@@ -1,9 +1,9 @@
 import tensorflow as tf
 from tensorflow.keras import datasets, layers, models
-from tf.keras.losses import MeanAbsoluteError
+from tensorflow.keras.losses import MeanAbsoluteError
 
-checkpoint_path = "actor/actor.ckpt"
-checkpoint_path_critic = "critic/critic.ckpt"
+checkpoint_path = "tetris/actor.ckpt"
+checkpoint_path_critic = "tetris/critic.ckpt"
 
 # Callback for setting checkpoints
 # Will resave weights every 5 epochs
@@ -22,18 +22,18 @@ cp_callback_critic = tf.keras.callbacks.ModelCheckpoint(
 class Tetris:
     def __init__(self, actor, critic):
         if actor:
-            self.actor = __create_model_input()
+            self.actor = self.__create_model_input()
             print("Successfully created actor")
         if critic:
-            self.critic = __create_model_critic()
+            self.critic = self.__create_model_critic()
             print("Successfully created critic")
 
     def gen_actor(self):
-        self.actor = __create_model_input()
+        self.actor = self.__create_model_input()
         print("Successfully created actor")
 
     def gen_critic(self):
-        self.critic = __create_model_critic()
+        self.critic = self.__create_model_critic()
         print("Successfully created critic")
 
     def __create_model_input(self):
