@@ -2,6 +2,8 @@ import tensorflow as tf
 from tensorflow.keras import datasets, layers, models
 from tensorflow.keras.losses import MeanAbsoluteError
 
+tf.keras.backend.set_floatx('float64')
+
 checkpoint_path = "tetris/actor.ckpt"
 checkpoint_path_critic = "tetris/critic.ckpt"
 
@@ -48,7 +50,7 @@ class Tetris:
         model.add(layers.Flatten())
         model.add(layers.Dense(240, activation='relu'))
         model.add(layers.Dense(120, activation='relu'))
-        model.add(layers.Dense(10, activation='sigmoid'))
+        model.add(layers.Dense(10, activation='tanh'))
 
         model.summary()
 
