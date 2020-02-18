@@ -72,7 +72,7 @@ class Tetris:
 
         model.add(layers.Flatten())
         model.add(layers.Dense(240, activation='relu'))
-        model.add(layers.Dense(2, activation='sigmoid'))
+        model.add(layers.Dense(1, activation='sigmoid'))
 
         model.summary()
 
@@ -89,7 +89,7 @@ class Tetris:
         pass
 
     def eval_critic(self, image):
-        return self.critic(image)
+        return self.critic(image).numpy()
 
     def fit_critic(self, image, output):
-        self.critic.fit(image, output, callbacks=[cp_callback_critic])
+        self.critic.fit(image, output)
