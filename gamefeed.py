@@ -2,11 +2,15 @@ import cv2
 import numpy as np
 import random
 from tetris import Tetris
+from PIL import Image
+import tensorflow as tf
 
 bot = Tetris(False, True)
-TRAIN_CRITIC = True
+TRAIN_CRITIC = False
 
-BUF_SIZE = 30
+BUF_SIZE = 5 # How many images to capture on each input
+IM_WIDTH = 160
+IM_HEIGHT = 90
 
 
 class _Getch:
@@ -56,12 +60,25 @@ def show_webcam(mirror=False):
         # Display to screen (720p)
         if not TRAIN_CRITIC:
             ret_val, img = cam.read()
-            im = cv2.resize(img, (640,360))
-            im = im / 255.0
-            im = np.resize(im, (1,640,360,3))
+            im = cv2.resize(img, (IM_WIDTH,IM_HEIGHT))
+            im = Image.fromarray(im)
+            im.save('temp.png')
+            
             # Current prediction
             if it % 10 == 0:
-                print(bot.eval_critic(im))
+                img_data = tf.io.read_file('temp.png')
+                im = tf.image.decode_png(img_data, channels=3)
+                im = tf.reshape(tf.image.convert_image_dtype(im, tf.float64), (1,90,160,3))
+                print(np.round(bot.eval_critic(im), 2))
+                '''
+                val = bot.eval_critic(im)
+                if np.argmax(val) == 0:
+                    print("Good move")
+                elif np.argmax(val) == 1:
+                    print("Bad move")
+                else:
+                    print("neutral")
+                '''
             img = cv2.resize(img, (1280,720))
             cv2.imshow('Switch Display', img)
             val = cv2.waitKey(1)
@@ -77,61 +94,68 @@ def show_webcam(mirror=False):
                     ret_val, im = cam.read()
                     img = cv2.resize(im, (1280,720))
                     cv2.imshow('Switch Display', img)
-                    im = cv2.resize(im, (640,360))
-                    im = im / 255.0
-                    im = np.resize(im, (1,640,360,3))
+                    im = cv2.resize(im, (IM_WIDTH,IM_HEIGHT))
                     buf.append(im)
                     val = cv2.waitKey(1)
 
-                img = np.concatenate(buf, axis=0)
-
                 if val == 27:
                     break
+                '''
+                Temporarily removing positive feedback
                 elif val == 32:
                     #print("Current prediction:", bot.eval_critic(im))
                     print("+ Giving positive feedback") # space bar
                     #bot.fit_critic(im, np.array([0.99]))
-                    np.save('training/tetris/positive/' + str(random.randrange(2147483647)), img)
-                elif val == 48:
+                    for x in buf:
+                        im = Image.fromarray(x)
+                        im.save('training/tetris/positive/' + str(random.randrange(2147483647)) + '.png')
+                '''
+                if val == 48:
                     #print("Current prediction:", bot.eval_critic(im))
                     print("- Giving negative feedback") # q
                     #bot.fit_critic(im, np.array([-0.99]))
-                    np.save('training/tetris/negative/' + str(random.randrange(2147483647)), img)
+                    for x in buf:
+                        im = Image.fromarray(x)
+                        im.save('training/tetris/negative/' + str(random.randrange(2147483647)) + '.png')
                 elif val == 43:
                     #print("Current prediction:", bot.eval_critic(im))
                     print("  Neutral feedback")
                     #bot.fit_critic(im, np.array([0.0]))
-                    np.save('training/tetris/neutral/' + str(random.randrange(2147483647)), img)
+                    for x in buf:
+                        im = Image.fromarray(x)
+                        im.save('training/tetris/neutral/' + str(random.randrange(2147483647)) + '.png')
 
             else:
                 val = getch()
                 buf = []
                 for _ in range(BUF_SIZE):
                     ret_val, im = cam.read()
-                    im = cv2.resize(im, (640,360))
-                    im = im / 255.0
-                    im = np.resize(im, (1,640,360,3))
+                    im = cv2.resize(im, (IM_WIDTH,IM_HEIGHT))
                     buf.append(im)
-
-                img = np.concatenate(buf, axis=0)
 
                 if val == b'q':
                     break
                 elif val == b' ':
-                    print("Current prediction:", bot.eval_critic(im))
+                    #print("Current prediction:", bot.eval_critic(im))
                     print("+ Giving positive feedback") # space bar
                     #bot.fit_critic(im, np.array([0.99]))
-                    np.save('training/tetris/positive/' + str(random.randrange(2147483647)), img)
+                    for x in buf:
+                        im = Image.fromarray(x)
+                        im.save('training/tetris/positive/' + str(random.randrange(2147483647)) + '.png')
                 elif val == b'0':
-                    print("Current prediction:", bot.eval_critic(im))
+                    #print("Current prediction:", bot.eval_critic(im))
                     print("- Giving negative feedback") # q
                     #bot.fit_critic(im, np.array([-0.99]))
-                    np.save('training/tetris/negative/' + str(random.randrange(2147483647)), img)
+                    for x in buf:
+                        im = Image.fromarray(x)
+                        im.save('training/tetris/negative/' + str(random.randrange(2147483647)) + '.png')
                 else:
-                    print("Current prediction:", bot.eval_critic(im))
+                    #print("Current prediction:", bot.eval_critic(im))
                     print("  Neutral feedback")
                     #bot.fit_critic(im, np.array([0.0]))
-                    np.save('training/tetris/neutral/' + str(random.randrange(2147483647)), img)
+                    for x in buf:
+                        im = Image.fromarray(x)
+                        im.save('training/tetris/neutral/' + str(random.randrange(2147483647)) + '.png')
         it += 1
     cv2.destroyAllWindows()
 
