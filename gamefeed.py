@@ -116,14 +116,14 @@ def show_webcam(mirror=False):
                     #bot.fit_critic(im, np.array([-0.99]))
                     for x in buf:
                         im = Image.fromarray(x)
-                        im.save('training/tetris/negative/' + str(random.randrange(2147483647)) + '.png')
+                        im.save('training/tetris_critic/negative/' + str(random.randrange(2147483647)) + '.png')
                 elif val == 43:
                     #print("Current prediction:", bot.eval_critic(im))
                     print("  Neutral feedback")
                     #bot.fit_critic(im, np.array([0.0]))
                     for x in buf:
                         im = Image.fromarray(x)
-                        im.save('training/tetris/neutral/' + str(random.randrange(2147483647)) + '.png')
+                        im.save('training/tetris_critic/neutral/' + str(random.randrange(2147483647)) + '.png')
 
             else:
                 val = getch()

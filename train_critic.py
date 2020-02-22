@@ -14,7 +14,7 @@ IMG_WIDTH = 160
 IMG_HEIGHT = 90
 
 tetris = Tetris(False, True)
-data_path = pathlib.Path("training/tetris")
+data_path = pathlib.Path("training/tetris_critic")
 list_train_ds = tf.data.Dataset.list_files(str(data_path/'*/*.png'))
 image_count = len(list(data_path.glob("*/*.png")))
 STEPS_PER_EPOCH = np.ceil(image_count / BATCH_SIZE)
