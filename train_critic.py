@@ -67,12 +67,12 @@ def prepare_for_training(ds, cache=False, shuffle_buffer_size=100):
 train_ds = prepare_for_training(labeled_train_ds)
 
 def show_batch(image_batch, label_batch):
-  plt.figure(figsize=(10,10))
-  for n in range(25):
-      ax = plt.subplot(5,5,n+1)
-      plt.imshow(image_batch[n])
-      plt.title(CLASS_NAMES[label_batch[n]==True][0].title())
-      plt.axis('off')
+    plt.figure(figsize=(10,10))
+    for n in range(25):
+        ax = plt.subplot(5,5,n+1)
+        plt.imshow(image_batch[n])
+        plt.title(CLASS_NAMES[label_batch[n]==True][0].title())
+        plt.axis('off')
 
 image_batch, label_batch = next(iter(train_ds))
 

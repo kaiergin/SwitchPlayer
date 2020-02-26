@@ -7,6 +7,10 @@ import sys
 import time
 import math
 import cv2
+from tetris import Tetris
+import numpy as np
+import tensorflow as tf
+from PIL import Image
 
 parser = argparse.ArgumentParser('Client for sending controller commands to a controller emulator')
 parser.add_argument('port')
@@ -401,7 +405,7 @@ def sync():
 
 # -------------------------------------------------------------------------
 
-enum = [BTN_NONE, BTN_A, BTN_X, BTN_R, BTN_ZR, DPAD_CENTER, DPAD_U, DPAD_R, DPAD_D, DPAD_L]
+enum = [BTN_A, BTN_X, BTN_R, BTN_ZR, DPAD_CENTER, DPAD_U, DPAD_R, DPAD_D, DPAD_L]
 
 def vector_to_buttons(vec):
     cmd = 0
@@ -412,7 +416,6 @@ def vector_to_buttons(vec):
 
 # --
 
-move_buffer = []
 ser = serial.Serial(port=args.port, baudrate=19200,timeout=1)
 # ser = serial.Serial(port=args.port, baudrate=31250,timeout=1)
 # ser = serial.Serial(port=args.port, baudrate=40000,timeout=1)
@@ -426,16 +429,55 @@ while not sync():
 
 print('Synced')
 
+
+IM_WIDTH = 160
+IM_HEIGHT = 90
+
+RENDER = True
+
 # Open webcam which is live feed of switch
 cam = cv2.VideoCapture(0)
+# Initialize actor and critic
+bot = Tetris(True, True)
+count = 0
 
 while True:
-    ret_val, img = cam.read()
-    img = cv2.resize(img, (640,360))
-    output = #Eval img on NN w/ buffer
-    button = vector_to_button(output)
+    # Read in image from switch display
+    ret_val, img_orig = cam.read()
+    img = cv2.resize(img_orig, (IM_WIDTH, IM_HEIGHT))
+    # Render image that is being seen
+    if RENDER:
+        cv2.imshow('Switch Display', img)
+        if cv2.waitKey(1) == 27:
+            break
+    # Save the image
+    im = Image.fromarray(img)
+    im.save('temp.png')
+    # Evaluate the bot to get moves to make
+    output = bot.eval_actor(img)
+    # Check every 10 frames if game is over
+    if count % 10 == 0:
+        img_data = tf.io.read_file('temp.png')
+        im = tf.image.decode_png(img_data, channels=3)
+        im = tf.reshape(tf.image.convert_image_dtype(im, tf.float64), (1,90,160,3))
+        # If critic thinks actor lost
+        if np.argmax(bot.eval_critic(im)) == 1:
+            if not send_cmd(NO_INPUT):
+                print('Packet Error!')
+            print('GAME OVER: STARTING TRAINING')
+            bot.fit_actor()
+            print('FINISHED TRAINING')
+            bot.reset_actor()
+            print('ACTOR RESET')
+            # Send button A to start a new game
+            if not send_cmd(BTN_A):
+                print('Packet Error!')
+            time.sleep(3)
+            continue
+    button = vector_to_buttons(output)
     if not send_cmd(button):
         print('Packet Error!')
+    count += 1
 
 
 

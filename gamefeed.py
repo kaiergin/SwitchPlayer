@@ -112,7 +112,7 @@ def show_webcam(mirror=False):
                 '''
                 if val == 48:
                     #print("Current prediction:", bot.eval_critic(im))
-                    print("- Giving negative feedback") # q
+                    print("- Giving negative feedback")
                     #bot.fit_critic(im, np.array([-0.99]))
                     for x in buf:
                         im = Image.fromarray(x)
