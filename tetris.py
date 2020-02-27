@@ -7,7 +7,7 @@ import pathlib
 import numpy as np
 import os
 
-tf.keras.backend.set_floatx('float64')
+#tf.keras.backend.set_floatx('float64')
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -23,8 +23,8 @@ OUTPUT_ACTOR = 9
 BATCH_SIZE = 1
 EPOCHS = SHORT_TERM_BUF - 1
 
-checkpoint_path = "tetris/actor.ckpt"
-checkpoint_path_critic = "tetris/critic.ckpt"
+checkpoint_path = "tetris/actor/actor.ckpt"
+checkpoint_path_critic = "tetris/critic/critic.ckpt"
 
 # Callback for setting checkpoints
 # Will resave weights every 5 epochs
@@ -42,8 +42,8 @@ cp_callback_critic = tf.keras.callbacks.ModelCheckpoint(
 
 class Tetris:
     def __init__(self, actor, critic):
-        self.previous_moves = tf.zeros((SHORT_TERM_BUF - 1,OUTPUT_ACTOR))
-        self.previous_inputs = tf.zeros((SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
+        self.previous_moves = tf.zeros((1,SHORT_TERM_BUF,OUTPUT_ACTOR))
+        self.previous_inputs = tf.zeros((1,SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
         #self.internal_state = tf.zeros(20)
         self.random = tf.random_uniform_initializer(minval=0.0, maxval=1.0)
         self.internal_clock = 0
@@ -57,15 +57,15 @@ class Tetris:
 
     def __create_model_actor(self):
         image_input = Input(shape=(SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
-        x = layers.ConvLSTM2D(image_input, 60, (5,5), activation='relu')
-        x = layers.MaxPooling2D(x, (3,3))
-        x = layers.ConvLSTM2D(x, 60, (5,5), activation='relu')
-        x = layers.Flatten(x)
+        x = layers.Conv3D(120, (3,5,5), activation='relu')(image_input)
+        x = layers.MaxPooling3D((2,3,3))(x)
+        x = layers.Conv3D(60, (3,5,5), activation='relu')(x)
+        x = layers.Flatten()(x)
         move_buffer_input = Input(shape=(SHORT_TERM_BUF,OUTPUT_ACTOR))
-        y = layers.Flatten(move_buffer_input)
-        x = layers.concatenate((x,y), axis=0)
-        x = layers.Dense(x, 480, activation='relu')
-        x = layers.Dense(x, OUTPUT_ACTOR, activation='sigmoid')
+        y = layers.Flatten()(move_buffer_input)
+        x = layers.concatenate([x,y], axis=1)
+        x = layers.Dense(480, activation='relu')(x)
+        x = layers.Dense(OUTPUT_ACTOR, activation='sigmoid')(x)
 
         model = Model(inputs=(image_input, move_buffer_input), outputs=x)
 
@@ -107,21 +107,22 @@ class Tetris:
         im.save(self.current_save_path + '/' + str(self.internal_clock) + '.png')
         img_data = tf.io.read_file(self.current_save_path + '/' + str(self.internal_clock) + '.png')
         im = tf.image.decode_png(img_data, channels=3)
-        im = tf.reshape(tf.image.convert_image_dtype(im, tf.float64), (1,IM_HEIGHT,IM_WIDTH,3))
+        im = tf.reshape(tf.image.convert_image_dtype(im, tf.float32), (1,1,IM_HEIGHT,IM_WIDTH,3))
         # Roll frame buffer
-        self.previous_inputs = tf.slice(self.previous_inputs, (0,0,0,0), (SHORT_TERM_BUF-1,IM_HEIGHT,IM_WIDTH,3))
-        self.previous_inputs = tf.concat(im, self.previous_inputs, axis=0)
+        self.previous_inputs = tf.slice(self.previous_inputs, (0,0,0,0,0), (1,SHORT_TERM_BUF-1,IM_HEIGHT,IM_WIDTH,3))
+        self.previous_inputs = tf.concat([im, self.previous_inputs], axis=1)
         # Pass im and buffer data to get next move probabilities
-        output = self.critic((self.previous_inputs, self.previous_moves)).numpy()
+        output = self.actor((self.previous_inputs, self.previous_moves))
         # Create random (0,1) tensor the same size as output
         random_tensor = self.random(shape=(1,OUTPUT_ACTOR))
         # Compare > to get which moves fired
         result = tf.math.greater(output, random_tensor)
+        result_input = tf.cast(tf.equal(tf.reshape(result, (1,1,OUTPUT_ACTOR)), True), tf.float32)
         # Roll move buffer
-        self.previous_moves = tf.slice(self.previous_moves, (0,0,0), (SHORT_TERM_BUF-1,IM_HEIGHT,IM_WIDTH,3))
-        self.previous_inputs = tf.concat(result, self.previous_inputs, axis=0)
+        self.previous_moves = tf.slice(self.previous_moves, (0,0,0), (1,SHORT_TERM_BUF-1,OUTPUT_ACTOR))
+        self.previous_moves = tf.concat([result_input, self.previous_moves], axis=1)
         # Save move for current frame
-        tf.io.write_file(self.current_save_path + '/' + str(self.internal_clock) + '.tns', result)
+        np.save(self.current_save_path + '/' + str(self.internal_clock) + '.npy', result_input.numpy())
         # Update clock
         self.internal_clock += 1
         # Return chosen moves
@@ -143,14 +144,14 @@ class Tetris:
         data_path = pathlib.Path(self.current_save_path)
         list_train_ds = tf.data.Dataset.list_files(str(data_path/'*.png'), shuffle=False)
         # Each timestamp has a corresponding move file, made at the same timestamp
-        list_train_moves_ds = tf.data.Dataset.list_files(str(data_path/'*.tns'))
+        list_train_moves_ds = tf.data.Dataset.list_files(str(data_path/'*.npy'), shuffle=False)
         image_count = len(list(data_path.glob("*.png")))
         def process_path(file_path):
             img = tf.io.read_file(file_path)
-            img = tf.decode_png(img)
+            img = tf.image.decode_png(img)
             return img
         train_ds = list_train_ds.map(process_path, num_parallel_calls=AUTOTUNE)
-        train_move_ds = list_train_moves_ds.map(tf.io.read_file, num_parallel_calls=AUTOTUNE)
+        train_move_ds = list_train_moves_ds.map(np.load, num_parallel_calls=AUTOTUNE)
         def prepare_for_training(skip, ds):
             # Uses skip to offset data for each epoch so that model is training on different predictions
             ds.skip(skip)
@@ -168,7 +169,7 @@ class Tetris:
             # ASSIGN LABELS HERE
             # TO DO
             ds.batch(BATCH_SIZE)
-            self.actor.fit(ds, epochs=1)
+            #self.actor.fit(ds, epochs=1)
 
     def reset_actor(self):
         self.previous_moves = tf.zeros((SHORT_TERM_BUF,OUTPUT_ACTOR))

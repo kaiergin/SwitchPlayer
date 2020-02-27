@@ -410,7 +410,7 @@ enum = [BTN_A, BTN_X, BTN_R, BTN_ZR, DPAD_CENTER, DPAD_U, DPAD_R, DPAD_D, DPAD_L
 def vector_to_buttons(vec):
     cmd = 0
     for x in range(len(vec)):
-        if vec[x]:
+        if vec[0][x]:
             cmd += enum[x]
     return cmd
 
@@ -461,13 +461,15 @@ while True:
         im = tf.image.decode_png(img_data, channels=3)
         im = tf.reshape(tf.image.convert_image_dtype(im, tf.float64), (1,90,160,3))
         # If critic thinks actor lost
-        if np.argmax(bot.eval_critic(im)) == 1:
+        result = bot.eval_critic(im)
+        print(result)
+        if np.argmax(bot.eval_critic(im)[0]) == 1:
             if not send_cmd(NO_INPUT):
                 print('Packet Error!')
             print('GAME OVER: STARTING TRAINING')
-            bot.fit_actor()
+            #bot.fit_actor()
             print('FINISHED TRAINING')
-            bot.reset_actor()
+            #bot.reset_actor()
             print('ACTOR RESET')
             # Send button A to start a new game
             if not send_cmd(BTN_A):
