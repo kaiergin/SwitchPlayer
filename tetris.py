@@ -56,6 +56,7 @@ class Tetris:
             self.previous_inputs = tf.zeros((1,SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
             self.random = tf.random_uniform_initializer(minval=0.0, maxval=1.0)
             self.internal_clock = 0
+            self.dataset_built = False
             self.current_save_path = 'training/tetris_actor/game'
             self.actor_opt = tf.keras.optimizers.Adam(1e-4)
             self.critic_opt = tf.keras.optimizers.Adam(1e-4)
@@ -186,13 +187,13 @@ class Tetris:
         self.dataset_built = True
         data_path = pathlib.Path(self.current_save_path)
         self.image_count = len(list(data_path.glob("*.png")))
-        if image_count < 100:
+        if self.image_count < 100:
             print("Game too short, cannot build dataset")
             self.dataset_built = False
             return
-        self.cur_index = image_count - (EVAL_FRAMES + 2) # start from the back of the dataset
+        self.cur_index = self.image_count - (EVAL_FRAMES + 1) # start from the back of the dataset
         self.cur_discount = -1 * GAMMA
-        self.move_tensor = np.load(self.current_save_path + '/0.npy')
+        self.move_tensor = np.load(self.current_save_path + '/0.npy').astype('float32')
     
     def __get_next_batch(self):
         def build_path(name):
@@ -200,6 +201,7 @@ class Tetris:
         def process_path(file_path):
             img = tf.io.read_file(file_path)
             img = tf.image.decode_png(img)
+            img = tf.image.convert_image_dtype(img, tf.float32)
             img = tf.expand_dims(img, axis=0)
             return img
         images = []
@@ -214,8 +216,11 @@ class Tetris:
             path = build_path(str(self.cur_index + x))
             images.append(process_path(path))
         result_buf = tf.concat(images, axis=0)
+        result_buf = tf.expand_dims(result_buf, axis=0)
         move_chosen = self.move_tensor[self.cur_index]
-        move_buf = self.move_tensor[self.cur_index-(SHORT_TERM_BUF+1):self.cur_index]
+        # The move buffer does not have the move for the
+        # current frame (cur_index) so we go from from cur_index - (SHORT_TERM_BUF)
+        move_buf = self.move_tensor[self.cur_index-(SHORT_TERM_BUF):self.cur_index]
         move_buf = tf.convert_to_tensor(move_buf)
         move_buf = tf.expand_dims(move_buf, axis=0)
         self.cur_discount *= GAMMA
@@ -223,10 +228,11 @@ class Tetris:
 
     # This function will be called after a game of tetris is lost
     def fit_actor(self):
-        self.__build_dataset() 
+        self.__build_dataset()
+        it = 0
         while (self.cur_index-(SHORT_TERM_BUF+1) > 0):
             batch = self.__get_next_batch()
-            train_step(batch)
+            self.__train_step(batch)
             self.cur_index -= EVAL_FRAMES
         self.__reset_actor()
 
@@ -241,7 +247,7 @@ class Tetris:
             os.unlink(file_path)
     
     @tf.function
-    def train_step(self, batch):
+    def __train_step(self, batch):
         image_buf, move_buf, move_chosen, result_buf = batch
         with tf.GradientTape() as act_tape, tf.GradientTape() as crit_tape:
             probs = self.actor((image_buf, move_buf), training=True)

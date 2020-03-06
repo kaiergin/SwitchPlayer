@@ -447,7 +447,8 @@ while True:
     img = cv2.resize(img_orig, (IM_WIDTH, IM_HEIGHT))
     # Render image that is being seen
     if RENDER:
-        cv2.imshow('Switch Display', img)
+        blown = cv2.resize(img, (1280, 720))
+        cv2.imshow('Switch Display', blown)
         if cv2.waitKey(1) == 27:
             break
     # Save the image
@@ -460,17 +461,15 @@ while True:
         img_data = tf.io.read_file('temp.png')
         im = tf.image.decode_png(img_data, channels=3)
         im = tf.reshape(tf.image.convert_image_dtype(im, tf.float64), (1,90,160,3))
-        # If critic thinks actor lost
-        result = bot.eval_critic(im)
+        # If environment thinks actor lost
+        result = bot.eval_environment(im)
         print(result)
-        if np.argmax(bot.eval_critic(im)[0]) == 1:
-            if not send_cmd(NO_INPUT):
+        if np.argmax(bot.eval_environment(im)[0]) == 1:
+            if not send_cmd(BTN_L + BTN_R):
                 print('Packet Error!')
             print('GAME OVER: STARTING TRAINING')
-            #bot.fit_actor()
+            bot.fit_actor()
             print('FINISHED TRAINING')
-            #bot.reset_actor()
-            print('ACTOR RESET')
             # Send button A to start a new game
             if not send_cmd(BTN_A):
                 print('Packet Error!')
