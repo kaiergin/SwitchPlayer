@@ -405,13 +405,17 @@ def sync():
 
 # -------------------------------------------------------------------------
 
-enum = [BTN_A, BTN_X, BTN_R, BTN_ZR, DPAD_CENTER, DPAD_U, DPAD_R, DPAD_D, DPAD_L]
+enum_dir = [DPAD_U, DPAD_R, DPAD_D, DPAD_L]
+enum_btn = [BTN_A, BTN_X, BTN_R, BTN_NONE]
 
 def vector_to_buttons(vec):
     cmd = 0
-    for x in range(len(vec)):
-        if vec[0][x]:
-            cmd += enum[x]
+    chosen_dir, chosen_btn = vec
+    for x in range(4):
+        if chosen_dir[x]:
+            cmd += enum_dir[x]
+        if chosen_btn[x]:
+            cmd += enum_btn[x]
     return cmd
 
 # --
@@ -463,7 +467,7 @@ while True:
         im = tf.reshape(tf.image.convert_image_dtype(im, tf.float64), (1,90,160,3))
         # If environment thinks actor lost
         result = bot.eval_environment(im)
-        print(result)
+        # print(result)
         if np.argmax(bot.eval_environment(im)[0]) == 1:
             if not send_cmd(BTN_L + BTN_R):
                 print('Packet Error!')
@@ -478,6 +482,8 @@ while True:
     button = vector_to_buttons(output)
     if not send_cmd(button):
         print('Packet Error!')
+    # Wait 1/10th of a second
+    p_wait(0.1)
     count += 1
 
 

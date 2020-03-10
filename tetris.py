@@ -16,14 +16,17 @@ IM_HEIGHT = 90
 SHORT_TERM_BUF = 10
 EVAL_FRAMES = 3
 
-OUTPUT_ACTOR = 9
+OUTPUT_ACTOR_DPAD = 4
+OUTPUT_ACTOR_OTHR = 4
+OUTPUT_ACTOR = OUTPUT_ACTOR_DPAD + OUTPUT_ACTOR_OTHR
 OUTPUT_CRITIC = 1
 OUTPUT_ENVIRONMENT = 2
 
 BATCH_SIZE = 1
 
-GAMMA = .99999
+GAMMA = .99
 
+data_track = "actor_critic_loss.data"
 checkpoint_path_actor = "tetris/actor/actor.ckpt"
 checkpoint_path_critic = "tetris/critic/critic.ckpt"
 checkpoint_path_enviornment = "tetris/environment/environment.ckpt"
@@ -53,33 +56,38 @@ class Tetris:
     def __init__(self, actor, environment):
         if actor:
             self.previous_moves = tf.zeros((1,SHORT_TERM_BUF,OUTPUT_ACTOR))
-            self.previous_inputs = tf.zeros((1,SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
+            self.previous_frames = tf.zeros((1,SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
             self.random = tf.random_uniform_initializer(minval=0.0, maxval=1.0)
             self.internal_clock = 0
             self.dataset_built = False
             self.current_save_path = 'training/tetris_actor/game'
-            self.actor_opt = tf.keras.optimizers.Adam(1e-4)
-            self.critic_opt = tf.keras.optimizers.Adam(1e-4)
+            self.actor_opt = tf.keras.optimizers.Adam(1e-6)
+            self.critic_opt = tf.keras.optimizers.Adam(1e-6)
             self.actor = self.__create_model_actor()
             self.critic = self.__create_model_critic()
+             # Create networks to edit and save
+            self.edit_actor = self.__create_model_actor()
+            self.edit_critic = self.__create_model_critic()
             print("Successfully created actor and critic")
         if environment:
             self.environment = self.__create_model_environment()
             print("Successfully created environment")
 
+    # Change to CRNN
     def __create_model_actor(self):
         image_input = Input(shape=(SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
-        x = layers.Conv3D(120, (3,5,5), activation='relu')(image_input)
-        x = layers.MaxPooling3D((2,3,3))(x)
-        x = layers.Conv3D(60, (3,5,5), activation='relu')(x)
+        x = layers.Conv3D(60, (3, 5, 5), activation='relu')(image_input)
+        x = layers.AveragePooling3D((2, 3, 3))(x)
+        x = layers.Conv3D(30, (3, 5, 5), activation='relu')(x)
         x = layers.Flatten()(x)
         move_buffer_input = Input(shape=(SHORT_TERM_BUF,OUTPUT_ACTOR))
         y = layers.Flatten()(move_buffer_input)
         x = layers.concatenate([x,y], axis=1)
         x = layers.Dense(480, activation='relu')(x)
-        x = layers.Dense(OUTPUT_ACTOR, activation='sigmoid')(x)
+        x = layers.Dense(OUTPUT_ACTOR_DPAD, activation='softmax')(x)
+        y = layers.Dense(OUTPUT_ACTOR_OTHR, activation='softmax')(x)
 
-        model = Model(inputs=(image_input, move_buffer_input), outputs=x)
+        model = Model(inputs=(image_input, move_buffer_input), outputs=(x,y))
 
         model.summary()
 
@@ -98,12 +106,12 @@ class Tetris:
     def __create_model_critic(self):
         model = models.Sequential()
         model.add(layers.Conv3D(60, (2, 5, 5), activation='relu', input_shape=(EVAL_FRAMES,IM_HEIGHT,IM_WIDTH,3)))
-        model.add(layers.AveragePooling3D((1, 3, 3)))
-        model.add(layers.Conv3D(30, (2, 5, 5), activation='relu'))
+        model.add(layers.AveragePooling3D((2, 3, 3)))
+        model.add(layers.Conv3D(30, (1, 5, 5), activation='relu'))
 
         model.add(layers.Flatten())
         model.add(layers.Dense(120, activation='relu'))
-        model.add(layers.Dense(OUTPUT_CRITIC, activation='sigmoid'))
+        model.add(layers.Dense(OUTPUT_CRITIC))
 
         model.summary()
 
@@ -143,10 +151,11 @@ class Tetris:
         im = tf.image.decode_png(img_data, channels=3)
         im = tf.reshape(tf.image.convert_image_dtype(im, tf.float32), (1,1,IM_HEIGHT,IM_WIDTH,3))
         # Roll frame buffer
-        self.previous_inputs = tf.slice(self.previous_inputs, (0,0,0,0,0), (1,SHORT_TERM_BUF-1,IM_HEIGHT,IM_WIDTH,3))
-        self.previous_inputs = tf.concat([im, self.previous_inputs], axis=1)
+        self.previous_frames = tf.slice(self.previous_frames, (0,0,0,0,0), (1,SHORT_TERM_BUF-1,IM_HEIGHT,IM_WIDTH,3))
+        self.previous_frames = tf.concat([im, self.previous_frames], axis=1)
         # Pass im and buffer data to get next move probabilities
-        output = self.actor((self.previous_inputs, self.previous_moves))
+        output_dir, output_btn = tf.squeeze(self.actor((self.previous_frames, self.previous_moves)))
+        '''
         # Create random (0,1) tensor the same size as output
         random_tensor = self.random(shape=(1,OUTPUT_ACTOR))
         # Compare > to get which moves fired
@@ -154,6 +163,19 @@ class Tetris:
         # Convert from boolean tensor to float tensor
         result_input_tensor = tf.cast(tf.equal(tf.reshape(result, (1,1,OUTPUT_ACTOR)), True), tf.float32)
         result_input_file = tf.cast(tf.equal(tf.reshape(result, (1,OUTPUT_ACTOR)), True), tf.float32).numpy()
+        '''
+        chosen_dir = tf.squeeze(tf.one_hot(tf.random.categorical([output_dir], 1), OUTPUT_ACTOR_DPAD))
+        chosen_btn = tf.squeeze(tf.one_hot(tf.random.categorical([output_btn], 1), OUTPUT_ACTOR_OTHR))
+        result = tf.concat([chosen_dir, chosen_btn], axis=0)
+        result_input_file = tf.reshape(tf.cast(result, tf.float32), (1, OUTPUT_ACTOR)).numpy()
+        result_input_tensor = tf.reshape(result, (1,1,OUTPUT_ACTOR))
+
+        if self.internal_clock % 100 == 0:
+            print('Direction distribution', output_dir.numpy())
+            print('Button distribution', output_btn.numpy())
+            print('Chosen direction', chosen_dir.numpy())
+            print('Chosen button', chosen_btn.numpy())
+
         # Load move file
         try:
             move_tensor = np.load(self.current_save_path + '/0.npy')
@@ -168,7 +190,7 @@ class Tetris:
         # Update clock
         self.internal_clock += 1
         # Return chosen moves
-        return result.numpy()
+        return chosen_dir.numpy(), chosen_btn.numpy()
 
     # This function is used to determine if a game of tetris was lost
     def eval_environment(self, image):
@@ -192,7 +214,7 @@ class Tetris:
             self.dataset_built = False
             return
         self.cur_index = self.image_count - (EVAL_FRAMES + 1) # start from the back of the dataset
-        self.cur_discount = -1 * GAMMA
+        self.cur_reward = -100 * GAMMA
         self.move_tensor = np.load(self.current_save_path + '/0.npy').astype('float32')
     
     def __get_next_batch(self):
@@ -223,22 +245,38 @@ class Tetris:
         move_buf = self.move_tensor[self.cur_index-(SHORT_TERM_BUF):self.cur_index]
         move_buf = tf.convert_to_tensor(move_buf)
         move_buf = tf.expand_dims(move_buf, axis=0)
-        self.cur_discount *= GAMMA
+        self.cur_reward *= GAMMA
         return image_buf, move_buf, move_chosen, result_buf
 
     # This function will be called after a game of tetris is lost
     def fit_actor(self):
         self.__build_dataset()
-        it = 0
+        if not self.dataset_built:
+            self.__reset_actor()
+            return
+        actor_loss, critic_loss = 0, 0
         while (self.cur_index-(SHORT_TERM_BUF+1) > 0):
             batch = self.__get_next_batch()
-            self.__train_step(batch)
-            self.cur_index -= EVAL_FRAMES
+            a, c = self.__train_step(batch)
+            actor_loss += a
+            critic_loss += c
+            self.cur_index -= 1
+        actor_loss = actor_loss.numpy()
+        critic_loss = critic_loss.numpy()
+        with open(data_track, 'a+') as f:
+            f.write('(' + str(actor_loss) + ',' + str(critic_loss) + ') ')
+            print('Actor loss:', actor_loss, 'Critic loss:', critic_loss)
+        # Save the edits to the file
+        self.edit_actor.save_weights(checkpoint_path_actor)
+        self.edit_critic.save_weights(checkpoint_path_critic)
+        # Load in new weights from save file
+        self.actor.load_weights(checkpoint_path_actor)
+        self.critic.load_weights(checkpoint_path_critic)
         self.__reset_actor()
 
     def __reset_actor(self):
         self.previous_moves = tf.zeros((1,SHORT_TERM_BUF,OUTPUT_ACTOR))
-        self.previous_inputs = tf.zeros((1,SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
+        self.previous_frames = tf.zeros((1,SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
         self.internal_clock = 0
         self.dataset_built = False
         # Clear folder
@@ -250,14 +288,21 @@ class Tetris:
     def __train_step(self, batch):
         image_buf, move_buf, move_chosen, result_buf = batch
         with tf.GradientTape() as act_tape, tf.GradientTape() as crit_tape:
-            probs = self.actor((image_buf, move_buf), training=True)
-            reward = self.critic(result_buf, training=True)
-            advantage = (self.cur_discount + 1) - reward
+            act_tape.watch(self.actor.trainable_variables)
+            crit_tape.watch(self.critic.trainable_variables)
+            probs = tf.squeeze(self.actor((image_buf, move_buf), training=True))
+            reward = tf.squeeze(self.critic(result_buf, training=True))
+            #print('prob, reward', probs, reward)
+            advantage = reward - self.cur_reward
             log_probs = tf.math.log(probs)
+            # Mask based on move chosen
+            # log_probs = tf.boolean_mask(log_probs, move_chosen)
             actor_loss = -1 * log_probs * advantage
-            critic_loss = 0.5 * tf.pow(advantage,2)
+            critic_loss = tf.pow(advantage,2)
+            #print('a loss, c loss', actor_loss, critic_loss)
         gradients_of_actor = act_tape.gradient(actor_loss, self.actor.trainable_variables)
         gradients_of_critic = crit_tape.gradient(critic_loss, self.critic.trainable_variables)
-        self.actor_opt.apply_gradients(zip(gradients_of_actor, self.actor.trainable_variables))
-        self.critic_opt.apply_gradients(zip(gradients_of_critic, self.critic.trainable_variables))
+        self.actor_opt.apply_gradients(zip(gradients_of_actor, self.edit_actor.trainable_variables))
+        self.critic_opt.apply_gradients(zip(gradients_of_critic, self.edit_critic.trainable_variables))
+        return actor_loss, critic_loss
 
