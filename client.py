@@ -405,17 +405,23 @@ def sync():
 
 # -------------------------------------------------------------------------
 
+enum_all = [DPAD_U, DPAD_R, DPAD_D, DPAD_L, BTN_A, BTN_X, BTN_R, BTN_NONE]
+
 enum_dir = [DPAD_U, DPAD_R, DPAD_D, DPAD_L]
 enum_btn = [BTN_A, BTN_X, BTN_R, BTN_NONE]
 
 def vector_to_buttons(vec):
     cmd = 0
-    chosen_dir, chosen_btn = vec
+    """
     for x in range(4):
         if chosen_dir[x]:
             cmd += enum_dir[x]
         if chosen_btn[x]:
             cmd += enum_btn[x]
+    """
+    for x in range(8):
+        if vec[x]:
+            cmd += enum_all[x]
     return cmd
 
 # --
@@ -446,7 +452,7 @@ bot = Tetris(True, True)
 count = 0
 
 while True:
-    # Read in image from switch display
+    # Read in image frokm switch display
     ret_val, img_orig = cam.read()
     img = cv2.resize(img_orig, (IM_WIDTH, IM_HEIGHT))
     # Render image that is being seen
@@ -480,10 +486,10 @@ while True:
             time.sleep(3)
             continue
     button = vector_to_buttons(output)
-    if not send_cmd(button):
-        print('Packet Error!')
+    send_cmd(button)
     # Wait 1/10th of a second
     p_wait(0.1)
+    send_cmd()
     count += 1
 
 
