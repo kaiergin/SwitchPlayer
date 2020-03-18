@@ -475,8 +475,8 @@ while True:
         result = bot.eval_environment(im)
         # print(result)
         if np.argmax(bot.eval_environment(im)[0]) == 1:
-            if not send_cmd(BTN_L + BTN_R):
-                print('Packet Error!')
+            send_cmd(BTN_L + BTN_R)
+            p_wait(0.5)
             print('GAME OVER: STARTING TRAINING')
             bot.fit_actor()
             print('FINISHED TRAINING')

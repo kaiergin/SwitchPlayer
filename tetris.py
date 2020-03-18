@@ -59,11 +59,7 @@ cp_callback_environment = tf.keras.callbacks.ModelCheckpoint(
 class Tetris:
     def __init__(self, actor, environment):
         if actor:
-            self.previous_moves = tf.zeros((1,SHORT_TERM_BUF,OUTPUT_ACTOR))
-            self.previous_frames = tf.zeros((1,SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
             self.random = tf.random_uniform_initializer(minval=0.0, maxval=1.0)
-            self.internal_clock = 0
-            self.dataset_built = False
             self.current_save_path = 'training/tetris_actor/game'
             # Create optimizers
             self.actor_opt = tf.keras.optimizers.Adam(1e-7)
@@ -75,6 +71,8 @@ class Tetris:
             self.discriminator = self.__create_model_discriminator()
              # Create networks to edit and save
             self.edit_actor = self.__create_model_actor()
+            # Sets states of actor and clears save folder
+            self.__reset_actor()
             print("Successfully created actor and critic")
         if environment:
             self.environment = self.__create_model_environment()
