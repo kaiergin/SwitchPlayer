@@ -1,4 +1,4 @@
-# an AI to play Nintendo Switch games
+# an AI that plays Nintendo Switch games
 
 Games to learn:
 * Tetris 99 (current)
