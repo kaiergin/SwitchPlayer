@@ -405,6 +405,9 @@ def sync():
 
 # -------------------------------------------------------------------------
 
+CLASS_NAMES = np.array(['neutral', 'end_screen', 'error', 'title_a', 'title_b'])
+
+
 enum_all = [DPAD_U, DPAD_R, DPAD_D, DPAD_L, BTN_A, BTN_X, BTN_R, BTN_NONE]
 
 enum_dir = [DPAD_U, DPAD_R, DPAD_D, DPAD_L]
@@ -439,6 +442,15 @@ while not sync():
 
 print('Synced')
 
+# Connect controller
+send_cmd(BTN_L + BTN_R)
+p_wait(0.5)
+send_cmd()
+p_wait(0.1)
+
+send_cmd(BTN_A)
+p_wait(0.5)
+send_cmd()
 
 IM_WIDTH = 160
 IM_HEIGHT = 90
@@ -464,8 +476,60 @@ while True:
     # Save the image
     im = Image.fromarray(img)
     im.save('temp.png')
-    # Evaluate the bot to get moves to make
-    output = bot.eval_actor(img)
+
+    # Load the image just saved
+    img_data = tf.io.read_file('temp.png')
+    im = tf.image.decode_png(img_data, channels=3)
+    im = tf.reshape(tf.image.convert_image_dtype(im, tf.float64), (1,IM_HEIGHT,IM_WIDTH,3))
+
+    result = np.argmax(bot.eval_environment(im))
+    if result == 0:
+        # Neutral screen (in-game), evaluate bot as normal
+        output = bot.eval_actor(img)
+        # Check current discriminator output
+        disc_out = bot.discriminator(im).numpy()
+        print('Discriminator:', str(disc_out))
+        button = vector_to_buttons(output)
+        send_cmd(button)
+        # Realtime training (if enabled)
+        cur_time = time.perf_counter()
+        bot.fit_actor_realtime()
+        end_time = time.perf_counter()
+        time_dif = 0.1 - (end_time - cur_time)
+        if time_dif < 0:
+            print('Realtime training took over .1 seconds!', time_dif)
+            time_dif = 0
+        # Wait 1/10th of a second minus amount of time taken for training
+        p_wait(time_dif)
+    elif result == 1:
+        # Results screen, reset bot and start game over
+        print('GAME OVER: STARTING TRAINING')
+        bot.fit_actor()
+        print('FINISHED TRAINING')
+        send_cmd(BTN_A)
+        time.sleep(3)
+        send_cmd()
+    elif result == 2:
+        # Error screen, reset actor and continue
+        bot.reset_actor()
+        send_cmd(BTN_A)
+        p_wait(0.1)
+        send_cmd()
+        time.sleep(2)
+    elif result == 3:
+        # Title a, push button A and continue
+        send_cmd(BTN_A)
+        p_wait(0.1)
+        send_cmd()
+        time.sleep(2)
+    elif result == 4:
+        # Title b, push button B and continue
+        send_cmd(BTN_B)
+        p_wait(0.1)
+        send_cmd()
+        time.sleep(2)
+
+    '''
     # Check every 10 frames if game is over
     if count % 10 == 0:
         img_data = tf.io.read_file('temp.png')
@@ -475,21 +539,17 @@ while True:
         result = bot.eval_environment(im)
         # print(result)
         if np.argmax(bot.eval_environment(im)[0]) == 1:
-            send_cmd(BTN_L + BTN_R)
-            p_wait(0.5)
+            # Connects controller if disconnected
             print('GAME OVER: STARTING TRAINING')
             bot.fit_actor()
             print('FINISHED TRAINING')
             # Send button A to start a new game
-            if not send_cmd(BTN_A):
-                print('Packet Error!')
+            send_cmd(BTN_A):
             time.sleep(3)
             continue
     button = vector_to_buttons(output)
     send_cmd(button)
-    # Wait 1/10th of a second
-    p_wait(0.1)
-    send_cmd()
+    '''
     count += 1
 
 

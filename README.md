@@ -6,14 +6,11 @@ Games to learn:
 
 ## How does it work?
 
-Explanation here
+Actor critic algorithms have done some pretty impressive stuff in the past few years. Actor critic algorithms such as [A2C](https://towardsdatascience.com/understanding-actor-critic-methods-931b97b6df3f) (Advantage Actor Critic) and A3C (Asychronous Advantage Actor Critic) use multiple neural networks to accomplish a single goal. In general, the actor network is making moves and the critic network is assigning rewards to those moves. The model I am putting together to play Tetris is a tweaked version of A2C, which will utilize a custom shaped reward function.
 
 ## To do list
-* Realtime learning
-* Chosen learning method (epsilon vs prob distribution)
 * Clean discriminator database
-* Create more states for environment
-* Explain how it works (or will work)
+* Create more states for environment (clearing lines, tetris, end game)
 
 [Repo for sending commands to switch](https://github.com/wchill/SwitchInputEmulator)
 

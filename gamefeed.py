@@ -57,12 +57,12 @@ def show_webcam():
                 print("- Saving negative feedback")
                 for x in buf:
                     im = Image.fromarray(x)
-                    im.save('training/tetris_critic/negative/' + str(random.randrange(2147483647)) + '.png')
+                    im.save('training/tetris_environment/negative/' + str(random.randrange(2147483647)) + '.png')
             elif val == 43:
                 print("  Saving neutral feedback")
                 for x in buf:
                     im = Image.fromarray(x)
-                    im.save('training/tetris_critic/neutral/' + str(random.randrange(2147483647)) + '.png')
+                    im.save('training/tetris_environment/neutral/' + str(random.randrange(2147483647)) + '.png')
         it += 1
     cv2.destroyAllWindows()
 

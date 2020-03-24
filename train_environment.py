@@ -8,7 +8,7 @@ import os
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
-EPOCHS = 2
+EPOCHS = 20
 BATCH_SIZE = 25
 IMG_WIDTH = 160
 IMG_HEIGHT = 90
@@ -20,7 +20,7 @@ image_count = len(list(data_path.glob("*/*.png")))
 STEPS_PER_EPOCH = np.ceil(image_count / BATCH_SIZE)
 CLASS_NAMES = np.array([item.name for item in data_path.glob('*') if item.name != "LICENSE.txt"])
 print(CLASS_NAMES)
-CLASS_NAMES = np.array(['neutral', 'negative'])
+CLASS_NAMES = np.array(['neutral', 'end_screen', 'error', 'title_a', 'title_b'])
 
 def get_label(file_path):
     # convert the path to a list of path components
