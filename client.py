@@ -487,8 +487,8 @@ while True:
         # Neutral screen (in-game), evaluate bot as normal
         output = bot.eval_actor(img)
         # Check current discriminator output
-        disc_out = bot.discriminator(im).numpy()
-        print('Discriminator:', str(disc_out))
+        # disc_out = bot.discriminator(im).numpy()
+        # print('Discriminator:', str(disc_out))
         button = vector_to_buttons(output)
         send_cmd(button)
         # Realtime training (if enabled)
