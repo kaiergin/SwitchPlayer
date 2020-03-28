@@ -14,11 +14,6 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 IM_WIDTH = 160
 IM_HEIGHT = 90
 
-# Replay buffer size
-SHORT_TERM_BUF = 2
-# Number of frames to evaluate on (including current frame)
-EVAL_FRAMES = 2
-
 OUTPUT_ACTOR_DPAD = 4
 OUTPUT_ACTOR_OTHR = 4
 OUTPUT_ACTOR = OUTPUT_ACTOR_DPAD + OUTPUT_ACTOR_OTHR
@@ -29,8 +24,11 @@ BATCH_SIZE = 1
 
 GAMMA = .95
 
-REALTIME_LEARNING = True
-EPSILON_LEARNING = True
+TRAIN_DISC = False
+TD_LEARNING = True
+RANDOM_SELECTION_LEARNING = True
+EPSILON_LEARNING = False
+RANDOM_NOISE_LEARNING = False
 
 EPSILON_GROWTH = .003
 EPSILON_MAX = .95
@@ -79,32 +77,32 @@ class Tetris:
             self.critic = self.__create_model_critic()
             self.discriminator = self.__create_model_discriminator()
              # Create networks to edit and save
-            if not REALTIME_LEARNING:
+            if not TD_LEARNING:
                 self.edit_actor = self.__create_model_actor()
             # Sets states of actor and clears save folder
             self.reset_actor()
             print("Successfully created actor and critic")
         if environment:
             self.environment = self.__create_model_environment()
-            self.tetris_finder = self.__create_tetris_finder()
+            # self.tetris_finder = self.__create_tetris_finder()
             print("Successfully created environment")
 
-    # Change to CRNN
+    # Evaluates a frame of tetris to get move probabilities
     def __create_model_actor(self):
-        image_input = Input(shape=(SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
-        x = layers.Conv3D(60, (1, 10, 10), activation='relu')(image_input)
-        x = layers.MaxPooling3D((1, 3, 3))(x)
-        x = layers.Conv3D(30, (1, 5, 5), activation='relu')(x)
+        image_input = Input(shape=(IM_HEIGHT,IM_WIDTH,3))
+        x = layers.Conv2D(60, (10, 10), activation='relu')(image_input)
+        x = layers.MaxPooling2D((3, 3))(x)
+        x = layers.Conv2D(30, (5, 5), activation='relu')(x)
         x = layers.Flatten()(x)
-        move_buffer_input = Input(shape=(SHORT_TERM_BUF,OUTPUT_ACTOR))
-        y = layers.Flatten()(move_buffer_input)
-        x = layers.concatenate([x,y], axis=1)
-        x = layers.Dense(480, activation='relu')(x)
+        #move_buffer_input = Input(shape=(SHORT_TERM_BUF,OUTPUT_ACTOR))
+        #y = layers.Flatten()(move_buffer_input)
+        #x = layers.concatenate([x,y], axis=1)
+        x = layers.Dense(120, activation='relu')(x)
         x = layers.Dense(OUTPUT_ACTOR, activation='softmax')(x)
         #x = layers.Dense(OUTPUT_ACTOR_DPAD, activation='softmax')(x)
         #y = layers.Dense(OUTPUT_ACTOR_OTHR, activation='softmax')(x)
 
-        model = Model(inputs=(image_input, move_buffer_input), outputs=x)
+        model = Model(inputs=image_input, outputs=x)
 
         model.summary()
 
@@ -114,16 +112,18 @@ class Tetris:
             print('Error loading weights from file')
         return model
     
-    # TO DO: Add move chosen to be evaluated
     def __create_model_critic(self):
-        model = models.Sequential()
-        model.add(layers.Conv2D(60, (10, 10), activation='relu', input_shape=(IM_HEIGHT,IM_WIDTH,3)))
-        model.add(layers.MaxPooling2D((3, 3)))
-        model.add(layers.Conv2D(30, (5, 5), activation='relu'))
+        image_input = Input(shape=(IM_HEIGHT,IM_WIDTH,3))
+        x = layers.Conv2D(60, (10, 10), activation='relu')(image_input)
+        x = layers.MaxPooling2D((3, 3))(x)
+        x = layers.Conv2D(30, (5, 5), activation='relu')(x)
+        x = layers.Flatten()(x)
+        move_input = Input(shape=(OUTPUT_ACTOR))
+        x = layers.concatenate([x,move_input], axis=1)
+        x = layers.Dense(120, activation='relu')(x)
+        x = layers.Dense(OUTPUT_CRITIC)(x)
 
-        model.add(layers.Flatten())
-        model.add(layers.Dense(120, activation='relu'))
-        model.add(layers.Dense(OUTPUT_CRITIC))
+        model = Model(inputs=(image_input,move_input), outputs=x)
 
         model.summary()
 
@@ -197,59 +197,51 @@ class Tetris:
         im.save(self.current_save_path + '/' + str(self.internal_clock) + '.png')
         img_data = tf.io.read_file(self.current_save_path + '/' + str(self.internal_clock) + '.png')
         im = tf.image.decode_png(img_data, channels=3)
-        im = tf.reshape(tf.image.convert_image_dtype(im, tf.float32), (1,1,IM_HEIGHT,IM_WIDTH,3))
-        im_dsc = tf.reshape(tf.image.convert_image_dtype(im, tf.float32), (1,IM_HEIGHT,IM_WIDTH,3))
-        result_buf = [tf.slice(tf.squeeze(self.previous_frames), (0,0,0,0), (1,IM_HEIGHT,IM_WIDTH,3)), im_dsc]
-        self.batch = (self.prev_state[0], self.prev_state[1], self.previous_move, result_buf)
-        self.prev_state[0] = tf.identity(self.previous_frames)
-        self.prev_state[1] = tf.identity(self.previous_moves)
-        # Roll frame buffer
-        self.previous_frames = tf.slice(self.previous_frames, (0,0,0,0,0), (1,SHORT_TERM_BUF-1,IM_HEIGHT,IM_WIDTH,3))
-        self.previous_frames = tf.concat([im, self.previous_frames], axis=1)
-        # Pass im and buffer data to get next move probabilities
-        # output_dir, output_btn = tf.squeeze(self.actor((self.previous_frames, self.previous_moves)))
-        output_btn = tf.squeeze(self.actor((self.previous_frames, self.previous_moves)))
-        disc_cur = tf.squeeze(self.discriminator(im_dsc))
-        crit_cur = tf.squeeze(self.critic(im_dsc))
+        im = tf.reshape(tf.image.convert_image_dtype(im, tf.float32), (1,IM_HEIGHT,IM_WIDTH,3))
+        # Get button probabilities
+        output_btn = tf.squeeze(self.actor(im))
+        # Reward for current frame
+        disc_cur = tf.squeeze(self.discriminator(im))
+        # Estimated future reward for previous move 
+        crit_cur = tf.squeeze(self.critic((self.previous_frame, self.previous_move)))
         if EPSILON_LEARNING:
             random_num = self.random([1]).numpy()[0]
             # If random number is greater than epsilon, take random path, else choose max
             if random_num > self.epsilon:
-                chosen_btn = tf.squeeze(tf.one_hot(tf.math.argmax(tf.random.uniform([OUTPUT_ACTOR])), OUTPUT_ACTOR))
+                chosen_btn = tf.one_hot(tf.math.argmax(tf.random.uniform([OUTPUT_ACTOR])), OUTPUT_ACTOR)
             else:
-                chosen_btn = tf.squeeze(tf.one_hot(tf.math.argmax(output_btn), OUTPUT_ACTOR))
-        else:
-            # chosen_dir = tf.squeeze(tf.one_hot(tf.random.categorical(tf.math.log([output_dir]), 1), OUTPUT_ACTOR_DPAD))
-            chosen_btn = tf.squeeze(tf.one_hot(tf.random.categorical(tf.math.log([output_btn]), 1), OUTPUT_ACTOR))
-        # result = tf.concat([chosen_dir, chosen_btn], axis=0)
-        result = chosen_btn
-        result_input_file = tf.reshape(tf.cast(result, tf.float32), (1, OUTPUT_ACTOR)).numpy()
-        result_input_tensor = tf.reshape(result, (1,1,OUTPUT_ACTOR))
-
+                chosen_btn = tf.one_hot(tf.math.argmax(output_btn), OUTPUT_ACTOR)
+        elif RANDOM_SELECTION_LEARNING:
+            # Selects based on output probability
+            chosen_btn = tf.one_hot(tf.random.categorical(tf.math.log([output_btn]), 1), OUTPUT_ACTOR)
+        chosen_btn = tf.reshape(chosen_btn, (1,OUTPUT_ACTOR))
+        result_input_file = tf.cast(chosen_btn, tf.float32).numpy()
+        
+        # Save state, action, next state, next move for realtime training
+        self.batch = (self.previous_frame, self.previous_move, im, chosen_btn)
+        
         if self.internal_clock % 50 == 0:
-            #print('Direction distribution', output_dir.numpy())
             print('Button distribution', output_btn.numpy())
-            #print('Chosen direction', chosen_dir.numpy())
             print('Chosen button', chosen_btn.numpy())
             print('Discriminator output', disc_cur.numpy())
             print('Critic output', crit_cur.numpy())
 
         # Load move file
         try:
-            move_tensor = np.load(self.current_save_path + '/0.npy')
+            move_tensor = np.load(self.current_save_path + '/moves.npy')
             move_tensor = np.concatenate((move_tensor, result_input_file), axis=0)
         except FileNotFoundError:
             move_tensor = result_input_file
-        # Roll move buffer
-        self.previous_moves = tf.slice(self.previous_moves, (0,0,0), (1,SHORT_TERM_BUF-1,OUTPUT_ACTOR))
-        self.previous_moves = tf.concat([result_input_tensor, self.previous_moves], axis=1)
+        # Update previous frame
+        self.previous_frame = im
+        # Update previous move
+        self.previous_move = chosen_btn
         # Save move for current frame
-        np.save(self.current_save_path + '/0.npy', move_tensor)
+        np.save(self.current_save_path + '/moves.npy', move_tensor)
         # Update clock
         self.internal_clock += 1
-        self.previous_move = chosen_btn.numpy()
         # Return chosen moves
-        return chosen_btn.numpy()
+        return tf.squeeze(chosen_btn).numpy()
 
     # This function is used to determine if a game of tetris was lost
     def eval_environment(self, image):
@@ -262,6 +254,7 @@ class Tetris:
                     steps_per_epoch = spe,
                     callbacks = [cp_callback_environment])
     
+    '''
     def eval_tetris_finder(self, image):
         return self.tetris_finder(image).numpy()
     
@@ -271,6 +264,7 @@ class Tetris:
                     verbose = 1,
                     steps_per_epoch = spe,
                     callbacks = [cp_callback_environment])
+    '''
 
     def __build_dataset(self):
         if self.dataset_built:
@@ -282,36 +276,23 @@ class Tetris:
             print("Game too short, cannot build dataset")
             self.dataset_built = False
             return
-        self.cur_index = self.image_count - (EVAL_FRAMES + 1) # start from the back of the dataset
-        self.actual_future_reward = GAMMA
-        self.move_tensor = np.load(self.current_save_path + '/0.npy').astype('float32')
+        self.cur_index = self.image_count - 2 # start from the back of the dataset
+        self.move_tensor = np.load(self.current_save_path + '/moves.npy').astype('float32')
     
     def __get_next_batch(self):
         def build_path(name):
             return self.current_save_path + "/" + name + ".png"
-        images = []
-        for x in range(SHORT_TERM_BUF):
-            path = build_path(str(self.cur_index - x))
-            images.append(process_path(path))
-        image_buf = tf.concat(images, axis=0)
-        image_buf = tf.expand_dims(image_buf, axis=0)
+        state = process_path(build_path(str(self.cur_index)))
         # Get the resulting frames from doing move
-        result_buf = []
-        for x in range(EVAL_FRAMES):
-            path = build_path(str(self.cur_index + x))
-            result_buf.append(process_path(path))
-        move_chosen = self.move_tensor[self.cur_index]
-        # The move buffer does not have the move for the
-        # current frame (cur_index) so we go from from cur_index - SHORT_TERM_BUF
-        move_buf = self.move_tensor[self.cur_index - SHORT_TERM_BUF:self.cur_index]
-        move_buf = tf.convert_to_tensor(move_buf)
-        move_buf = tf.expand_dims(move_buf, axis=0)
+        next_state = state = process_path(build_path(str(self.cur_index + 1)))
+        # Get move chosen
+        move_chosen = np.reshape(self.move_tensor[self.cur_index], (1, OUTPUT_ACTOR))
         # Gets a random image from game of a tetris player knows what they're doing
         good_image = get_discriminator_image()
-        return image_buf, move_buf, move_chosen, result_buf, good_image
+        return state, move_chosen, next_state, good_image
     
     def fit_actor_realtime(self):
-        if not REALTIME_LEARNING:
+        if not TD_LEARNING:
             return
         a = self.__train_step_realtime(self.batch)
         if self.internal_clock % 50 == 0:
@@ -325,9 +306,9 @@ class Tetris:
         if not self.dataset_built:
             self.reset_actor()
             return
-        # Value for losing
+        # Q value for losing
         qval = -20
-        while (self.cur_index-(SHORT_TERM_BUF+1) > 0):
+        while (self.cur_index > 1):
             batch = self.__get_next_batch()
             qval, a, c, d = self.__train_step(qval, batch)
             actor_loss += a
@@ -335,7 +316,7 @@ class Tetris:
             disc_loss += d
             self.cur_index -= 1
             it += 1
-            self.actual_future_reward *= GAMMA
+        # Record losses
         actor_loss = actor_loss.numpy()
         critic_loss = critic_loss.numpy()
         disc_loss = disc_loss.numpy()
@@ -347,10 +328,11 @@ class Tetris:
         self.epsilon = min(self.epsilon, EPSILON_MAX)
         if EPSILON_LEARNING:
             print('Current epsilon:', str(self.epsilon))
-        # Save current state of each neural network
+        # Save current state of each neural networks
         self.critic.save_weights(checkpoint_path_critic)
-        self.discriminator.save_weights(checkpoint_path_discriminator)
-        if REALTIME_LEARNING:
+        if TRAIN_DISC:
+            self.discriminator.save_weights(checkpoint_path_discriminator)
+        if TD_LEARNING:
             self.actor.save_weights(checkpoint_path_actor)
         else:
             self.edit_actor.save_weights(checkpoint_path_actor)
@@ -358,10 +340,8 @@ class Tetris:
         self.reset_actor()
 
     def reset_actor(self):
-        self.previous_moves = tf.zeros((1,SHORT_TERM_BUF,OUTPUT_ACTOR))
-        self.previous_frames = tf.zeros((1,SHORT_TERM_BUF,IM_HEIGHT,IM_WIDTH,3))
-        self.prev_state = [tf.identity(self.previous_frames), tf.identity(self.previous_moves)]
-        self.previous_move = tf.squeeze(self.actor((self.previous_frames, self.previous_moves))).numpy()
+        self.previous_frame = tf.zeros((1,IM_HEIGHT,IM_WIDTH,3))
+        self.previous_move = self.actor(self.previous_frame)
         self.internal_clock = 0
         self.dataset_built = False
         # Clear folder
@@ -372,17 +352,17 @@ class Tetris:
     # Only for editing actor
     @tf.function
     def __train_step_realtime(self, batch):
-        image_buf, move_buf, move_chosen, result_buf = batch
+        state, move_chosen, next_state, next_move = batch
         with tf.GradientTape() as act_tape:
             act_tape.watch(self.actor.trainable_variables)
             # Evaluate on models
-            probs = tf.squeeze(self.actor((image_buf, move_buf)))
-            V_cur = tf.squeeze(self.critic(result_buf[0]))
-            V_future = tf.squeeze(self.critic(result_buf[1]))
+            probs = tf.squeeze(self.actor(state))
+            V_cur = tf.squeeze(self.critic((state, move_chosen)))
+            V_future = tf.squeeze(self.critic((next_state, next_move)))
             # Currently only calculated by discriminator value (will add ingame rewards such as lineclears)
-            reward_future = tf.squeeze(self.discriminator(result_buf[1])) # + 5 * tf.squeeze(self.find_tetris(result_buf[1]))[1]
+            reward = tf.squeeze(self.discriminator(next_state)) # + 5 * tf.squeeze(self.find_tetris(result_buf[1]))[1]
             # Calculate TD advantage
-            advantage = reward_future + GAMMA*V_future - V_cur
+            advantage = reward + GAMMA*V_future - V_cur
             log_probs = tf.math.log(probs)
             actor_loss = -1 * log_probs * advantage
         gradients_of_actor = act_tape.gradient(actor_loss, self.actor.trainable_variables)
@@ -392,33 +372,30 @@ class Tetris:
     # Updates all networks (except for actor if REALTIME_TRAINING is True)
     @tf.function
     def __train_step(self, qval, batch):
-        image_buf, move_buf, move_chosen, result_buf, good_image = batch
+        state, move_chosen, next_state, good_image = batch
         with tf.GradientTape() as act_tape, tf.GradientTape() as crit_tape, tf.GradientTape() as disc_tape:
             # Assign tape to variables
             act_tape.watch(self.actor.trainable_variables)
             crit_tape.watch(self.critic.trainable_variables)
             disc_tape.watch(self.discriminator.trainable_variables)
             # Evaluate on models
-            probs = tf.squeeze(self.actor((image_buf, move_buf)))
-            V_cur = tf.squeeze(self.critic(result_buf[0]))
-            disc_future = tf.squeeze(self.discriminator(result_buf[1]))
+            probs = tf.squeeze(self.actor(state))
+            V_cur = tf.squeeze(self.critic((state,move_chosen)))
+            disc_future = tf.squeeze(self.discriminator(next_state))
             disc_good = tf.squeeze(self.discriminator(good_image))
-            advantage = disc_future + GAMMA*qval - V_cur
+            reward = disc_future # Reward currently only calculated by discriminator
+            advantage = reward + GAMMA*qval - V_cur
             newq = disc_future + GAMMA*qval
             log_probs = tf.math.log(probs)
-            # Mask based on move chosen (OPTIONAL)
-                # If the network predicts with 100% probability, other moves will have 0 probability
-                # and log (0) is undefined
-            # move_chosen = np.reshape(move_chosen, (2,4))
-            # log_probs = tf.boolean_mask(log_probs, move_chosen)
             actor_loss = -1 * log_probs * advantage
             critic_loss = tf.math.square(advantage)
             disc_loss = disc_future + (1 - disc_good)
-        if not REALTIME_LEARNING:
+        if not TD_LEARNING:
             gradients_of_actor = act_tape.gradient(actor_loss, self.actor.trainable_variables)
             self.actor_opt.apply_gradients(zip(gradients_of_actor, self.edit_actor.trainable_variables))
         gradients_of_critic = crit_tape.gradient(critic_loss, self.critic.trainable_variables)
-        gradients_of_discriminator = disc_tape.gradient(disc_loss, self.discriminator.trainable_variables)
         self.critic_opt.apply_gradients(zip(gradients_of_critic, self.critic.trainable_variables))
-        self.disc_opt.apply_gradients(zip(gradients_of_discriminator, self.discriminator.trainable_variables))
+        if TRAIN_DISC:
+            gradients_of_discriminator = disc_tape.gradient(disc_loss, self.discriminator.trainable_variables)
+            self.disc_opt.apply_gradients(zip(gradients_of_discriminator, self.discriminator.trainable_variables))
         return newq, actor_loss, critic_loss, disc_loss
