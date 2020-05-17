@@ -6,13 +6,14 @@ Games to learn:
 
 ## How does it work?
 
-Actor critic algorithms have done some pretty impressive stuff in the past few years. Actor critic algorithms such as [A2C](https://towardsdatascience.com/understanding-actor-critic-methods-931b97b6df3f) (Advantage Actor Critic) and A3C (Asychronous Advantage Actor Critic) use multiple neural networks to accomplish a single goal. In general, the actor network is making moves and the critic network is assigning rewards to those moves. The model I am putting together to play Tetris is a tweaked version of A2C, which will utilize a custom shaped reward function.
+Deep Q networks have set some impressive milestones for playing games in the atari domain. [Check here](https://towardsdatascience.com/advanced-dqns-playing-pac-man-with-deep-reinforcement-learning-3ffbd99e0814) to learn more about how they work and the optimizations necessary to get good performance.
 
 ## To do list
 * Clean discriminator database
-* Create more states for environment (clearing lines, tetris, end game)
+* Create more states for environment (single line vs double vs triple vs tetris)
 
 [Repo for sending commands to switch](https://github.com/wchill/SwitchInputEmulator)
+[Repo for DQN](https://github.com/jakegrigsby/AdvancedPacmanDQNs)
 
 Hardware Used:
 * [Arduino Uno R3](https://www.amazon.com/Sintron-UNO-R3-ATMEGA328P-Arduino/dp/B073DYD97C/ref=sxin_2_ac_d_pm?ac_md=1-0-VW5kZXIgJDEw-ac_d_pm&cv_ct_cx=arduino+uno+r3&keywords=arduino+uno+r3&pd_rd_i=B073DYD97C&pd_rd_r=9305d6a8-c762-46e8-b3f8-356745bc8a6d&pd_rd_w=z4ysu&pd_rd_wg=MwvP1&pf_rd_p=0e223c60-bcf8-4663-98f3-da892fbd4372&pf_rd_r=RAANRF34YJKT950W9MVQ&psc=1&qid=1584519878&s=electronics)
