@@ -4,7 +4,7 @@ import sys
 sys.path.append('keras-rl')
 from PIL import Image
 import numpy as np
-import tetris-remake
+import tetris
 from keras.models import Model
 from keras.layers import Flatten, Convolution2D, Input
 from keras.optimizers import Adam
