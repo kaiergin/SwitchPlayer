@@ -1,4 +1,4 @@
-# an AI that plays Nintendo Switch games
+# Reinforcement Learning on Nintendo Switch
 
 Games to learn:
 * Tetris 99 (current)
@@ -12,7 +12,13 @@ Deep Q networks have set some impressive milestones for playing games in the ata
 * Clean discriminator database
 * Create more states for environment (single line vs double vs triple vs tetris)
 
-[Repo for sending commands to switch](https://github.com/wchill/SwitchInputEmulator)
+## Dependencies
+
+I recommend creating a virtual envioronment with python 3.5 as tensorflow 1.14 is used for keras-rl  
+Then run  
+* pip install -r
+
+[Repo for sending commands to switch](https://github.com/wchill/SwitchInputEmulator)  
 [Repo for DQN](https://github.com/jakegrigsby/AdvancedPacmanDQNs)
 
 Hardware Used:
