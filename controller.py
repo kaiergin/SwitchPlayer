@@ -8,8 +8,6 @@ import time
 import math
 import cv2
 import numpy as np
-import tensorflow as tf
-from PIL import Image
 
 # Set the serial port here (this is the name of the USB to serial adapter that shows up on your computer)
 PORT = 'COM5'

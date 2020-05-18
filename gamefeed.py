@@ -11,6 +11,7 @@ BUF_SIZE = 5 # How many images to capture on each input of keystroke
 IM_WIDTH = 160
 IM_HEIGHT = 90
 
+TRAIN_ENVIRONMENT = False
 
 def show_webcam():
     cam = cv2.VideoCapture(0)

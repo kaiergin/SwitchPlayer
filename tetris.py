@@ -78,7 +78,6 @@ class Tetris(Env):
             m.load_weights(env_path)
         except:
             print('Unable to load environment network')
-            exit()
         return m
 
     # A model that determines how similar the gameplay is to my gameplay (the good parts)

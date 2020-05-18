@@ -1,5 +1,5 @@
 tensorflow==1.15.2
-opencv
+opencv-python
 keras
 pathlib
 numpy
