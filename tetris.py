@@ -12,12 +12,18 @@ import gym
 DEBUG = False
 
 TRAINING_BUFFER = 20
-INPUT_SHAPE = (100,100)
+INPUT_SHAPE = (160,90)
 OUTPUT_ENV = 5
 OUTPUT_DISC = 1
 ACTION_SPACE = len(tetris_enum)
 
 CLASS_NAMES = np.array(['neutral', 'end_screen', 'error', 'title_a', 'title_b'])
+
+# Data paths
+env_data = pathlib.Path('training/tetris_environment')
+reward_data = pathlib.Path('training/tetris_discriminator')
+
+# Model save paths
 env_path = 'tetris/environment/env.ckpt'
 reward_path = 'tetris/reward/reward.ckpt'
 
@@ -93,11 +99,30 @@ class Tetris(Env):
 
     # Called every 5 steps. Grabs a random memory and fits against my gameplay
     def fit_reward(self):
-        pass
-
+        batch = np.zeros((2, *INPUT_SHAPE, 3))
+        choice = np.random.randint(0, TRAINING_BUFFER - 1)
+        batch[0] = np.choice(self.frames)
+        good_path = np.choice(list(reward_data.glob('clean_data_playing/*/*.png')))
+        batch[1] = cv2.imread(good_path) / 255.0
+        labels = np.array([0, 1])
+        self.reward.fit(batch, labels)
+    
     # Called at the beggining to fit network to training labels (pre-recorded)
     def fit_environment(self, epochs = 20):
-        pass
+        for _ in range(epochs):
+            batch = np.zeros((10, *INPUT_SHAPE, 3))
+            labels = np.zeros((10, OUTPUT_ENV))
+            x = 0
+            for path in list(reward_data.glob('*/*.png')):
+                # Already resized
+                batch[x] = cv2.imread(path) / 255.0
+                label = path.split('/')[0]
+                labels[x] = K.one_hot(np.where(CLASS_NAMES == label)[0])
+                x += 1
+                if x == 10:
+                    self.env.fit(batch, lables)
+                    x = 0
+
 
     def step(self, action):
         # Send the chosen button press to switch
@@ -105,7 +130,7 @@ class Tetris(Env):
         p_wait(.05)
         # Read in the resulting frame
         ret_val, self.current_frame = self.switch_screen.read()
-        img_resize = K.expand_dims(cv2.resize(img_orig, INPUT_SHAPE), axis=0)
+        img_resize = K.expand_dims(cv2.resize(img_orig, INPUT_SHAPE), axis=0) / 255.0
         # Evaluate on environment network
         env_out = np.argmax(self.env(img_resize).numpy()[0])
         done = False
@@ -128,8 +153,7 @@ class Tetris(Env):
         # Add frame to training buffer for reward training
         self.frames[self.clock % TRAINING_BUFFER] = img_resize
         if clock % 5 == 0 and self.train_reward:
-            choice = np.randint(0, TRAINING_BUFFER - 1)
-            fit_reward(frames[choice])
+            fit_reward()
         self.clock += 1
         return self.current_frame, reward, done, {}
 
@@ -143,7 +167,7 @@ class Tetris(Env):
                 print('Error reading from switch screen. Switch disconnected?')
                 print('Exiting')
                 exit()
-            img_resize = K.expand_dims(cv2.resize(img_orig, INPUT_SHAPE), axis=0)
+            img_resize = K.expand_dims(cv2.resize(img_orig, INPUT_SHAPE), axis=0) / 255.0
             if DEBUG:
                 print('Successfully resized and expanded')
             # Evaluate on environment
