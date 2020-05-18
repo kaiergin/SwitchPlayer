@@ -7,9 +7,6 @@ import tensorflow as tf
 
 # This file is for testing the capture card and for gathering data to train the environment
 
-bot = Tetris(False, True)
-TRAIN_ENVIRONMENT = False
-
 BUF_SIZE = 5 # How many images to capture on each input of keystroke
 IM_WIDTH = 160
 IM_HEIGHT = 90
@@ -26,14 +23,6 @@ def show_webcam():
             im = cv2.resize(img, (IM_WIDTH,IM_HEIGHT))
             im = Image.fromarray(im)
             im.save('temp.png')
-            
-            # Current prediction
-            if it % 10 == 0:
-                img_data = tf.io.read_file('temp.png')
-                im = tf.image.decode_png(img_data, channels=3)
-                im = tf.reshape(tf.image.convert_image_dtype(im, tf.float64), (1,90,160,3))
-                print(np.round(bot.eval_environment(im), 2))
-                
             img = cv2.resize(img, (1280,720))
             cv2.imshow('Switch Display', img)
             val = cv2.waitKey(1)

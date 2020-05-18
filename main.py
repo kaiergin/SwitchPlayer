@@ -45,7 +45,7 @@ parser.add_argument('--weights', type=str, default=None)
 args = parser.parse_args()
 
 # Get the environment and extract the number of actions.
-env = tetris_remake.Tetris()
+env = tetris.Tetris(train_reward=True, train_env=True)
 np.random.seed(231)
 env.seed(231)
 nb_actions = env.action_space.n

@@ -7,7 +7,6 @@ import sys
 import time
 import math
 import cv2
-from tetris import Tetris
 import numpy as np
 import tensorflow as tf
 from PIL import Image

@@ -7,9 +7,11 @@ import numpy as np
 from core import Env
 from controller import sync, send_cmd, tetris_enum, p_wait, BTN_A, BTN_B, BTN_R, BTN_L, DPAD_D
 import cv2
-import gym
+from gym import spaces
+import pathlib
 
-DEBUG = False
+DEBUG = True
+RENDER = True
 
 TRAINING_BUFFER = 20
 INPUT_SHAPE = (160,90)
@@ -29,7 +31,7 @@ reward_path = 'tetris/reward/reward.ckpt'
 
 # This file is a wrapper for an OpenAI gym environment
 class Tetris(Env):
-    action_space = gym.Discrete(ACTION_SPACE)
+    action_space = spaces.Discrete(ACTION_SPACE)
 
     def __init__(self, train_reward=False, train_env=False, capture_device=0):
         self.clock = 0
@@ -105,7 +107,9 @@ class Tetris(Env):
         good_path = np.choice(list(reward_data.glob('clean_data_playing/*/*.png')))
         batch[1] = cv2.imread(good_path) / 255.0
         labels = np.array([0, 1])
-        self.reward.fit(batch, labels)
+        accuracy = self.reward.fit(batch, labels)
+        # This value should hopefully approach .5 as the bot learns to play like me
+        print('Current reward function accuracy:', accuracy)
     
     # Called at the beggining to fit network to training labels (pre-recorded)
     def fit_environment(self, epochs = 20):
@@ -113,6 +117,8 @@ class Tetris(Env):
             batch = np.zeros((10, *INPUT_SHAPE, 3))
             labels = np.zeros((10, OUTPUT_ENV))
             x = 0
+            acc = 0
+            total = 0
             for path in list(reward_data.glob('*/*.png')):
                 # Already resized
                 batch[x] = cv2.imread(path) / 255.0
@@ -120,8 +126,11 @@ class Tetris(Env):
                 labels[x] = K.one_hot(np.where(CLASS_NAMES == label)[0])
                 x += 1
                 if x == 10:
-                    self.env.fit(batch, lables)
+                    acc += self.env.fit(batch, lables)
+                    total += 1
                     x = 0
+            print('Environment accuracy:', acc/total)
+        
 
 
     def step(self, action):
@@ -155,6 +164,8 @@ class Tetris(Env):
         if clock % 5 == 0 and self.train_reward:
             fit_reward()
         self.clock += 1
+        if RENDER:
+            self.render()
         return self.current_frame, reward, done, {}
 
     def reset(self):
