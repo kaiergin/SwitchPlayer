@@ -9,12 +9,13 @@ from controller import sync, send_cmd, tetris_enum, p_wait, BTN_A, BTN_B, BTN_R,
 import cv2
 from gym import spaces
 import pathlib
+from statistics import mean
+from random import shuffle, choice
 
 DEBUG = True
-RENDER = True
 
 TRAINING_BUFFER = 20
-INPUT_SHAPE = (160,90)
+INPUT_SHAPE = (90,160)
 OUTPUT_ENV = 5
 OUTPUT_DISC = 1
 ACTION_SPACE = len(tetris_enum)
@@ -29,13 +30,19 @@ reward_data = pathlib.Path('training/tetris_discriminator')
 env_path = 'tetris/environment/env.ckpt'
 reward_path = 'tetris/reward/reward.ckpt'
 
+def swap(a,b): return b, a
+
+def one_hot(a, num_classes): return np.squeeze(np.eye(num_classes)[a.reshape(-1)])
+
+def preprocess(im): return np.expand_dims(im.astype('float32') / 255.0, axis = 0)
+
 # This file is a wrapper for an OpenAI gym environment
 class Tetris(Env):
     action_space = spaces.Discrete(ACTION_SPACE)
 
-    def __init__(self, train_reward=False, train_env=False, capture_device=0):
+    def __init__(self, train_reward=True, train_env=False, capture_device=0):
         self.clock = 0
-        self.frames = np.zeros(shape=(TRAINING_BUFFER, *INPUT_SHAPE))
+        self.frames = []
         self.reward = self.model_reward()
         self.env = self.model_environment()
         # Sync to the switch so that we can send controller commands
@@ -59,7 +66,11 @@ class Tetris(Env):
             print('Unable to open capture device. Is it plugged in?')
             exit()
         if train_env:
+            print('Starting environment training')
             self.fit_environment()
+            print('Finished environment training - saving')
+            print('You can now set train_environment = False')
+            self.env.save_weights(env_path)
         self.train_reward = train_reward
         
     # A model that determines what state the game is in
@@ -101,34 +112,40 @@ class Tetris(Env):
     # Called every 5 steps. Grabs a random memory and fits against my gameplay
     def fit_reward(self):
         batch = np.zeros((2, *INPUT_SHAPE, 3))
-        choice = np.random.randint(0, TRAINING_BUFFER - 1)
-        batch[0] = np.choice(self.frames)
-        good_path = np.choice(list(reward_data.glob('clean_data_playing/*/*.png')))
-        batch[1] = cv2.imread(good_path) / 255.0
+        batch[0] = choice(self.frames)
+        good_path = str(choice(list(reward_data.glob('clean_data_playing/*/*.png'))))
+        batch[1] = preprocess(cv2.imread(good_path))
         labels = np.array([0, 1])
-        accuracy = self.reward.fit(batch, labels)
+        self.reward.train_on_batch(x = batch, y = labels)
+        accuracy = np.mean(self.reward.predict_on_batch(batch) - labels)
         # This value should hopefully approach .5 as the bot learns to play like me
         print('Current reward function accuracy:', accuracy)
     
     # Called at the beggining to fit network to training labels (pre-recorded)
-    def fit_environment(self, epochs = 20):
+    def fit_environment(self, epochs = 3):
         for _ in range(epochs):
             batch = np.zeros((10, *INPUT_SHAPE, 3))
             labels = np.zeros((10, OUTPUT_ENV))
             x = 0
-            acc = 0
-            total = 0
-            for path in list(reward_data.glob('*/*.png')):
+            paths = list(env_data.glob('*/*.png'))
+            shuffle(paths)
+            for path in paths:
+                path = str(path)
                 # Already resized
-                batch[x] = cv2.imread(path) / 255.0
-                label = path.split('/')[0]
-                labels[x] = K.one_hot(np.where(CLASS_NAMES == label)[0])
+                try:
+                    im = cv2.imread(path)
+                except:
+                    print('Unable to read in image')
+                    continue
+                batch[x] = im / 255.0
+                # Split by windows path divider
+                label = path.split('\\')[2]
+                found = np.where(CLASS_NAMES == label)
+                labels[x] = one_hot(found[0][0], CLASS_NAMES.size)
                 x += 1
                 if x == 10:
-                    acc += self.env.fit(batch, lables)
-                    total += 1
+                    self.env.train_on_batch(x = batch, y = labels)
                     x = 0
-            print('Environment accuracy:', acc/total)
         
 
 
@@ -138,9 +155,24 @@ class Tetris(Env):
         p_wait(.05)
         # Read in the resulting frame
         ret_val, self.current_frame = self.switch_screen.read()
-        img_resize = K.expand_dims(cv2.resize(img_orig, INPUT_SHAPE), axis=0) / 255.0
+        if ret_val == False:
+            print('Error reading from switch screen. Switch disconnected?')
+            print('Exiting')
+            exit()
+        
+        img_resize = cv2.resize(self.current_frame, swap(*INPUT_SHAPE))
+        im = Image.fromarray(img_resize)
+        # Unsure if these 2 lines are necessary
+        im.save('temp.png')
+        im_import = cv2.imread('temp.png')
+
+        preprocessed = preprocess(im_import)
+
         # Evaluate on environment network
-        env_out = np.argmax(self.env(img_resize).numpy()[0])
+        env_out = np.argmax(self.env.predict_on_batch(preprocessed))
+        if DEBUG and self.clock % 10 == 0:
+            print(env_out)
+            print('Current environment evaluation:', CLASS_NAMES[env_out])
         done = False
         if env_out == 1:
             # Endgame screen
@@ -155,16 +187,16 @@ class Tetris(Env):
             # Only get reward when placing a block
             if tetris_enum[action] == DPAD_D:
                 # Evaluate on reward network
-                reward = self.reward(img_resize).numpy()[0]
+                reward = self.reward.predict_on_batch(preprocessed)
             else:
                 reward = 0.0
         # Add frame to training buffer for reward training
-        self.frames[self.clock % TRAINING_BUFFER] = img_resize
-        if clock % 5 == 0 and self.train_reward:
-            fit_reward()
+        self.frames.append(preprocessed)
+        if len(self.frames) > 20:
+            self.frames.pop(0)
+        if self.clock % 5 == 0 and self.train_reward:
+            self.fit_reward()
         self.clock += 1
-        if RENDER:
-            self.render()
         return self.current_frame, reward, done, {}
 
     def reset(self):
@@ -177,13 +209,18 @@ class Tetris(Env):
                 print('Error reading from switch screen. Switch disconnected?')
                 print('Exiting')
                 exit()
-            img_resize = K.expand_dims(cv2.resize(img_orig, INPUT_SHAPE), axis=0) / 255.0
-            if DEBUG:
-                print('Successfully resized and expanded')
+            self.render()
+
+            img_resize = cv2.resize(self.current_frame, swap(*INPUT_SHAPE))
+            im = Image.fromarray(img_resize)
+            im.save('temp.png')
+            im_import = cv2.imread('temp.png')
+
+            preprocessed = preprocess(im_import)
             # Evaluate on environment
-            env_out = np.argmax(self.env(img_resize).numpy()[0])
+            env_out = np.argmax(self.env.predict_on_batch(preprocessed))
             if DEBUG:
-                print('Environment:', env_out)
+                print('Environment:', CLASS_NAMES[env_out])
             if env_out == 0:
                 # We have successfully started a new game, return first found frame
                 # TO DO optimization: add another classifier to wait until GO screen
@@ -195,7 +232,7 @@ class Tetris(Env):
                 # Screen for pressing B button
                 send_cmd(BTN_B)
             # Send none to clear button press
-            p_wait(0.1)
+            p_wait(3.0)
             send_cmd()
             p_wait(3.0)
 
@@ -205,7 +242,8 @@ class Tetris(Env):
         except NameError:
             print('No frames found')
             return
-        cv2.im_show('Switch Screen', resized_frame)
+        cv2.imshow('Switch Screen', resized_frame)
+        cv2.waitKey(1)
     
     def close(self):
         cv2.destroyAllWindows()

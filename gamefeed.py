@@ -3,7 +3,7 @@ import numpy as np
 import random
 from tetris import Tetris
 from PIL import Image
-import tensorflow as tf
+from tetris import Tetris
 
 # This file is for testing the capture card and for gathering data to train the environment
 
