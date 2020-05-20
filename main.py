@@ -45,7 +45,7 @@ parser.add_argument('--weights', type=str, default=None)
 args = parser.parse_args()
 
 # Get the environment and extract the number of actions.
-env = tetris.Tetris(train_reward=True, train_env=True)
+env = tetris.Tetris()
 np.random.seed(231)
 env.seed(231)
 nb_actions = env.action_space.n
@@ -87,7 +87,7 @@ if args.mode == 'train':
     checkpoint_weights_filename = folder_path + 'final_noisynet_nstep_pdd_dqn_' + args.env_name + '_weights_{step}.h5f'
     log_filename = folder_path + 'final_noisynet_nstep_pdd_dqn_' + args.env_name + '_REWARD_DATA.txt'
     callbacks = [ModelIntervalCheckpoint(checkpoint_weights_filename, interval=10000)]
-    callbacks += [TrainEpisodeLogger(log_filename)]
+    #callbacks += [TrainEpisodeLogger(log_filename)]
     dqn.fit(env, callbacks=callbacks, nb_steps=30000000, verbose=0, nb_max_episode_steps=20000)
 
 

@@ -15,9 +15,10 @@ Deep Q networks have set some impressive milestones for playing games in the ata
 
 ### Dependencies
 
-I recommend creating a virtual envioronment with python 3.5-3.6 as keras 2.1.5 with tensorflow 1.14 is used
+I recommend creating a virtual envioronment with python 3.5-3.6 as keras 2.1.5 with tensorflow 1.14 is used  
 Then run  
 * pip install -r requirements.txt  
+
 Currently only support for Windows machines
 
 ### References

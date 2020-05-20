@@ -5,14 +5,15 @@ import keras.backend as K
 from PIL import Image
 import numpy as np
 from core import Env
-from controller import sync, send_cmd, tetris_enum, p_wait, BTN_A, BTN_B, BTN_R, BTN_L, DPAD_D
+from controller import sync, send_cmd, tetris_enum, p_wait, BTN_A, BTN_B, BTN_R, BTN_L, DPAD_U
 import cv2
 from gym import spaces
 import pathlib
 from statistics import mean
 from random import shuffle, choice
 
-DEBUG = True
+DEBUG = False
+RENDER = True
 
 TRAINING_BUFFER = 20
 INPUT_SHAPE = (90,160)
@@ -119,7 +120,8 @@ class Tetris(Env):
         self.reward.train_on_batch(x = batch, y = labels)
         accuracy = np.mean(self.reward.predict_on_batch(batch) - labels)
         # This value should hopefully approach .5 as the bot learns to play like me
-        print('Current reward function accuracy:', accuracy)
+        if DEBUG:
+            print('Current reward function accuracy:', accuracy)
     
     # Called at the beggining to fit network to training labels (pre-recorded)
     def fit_environment(self, epochs = 3):
@@ -155,6 +157,8 @@ class Tetris(Env):
         p_wait(.05)
         # Read in the resulting frame
         ret_val, self.current_frame = self.switch_screen.read()
+        if RENDER:
+            self.render()
         if ret_val == False:
             print('Error reading from switch screen. Switch disconnected?')
             print('Exiting')
@@ -171,7 +175,6 @@ class Tetris(Env):
         # Evaluate on environment network
         env_out = np.argmax(self.env.predict_on_batch(preprocessed))
         if DEBUG and self.clock % 10 == 0:
-            print(env_out)
             print('Current environment evaluation:', CLASS_NAMES[env_out])
         done = False
         if env_out == 1:
@@ -185,9 +188,11 @@ class Tetris(Env):
         else:
             # in-game
             # Only get reward when placing a block
-            if tetris_enum[action] == DPAD_D:
+            if tetris_enum[action] == DPAD_U:
                 # Evaluate on reward network
-                reward = self.reward.predict_on_batch(preprocessed)
+                # POSSIBLY MESSED UP HERE
+                reward = self.reward.predict_on_batch(preprocessed)[0][0]
+                #print(reward)
             else:
                 reward = 0.0
         # Add frame to training buffer for reward training
@@ -209,7 +214,8 @@ class Tetris(Env):
                 print('Error reading from switch screen. Switch disconnected?')
                 print('Exiting')
                 exit()
-            self.render()
+            if RENDER:
+                self.render()
 
             img_resize = cv2.resize(self.current_frame, swap(*INPUT_SHAPE))
             im = Image.fromarray(img_resize)
