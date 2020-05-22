@@ -1,7 +1,9 @@
 from tetris import Tetris
 import numpy as np
 
-env = Tetris()
+# This file is used for testing the environment and for training the internal networks
+
+env = Tetris(train_reward = False, train_env = True, train_pregame = False, debug=True)
 
 obs = env.reset()
 

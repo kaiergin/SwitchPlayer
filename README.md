@@ -9,15 +9,17 @@ Games to learn:
 Deep Q networks have set some impressive milestones for playing games in the atari domain. [Check here](https://towardsdatascience.com/advanced-dqns-playing-pac-man-with-deep-reinforcement-learning-3ffbd99e0814) to learn more about how they work and the optimizations necessary to get good performance.
 
 ### To do list
-* Train on in-game data
+* Train on in-game data (in-progress)
 * Create more states for environment (single line vs double vs triple vs tetris)
-* Create optimization for skipping pre-game count down
 
 ### Dependencies
 
 I recommend creating a virtual envioronment with python 3.5-3.6 as keras 2.1.5 with tensorflow 1.14 is used  
 Then run  
 * pip install -r requirements.txt  
+
+For GPU usage  
+* pip install tensorflow-gpu==1.14  
 
 Currently only support for Windows machines
 

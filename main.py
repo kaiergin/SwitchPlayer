@@ -15,6 +15,8 @@ from rl.memory import PrioritizedMemory
 from rl.core import Processor
 from rl.callbacks import TrainEpisodeLogger, ModelIntervalCheckpoint
 from rl.layers import NoisyNetDense
+import os
+import glob
 
 #We downsize the atari frame to 84 x 84 and feed the model 4 frames at a time for
 #a sense of direction and speed.
@@ -40,7 +42,7 @@ class AtariProcessor(Processor):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--mode', choices=['train', 'test'], default='train')
-parser.add_argument('--env-name', type=str, default='MsPacmanDeterministic-v4')
+parser.add_argument('--env-name', type=str, default='Tetris99')
 parser.add_argument('--weights', type=str, default=None)
 args = parser.parse_args()
 
@@ -83,17 +85,21 @@ dqn.compile(Adam(lr=.00025/4), metrics=['mae'])
 folder_path = 'model_saves/'
 
 if args.mode == 'train':
-    weights_filename = folder_path + 'final_noisynet_nstep_pdd_dqn_{}_weights.h5f'.format(args.env_name)
-    checkpoint_weights_filename = folder_path + 'final_noisynet_nstep_pdd_dqn_' + args.env_name + '_weights_{step}.h5f'
-    log_filename = folder_path + 'final_noisynet_nstep_pdd_dqn_' + args.env_name + '_REWARD_DATA.txt'
+    checkpoint_weights_filename = folder_path + 'advanced_dqn_' + args.env_name + '_weights_{step}.h5f'
     callbacks = [ModelIntervalCheckpoint(checkpoint_weights_filename, interval=10000)]
-    #callbacks += [TrainEpisodeLogger(log_filename)]
-    dqn.fit(env, callbacks=callbacks, nb_steps=30000000, verbose=0, nb_max_episode_steps=20000)
+    list_of_files = glob.glob(folder_path + '*')
+    if len(list_of_files) != 0:
+        latest_file = max(list_of_files, key=os.path.getctime)
+        dqn.load_weights(latest_file)
+        print('-- Loaded DQN weights :', latest_file, '--')
+    dqn.fit(env, callbacks=callbacks, nb_steps=30000000, verbose=1)#, nb_max_episode_steps=20000)
 
 
 elif args.mode == 'test':
-    weights_filename = folder_path + 'final_noisynet_nstep_pdd_dqn_MsPacmanDeterministic-v4_weights_9000000.h5f'
+    # 30 million steps
+    weights_filename = folder_path + 'advanced_dqn_' + args.env_name + '_weights_30000000.h5f'
     if args.weights:
-        weights_filename = args.weights
+        # Choose a step
+        weights_filename = weights_filename = folder_path + 'advanced_dqn_' + args.env_name + '_weights_' + args.weights + '.h5f'
     dqn.load_weights(weights_filename)
     dqn.test(env, nb_episodes=20, visualize=True, nb_max_start_steps=80)

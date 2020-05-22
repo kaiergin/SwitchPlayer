@@ -12,24 +12,29 @@ import pathlib
 from statistics import mean
 from random import shuffle, choice
 
-DEBUG = False
 RENDER = True
 
 TRAINING_BUFFER = 20
 INPUT_SHAPE = (90,160)
 OUTPUT_ENV = 5
 OUTPUT_DISC = 1
+OUTPUT_PRE = 2
 ACTION_SPACE = len(tetris_enum)
 
 CLASS_NAMES = np.array(['neutral', 'end_screen', 'error', 'title_a', 'title_b'])
+CLASS_NAMES_PRE = np.array(['go', 'pregame'])
 
 # Data paths
 env_data = pathlib.Path('training/tetris_environment')
 reward_data = pathlib.Path('training/tetris_discriminator')
+pregame_data = pathlib.Path('training/tetris_pregame_opt')
 
 # Model save paths
 env_path = 'tetris/environment/env.ckpt'
 reward_path = 'tetris/reward/reward.ckpt'
+pregame_path = 'tetris/pregame/pregame.ckpt'
+
+# Helper functions
 
 def swap(a,b): return b, a
 
@@ -39,16 +44,19 @@ def preprocess(im): return np.expand_dims(im.astype('float32') / 255.0, axis = 0
 
 # This file is a wrapper for an OpenAI gym environment
 class Tetris(Env):
-    action_space = spaces.Discrete(ACTION_SPACE)
+    # -1 so that the bot cannot choose BTN_NONE
+    action_space = spaces.Discrete(ACTION_SPACE - 1)
 
-    def __init__(self, train_reward=True, train_env=False, capture_device=0):
+    def __init__(self, train_reward=True, train_env=False, train_pregame=False, capture_device=0, debug=False):
+        self.DEBUG = debug
         self.clock = 0
         self.frames = []
         self.reward = self.model_reward()
         self.env = self.model_environment()
+        self.pregame = self.model_pregame()
         # Sync to the switch so that we can send controller commands
         sync()
-        if DEBUG:
+        if self.DEBUG:
             print('Successfully synced to MCU')
         # Connect controller
         send_cmd(BTN_L + BTN_R)
@@ -58,7 +66,7 @@ class Tetris(Env):
         send_cmd(BTN_A)
         p_wait(0.5)
         send_cmd()
-        if DEBUG:
+        if self.DEBUG:
             print('Successfully paired controller')
         # Capture switch screen
         try:
@@ -72,6 +80,12 @@ class Tetris(Env):
             print('Finished environment training - saving')
             print('You can now set train_environment = False')
             self.env.save_weights(env_path)
+        if train_pregame:
+            print('Starting pregame optimization training')
+            self.fit_pregame()
+            print('Finished optimization training - saving')
+            print('You can now set train_pregame = False')
+            self.pregame.save_weights(pregame_path)
         self.train_reward = train_reward
         
     # A model that determines what state the game is in
@@ -110,6 +124,24 @@ class Tetris(Env):
             print('Unable to load reward network')
         return m
 
+    # A model for waiting until the GO screen
+    # (GO screen, pregame waiting screen)
+    def model_pregame(self):
+        frame = Input(shape=(*INPUT_SHAPE, 3))
+        x = Convolution2D(32, kernel_size=(8,8), strides=4, activation='relu')(frame)
+        x = Convolution2D(64, kernel_size=(4,4), strides=2, activation='relu')(x)
+        x = Convolution2D(64, kernel_size=(3,3), strides=1, activation='relu')(x)
+        x = Flatten()(x)
+        x = Dense(512, activation='relu')(x)
+        output = Dense(OUTPUT_PRE, activation='softmax')(x)
+        m = Model(inputs = frame, outputs = output)
+        m.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+        try:
+            m.load_weights(pregame_path)
+        except:
+            print('Unable to load pregame-optimization network')
+        return m
+
     # Called every 5 steps. Grabs a random memory and fits against my gameplay
     def fit_reward(self):
         batch = np.zeros((2, *INPUT_SHAPE, 3))
@@ -120,7 +152,7 @@ class Tetris(Env):
         self.reward.train_on_batch(x = batch, y = labels)
         accuracy = np.mean(self.reward.predict_on_batch(batch) - labels)
         # This value should hopefully approach .5 as the bot learns to play like me
-        if DEBUG:
+        if self.DEBUG:
             print('Current reward function accuracy:', accuracy)
     
     # Called at the beggining to fit network to training labels (pre-recorded)
@@ -148,8 +180,32 @@ class Tetris(Env):
                 if x == 10:
                     self.env.train_on_batch(x = batch, y = labels)
                     x = 0
-        
 
+    # Called at the beggining to fit network to training labels (pre-recorded)
+    def fit_pregame(self, epochs = 3):
+        for _ in range(epochs):
+            batch = np.zeros((10, *INPUT_SHAPE, 3))
+            labels = np.zeros((10, OUTPUT_PRE))
+            x = 0
+            paths = list(pregame_data.glob('*/*.png'))
+            shuffle(paths)
+            for path in paths:
+                path = str(path)
+                # Already resized
+                try:
+                    im = cv2.imread(path)
+                except:
+                    print('Unable to read in image')
+                    continue
+                batch[x] = im / 255.0
+                # Split by windows path divider
+                label = path.split('\\')[2]
+                found = np.where(CLASS_NAMES_PRE == label)
+                labels[x] = one_hot(found[0][0], CLASS_NAMES_PRE.size)
+                x += 1
+                if x == 10:
+                    self.pregame.train_on_batch(x = batch, y = labels)
+                    x = 0
 
     def step(self, action):
         # Send the chosen button press to switch
@@ -174,7 +230,7 @@ class Tetris(Env):
 
         # Evaluate on environment network
         env_out = np.argmax(self.env.predict_on_batch(preprocessed))
-        if DEBUG and self.clock % 10 == 0:
+        if self.DEBUG and self.clock % 10 == 0:
             print('Current environment evaluation:', CLASS_NAMES[env_out])
         done = False
         if env_out == 1:
@@ -190,22 +246,22 @@ class Tetris(Env):
             # Only get reward when placing a block
             if tetris_enum[action] == DPAD_U:
                 # Evaluate on reward network
-                # POSSIBLY MESSED UP HERE
                 reward = self.reward.predict_on_batch(preprocessed)[0][0]
-                #print(reward)
+                if self.train_reward and len(self.frames) > 0:
+                    self.fit_reward()
             else:
                 reward = 0.0
         # Add frame to training buffer for reward training
         self.frames.append(preprocessed)
         if len(self.frames) > 20:
             self.frames.pop(0)
-        if self.clock % 5 == 0 and self.train_reward:
-            self.fit_reward()
         self.clock += 1
         return self.current_frame, reward, done, {}
 
     def reset(self):
         self.clock = 0
+        if self.train_reward:
+            self.reward.save_weights(reward_path)
         # While we are not in-game
         while True:
             # Read in current state of switch screen
@@ -225,12 +281,22 @@ class Tetris(Env):
             preprocessed = preprocess(im_import)
             # Evaluate on environment
             env_out = np.argmax(self.env.predict_on_batch(preprocessed))
-            if DEBUG:
+            if self.DEBUG:
                 print('Environment:', CLASS_NAMES[env_out])
             if env_out == 0:
-                # We have successfully started a new game, return first found frame
-                # TO DO optimization: add another classifier to wait until GO screen
-                return self.current_frame
+                # Check if in pregame or GO screen
+                pregame_out = np.argmax(self.pregame.predict_on_batch(preprocessed))
+                if CLASS_NAMES_PRE[pregame_out] == 'pregame':
+                    # Still on pregame, wait
+                    if self.DEBUG:
+                        print('Waiting on pregame')
+                    p_wait(.05)
+                    continue
+                else:
+                    # We have successfully started a new game, return GO screen
+                    if self.DEBUG:
+                        print('GO')
+                    return self.current_frame
             if env_out == 1 or env_out == 2 or env_out == 3:
                 # End game screen, title screen, or error screen
                 send_cmd(BTN_A)

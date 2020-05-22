@@ -3,7 +3,6 @@ import numpy as np
 import random
 from tetris import Tetris
 from PIL import Image
-from tetris import Tetris
 
 # This file is for testing the capture card and for gathering data to train the environment
 
@@ -11,7 +10,8 @@ BUF_SIZE = 5 # How many images to capture on each input of keystroke
 IM_WIDTH = 160
 IM_HEIGHT = 90
 
-TRAIN_ENVIRONMENT = False
+TRAIN_ENVIRONMENT = True
+env = Tetris(debug=True)
 
 def show_webcam():
     cam = cv2.VideoCapture(0)
@@ -47,12 +47,12 @@ def show_webcam():
                 print("- Saving negative feedback")
                 for x in buf:
                     im = Image.fromarray(x)
-                    im.save('training/tetris_environment/negative/' + str(random.randrange(2147483647)) + '.png')
+                    im.save('training/tetris/negative/' + str(random.randrange(2147483647)) + '.png')
             elif val == 43:
                 print("  Saving neutral feedback")
                 for x in buf:
                     im = Image.fromarray(x)
-                    im.save('training/tetris_environment/neutral/' + str(random.randrange(2147483647)) + '.png')
+                    im.save('training/tetris/neutral/' + str(random.randrange(2147483647)) + '.png')
         it += 1
     cv2.destroyAllWindows()
 
