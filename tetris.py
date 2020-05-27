@@ -17,16 +17,17 @@ RENDER = True
 TRAINING_BUFFER = 20
 INPUT_SHAPE = (90,160)
 OUTPUT_ENV = 5
-OUTPUT_DISC = 1
+OUTPUT_REWARD = 3
 OUTPUT_PRE = 2
 ACTION_SPACE = len(tetris_enum)
 
 CLASS_NAMES = np.array(['neutral', 'end_screen', 'error', 'title_a', 'title_b'])
 CLASS_NAMES_PRE = np.array(['go', 'pregame'])
+CLASS_NAMES_REWARD = np.array(['neutral', 'double', 'tetris'])
 
 # Data paths
 env_data = pathlib.Path('training/tetris_environment')
-reward_data = pathlib.Path('training/tetris_discriminator')
+reward_data = pathlib.Path('training/tetris_line_clears')
 pregame_data = pathlib.Path('training/tetris_pregame_opt')
 
 # Model save paths
@@ -47,10 +48,9 @@ class Tetris(Env):
     # -1 so that the bot cannot choose BTN_NONE
     action_space = spaces.Discrete(ACTION_SPACE - 1)
 
-    def __init__(self, train_reward=True, train_env=False, train_pregame=False, capture_device=0, debug=False):
+    def __init__(self, train_reward=False, train_env=False, train_pregame=False, capture_device=0, debug=False):
         self.DEBUG = debug
         self.clock = 0
-        self.frames = []
         self.reward = self.model_reward()
         self.env = self.model_environment()
         self.pregame = self.model_pregame()
@@ -86,7 +86,12 @@ class Tetris(Env):
             print('Finished optimization training - saving')
             print('You can now set train_pregame = False')
             self.pregame.save_weights(pregame_path)
-        self.train_reward = train_reward
+        if train_reward:
+            print('Starting reward training')
+            self.fit_reward()
+            print('Finished reward training - saving')
+            print('You can now set train_reward = False')
+            self.reward.save_weights(reward_path)
         
     # A model that determines what state the game is in
     # (IN_GAME, RESULT_SCREEN, ERROR_SCREEN, TITLE_A, TITLE_B)
@@ -106,8 +111,8 @@ class Tetris(Env):
             print('Unable to load environment network')
         return m
 
-    # A model that determines how similar the gameplay is to my gameplay (the good parts)
-    # Assigns reward for gameplay (0 being unsimilar, 1 being similar)
+    # A model for determining reward
+    # (neutral [no reward], junk sent [.5 point], tetris [1 point])
     def model_reward(self):
         frame = Input(shape=(*INPUT_SHAPE, 3))
         x = Convolution2D(32, kernel_size=(8,8), strides=4, activation='relu')(frame)
@@ -115,7 +120,7 @@ class Tetris(Env):
         x = Convolution2D(64, kernel_size=(3,3), strides=1, activation='relu')(x)
         x = Flatten()(x)
         x = Dense(512, activation='relu')(x)
-        output = Dense(OUTPUT_DISC, activation='sigmoid')(x)
+        output = Dense(OUTPUT_REWARD, activation='softmax')(x)
         m = Model(inputs = frame, outputs = output)
         m.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
         try:
@@ -142,18 +147,37 @@ class Tetris(Env):
             print('Unable to load pregame-optimization network')
         return m
 
-    # Called every 5 steps. Grabs a random memory and fits against my gameplay
-    def fit_reward(self):
-        batch = np.zeros((2, *INPUT_SHAPE, 3))
-        batch[0] = choice(self.frames)
-        good_path = str(choice(list(reward_data.glob('clean_data_playing/*/*.png'))))
-        batch[1] = preprocess(cv2.imread(good_path))
-        labels = np.array([0, 1])
-        self.reward.train_on_batch(x = batch, y = labels)
-        accuracy = np.mean(self.reward.predict_on_batch(batch) - labels)
-        # This value should hopefully approach .5 as the bot learns to play like me
-        if self.DEBUG:
-            print('Current reward function accuracy:', accuracy)
+    # A model for determining reward
+    # (neutral [no reward], junk sent [.5 point], tetris [1 point])
+    def fit_reward(self, epochs = 20):
+        for i in range(epochs):
+            batch = np.zeros((10, *INPUT_SHAPE, 3))
+            labels = np.zeros((10, OUTPUT_REWARD))
+            x = 0
+            paths = list(reward_data.glob('*/*.png'))
+            shuffle(paths)
+            accuracy = 0
+            total = 0
+            for path in paths:
+                path = str(path)
+                # Already resized
+                try:
+                    im = cv2.imread(path)
+                except:
+                    print('Unable to read in image')
+                    continue
+                batch[x] = im / 255.0
+                # Split by windows path divider
+                label = path.split('\\')[2]
+                found = np.where(CLASS_NAMES_REWARD == label)
+                labels[x] = one_hot(found[0][0], CLASS_NAMES_REWARD.size)
+                x += 1
+                if x == 10:
+                    accuracy += self.reward.train_on_batch(x = batch, y = labels)[1]
+                    total += 1
+                    x = 0
+            if i == epochs - 1:
+                print('Final accuracy reward:', accuracy/total)
     
     # Called at the beggining to fit network to training labels (pre-recorded)
     def fit_environment(self, epochs = 3):
@@ -242,26 +266,25 @@ class Tetris(Env):
             reward = 0.0
             done = True
         else:
-            # in-game
-            # Only get reward when placing a block
-            if tetris_enum[action] == DPAD_U:
-                # Evaluate on reward network
-                reward = self.reward.predict_on_batch(preprocessed)[0][0]
-                if self.train_reward and len(self.frames) > 0:
-                    self.fit_reward()
-            else:
+            reward_func = np.argmax(self.reward.predict_on_batch(preprocessed))
+            if reward_func == 0: # neutral
                 reward = 0.0
-        # Add frame to training buffer for reward training
-        self.frames.append(preprocessed)
-        if len(self.frames) > 20:
-            self.frames.pop(0)
+            elif reward_func == 1: # line clear
+                # Drop this value once agent learns how to do normal line clears
+                reward = 1.0
+            else:
+                reward = 1.0 # tetris
+            if self.DEBUG:
+                print('Current reward:', reward)
         self.clock += 1
-        return self.current_frame, reward, done, {}
+        # Crop to get only area of tetris
+        cropped = self.current_frame[:, 480:-480]
+        #cv2.imshow('cropped', cropped)
+        #cv2.waitKey(1)
+        return cropped, reward, done, {}
 
     def reset(self):
         self.clock = 0
-        if self.train_reward:
-            self.reward.save_weights(reward_path)
         # While we are not in-game
         while True:
             # Read in current state of switch screen
@@ -296,7 +319,8 @@ class Tetris(Env):
                     # We have successfully started a new game, return GO screen
                     if self.DEBUG:
                         print('GO')
-                    return self.current_frame
+                    cropped = self.current_frame[:, 480:-480]
+                    return cropped
             if env_out == 1 or env_out == 2 or env_out == 3:
                 # End game screen, title screen, or error screen
                 send_cmd(BTN_A)

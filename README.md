@@ -10,7 +10,6 @@ Deep Q networks have set some impressive milestones for playing games in the ata
 
 ### To do list
 * Train on in-game data (in-progress)
-* Create more states for environment (single line vs double vs triple vs tetris)
 
 ### Dependencies
 
