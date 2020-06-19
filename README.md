@@ -4,12 +4,19 @@ Games to learn:
 * Tetris 99 (current)
 * Mario Maker 2
 
+### What is working?
+
+Currently the OpenAI gym environment for playing Tetris 99 works properly. Reward is given on line clears and the environment can properly restart when a game is lost. An implementation of Rainbow DQN is being used for training but will be most likely replaced soon with a different method.
+
 ### How does it work?
 
 Deep Q networks have set some impressive milestones for playing games in the atari domain. [Check here](https://towardsdatascience.com/advanced-dqns-playing-pac-man-with-deep-reinforcement-learning-3ffbd99e0814) to learn more about how they work and the optimizations necessary to get good performance.
 
 ### To do list
 * Train on in-game data (in-progress)
+* Swap to a model based method
+* Update to tensorflow 2
+* More work on reward function
 
 ### Dependencies
 
