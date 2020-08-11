@@ -1,9 +1,17 @@
 from tetris import Tetris
 import numpy as np
+import argparse
 
 # This file is used for testing the environment and for training the internal networks
 
-env = Tetris(train_reward = False, train_env = False, train_pregame = False, debug=True)
+parser = argparse.ArgumentParser()
+parser.add_argument('--reward', type=bool, default=False)
+parser.add_argument('--env', type=bool, default=False)
+parser.add_argument('--pregame', type=bool, default=False)
+parser.add_argument('--epochs', type=int, default=10)
+args = parser.parse_args()
+
+env = Tetris(train_reward = args.reward, train_env = args.env, train_pregame = args.pregame, debug = True, epochs=args.epochs)
 
 obs = env.reset()
 

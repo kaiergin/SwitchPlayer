@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
 import random
-from tetris import Tetris
 from PIL import Image
+from random import choice
 
 # This file is for testing the capture card and for gathering data to train the environment
 
@@ -10,8 +10,8 @@ BUF_SIZE = 5 # How many images to capture on each input of keystroke
 IM_WIDTH = 160
 IM_HEIGHT = 90
 
-TRAIN_ENVIRONMENT = True
-env = Tetris(debug=True)
+TRAIN_ENVIRONMENT = False
+
 
 def show_webcam():
     cam = cv2.VideoCapture(0)

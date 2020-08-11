@@ -1,0 +1,8 @@
+game_list.p
+steps.p
+temp.png
+__pycache__
+game_storage/*
+model_saves/*
+tetris/*
+training/*

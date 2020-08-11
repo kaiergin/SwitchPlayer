@@ -10,6 +10,7 @@ Deep Q networks have set some impressive milestones for playing games in the ata
 
 ### To do list
 * Train on in-game data (in-progress)
+* Swap algorithm from Noisy-N-step DQN to MuZero, swap from tensorflow 1.14 to 2.0.0
 
 ### Dependencies
 
