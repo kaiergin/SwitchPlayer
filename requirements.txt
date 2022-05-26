@@ -1,6 +1,6 @@
 opencv-python
 keras==2.1.5
-tensorflow==1.14
+tensorflow==2.7.2
 pathlib
 numpy
 matplotlib
