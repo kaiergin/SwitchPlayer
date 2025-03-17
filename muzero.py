@@ -157,23 +157,14 @@ class PredictionNetwork(nn.Module):
         value = torch.tanh(self.value_fc2(v))
         return policy_logits, value
 
-def soft_update(target_net, source_net, tau):
-    """
-    Perform a soft update of the target network parameters.
-    target_net: the network to be updated (e.g. prediction_old)
-    source_net: the live network (e.g. prediction)
-    tau: mixing coefficient (0 < tau <= 1)
-    """
-    for target_param, param in zip(target_net.parameters(), source_net.parameters()):
-        target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-
 def prepare_batch(replay_buffer, batch_size, unroll_steps, action_space):
     """
     Prepares a training batch for multi-step unrolling.
     
     Args:
       replay_buffer: list of trajectories. Each trajectory is a list of transitions.
-                     Each transition is a MCTSNode
+                     Each transition is a tuple: 
+                     (obs, action, reward, next_obs, target_policy, target_value)
       batch_size: number of samples to include in the batch.
       unroll_steps: number of unroll steps to sample.
       action_space: number of possible actions.
@@ -200,7 +191,7 @@ def prepare_batch(replay_buffer, batch_size, unroll_steps, action_space):
         start_index = np.random.randint(0, traj_length)
         
         # Get initial observation.
-        init_obs = traj[start_index].obs
+        init_obs = traj[start_index]["obs"]
         
         # Prepare lists for unroll data.
         actions = []
@@ -213,12 +204,12 @@ def prepare_batch(replay_buffer, batch_size, unroll_steps, action_space):
             if start_index + step < traj_length:
                 transition = traj[start_index + step]
                 # Append the target policy and value for each step.
-                target_policy.append(transition.target_policy)
-                target_value.append(transition.target_value)
+                target_policy.append(transition["target_policy"])
+                target_value.append(transition["target_value"])
                 if step < unroll_steps:
                     # For actions and rewards, only collect for unroll_steps.
-                    actions.append(transition.action)
-                    rewards.append(transition.reward)
+                    actions.append(transition["action"])
+                    rewards.append(transition["reward"])
             else:
                 # If the trajectory doesn't have enough transitions, pad with zeros.
                 if step < unroll_steps:
@@ -272,9 +263,8 @@ def hash_latent(latent, precision=3):
 # MCTS Node Definition
 # -----------------------------
 class MCTSNode:
-    def __init__(self, latent, prior, reward=0.0, policy = None, expanded_value = None, obs = None, action = None, target_value = None, target_policy = None):
-        if obs == None:
-            self.latent = latent
+    def __init__(self, latent, prior, reward=0.0, policy = None, expanded_value = None):
+        self.latent = latent            # torch.Tensor (latent state)
         self.prior = prior              # float value
         self.reward = reward            # immediate reward
         self.children = {}              # dict: action -> child node
@@ -285,10 +275,6 @@ class MCTSNode:
         self.latent_hash = hash_latent(latent)
         self.lock = threading.Lock()
         self.expanded_value = expanded_value
-        self.obs = obs
-        self.action = action
-        self.target_value = target_value
-        self.target_policy = target_policy
 
     def q_value(self):
         return self.value_sum / self.visit_count if self.visit_count > 0 else 0.0
@@ -352,10 +338,10 @@ class MCTSHelper:
                     best_score = score
                     best_child = child
                     best_action = a
+            path.append(action)
             node = best_child
             cumulative_discount *= discount
-            path.append(a)
-        return (path, cumulative_discount)
+        return (start, path, cumulative_discount)
 
 class MuZeroAgent:
     def __init__(self, action_space, device):
@@ -377,26 +363,20 @@ class MuZeroAgent:
 
         self.mcts_hash_table = {}
 
-    def inference_batch(self, batch_obs, old=False):
-        # Stack into a single array: shape (B, H, W, C)
-        batch_array = np.stack(batch_obs, axis=0)
-        # Convert to tensor and normalize; expected dtype is float32.
-        tensor_obs = torch.tensor(batch_array, dtype=torch.float32, device=self.device) / 255.0
-        if old:
-            latent_batch = self.representation_old(tensor_obs)
-            policy_logits_batch, value_batch = self.prediction_old(latent_batch)
-        else:
-            latent_batch = self.representation(tensor_obs)
-            policy_logits_batch, value_batch = self.prediction(latent_batch)
-        return latent_batch, policy_logits_batch, value_batch
-
     def initial_inference(self, observation):
-        obs_resized = np.transpose(cv2.resize(observation, (95, 95)), (2, 0, 1))
-        obs_tensor = torch.tensor(obs_resized, dtype=torch.float32, device=self.device) / 255.0
-        obs_tensor = obs_tensor.unsqueeze(0)
-        latent = self.representation_old(obs_tensor)
+        obs = cv2.resize(observation, (95, 95))
+        obs = np.transpose(obs, (2, 0, 1))
+        converted_obs = torch.tensor(obs, dtype=torch.float32, device=self.device) / 255.0
+        converted_obs = converted_obs.unsqueeze(0)
+        latent = self.representation_old(converted_obs)
         policy_logits, value = self.prediction_old(latent)
-        return latent, policy_logits, value, obs_resized
+        return latent, policy_logits, value, obs
+
+    def recurrent_inference(self, latent, action):
+        a_tensor = torch.tensor([action], dtype=torch.long, device=self.device)
+        latent, reward = self.dynamics(latent, a_tensor)
+        policy_logits, value = self.prediction_old(latent)
+        return latent, reward, policy_logits, value
 
     def update_representation(self):
         self.mcts_hash_table = {}
@@ -404,6 +384,16 @@ class MuZeroAgent:
 
     def update_prediction(self):
         self.prediction_old.load_state_dict(self.prediction.state_dict())
+
+    def soft_update_prediction(self, tau):
+        """
+        Perform a soft update of the target network parameters.
+        target_net: the network to be updated (e.g. prediction_old)
+        source_net: the live network (e.g. prediction)
+        tau: mixing coefficient (0 < tau <= 1)
+        """
+        for target_param, param in zip(self.prediction_old.parameters(), self.prediction.parameters()):
+            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
 
     # -----------------------------
     # Training Step: remote method to update networks
@@ -484,71 +474,55 @@ class MuZeroAgent:
         
         Args:
         nodes: list of MCTSNode objects to expand.
-        batch_size: number of nodes to process in a single batch.
-                    (The effective batch size for the dynamics network will be batch_size * self.action_space.)
+        batch_size: number of nodes to process in a single batch. (actual batch size is batch_size*self.action_space)
         """
         if not nodes:
-            print("no node!")
             return
 
         A = self.action_space  # number of actions
         N = len(nodes)
         
-        # Process nodes in chunks.
+        # Process nodes in chunks of batch_size.
         for i in range(0, N, batch_size):
             chunk = nodes[i:i + batch_size]
             num_chunk = len(chunk)
             
-            # Assume each node stores its observation in node.obs.
-            # Create a list of observations for this chunk.
-            obs_list = [node.obs for node in chunk]
+            # Gather latent states from each node in the chunk.
+            latent_list = [node.latent for node in chunk]  # each shape: (1, C, H, W)
+            # Stack into a tensor of shape (num_chunk, C, H, W)
+            stacked_latents = torch.cat(latent_list, dim=0)
+            # For each node, we want to evaluate dynamics for each action.
+            # Repeat each latent A times: resulting shape (num_chunk * A, C, H, W)
+            latent_batch = stacked_latents.repeat_interleave(A, dim=0)
+            latent_batch = latent_batch.to(self.device)
             
-            # Perform batched initial inference for the chunk.
-            # inference_batch should return:
-            #  - latent_batch: shape (num_chunk, C, H, W)
-            #  - initial_policy_logits: shape (num_chunk, action_space) (optional)
-            #  - initial_value_batch: shape (num_chunk, 1) (optional)
-            latent_batch, initial_policy_logits, initial_value_batch = self.inference_batch(obs_list)
-            latent_batch = latent_batch.to(self.device)  # shape: (num_chunk, C, H, W)
-            
-            # For each node in the chunk, we want to evaluate dynamics for each action.
-            # Repeat each latent state A times.
-            # Resulting shape: (num_chunk * A, C, H, W)
-            latent_batch_expanded = latent_batch.repeat_interleave(A, dim=0)
-            
-            # Create a tensor of action indices for each node in the chunk.
-            action_tensor = torch.arange(A, dtype=torch.long, device=self.device)  \
-                            .unsqueeze(0).repeat(num_chunk, 1)  \
-                            .view(-1)  # shape: (num_chunk * A,)
-            
+            # Create a tensor of action indices. For each node in the chunk, we need actions 0,...,A-1.
+            action_tensor = torch.arange(A, dtype=torch.long, device=self.device).unsqueeze(0).repeat(num_chunk, 1)
+            action_tensor = action_tensor.view(-1)  # shape: (num_chunk * A,)
+        
             with torch.no_grad():
-                # Run the dynamics network in batch.
-                next_latents, rewards = self.dynamics(latent_batch_expanded, action_tensor)
-                # Run the prediction network on the next_latents.
-                policy_logits, estimated_values = self.prediction(next_latents)
-                # Compute probabilities from the policy logits.
-                next_policy = F.softmax(policy_logits, dim=1).cpu().detach().numpy()
-                # Move estimated_values to CPU; assume shape (num_chunk * A, 1)
-                estimated_values = estimated_values.cpu().detach()
+                # next_latents: (num_chunk*A, C, H, W)
+                # rewards: (num_chunk*A, 1) or (num_chunk*A,) depending on implementation
+                next_latents, rewards = self.dynamics(latent_batch, action_tensor)
+                batch_policy_logits, estimated_values = self.prediction(next_latents)
+                next_policy = F.softmax(batch_policy_logits, dim=1).cpu().numpy()
             
             # Update each node in the chunk.
             for j, node in enumerate(chunk):
                 start = j * A
                 end = start + A
-                # Use the parent's policy if already set, or fallback to the initial inference's policy.
-                if node.policy is not None:
-                    parent_policy = node.policy
-                else:
-                    parent_policy = F.softmax(initial_policy_logits[j:j+1], dim=1).cpu().detach().numpy()[0]
+                # Assume node.policy is already a numpy array of shape (A,)
+                policy = node.policy
                 node.children = {}
                 for a in range(A):
                     idx = start + a
+                    # Create the child node with latent state moved to CPU.
                     child = MCTSNode(
-                        latent = next_latents[idx].cpu(), 
-                        prior = parent_policy[a],
-                        reward = rewards[idx].item() if rewards[idx].ndim == 0 else rewards[idx].squeeze().item(),
-                        policy = next_policy[idx],  # updated target policy for the child
-                        expanded_value = estimated_values[idx].item()  # use the prediction network's output
+                        latent=next_latents[idx].unsqueeze(0).cpu(), 
+                        prior=policy[a], 
+                        reward=rewards[idx].item() if rewards[idx].ndim == 0 else rewards[idx].squeeze().item(),
+                        policy=next_policy[idx],
+                        expanded_value=estimated_values[idx].item()
                     )
                     node.children[a] = child
                 node.is_expanded = True
@@ -578,21 +552,24 @@ class MuZeroAgent:
 
         # Batch expansion: collect unique leaves that have not been expanded.
         unique_leaves = set()
-        for path, cum_discount in selection_results:
+        unique_paths = []
+        for start, path, cum_discount in selection_results:
             leaf = node
+            new_path = [node]
             for a in path:
                 leaf = leaf.children[a]
+                new_path.append(leaf)
             if not leaf.is_expanded:
                 unique_leaves.add(leaf)
-
-        self.batch_expand_nodes(list(unique_leaves))
+                unique_paths.append(new_path)
+        unique_leaves = list(unique_leaves)
+        self.batch_expand_nodes(unique_leaves)
 
         # Backup: For each simulation, backup the leaf value along its path.
-        for path, leaf, cum_discount in selection_results:
+        for path, leaf in zip(unique_paths, unique_leaves):
             if hasattr(leaf, 'expanded_value'):
                 leaf_value = leaf.expanded_value
             else:
-                print("Expanded value does not exist!")
                 with torch.no_grad():
                     _, value = self.prediction(leaf.latent)
                 leaf_value = value.item()
@@ -613,7 +590,7 @@ class MuZeroAgent:
         prev_action_taken = None
         path = []
         for (obs_sample, latent, action_taken, policy, reward) in game_trajectory:
-            new_node = MCTSNode(latent=latent.cpu(), prior=1.0, reward=reward, obs=obs_sample, action=action_taken)
+            new_node = MCTSNode(latent=latent.cpu(), prior=1.0, reward=reward)
             # If new node is not already in hash table, add it
             if new_node.latent_hash not in self.mcts_hash_table:
                 self.mcts_hash_table[new_node.latent_hash] = new_node
@@ -621,39 +598,68 @@ class MuZeroAgent:
                 new_node = self.mcts_hash_table[new_node.latent_hash]
             new_node.policy = policy
             if prev_node != None:
-                new_node.prior = prev_node.policy[prev_node.action]
-                prev_node.children[prev_node.action] = new_node
+                new_node.prior = prev_node.policy[prev_action_taken]
+                prev_node.children[prev_action_taken] = new_node
             else:
                 root_node = new_node
             path.append(new_node)
             prev_node = new_node
+            prev_action_taken = action_taken
         
         self.batch_expand_nodes(path)
 
         self.backup_simulation(path, episode_reward)
         return path
 
+    def reanalyze_trajectory(self, trajectory, batch_size=128, mcts_simulations=128, c_puct=1.0, discount=0.997):
+        """
+        Reanalyzes a single trajectory using the current agent parameters.
+        
+        Args:
+            trajectory: A list of transitions (each a dict with keys "obs", "action", "reward", "target_policy", "target_value").
+            mcts_simulations: Number of simulations to run during MCTS.
+            c_puct: The exploration constant for MCTS.
+            discount: Discount factor for value estimation.
+        
+        Returns:
+            A new trajectory with updated target_policy and target_value for each transition.
+        """
+
+        trajectory_obs = [transition["obs"] for transition in trajectory]
+        num_transitions = len(trajectory)
+        for start in range(0, num_transitions, batch_size):
+            end = min(start + batch_size, num_transitions)
+            batch_obs = torch.as_tensor(np.array(trajectory_obs[start:end]), dtype=torch.float32, device=self.device)
+            latent_batch = self.representation(batch_obs)
+            for i in range(start, end):
+                trajectory[i]["latent"] = latent_batch[i - start]
+
+        path = self.create_tree_from_game(game_trajectory)
+        helper = MCTSHelper.remote(path)
+        for transition, node in zip(trajectory, path):
+            improved_policy, value_estimate = self.run_full_mcts(node,
+                                                                    helper,
+                                                                    num_simulations=mcts_simulations, 
+                                                                    c_puct=c_puct, 
+                                                                    discount=discount)
+            transition["target_policy"] = improved_policy
+            transition["target_value"] = value_estimate
+
     # If you want to reanalyze the entire replay buffer (which is assumed to be a deque or list of trajectories):
     def reanalyze_replay_buffer(self, replay_buffer, mcts_simulations=128, c_puct=1.0, discount=0.997):
+        """
+        Reanalyzes each trajectory in the replay buffer using the current agent.
+        
+        Args:
+            replay_buffer: A list (or deque) of trajectories.
+            mcts_simulations, c_puct, discount: Hyperparameters for MCTS.
+        
+        Returns:
+            A new replay buffer with updated trajectories.
+        """
         print("Reanalyzing replay buffer")
-        prev_node = None
         for trajectory in replay_buffer:
-            for node in trajectory:
-                node.is_expanded = False
-                node.children = {}
-                if prev_node != None:
-                    prev_node.children[prev_node.action] = node
-        for trajectory in replay_buffer:
-            helper = MCTSHelper.remote(trajectory)
-            for node in trajectory:
-                print(type(node.obs))
-                improved_policy, value_estimate = self.run_full_mcts(node,
-                                                                        helper,
-                                                                        num_simulations=mcts_simulations, 
-                                                                        c_puct=c_puct, 
-                                                                        discount=discount)
-                transition["target_policy"] = improved_policy
-                transition["target_value"] = value_estimate
+            self.reanalyze_trajectory(trajectory, mcts_simulations, c_puct, discount)
 
 
 # -----------------------------
@@ -667,7 +673,7 @@ if __name__ == '__main__':
     agent = MuZeroAgent(action_space=action_space, device=device)
     
     num_episodes = 6000
-    num_episodes_until_mcts = 50
+    num_episodes_until_mcts = 5
     replay_buffer = []
     
     for episode in range(num_episodes):
@@ -699,33 +705,45 @@ if __name__ == '__main__':
         # Store one-step transition (for a basic training sample)
         if episode < num_episodes_until_mcts:
             for (obs_sample, latent, action_taken, policy, reward), node in zip(game_trajectory, path):
-                node.target_policy = np.ones(action_space) / action_space
-                node.target_value = node.q_value()
-                trajectory.append(node)
+                transition = {
+                    "obs": obs_sample,
+                    "action": action_taken,
+                    "reward": reward,
+                    "latent": latent,
+                    "target_policy": np.ones(action_space) / action_space,
+                    "target_value": node.q_value()
+                }
+                trajectory.append(transition)
             replay_buffer.append(trajectory)
 
         if episode >= num_episodes_until_mcts:
             print("starting mcts tree search")
             helper = MCTSHelper.remote(path)
             for (obs_sample, latent, action_taken, policy, reward), node in zip(game_trajectory, path):
-                improved_policy, value_estimate = agent.run_full_mcts(node, helper, num_processes=NUM_PROCESSES, c_puct=1.0, discount=0.997)
-                node.improved_policy = improved_policy
-                node.value_estimate = value_estimate
-                trajectory.append(node)
+                improved_policy, value_estimate = agent.run_full_mcts(node, helper, num_processes=NUM_PROCESSES, num_simulations=16, c_puct=1.0, discount=0.997)
+                # Here we create an additional training sample using the improved target.
+                mcts_sample = {
+                    "obs": obs_sample,
+                    "action": action_taken,
+                    "reward": node.reward,  # For illustration; in practice use multi-step return.
+                    "latent": latent,
+                    "target_policy": improved_policy,
+                    "target_value": value_estimate
+                }
+                trajectory.append(mcts_sample)
             replay_buffer.append(trajectory)
         
-        while sum([len(traj) for traj in replay_buffer]) > 100000:
+        while sum([len(traj) for traj in replay_buffer]) > 10000:
             replay_buffer.pop(0)
         print(f"Replay buffer size: {sum([len(traj) for traj in replay_buffer])}")
         print(f"Size of tree {asizeof.asizeof(agent.mcts_hash_table)}")
         
-        for _ in range(10):
+        for _ in range(max(4 * episode, 50)):
             batch = prepare_batch(replay_buffer, 128, 5, action_space)
             loss = agent.train_step(batch)
             print(f"Training loss: {loss}")
         
-        if episode % 10 == 0 and episode > 1:
-            agent.update_prediction()
-        if episode % 50 == 0:
+        agent.soft_update_prediction(0.01)
+        if episode % 4 == 0 and episode > 1:
             agent.update_representation()
-            agent.reanalyze_replay_buffer(replay_buffer)
+            agent.reanalyze_replay_buffer(replay_buffer, mcts_simulations=16)
