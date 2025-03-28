@@ -6,20 +6,24 @@ import gym
 import numpy as np
 import cv2
 import random
-from collections import deque
 import threading
 import concurrent.futures
 import ray
-import hashlib
 import copy
 import psutil
 from pympler import asizeof
+import pickle
+import queue
+from collections import deque
+import scalar_categorical
 
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
 
 # Set this to number of threads your processor has
 NUM_PROCESSES = 16
+MAX_DEPTH = 5
+IMAGE_RESHAPE = (84,84)
 
 def print_memory_diagnostics():
     process = psutil.Process()
@@ -88,23 +92,81 @@ class RepresentationNetwork(nn.Module):
         x = self.block4(x)
         return x  # latent state of shape (batch, latent_channels, H', W')
 
-# -----------------------------
-# Dynamics Network
-# -----------------------------
+# Helper functions to create the support vector and convert logits to a scalar.
+def create_support(support_size, num_bins, device):
+    """
+    Creates a support vector from -support_size to support_size with num_bins discrete values.
+    """
+    return torch.linspace(0, support_size, num_bins, device=device)
+
+def scalar_from_logits(logits, support):
+    """
+    Converts categorical logits into a scalar by applying softmax, then computing the expected value.
+    """
+    probs = F.softmax(logits, dim=1)
+    expected_value = torch.sum(probs * support.unsqueeze(0).expand_as(probs), dim=1, keepdim=True)
+    return expected_value
+
+# Assume BasicBlock is defined as in your original code.
+
+# Revised PredictionNetwork with categorical value representation and policy clipping.
+class PredictionNetwork(nn.Module):
+    def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21):
+        super(PredictionNetwork, self).__init__()
+        self.block = BasicBlock(latent_channels, latent_channels)
+        self.relu = nn.ReLU(inplace=False)
+        
+        # Policy head:
+        self.policy_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
+        self.policy_fc = nn.Linear(32 * 8 * 8, action_space)
+        
+        # Value head now outputs categorical logits instead of a single scalar.
+        self.value_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
+        self.value_fc = nn.Linear(32 * 8 * 8, num_bins)
+        
+        self.support_size = support_size
+        self.num_bins = num_bins
+        
+    def forward(self, latent):
+        x = self.block(latent)
+        x = self.relu(x)
+        
+        # Policy branch:
+        p = self.relu(self.policy_conv(x))
+        p = F.adaptive_avg_pool2d(p, (8, 8))
+        p = p.contiguous().view(p.size(0), -1)
+        policy_logits = self.policy_fc(p)
+        # Convert logits to probabilities and clip for numerical stability.
+        policy_probs = F.softmax(policy_logits, dim=1)
+        policy_probs = torch.clamp(policy_probs, min=1e-6, max=1.0)
+        
+        # Value branch:
+        v = self.relu(self.value_conv(x))
+        v = F.adaptive_avg_pool2d(v, (8, 8))
+        v = v.contiguous().view(v.size(0), -1)
+        value_logits = self.value_fc(v)  # shape: (batch_size, num_bins)
+        support = create_support(self.support_size, self.num_bins, latent.device)
+        value = scalar_from_logits(value_logits, support)
+        
+        return policy_probs, value, value_logits
+
+# Revised DynamicsNetwork with categorical reward representation.
 class DynamicsNetwork(nn.Module):
-    def __init__(self, latent_channels=128, action_space=9):
+    def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21):
         super(DynamicsNetwork, self).__init__()
         self.action_space = action_space
+        self.support_size = support_size
+        self.num_bins = num_bins
         self.action_embedding = nn.Embedding(action_space, latent_channels)
         self.conv1 = nn.Conv2d(latent_channels * 2, latent_channels,
                                kernel_size=3, stride=1, padding=1)
         self.relu = nn.ReLU(inplace=False)
         self.block1 = BasicBlock(latent_channels, latent_channels)
         self.block2 = BasicBlock(latent_channels, latent_channels)
-        self.reward_conv = nn.Conv2d(latent_channels, 1,
-                                     kernel_size=3, stride=1, padding=1)
-        # Assuming latent spatial size is 8x8:
-        self.reward_fc = nn.Linear(8 * 8, 1)
+        
+        # Reward head now outputs categorical logits.
+        self.reward_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
+        self.reward_fc = nn.Linear(32 * 8 * 8, num_bins)
         
     def forward(self, latent, action):
         batch_size = latent.size(0)
@@ -116,46 +178,25 @@ class DynamicsNetwork(nn.Module):
         x = self.block1(x)
         x = self.block2(x)
         next_latent = x
+        
+        # Reward branch:
         r = self.relu(self.reward_conv(x))
-        # Force reward to a fixed spatial size (e.g. 8x8)
         r = F.adaptive_avg_pool2d(r, (8, 8))
         r = r.contiguous().view(batch_size, -1)
-        reward = torch.tanh(self.reward_fc(r))
-        return next_latent, reward
+        reward_logits = self.reward_fc(r)
+        support = create_support(self.support_size, self.num_bins, latent.device)
+        reward = scalar_from_logits(reward_logits, support)
+        
+        return next_latent, reward, reward_logits
 
-# -----------------------------
-# Prediction Network
-# -----------------------------
-class PredictionNetwork(nn.Module):
-    def __init__(self, latent_channels=128, action_space=9):
-        super(PredictionNetwork, self).__init__()
-        self.block = BasicBlock(latent_channels, latent_channels)
-        self.relu = nn.ReLU(inplace=False)
-        # Policy head:
-        self.policy_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
-        self.policy_fc = nn.Linear(32 * 8 * 8, action_space)
-        # Value head:
-        self.value_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
-        self.value_fc1 = nn.Linear(32 * 8 * 8, 64)
-        self.value_fc2 = nn.Linear(64, 1)
-        
-    def forward(self, latent):
-        x = self.block(latent)
-        x = self.relu(x)
-        # Policy branch:
-        p = self.relu(self.policy_conv(x))
-        # Force spatial size to 8x8:
-        p = F.adaptive_avg_pool2d(p, (8, 8))
-        p = p.contiguous().view(p.size(0), -1)
-        policy_logits = self.policy_fc(p)
-        
-        # Value branch:
-        v = self.relu(self.value_conv(x))
-        v = F.adaptive_avg_pool2d(v, (8, 8))
-        v = v.contiguous().view(v.size(0), -1)
-        v = self.relu(self.value_fc1(v))
-        value = torch.tanh(self.value_fc2(v))
-        return policy_logits, value
+def print_tree(node, depth=0):
+    if depth > 6:
+        return
+    indent = "    " * depth  # 4 spaces per depth level.
+    print(f"{indent}Node(prior={node.prior}, reward={node.reward}, visits={node.visit_count}, value={node.expanded_value}, depth={depth})")
+    for action, child in node.children.items():
+        print(f"{indent}  Action {action}:")
+        print_tree(child, depth + 1)
 
 def prepare_batch(replay_buffer, batch_size, unroll_steps, action_space):
     """
@@ -173,7 +214,7 @@ def prepare_batch(replay_buffer, batch_size, unroll_steps, action_space):
       A dictionary with keys:
          "obs": (B, H, W, C) initial observations,
          "actions": (B, unroll_steps) sequence of actions,
-         "rewards": (B, unroll_steps) sequence of rewards,
+         "rewards": (B, unroll_steps+1) sequence of rewards,
          "target_policy": (B, unroll_steps+1, action_space) target policies,
          "target_value": (B, unroll_steps+1) target values.
     """
@@ -202,21 +243,22 @@ def prepare_batch(replay_buffer, batch_size, unroll_steps, action_space):
         # We need unroll_steps+1 target entries (for step 0 and each unroll step).
         for step in range(unroll_steps + 1):
             if start_index + step < traj_length:
-                transition = traj[start_index + step]
+                node = traj[start_index + step]
                 # Append the target policy and value for each step.
-                target_policy.append(transition["target_policy"])
-                target_value.append(transition["target_value"])
+                target_policy.append(node["target_policy"])
+                target_value.append(node["target_value"])
+                # reward for entering node (reward[0] will not be used)
+                rewards.append(node["reward"])
                 if step < unroll_steps:
-                    # For actions and rewards, only collect for unroll_steps.
-                    actions.append(transition["action"])
-                    rewards.append(transition["reward"])
+                    # For actions, only collect for unroll_steps.
+                    actions.append(node["action"])
             else:
                 # If the trajectory doesn't have enough transitions, pad with zeros.
+                target_policy.append(np.ones(action_space) / action_space)
+                target_value.append(0.0)
+                rewards.append(0.0)
                 if step < unroll_steps:
                     actions.append(0)         # or a default action
-                    rewards.append(0.0)
-                target_policy.append(np.zeros(action_space))
-                target_value.append(0.0)
         
         batch_obs.append(init_obs)
         batch_actions.append(actions)
@@ -239,152 +281,188 @@ def prepare_batch(replay_buffer, batch_size, unroll_steps, action_space):
         "target_value": batch_target_value
     }
 
-def hash_latent(latent, precision=3):
+def add_dirichlet_noise(prior, epsilon=0.25, alpha=0.03):
     """
-    Compute a hash string for a latent tensor.
+    Adds Dirichlet noise to a given prior policy.
     
-    Parameters:
-      latent (torch.Tensor): The latent state (expected to be on GPU or CPU).
-      precision (int): Number of decimals to round to, to reduce sensitivity to small changes.
-      
+    Args:
+      prior (np.array): Array of shape (num_actions,) representing the original prior probabilities.
+      epsilon (float): Fraction of noise to mix in.
+      alpha (float): Concentration parameter for the Dirichlet distribution.
+    
     Returns:
-      A hexadecimal MD5 hash string.
+      np.array: The noisy prior policy.
     """
-    # Ensure the tensor is on CPU and detached from the graph.
-    arr = latent.cpu().detach().numpy()
-    # Round the array to reduce numerical precision issues.
-    arr_rounded = np.round(arr, decimals=precision)
-    # Convert the array to bytes.
-    arr_bytes = arr_rounded.tobytes()
-    # Compute and return an MD5 hash.
-    return hashlib.md5(arr_bytes).hexdigest()
+    noise = np.random.dirichlet([alpha] * len(prior))
+    noisy_prior = (1 - epsilon) * prior + epsilon * noise
+    return noisy_prior
 
 # -----------------------------
 # MCTS Node Definition
 # -----------------------------
 class MCTSNode:
-    def __init__(self, latent, prior, reward=0.0, policy = None, expanded_value = None):
+    def __init__(self, latent, prior, reward=0.0, policy = None, expanded_value = None, is_gameplay = False):
         self.latent = latent            # torch.Tensor (latent state)
         self.prior = prior              # float value
         self.reward = reward            # immediate reward
         self.children = {}              # dict: action -> child node
         self.visit_count = 0
         self.value_sum = 0.0
+        
         self.is_expanded = False
         self.policy = policy              # cached policy (numpy array)
-        self.latent_hash = hash_latent(latent)
         self.lock = threading.Lock()
         self.expanded_value = expanded_value
         self.virtual_loss = 0.0
+        self.is_gameplay = is_gameplay
 
     def q_value(self):
         return self.value_sum / self.visit_count if self.visit_count > 0 else 0.0
 
-    def __hash__(self):
-        # Use the hash of the latent hash string.
-        return hash(self.latent_hash)
+# -----------------------------
+# Full MCTS: Run multiple simulations, batch expand unexpanded leaves,
+# then backup their values.
+# -----------------------------
+def run_full_mcts(agent, index, num_simulations=128, num_processes=8, c_puct=1.0, discount=0.997, max_depth=MAX_DEPTH, temperature=1.0):
+    ray.get(agent.add_noise_to_node.remote(index))
+    for x in range(max(int(num_simulations // num_processes), 1)):
+        futures = [
+            agent.selection_task_no_expand.remote(index, c_puct, discount, max_depth)
+            for _ in range(num_processes)
+        ]
+        ray.get(futures)
+        ray.get(agent.expand_selected.remote(discount))
+    return ray.get(agent.drop_non_gameplay_children_and_compute_improvements.remote(index, temperature=temperature))
 
-    def __eq__(self, other):
-        # Two nodes are equal if their latent hash strings are equal.
-        if isinstance(other, MCTSNode):
-            return self.latent_hash == other.latent_hash
-        return False
+def reanalyze_trajectory(agent, trajectory, mcts_simulations=128, c_puct=1.0, discount=0.997, temperature=1.0):
+    """
+    Reanalyzes a single trajectory using the current agent parameters.
     
-    def __getstate__(self):
-        """
-        Remove the lock from the state before pickling.
-        """
-        state = self.__dict__.copy()
-        # Remove the lock because threading.Lock() is not picklable.
-        if "lock" in state:
-            del state["lock"]
-        return state
+    Args:
+        trajectory: A list of transitions (each a dict with keys "obs", "action", "reward", "target_policy", "target_value").
+        mcts_simulations: Number of simulations to run during MCTS.
+        c_puct: The exploration constant for MCTS.
+        discount: Discount factor for value estimation.
+    """
 
-    def __setstate__(self, state):
-        """
-        Reinitialize the lock when unpickling.
-        """
-        self.__dict__.update(state)
-        self.lock = threading.Lock()
+    remade_traj = []
+    for x in range(len(trajectory)):
+        with torch.no_grad():
+            latent, policy, value = ray.get(agent.initial_inference.remote(trajectory[x]["obs"]))
+        remade_traj.append((trajectory[x]["obs"], latent, trajectory[x]["action"], policy, trajectory[x]["reward"], value))
 
+    ray.get(agent.create_tree_from_game.remote(remade_traj))
+    for transition, idx in zip(trajectory, list(range(len(remade_traj)))):
+        print("Running MCTS index", idx, "out of", len(remade_traj))
+        improved_policy, value_estimate = run_full_mcts(agent, idx,
+                                                            num_simulations=mcts_simulations, 
+                                                            c_puct=c_puct, 
+                                                            discount=discount,
+                                                            temperature=temperature)
+        transition["target_policy"] = improved_policy
+        transition["target_value"] = value_estimate
 
-# -----------------------------
-# Remote MCTS Selection Task
-# -----------------------------
+# If you want to reanalyze the entire replay buffer (which is assumed to be a deque or list of trajectories):
+def reanalyze_replay_buffer(agent, replay_buffer, mcts_simulations=128, c_puct=1.0, discount=0.997, temperature=1.0):
+    """
+    Reanalyzes each trajectory in the replay buffer using the current agent.
+    
+    Args:
+        replay_buffer: A list (or deque) of trajectories.
+        mcts_simulations, c_puct, discount: Hyperparameters for MCTS.
+    """
+    print("Reanalyzing replay buffer")
+    for trajectory in replay_buffer:
+        print("starting next trajectory")
+        reanalyze_trajectory(agent, trajectory, mcts_simulations, c_puct, discount, temperature)
+
+def apply_temperature(visit_counts, temperature):
+    """
+    Adjusts a vector of visit counts using a temperature parameter.
+    
+    Args:
+        visit_counts (list or np.array): MCTS visit counts for each action.
+        temperature (float): Temperature parameter. Higher values lead to softer distributions.
+        
+    Returns:
+        np.array: Probability distribution over actions.
+    """
+    visit_counts = np.array(visit_counts, dtype=np.float32)
+    
+    # When temperature is close to 0, choose the action with the highest count deterministically.
+    if temperature < 1e-3:
+        policy = np.zeros_like(visit_counts)
+        policy[np.argmax(visit_counts)] = 1.0
+        return policy
+    
+    # Adjust counts by temperature.
+    adjusted_counts = visit_counts ** (1.0 / temperature)
+    policy = adjusted_counts / np.sum(adjusted_counts)
+    return policy
+
+def get_temperature(epoch, initial_temp=1.0, final_temp=0.1, decay_epochs=100):
+    """
+    Linearly decays temperature from initial_temp to final_temp over decay_epochs.
+    If epoch exceeds decay_epochs, return final_temp.
+    """
+    if epoch >= decay_epochs:
+        return final_temp
+    return initial_temp - (initial_temp - final_temp) * (epoch / decay_epochs)
+
 @ray.remote
-class MCTSHelper:
-    def __init__(self, path):
-        self.path = path
-
-    def selection_task_no_expand(self, start, c_puct, discount, max_depth=float('inf')):
-        """
-        Traverse the tree from the given root until a leaf is reached.
-        This function is run remotely so it works on a serialized copy of the tree.
-        It ensures that the latent tensors are on CPU before returning.
-        """
-        path = []
-        node = self.path[start]
-        cumulative_discount = 1.0
-        while len(path) < max_depth:
-            if not node.children:
-                break  # reached a leaf
-            total_visits = sum(child.visit_count for child in node.children.values())
-            best_score = -float('inf')
-            best_candidates = []  # List to store (action, child) pairs with highest score.
-            for a, child in node.children.items():
-                u = c_puct * child.prior * np.sqrt(total_visits) / (1 + max(child.visit_count, 0))
-                score = child.q_value() - child.virtual_loss + u
-                if score > best_score:
-                    best_score = score
-                    best_candidates = [(a, child)]
-                elif score == best_score:
-                    best_candidates.append((a, child))
-            # Randomly select one of the best candidates in case of a tie.
-            chosen_action, chosen_child = random.choice(best_candidates)
-            with chosen_child.lock:
-                chosen_child.virtual_loss += 1
-            path.append(chosen_action)
-            node = chosen_child
-            cumulative_discount *= discount
-        return (start, path, cumulative_discount)
-
 class MuZeroAgent:
     def __init__(self, action_space, device):
         self.device = device
         self.action_space = action_space
         self.latent_channels = 128
 
-        self.representation = RepresentationNetwork(input_channels=3,
+        self.representation = RepresentationNetwork(input_channels=4,
                                                     latent_channels=self.latent_channels).to(device)
         self.dynamics = DynamicsNetwork(latent_channels=self.latent_channels,
-                                        action_space=action_space).to(device)
+                                        action_space=action_space,
+                                        support_size=800,
+                                        num_bins=51).to(device)
         self.prediction = PredictionNetwork(latent_channels=self.latent_channels,
-                                            action_space=action_space).to(device)
+                                            action_space=action_space,
+                                            support_size=3500,
+                                            num_bins=51).to(device)
         self.representation_old = copy.deepcopy(self.representation)
         self.prediction_old = copy.deepcopy(self.prediction)
-        self.rep_optimizer = optim.Adam(self.representation.parameters(), lr=1e-5)
-        self.dyn_optimizer = optim.Adam(self.dynamics.parameters(), lr=1e-5)
-        self.pred_optimizer = optim.Adam(self.prediction.parameters(), lr=1e-5)
+        self.rep_optimizer = optim.Adam(self.representation.parameters(), lr=1e-4)
+        self.dyn_optimizer = optim.Adam(self.dynamics.parameters(), lr=1e-4)
+        self.pred_optimizer = optim.Adam(self.prediction.parameters(), lr=1e-4)
+        self.selection_results = queue.Queue()
 
-        self.mcts_hash_table = {}
-
-    def initial_inference(self, observation):
-        obs = cv2.resize(observation, (95, 95))
-        obs = np.transpose(obs, (2, 0, 1))
+    def initial_inference(self, obs):
         converted_obs = torch.tensor(obs, dtype=torch.float32, device=self.device) / 255.0
         converted_obs = converted_obs.unsqueeze(0)
         latent = self.representation_old(converted_obs)
-        policy_logits, value = self.prediction_old(latent)
-        return latent, policy_logits, value, obs
+        policy_logits, value, _ = self.prediction_old(latent)
+        policy_logits = F.softmax(policy_logits, dim=1).cpu().detach().numpy()[0]
+        latent = latent.cpu()
+        return latent, policy_logits, value.item()
+    
+    #not working?
+    def batch_inference(self, batch_obs, old = False):
+        converted = torch.tensor(batch_obs, dtype=torch.float32, device=self.device) / 255.0
+        if old:
+            batch_latents = self.representation_old(coverted)
+            batch_policy, batch_value, _ = self.prediction_old(batch_latents)
+        else:
+            batch_latents = self.representation(converted)
+            batch_policy, batch_value, _ = self.prediction(batch_latents)
+        batch_policy = F.softmax(batch_policy, dim=1).cpu().detach().numpy()
+        batch_latents = batch_latents.cpu()
+        batch_value = batch_value.cpu()
+        return batch_latents, batch_policy, batch_value
 
     def recurrent_inference(self, latent, action):
         a_tensor = torch.tensor([action], dtype=torch.long, device=self.device)
         latent, reward = self.dynamics(latent, a_tensor)
-        policy_logits, value = self.prediction_old(latent)
+        policy_logits, value, _ = self.prediction_old(latent)
         return latent, reward, policy_logits, value
 
     def update_representation(self):
-        self.mcts_hash_table = {}
         self.representation_old.load_state_dict(self.representation.state_dict())
 
     def update_prediction(self):
@@ -400,17 +478,23 @@ class MuZeroAgent:
         for target_param, param in zip(self.prediction_old.parameters(), self.prediction.parameters()):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
 
+    def add_noise_to_node(self, idx, epsilon = 0.25, alpha = 0.03):
+        node = self.current_trajectory[idx]
+        node.policy = add_dirichlet_noise(node.policy, epsilon=epsilon, alpha=alpha)
+        for action, child in node.children.items():
+            child.prior = node.policy[action]
+
     # -----------------------------
     # Training Step: remote method to update networks
     # -----------------------------
-    def train_step(self, batch):
+    def train_step(self, batch, only_dynamics = False):
         """
         Multi-step unrolling training step.
         
         Expects a batch dictionary with keys:
         "obs": (B, H, W, C) uint8 images,
         "actions": (B, unroll_steps) ints,
-        "rewards": (B, unroll_steps) floats,
+        "rewards": (B, unroll_steps+1) floats,
         "target_policy": (B, unroll_steps+1, action_space) probabilities,
         "target_value": (B, unroll_steps+1) floats.
         """
@@ -435,37 +519,47 @@ class MuZeroAgent:
         # Step 0: Initial Inference
         # ---------------------
         latent = self.representation(obs)
-        policy_logits, value = self.prediction(latent)
+        policy_logits, _, value_logits = self.prediction(latent)
         
+        converted_target_rewards = scalar_categorical.scalar_to_categorical_batch(rewards, self.dynamics.support_size, self.dynamics.num_bins, self.device)
+
         # Compute losses for the initial step (no reward loss here).
-        policy_loss_0 = -torch.sum(target_policy[:, 0, :] * F.log_softmax(policy_logits, dim=1), dim=1).mean()
-        value_loss_0 = F.mse_loss(value.squeeze(), target_value[:, 0])
-        total_loss += policy_loss_0 + value_loss_0
+        if not only_dynamics:
+            policy_loss_0 = -torch.sum(target_policy[:, 0, :] * F.log_softmax(policy_logits, dim=1), dim=1).mean()
+            converted_target_values = scalar_categorical.scalar_to_categorical_batch(target_value, self.prediction.support_size, self.prediction.num_bins, self.device)
+            value_loss_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
+            total_loss += policy_loss_0 + value_loss_0
 
         # ---------------------
         # Unroll for each subsequent step
         # ---------------------
         for i in range(1, unroll_steps + 1):
             # Use the action from the previous step to roll forward the latent state.
-            latent, reward_prediction = self.dynamics(latent, actions[:, i - 1])
-            policy_logits, value = self.prediction(latent)
+            latent, _, reward_logits = self.dynamics(latent, actions[:, i - 1])
             
-            # Loss for reward prediction.
-            reward_loss = F.mse_loss(reward_prediction.squeeze(), rewards[:, i - 1])
-            # Loss for policy prediction.
-            policy_loss = -torch.sum(target_policy[:, i, :] * F.log_softmax(policy_logits, dim=1), dim=1).mean()
-            # Loss for value prediction.
-            value_loss = F.mse_loss(value.squeeze(), target_value[:, i])
-            
-            total_loss += reward_loss + policy_loss + value_loss
+            # Loss for reward prediction. (reward[0] not used since it is reward for entering obs)
+            reward_loss = -torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1).mean()
+
+            if not only_dynamics:
+                policy_logits, _, value_logits = self.prediction(latent)
+                
+                # Loss for policy prediction.
+                policy_loss = -torch.sum(target_policy[:, i, :] * F.log_softmax(policy_logits, dim=1), dim=1).mean()
+                # Loss for value prediction.
+                value_loss = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
+                
+                total_loss += reward_loss + policy_loss + value_loss
+            else:
+                total_loss += reward_loss
 
         # Backpropagate the total loss.
         total_loss.backward()
         
         # Step the optimizers.
         self.rep_optimizer.step()
-        self.pred_optimizer.step()
         self.dyn_optimizer.step()
+        if not only_dynamics:
+            self.pred_optimizer.step()
         
         return total_loss.item()
 
@@ -508,8 +602,8 @@ class MuZeroAgent:
             with torch.no_grad():
                 # next_latents: (num_chunk*A, C, H, W)
                 # rewards: (num_chunk*A, 1) or (num_chunk*A,) depending on implementation
-                next_latents, rewards = self.dynamics(latent_batch, action_tensor)
-                batch_policy_logits, estimated_values = self.prediction(next_latents)
+                next_latents, rewards, _ = self.dynamics(latent_batch, action_tensor)
+                batch_policy_logits, estimated_values, _ = self.prediction(next_latents)
                 next_policy = F.softmax(batch_policy_logits, dim=1).cpu().numpy()
             
             # Update each node in the chunk.
@@ -518,8 +612,9 @@ class MuZeroAgent:
                 end = start + A
                 # Assume node.policy is already a numpy array of shape (A,)
                 policy = node.policy
-                node.children = {}
                 for a in range(A):
+                    if a in node.children and node.children[a].is_gameplay:
+                        continue
                     idx = start + a
                     # Create the child node with latent state moved to CPU.
                     child = MCTSNode(
@@ -538,63 +633,18 @@ class MuZeroAgent:
     def backup_simulation(self, path, leaf_value, discount=0.997):
         backup_value = leaf_value
         for n in reversed(path):
-            backup_value = n.reward + discount * backup_value
             n.visit_count += 1
             n.value_sum += backup_value
+            backup_value = n.reward + discount * backup_value
             n.virtual_loss = 0.0
 
-    # -----------------------------
-    # Full MCTS: Run multiple simulations, batch expand unexpanded leaves,
-    # then backup their values.
-    # -----------------------------
-    def run_full_mcts(self, node, helper, idx, num_simulations=128, num_processes=8, c_puct=1.0, discount=0.997, max_depth=float('inf')):
-        selection_results = []
-        for _ in range(max(int(num_simulations // num_processes), 1)):
-            futures = [
-                helper.selection_task_no_expand.remote(idx, c_puct, discount, max_depth)
-                for _ in range(num_processes)
-            ]
-            selection_results += ray.get(futures)
-
-        # Batch expansion: collect unique leaves that have not been expanded.
-        unique_leaves = set()
-        for start, path, cum_discount in selection_results:
-            leaf = node
-            new_path = [node]
-            for a in path:
-                leaf = leaf.children[a]
-                new_path.append(leaf)
-            if not leaf.is_expanded:
-                unique_leaves.add((leaf, tuple(new_path)))
-        unique_leaves = list(unique_leaves)
-        self.batch_expand_nodes([t[0] for t in unique_leaves])
-
-        # Backup: For each simulation, backup the leaf value along its path.
-        for leaf, path in unique_leaves:
-            leaf_value = leaf.expanded_value
-            self.backup_simulation(path, leaf_value, discount=discount)
-
-        # Compute improved policy from the root's children.
-        visit_counts = np.array([node.children[a].visit_count for a in range(self.action_space)])
-        if visit_counts.sum() > 0:
-            improved_policy = visit_counts / visit_counts.sum()
-        else:
-            improved_policy = np.ones(self.action_space) / self.action_space
-        root_value = node.q_value()
-        return improved_policy, root_value
-    
     def create_tree_from_game(self, game_trajectory):
         root_node = None
         prev_node = None
         prev_action_taken = None
         path = []
         for (obs_sample, latent, action_taken, policy, reward, expanded_value) in game_trajectory:
-            new_node = MCTSNode(latent=latent.cpu(), prior=1.0, reward=reward)
-            # If new node is not already in hash table, add it
-            if new_node.latent_hash not in self.mcts_hash_table:
-                self.mcts_hash_table[new_node.latent_hash] = new_node
-            else: # Else use the previously found node
-                new_node = self.mcts_hash_table[new_node.latent_hash]
+            new_node = MCTSNode(latent=latent.to(self.device), prior=1.0, reward=reward, is_gameplay=True)
             new_node.policy = policy
             new_node.expanded_value = expanded_value
             if prev_node != None:
@@ -609,61 +659,90 @@ class MuZeroAgent:
         self.batch_expand_nodes(path)
 
         self.backup_simulation(path, 0)
-        return path
+        self.current_trajectory = path
 
-    '''
-    def reanalyze_trajectory(self, trajectory, batch_size=128, mcts_simulations=128, c_puct=1.0, discount=0.997):
+    def selection_task_no_expand(self, index, c_puct, discount, max_depth=MAX_DEPTH):
         """
-        Reanalyzes a single trajectory using the current agent parameters.
-        
-        Args:
-            trajectory: A list of transitions (each a dict with keys "obs", "action", "reward", "target_policy", "target_value").
-            mcts_simulations: Number of simulations to run during MCTS.
-            c_puct: The exploration constant for MCTS.
-            discount: Discount factor for value estimation.
-        
-        Returns:
-            A new trajectory with updated target_policy and target_value for each transition.
+        Traverse the tree from the given root until a leaf is reached.
         """
+        node = self.current_trajectory[index]
+        path = []
+        cumulative_discount = 1.0
+        while len(path) <= max_depth:
+            if not node.children:
+                break  # reached a leaf
+            path.append(node)
+            total_visits = sum(child.visit_count for child in node.children.values())
+            best_score = -float('inf')
+            best_candidates = []  # List to store (action, child) pairs with highest score.
+            for a, child in node.children.items():
+                u = c_puct * child.prior * np.sqrt(total_visits) / (1 + max(child.visit_count, 0))
+                score = child.q_value() - child.virtual_loss + u
+                if score > best_score:
+                    best_score = score
+                    best_candidates = [(a, child)]
+                elif score == best_score:
+                    best_candidates.append((a, child))
+            # Randomly select one of the best candidates in case of a tie.
+            chosen_action, chosen_child = random.choice(best_candidates)
+            with chosen_child.lock:
+                chosen_child.virtual_loss += 1
+            node = chosen_child
+            cumulative_discount *= discount
+        path.append(node)
+        self.selection_results.put((node, path, cumulative_discount))
 
-        trajectory_obs = [transition["obs"] for transition in trajectory]
-        num_transitions = len(trajectory)
-        for start in range(0, num_transitions, batch_size):
-            end = min(start + batch_size, num_transitions)
-            batch_obs = torch.as_tensor(np.array(trajectory_obs[start:end]), dtype=torch.float32, device=self.device)
-            with torch.no_grad()
-                latent_batch = self.representation(batch_obs)
-                policy_batch, value_batch = self.prediction(batch_obs)
-            for i in range(start, end):
-                trajectory[i]["latent"] = latent_batch[i - start].cpu()
+    def expand_selected(self, discount):
+        unique_leaves = set()
+        while not self.selection_results.empty():
+            leaf, path, cumulative_discound = self.selection_results.get()
+            if not leaf.is_expanded:
+                unique_leaves.add((leaf, tuple(path)))
+        unique_leaves = list(unique_leaves)
+        self.batch_expand_nodes([t[0] for t in unique_leaves])
 
-        path = self.create_tree_from_game(trajectory)
-        helper = MCTSHelper.remote(path)
-        for transition, node in zip(trajectory, path):
-            improved_policy, value_estimate = self.run_full_mcts(node,
-                                                                    helper,
-                                                                    num_simulations=mcts_simulations, 
-                                                                    c_puct=c_puct, 
-                                                                    discount=discount)
-            transition["target_policy"] = improved_policy
-            transition["target_value"] = value_estimate
+        # Backup: For each simulation, backup the leaf value along its path.
+        for leaf, path in unique_leaves:
+            leaf_value = leaf.expanded_value
+            self.backup_simulation(path, leaf_value, discount=discount)
 
-    # If you want to reanalyze the entire replay buffer (which is assumed to be a deque or list of trajectories):
-    def reanalyze_replay_buffer(self, replay_buffer, mcts_simulations=128, c_puct=1.0, discount=0.997):
-        """
-        Reanalyzes each trajectory in the replay buffer using the current agent.
-        
-        Args:
-            replay_buffer: A list (or deque) of trajectories.
-            mcts_simulations, c_puct, discount: Hyperparameters for MCTS.
-        
-        Returns:
-            A new replay buffer with updated trajectories.
-        """
-        print("Reanalyzing replay buffer")
-        for trajectory in replay_buffer:
-            self.reanalyze_trajectory(trajectory, mcts_simulations, c_puct, discount)
-    '''
+    def drop_non_gameplay_children_and_compute_improvements(self, idx, temperature=1.0):
+        children_to_drop = []
+        node = self.current_trajectory[idx]
+        for action, child in node.children.items():
+            if not child.is_gameplay:
+                children_to_drop.append(action)
+        # Compute improved policy from the root's children.
+        visit_counts = np.array([node.children[a].visit_count for a in range(self.action_space)])
+        if visit_counts.sum() > 0:
+            improved_policy = apply_temperature(visit_counts, temperature)
+        else:
+            improved_policy = np.ones(self.action_space) / self.action_space
+        root_value = node.q_value()
+        for action in children_to_drop:
+            del node.children[action]
+        return improved_policy, root_value
+
+    def get_value(self, idx):
+        return self.current_trajectory[idx].q_value()
+
+
+def preprocess_frame(frame, resize_shape=(84, 84)):
+    """
+    Preprocess a single game frame.
+
+    Args:
+        frame (np.array): Input image, expected to be in RGB format.
+        resize_shape (tuple): Target size as (width, height). Default is (84, 84).
+
+    Returns:
+        np.array: Processed image.
+    """
+    # Convert from RGB to grayscale.
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    # Resize the image to the desired shape.
+    frame = cv2.resize(frame, resize_shape, interpolation=cv2.INTER_AREA)
+    return frame
 
 
 # -----------------------------
@@ -672,30 +751,33 @@ class MuZeroAgent:
 if __name__ == '__main__':
     ray.init()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = gym.make("MsPacman-v4")
+    env = gym.make("MsPacman-v4")#, render_mode='human')
     action_space = env.action_space.n
-    agent = MuZeroAgent(action_space=action_space, device=device)
+    agent = MuZeroAgent.remote(action_space=action_space, device=device)
     
     num_episodes = 6000
-    num_episodes_until_mcts = 8
+    num_episodes_until_mcts = 10
     replay_buffer = []
     
     for episode in range(num_episodes):
         obs, info = env.reset()
+        preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
         prev_reward = 0.0
         done = False
         episode_reward = 0
         game_trajectory = []  # store tuples of (obs, latent, action)
+        frame_stack = np.repeat(preprocessed_obs[np.newaxis, :, :], 4, axis=0)
         
         # Play one episode.
         while not done:
+            preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
+            frame_stack = np.concatenate([frame_stack[1:, :, :], preprocessed_obs[np.newaxis, :, :]], axis=0)
             with torch.no_grad():
-                latent, policy_logits, value, converted_obs = agent.initial_inference(obs)
-            policy = F.softmax(policy_logits, dim=1).cpu().detach().numpy()[0]
+                latent, policy, value = ray.get(agent.initial_inference.remote(frame_stack))
             action = np.random.choice(np.arange(action_space), p=policy)
-            game_trajectory.append((converted_obs, latent, action, policy, prev_reward, value.item()))
-            
             obs, reward, done, _, _ = env.step(action)
+            # obs, chosen action, reward for entering obs
+            game_trajectory.append((frame_stack, latent, action, policy, prev_reward, value))
             episode_reward += reward
             prev_reward = reward
             #env.render()
@@ -703,52 +785,56 @@ if __name__ == '__main__':
         print(f"Episode {episode} reward: {episode_reward}")
         print_memory_diagnostics()
         
-        path = agent.create_tree_from_game(game_trajectory)
+        ray.get(agent.create_tree_from_game.remote(game_trajectory))
 
         trajectory = []
         # Store one-step transition (for a basic training sample)
         if episode < num_episodes_until_mcts:
-            for (obs_sample, latent, action_taken, policy, reward, expanded_value), node in zip(game_trajectory, path):
+            for (obs_sample, latent, action_taken, policy, reward, expanded_value), idx in zip(game_trajectory, list(range(len(game_trajectory)))):
                 transition = {
                     "obs": obs_sample,
                     "action": action_taken,
                     "reward": reward,
                     "target_policy": np.ones(action_space) / action_space,
-                    "target_value": node.q_value()
+                    "target_value": ray.get(agent.get_value.remote(idx))
                 }
                 trajectory.append(transition)
             replay_buffer.append(trajectory)
 
         if episode >= num_episodes_until_mcts:
             print("starting mcts tree search")
-            helper = MCTSHelper.remote(path)
-            idx = 0
-            for (obs_sample, latent, action_taken, policy, reward, expanded_value), node in zip(game_trajectory, path):
-                improved_policy, value_estimate = agent.run_full_mcts(node, helper, idx, num_processes=NUM_PROCESSES, num_simulations=16, c_puct=1.5, discount=0.997)
-                # Here we create an additional training sample using the improved target.
+            for (obs_sample, latent, action_taken, policy, reward, expanded_value), idx in zip(game_trajectory, list(range(len(game_trajectory)))):
+                print("Running MCTS index", idx, "out of", len(game_trajectory))
+                temperature = get_temperature(episode)
+                improved_policy, value_estimate = run_full_mcts(agent, idx,
+                                                                    num_processes=NUM_PROCESSES,
+                                                                    num_simulations=128,
+                                                                    c_puct=1.5,
+                                                                    discount=0.997,
+                                                                    temperature=temperature)
+                # Here we create a training sample using the improved target.
                 mcts_sample = {
                     "obs": obs_sample,
                     "action": action_taken,
-                    "reward": node.reward,  # For illustration; in practice use multi-step return.
+                    "reward": reward,  # For illustration; in practice use multi-step return.
                     "target_policy": improved_policy,
                     "target_value": value_estimate
                 }
                 trajectory.append(mcts_sample)
-                idx += 1
             replay_buffer.append(trajectory)
-            ray.kill(helper)
         
         print(f"Replay buffer size: {sum([len(traj) for traj in replay_buffer])}")
-        print(f"Size of tree {asizeof.asizeof(agent.mcts_hash_table)}")
         
-        for _ in range(max(2 * episode, 20)):
+        for _ in range(20):
             batch = prepare_batch(replay_buffer, 128, 5, action_space)
-            loss = agent.train_step(batch)
+            loss = ray.get(agent.train_step.remote(batch))
             print(f"Training loss: {loss}")
         
-        agent.soft_update_prediction(0.05)
-        if episode % 20 == 0 and episode > 1:
-            agent.update_representation()
-            #agent.reanalyze_replay_buffer(replay_buffer, mcts_simulations=16)
-        if len(replay_buffer) > 20:
+        #agent.soft_update_prediction.remote(0.05)
+        if episode % 5 == 0 and episode > 1 and episode > num_episodes_until_mcts:
+            ray.get(agent.update_prediction.remote())
+            ray.get(agent.update_representation.remote())
+            temperature = get_temperature(episode)
+            reanalyze_replay_buffer(agent, replay_buffer, temperature=temperature)
+        if len(replay_buffer) > 30:
             replay_buffer.pop(0)
