@@ -69,12 +69,19 @@ ARMS = {
         "_linear_support": True,
         "_doc": "Pre-h() encoding: linear support, 51 bins, as before f08dbdf1.",
     },
-    "short-horizon": {
+    "horizon-0.9": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.9,
+        "_doc": "Kai's fast-convergence arm. Horizon ~10 steps against MAX_DEPTH=8, "
+                "so the tree is still meaningfully deep -- a depth-8 node keeps 43% "
+                "of its reward, against 0.4% at gamma=0.5, where the search would be "
+                "doing eight levels of work for an effectively depth-2 problem.",
+    },
+    "horizon-0.5": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.5,
-        "_doc": "Kai's fast-convergence arm. Heavy discounting makes the optimal "
-                "policy trivial; also removes the horizon the prefix addresses, "
-                "so it doubles as a control on the mechanism.",
+        "_doc": "Extreme control. Horizon ~2 steps, so the tree is effectively "
+                "depth-2 and planning barely matters. Run only to bracket 0.9.",
     },
 }
 

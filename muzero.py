@@ -663,7 +663,7 @@ class MCTSHelper:
                                                                                 sim_batches=MCTS_BATCHES,
                                                                                 num_simulations=TOTAL_MCTS_SIMS,
                                                                                 c_puct=C_PUCT,
-                                                                                discount=0.997,
+                                                                                discount=DISCOUNT,
                                                                                 temperature=temperature)
                             has_policy_target = True
                         else:
@@ -810,7 +810,12 @@ class MCTSHelper:
     # -----------------------------
     # Backup Phase: Propagate the leaf value up the simulation path.
     # -----------------------------
-    def backup_simulation(self, path, leaf_value, discount=0.997, min_max_stats=None):
+    def backup_simulation(self, path, leaf_value, discount=None, min_max_stats=None):
+        # Resolved at call time, not baked into the signature: create_tree_from_game
+        # calls this without a discount, so a hardcoded default silently pinned the
+        # Monte Carlo value targets to 0.997 no matter what DISCOUNT was set to.
+        # That made any experiment varying gamma measure nothing.
+        discount = DISCOUNT if discount is None else discount
         backup_value = leaf_value
         for n in reversed(path):
             n.visit_count += 1
@@ -938,7 +943,8 @@ class MCTSHelper:
     # Full MCTS: Run multiple simulations, batch expand unexpanded leaves,
     # then backup their values.
     # -----------------------------
-    async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=0.997, max_depth=MAX_DEPTH, temperature=1.0):
+    async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=None, max_depth=MAX_DEPTH, temperature=1.0):
+        discount = DISCOUNT if discount is None else discount
         # Now that expansion is lazy the root has to be expanded explicitly:
         # selection stops at unexpanded nodes, and add_noise_to_node writes the
         # noisy prior through to the children, which must therefore exist.
