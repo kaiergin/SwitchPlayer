@@ -12,6 +12,7 @@ training/*
 
 # Logs
 *.log
+logs/
 
 # Editor
 .vscode/

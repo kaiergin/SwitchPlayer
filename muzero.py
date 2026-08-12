@@ -219,7 +219,6 @@ def configure_actor_logger(name, enable_logging=False, log_dir=LOG_DIR):
         logger.addHandler(console_handler)
     return logger
 
-@ray.remote(max_concurrency=8)
 class StorageHelper:
     def __init__(self, max_replay=MAX_REPLAY, max_gameplay=MAX_GAMEPLAY):
         self.gameplay_buffer = deque(maxlen=max_gameplay)
@@ -294,7 +293,6 @@ class StorageManager:
         return await self.storage_helper.get_max_gameplay.remote()
 
 #create versioning like storage
-@ray.remote(max_concurrency=8)
 class NetworkHelper:
     def __init__(self, action_space, device, checkpoint_path = 'checkpoint.pth', enable_logging=False):
         self.device = device
@@ -437,12 +435,6 @@ class NetworkManager:
             if self.load_dynamics:
                 self.dynamics.load_state_dict(dyn_dict)
 
-# max_concurrency governs concurrent *Ray* calls into the actor, of which there
-# are only ever setup() and MCTS_process(). It was tied to MCTS_BATCHES, but the
-# simulation coroutines are created by asyncio.gather inside MCTS_process and so
-# are not Ray calls at all -- max_concurrency never applied to them. MCTS_BATCHES
-# is now purely the simulation batch size.
-@ray.remote(max_concurrency=4)
 class MCTSHelper:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False, name="MCTSHelper"):
         self.network_manager = NetworkManager(network_ref, action_space=action_space, device=device)
@@ -747,7 +739,6 @@ class MCTSHelper:
     def get_value(self, idx):
         return self.current_trajectory[idx].q_value()
 
-@ray.remote
 class TrainingHelper:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False):
         self.network_helper = network_ref
@@ -976,7 +967,6 @@ class TrainingHelper:
         }
 
 #Agent will be single threaded for real time learning
-@ray.remote(max_concurrency=1)
 class MuZeroAgent:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False):
         self.network_manager = NetworkManager(network_ref, action_space=action_space, device=device, load_dynamics=False)
@@ -1068,6 +1058,26 @@ def preprocess_frame(frame, resize_shape=(84, 84)):
     return frame
 
 
+# ---------------------------------------------------------------------------
+# Ray actor wrappers
+#
+# The classes above are plain Python so they can be constructed directly in
+# tests -- @ray.remote returns an ActorClass, which cannot be instantiated
+# normally. Decorating here keeps both paths available: tests import the class,
+# main uses the actor.
+#
+# max_concurrency governs concurrent *Ray* calls into an actor. MCTSHelper's
+# was tied to MCTS_BATCHES on the assumption that it limited the simulation
+# coroutines, but those are created by asyncio.gather inside MCTS_process and
+# are not Ray calls at all. MCTS_BATCHES is purely the simulation batch size.
+# ---------------------------------------------------------------------------
+StorageActor  = ray.remote(max_concurrency=8)(StorageHelper)
+NetworkActor  = ray.remote(max_concurrency=8)(NetworkHelper)
+MCTSActor     = ray.remote(max_concurrency=4)(MCTSHelper)
+TrainingActor = ray.remote(TrainingHelper)
+AgentActor    = ray.remote(max_concurrency=1)(MuZeroAgent)
+
+
 def resource_plan(num_mcts_actors=NUM_MCTS_ACTORS, use_cuda=True):
     """Total CPU and GPU the actor fleet will request."""
     cpu = (CPU_STORAGE + CPU_NETWORK + CPU_TRAINING + CPU_AGENT
@@ -1127,14 +1137,14 @@ if __name__ == '__main__':
 
     check_cluster_resources(NUM_MCTS_ACTORS, use_cuda)
 
-    network = NetworkHelper.options(
+    network = NetworkActor.options(
                                 num_cpus=CPU_NETWORK,
                                 num_gpus=gpu(GPU_NETWORK)).remote(
                                 action_space=ACTION_SPACE,
                                 device=device,
                                 enable_logging=ENABLE_LOGGING)
-    storage = StorageHelper.options(num_cpus=CPU_STORAGE).remote()
-    agent = MuZeroAgent.options(
+    storage = StorageActor.options(num_cpus=CPU_STORAGE).remote()
+    agent = AgentActor.options(
                                 num_cpus=CPU_AGENT,
                                 num_gpus=gpu(GPU_AGENT)).remote(
                                 action_space=ACTION_SPACE,
@@ -1143,7 +1153,7 @@ if __name__ == '__main__':
                                 storage_ref=storage,
                                 enable_logging=ENABLE_LOGGING)
     mcts_instances = [
-        MCTSHelper.options(
+        MCTSActor.options(
                                 num_cpus=CPU_MCTS,
                                 num_gpus=gpu(GPU_MCTS)).remote(
                                 action_space=ACTION_SPACE,
@@ -1154,7 +1164,7 @@ if __name__ == '__main__':
                                 name=f'MCTSHelper{i}')
         for i in range(NUM_MCTS_ACTORS)
     ]
-    training_instance = TrainingHelper.options(
+    training_instance = TrainingActor.options(
                                 num_cpus=CPU_TRAINING,
                                 num_gpus=gpu(GPU_TRAINING)).remote(
                                 action_space=ACTION_SPACE,
