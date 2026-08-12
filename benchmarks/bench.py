@@ -25,7 +25,8 @@ import muzero
 from muzero import (C_PUCT, IMAGE_RESHAPE, LATENT_CHANNELS, MCTS_BATCHES,
                     MCTSHelper, NetworkManager, TOTAL_MCTS_SIMS, TRAINING_BATCHES,
                     initial_frame_stack, preprocess_frame, push_frame)
-from networks import DynamicsNetwork, PredictionNetwork, RepresentationNetwork
+from networks import (DynamicsNetwork, PredictionNetwork, RepresentationNetwork,
+                      ValuePrefixNetwork)
 
 ACTIONS = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -225,7 +226,138 @@ def bench_reanalysis(traj_len=200, strides=(1, 2, 4, 8, 16)):
     return rows
 
 
-def _local_trainer():
+def collect_trajectories(episodes=6, cap=400):
+    """Real MsPacman transitions under a random policy, in replay-buffer shape."""
+    import gymnasium as gym
+    from EpisodicLifeEnv import EpisodicLifeEnv
+    from muzero import initial_frame_stack, push_frame, REWARD_CLIP
+
+    env = EpisodicLifeEnv(gym.make("MsPacman-v4"))
+    trajectories = []
+    for ep in range(episodes):
+        obs, _ = env.reset(seed=ep)
+        stack = initial_frame_stack(preprocess_frame(obs, IMAGE_RESHAPE))
+        traj, prev_reward, done, steps = [], 0.0, False, 0
+        while not done and steps < cap:
+            stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
+            action = int(np.random.randint(ACTIONS))
+            obs, reward, term, trunc, _ = env.step(action)
+            done = term or trunc
+            traj.append({"obs": stack, "action": action, "reward": prev_reward,
+                         "target_policy": np.full(ACTIONS, 1.0 / ACTIONS),
+                         "target_value": 0.0, "has_policy_target": True})
+            prev_reward = min(float(reward), REWARD_CLIP)
+            steps += 1
+        if len(traj) > muzero.UNROLL_STEPS + 1:
+            trajectories.append(traj)
+    env.close()
+    return trajectories
+
+
+def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None, prefix_support=None):
+    """Value-prefix prediction error as a function of unroll depth.
+
+    The direct test of EfficientZero's claim. Both heads live on the same trunk
+    and train on the same batches, so this compares the heads themselves rather
+    than two separately-trained models:
+
+      per-step : decode a reward at each unrolled state, then discount and sum
+      prefix   : decode the whole discounted sum from the LSTM in one shot
+
+    State aliasing predicts the per-step error grows faster with depth, because
+    each step's prediction is made from a latent that has drifted further from
+    the truth and the errors accumulate through the sum.
+    """
+    discount = muzero.DISCOUNT if discount is None else discount
+    print(f"\n=== value prefix vs per-step reward (gamma={discount}) ===")
+    print(f"  collecting trajectories...", flush=True)
+    trajectories = collect_trajectories()
+    steps_total = sum(len(t) for t in trajectories)
+    print(f"  {len(trajectories)} trajectories, {steps_total} transitions")
+
+    trainer = _local_trainer(prefix_support)
+    holdout = trajectories[-2:]
+    train_set = trajectories[:-2] or trajectories
+
+    print(f"  training {train_steps} steps (both heads, shared trunk)...", flush=True)
+    t0 = time.perf_counter()
+    marks = max(train_steps // 5, 1)
+    for step in range(train_steps):
+        batch = asyncio.run(trainer.prepare_batch(train_set, batch_size,
+                                                  muzero.UNROLL_STEPS, ACTIONS))
+        loss = asyncio.run(trainer.train_step(batch))
+        if step % marks == 0 or step == train_steps - 1:
+            # Decoded prefix at the deepest step, so we can see whether the head
+            # has moved off the support midpoint (= an untrained uniform output).
+            with torch.no_grad():
+                trainer.value_prefix.eval()
+                lat = trainer.representation(
+                    torch.tensor(batch["obs"][:, 0], dtype=torch.float32, device=DEVICE) / 255.0)
+                st = trainer.value_prefix.initial_state(lat.size(0), DEVICE)
+                for i in range(muzero.UNROLL_STEPS):
+                    lat, _, _ = trainer.dynamics(
+                        lat, torch.tensor(batch["actions"][:, i], dtype=torch.long, device=DEVICE))
+                    pfx, _, st = trainer.value_prefix(lat, st)
+                trainer.value_prefix.train()
+            print(f"    step {step:>5}  loss {loss:>9.2f}  decoded prefix {pfx.mean().item():>9.2f}"
+                  f"  (midpoint {trainer.value_prefix.support_size / 2:.0f} = untrained)")
+    print(f"  trained in {time.perf_counter() - t0:.1f}s")
+
+    # ---- evaluate on held-out trajectories --------------------------------
+    K = muzero.UNROLL_STEPS
+    per_step_err = np.zeros(K + 1)
+    prefix_err = np.zeros(K + 1)
+    scale = np.zeros(K + 1)
+    n = 0
+
+    for name, net in (("representation", trainer.representation), ("dynamics", trainer.dynamics),
+                      ("prediction", trainer.prediction), ("value_prefix", trainer.value_prefix)):
+        net.eval()
+
+    with torch.no_grad():
+        for _ in range(eval_batches):
+            batch = asyncio.run(trainer.prepare_batch(holdout, batch_size, K, ACTIONS))
+            obs = torch.tensor(batch["obs"], dtype=torch.float32, device=DEVICE) / 255.0
+            actions = torch.tensor(batch["actions"], dtype=torch.long, device=DEVICE)
+            rewards = torch.tensor(batch["rewards"], dtype=torch.float32, device=DEVICE)
+            truth = muzero.discounted_prefix_targets(rewards, discount=discount)
+
+            latent = trainer.representation(obs[:, 0])
+            state = trainer.value_prefix.initial_state(obs.size(0), DEVICE)
+            running = torch.zeros(obs.size(0), 1, device=DEVICE)
+
+            for i in range(1, K + 1):
+                latent, reward, _ = trainer.dynamics(latent, actions[:, i - 1])
+                running = running + (discount ** (i - 1)) * reward      # per-step, summed
+                prefix, _, state = trainer.value_prefix(latent, state)  # LSTM, one shot
+
+                target = truth[:, i:i + 1]
+                per_step_err[i] += (running - target).abs().mean().item()
+                prefix_err[i] += (prefix - target).abs().mean().item()
+                scale[i] += target.abs().mean().item()
+            n += 1
+
+    per_step_err /= n
+    prefix_err /= n
+    scale /= n
+
+    print(f"\n  {'depth':>5} {'true |prefix|':>14} {'per-step MAE':>14} {'LSTM MAE':>12} {'ratio':>8}")
+    for i in range(1, K + 1):
+        ratio = per_step_err[i] / max(prefix_err[i], 1e-9)
+        print(f"  {i:>5} {scale[i]:>14.2f} {per_step_err[i]:>14.2f} "
+              f"{prefix_err[i]:>12.2f} {ratio:>7.2f}x")
+
+    deep = slice(max(1, K - 1), K + 1)
+    print(f"\n  deepest two steps: per-step {per_step_err[deep].mean():.2f} "
+          f"vs LSTM {prefix_err[deep].mean():.2f}")
+    growth_ps = per_step_err[K] / max(per_step_err[1], 1e-9)
+    growth_lstm = prefix_err[K] / max(prefix_err[1], 1e-9)
+    print(f"  error growth from depth 1 to {K}: per-step {growth_ps:.2f}x, LSTM {growth_lstm:.2f}x")
+    print("  (state aliasing predicts the per-step figure grows faster)")
+    return {"per_step": per_step_err, "prefix": prefix_err, "scale": scale}
+
+
+def _local_trainer(prefix_support=None):
     """A TrainingHelper without Ray or a storage handle."""
     from muzero import TrainingHelper
     trainer = object.__new__(TrainingHelper)
@@ -238,7 +370,13 @@ def _local_trainer():
                                        support_size=400, num_bins=51).to(DEVICE)
     trainer.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
                                            support_size=2000, num_bins=51).to(DEVICE)
+    trainer.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+                                              hidden_size=muzero.VALUE_PREFIX_HIDDEN,
+                                              support_size=(muzero.VALUE_PREFIX_SUPPORT
+                                                            if prefix_support is None else prefix_support),
+                                              num_bins=51).to(DEVICE)
     import torch.optim as optim
+    trainer.prefix_optimizer = optim.SGD(trainer.value_prefix.parameters(), lr=1e-4)
     trainer.rep_optimizer = optim.SGD(trainer.representation.parameters(), lr=1e-4)
     trainer.dyn_optimizer = optim.SGD(trainer.dynamics.parameters(), lr=1e-4)
     trainer.pred_optimizer = optim.SGD(trainer.prediction.parameters(), lr=1e-4)
@@ -376,10 +514,16 @@ def bench_startup():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("suite", choices=["components", "actors", "startup", "reanalysis", "all"])
+    ap.add_argument("suite", choices=["components", "actors", "startup", "reanalysis", "prefix", "all"])
     ap.add_argument("--trajectories", type=int, default=6)
     ap.add_argument("--traj-len", type=int, default=60)
     ap.add_argument("--actors", type=int, nargs="+", default=[1, 2, 3])
+    ap.add_argument("--train-steps", type=int, default=400,
+                    help="training steps for the prefix suite")
+    ap.add_argument("--prefix-support", type=float, default=None,
+                    help="override the value-prefix support ceiling (default: VALUE_PREFIX_SUPPORT)")
+    ap.add_argument("--gamma", type=float, default=None,
+                    help="discount for the prefix suite (default: muzero.DISCOUNT)")
     ap.add_argument("--stride", type=int, default=None,
                     help="reanalysis stride for the actor suite (default: REANALYSE_STRIDE)")
     args = ap.parse_args()
@@ -390,6 +534,8 @@ def main():
         bench_components()
     if args.suite in ("reanalysis", "all"):
         bench_reanalysis()
+    if args.suite in ("prefix", "all"):
+        bench_prefix(train_steps=args.train_steps, discount=args.gamma, prefix_support=args.prefix_support)
     if args.suite in ("startup", "all"):
         bench_startup()
     if args.suite in ("actors", "all"):

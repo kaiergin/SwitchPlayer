@@ -9,7 +9,8 @@ import ray
 from collections import deque
 import scalar_categorical
 from memory import print_memory_diagnostics
-from networks import DynamicsNetwork, PredictionNetwork, RepresentationNetwork
+from networks import (DynamicsNetwork, PredictionNetwork, RepresentationNetwork,
+                      ValuePrefixNetwork)
 import logging
 import os
 import uuid
@@ -34,6 +35,20 @@ MAX_REPLAY = 20
 IMAGE_RESHAPE = (84,84)
 STEPS_UNTIL_MCTS = 500
 LATENT_CHANNELS = 64
+UNROLL_STEPS = 5
+# gamma. Effective planning horizon is roughly 1/(1-DISCOUNT), so ~333 steps
+# here. Lowering it shortens credit assignment and converges faster to a worse
+# policy -- useful as a fast A/B arm, but note it also shrinks the horizon the
+# value prefix exists to fix, so a low value will understate that change.
+DISCOUNT = 0.997
+REWARD_CLIP = 400
+# The value prefix is a discounted SUM over UNROLL_STEPS rewards, so its support
+# has to cover that sum rather than a single reward. REWARD_CLIP * UNROLL_STEPS
+# is a safe ceiling for any DISCOUNT <= 1. Undersizing it clamps large prefixes
+# to the top bin, which is the all-zero-target hole fixed in 0ad73607.
+VALUE_PREFIX_SUPPORT = REWARD_CLIP * UNROLL_STEPS
+VALUE_PREFIX_HIDDEN = 512
+NUM_BINS = 51
 # Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
 # them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
 # slower than self-play generates data even with two MCTS actors, so the
@@ -196,6 +211,23 @@ def get_temperature(epoch, initial_temp=1.0, final_temp=0.1, decay_train_steps=1
         return final_temp
     return initial_temp - (initial_temp - final_temp) * (epoch / decay_train_steps)
 
+def discounted_prefix_targets(rewards, discount=DISCOUNT):
+    """Cumulative discounted reward sums along an unroll.
+
+    `rewards` is (B, unroll+1) where rewards[:, i] is the reward for *entering*
+    step i. rewards[:, 0] therefore belongs to the state the unroll starts from
+    and is part of no prefix. Column i of the result is
+
+        prefix_i = sum_{j=1..i} discount^(j-1) * rewards[:, j]
+
+    with column 0 zero: nothing is accumulated before the first step.
+    """
+    steps = rewards.shape[1] - 1
+    weights = discount ** torch.arange(steps, device=rewards.device, dtype=rewards.dtype)
+    prefix = torch.cumsum(rewards[:, 1:] * weights, dim=1)
+    return torch.cat([torch.zeros_like(rewards[:, :1]), prefix], dim=1)
+
+
 def masked_policy_loss(policy_logits, target_policy, mask):
     """Cross-entropy averaged over the positions that carry a real target.
 
@@ -330,9 +362,14 @@ class NetworkHelper:
                                             action_space=action_space,
                                             support_size=2000,
                                             num_bins=51).to(device)
+        self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+                                               hidden_size=VALUE_PREFIX_HIDDEN,
+                                               support_size=VALUE_PREFIX_SUPPORT,
+                                               num_bins=NUM_BINS).to(device)
         self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
         self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
         self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
+        self.prefix_optimizer = optim.SGD(self.value_prefix.parameters(), lr=1e-4)
         self.training_steps = 0
         self.logger = configure_actor_logger("NetworkHelper", enable_logging)
         self.load_checkpoint(checkpoint_path)
@@ -347,6 +384,8 @@ class NetworkHelper:
             'rep_optimizer_state_dict': self.rep_optimizer.state_dict(),
             'dyn_optimizer_state_dict': self.dyn_optimizer.state_dict(),
             'pred_optimizer_state_dict': self.pred_optimizer.state_dict(),
+            'value_prefix_state_dict': self.value_prefix.state_dict(),
+            'prefix_optimizer_state_dict': self.prefix_optimizer.state_dict(),
             'training_steps': training_steps
         }
         torch.save(checkpoint, checkpoint_path)
@@ -380,18 +419,35 @@ class NetworkHelper:
             policy = F.softmax(policy_logits, dim=1).cpu().numpy()[0]
         return policy, value.item()
 
-    def update_state(self, rep_state_dict, dyn_state_dict, pred_state_dict, rep_opt, dyn_opt, pred_opt, steps, path = 'checkpoint.pth'):
-        self.representation.load_state_dict(rep_state_dict)
-        self.dynamics.load_state_dict(dyn_state_dict)
-        self.prediction.load_state_dict(pred_state_dict)
-        self.rep_optimizer.load_state_dict(rep_opt)
-        self.dyn_optimizer.load_state_dict(dyn_opt)
-        self.pred_optimizer.load_state_dict(pred_opt)
-        self.save_checkpoint(steps, checkpoint_path=path)
+    def update_state(self, state, path='checkpoint.pth'):
+        self.representation.load_state_dict(state["representation"])
+        self.dynamics.load_state_dict(state["dynamics"])
+        self.prediction.load_state_dict(state["prediction"])
+        self.value_prefix.load_state_dict(state["value_prefix"])
+        self.rep_optimizer.load_state_dict(state["rep_optimizer"])
+        self.dyn_optimizer.load_state_dict(state["dyn_optimizer"])
+        self.pred_optimizer.load_state_dict(state["pred_optimizer"])
+        self.prefix_optimizer.load_state_dict(state["prefix_optimizer"])
+        self.save_checkpoint(state["training_steps"], checkpoint_path=path)
 
     def get_state(self):
-        return get_state_dict(self.representation), get_state_dict(self.dynamics), get_state_dict(self.prediction),\
-                get_state_dict(self.rep_optimizer), get_state_dict(self.dyn_optimizer), get_state_dict(self.pred_optimizer), self.training_steps, self.version
+        """Weights and optimiser state as a dict.
+
+        This was an 8-tuple unpacked positionally in three places. Adding a
+        fourth network to that arrangement is how misalignment bugs are made.
+        """
+        return {
+            "representation":   get_state_dict(self.representation),
+            "dynamics":         get_state_dict(self.dynamics),
+            "prediction":       get_state_dict(self.prediction),
+            "value_prefix":     get_state_dict(self.value_prefix),
+            "rep_optimizer":    get_state_dict(self.rep_optimizer),
+            "dyn_optimizer":    get_state_dict(self.dyn_optimizer),
+            "pred_optimizer":   get_state_dict(self.pred_optimizer),
+            "prefix_optimizer": get_state_dict(self.prefix_optimizer),
+            "training_steps":   self.training_steps,
+            "version":          self.version,
+        }
 
     def is_up_to_date(self, version_cmp):
         return self.version == version_cmp
@@ -410,17 +466,26 @@ class NetworkManager:
         if self.load_dynamics:
             self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=400,
-                                            num_bins=51).to(device)
+                                            support_size=REWARD_CLIP,
+                                            num_bins=NUM_BINS).to(device)
+            self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+                                                   hidden_size=VALUE_PREFIX_HIDDEN,
+                                                   support_size=VALUE_PREFIX_SUPPORT,
+                                                   num_bins=NUM_BINS).to(device)
             
 
     async def setup(self):
-        rep_dict, dyn_dict, pred_dict, _, _, _,\
-        self.training_steps, self.version = await self.network_helper.get_state.remote()
-        self.representation.load_state_dict(rep_dict)
-        self.prediction.load_state_dict(pred_dict)
+        await self._pull_state()
+
+    async def _pull_state(self):
+        state = await self.network_helper.get_state.remote()
+        self.training_steps = state["training_steps"]
+        self.version = state["version"]
+        self.representation.load_state_dict(state["representation"])
+        self.prediction.load_state_dict(state["prediction"])
         if self.load_dynamics:
-            self.dynamics.load_state_dict(dyn_dict)
+            self.dynamics.load_state_dict(state["dynamics"])
+            self.value_prefix.load_state_dict(state["value_prefix"])
 
     def initial_inference(self, obs):
         # no_grad must be applied here, not at the call site: Ray actors run in
@@ -451,12 +516,7 @@ class NetworkManager:
     
     async def update_if_needed(self):
         if not await self.network_helper.is_up_to_date.remote(self.version):
-            rep_dict, dyn_dict, pred_dict, _, _, _,\
-            self.training_steps, self.version = await self.network_helper.get_state.remote()
-            self.representation.load_state_dict(rep_dict)
-            self.prediction.load_state_dict(pred_dict)
-            if self.load_dynamics:
-                self.dynamics.load_state_dict(dyn_dict)
+            await self._pull_state()
 
 class MCTSHelper:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False, name="MCTSHelper"):
@@ -819,9 +879,14 @@ class TrainingHelper:
                                             action_space=action_space,
                                             support_size=2000,
                                             num_bins=51).to(device)
+        self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+                                               hidden_size=VALUE_PREFIX_HIDDEN,
+                                               support_size=VALUE_PREFIX_SUPPORT,
+                                               num_bins=NUM_BINS).to(device)
         self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
         self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
         self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
+        self.prefix_optimizer = optim.SGD(self.value_prefix.parameters(), lr=1e-4)
         self.logger = configure_actor_logger("TrainingHelper", enable_logging)
         self.logger.info("Initialized TrainingHelper logger.")
 
@@ -830,18 +895,30 @@ class TrainingHelper:
         await self.load_networks()
     
     async def load_networks(self):
-        representation_state_dict, dynamics_state_dict, prediction_state_dict,\
-                rep_optimizer_state_dict, dyn_optimizer_state_dict, pred_optimizer_state_dict, self.training_steps, self.network_version = await self.network_helper.get_state.remote()
-        self.representation.load_state_dict(representation_state_dict)
-        self.dynamics.load_state_dict(dynamics_state_dict)
-        self.prediction.load_state_dict(prediction_state_dict)
-        self.rep_optimizer.load_state_dict(rep_optimizer_state_dict)
-        self.dyn_optimizer.load_state_dict(dyn_optimizer_state_dict)
-        self.pred_optimizer.load_state_dict(pred_optimizer_state_dict)
+        state = await self.network_helper.get_state.remote()
+        self.training_steps = state["training_steps"]
+        self.network_version = state["version"]
+        self.representation.load_state_dict(state["representation"])
+        self.dynamics.load_state_dict(state["dynamics"])
+        self.prediction.load_state_dict(state["prediction"])
+        self.value_prefix.load_state_dict(state["value_prefix"])
+        self.rep_optimizer.load_state_dict(state["rep_optimizer"])
+        self.dyn_optimizer.load_state_dict(state["dyn_optimizer"])
+        self.pred_optimizer.load_state_dict(state["pred_optimizer"])
+        self.prefix_optimizer.load_state_dict(state["prefix_optimizer"])
 
     async def save_networks(self):
-        await self.network_helper.update_state.remote(self.representation.state_dict(), self.dynamics.state_dict(), self.prediction.state_dict(),\
-                                                self.rep_optimizer.state_dict(), self.dyn_optimizer.state_dict(), self.pred_optimizer.state_dict(), self.training_steps)
+        await self.network_helper.update_state.remote({
+            "representation":   self.representation.state_dict(),
+            "dynamics":         self.dynamics.state_dict(),
+            "prediction":       self.prediction.state_dict(),
+            "value_prefix":     self.value_prefix.state_dict(),
+            "rep_optimizer":    self.rep_optimizer.state_dict(),
+            "dyn_optimizer":    self.dyn_optimizer.state_dict(),
+            "pred_optimizer":   self.pred_optimizer.state_dict(),
+            "prefix_optimizer": self.prefix_optimizer.state_dict(),
+            "training_steps":   self.training_steps,
+        })
         
     
     # -----------------------------
@@ -877,6 +954,7 @@ class TrainingHelper:
         self.rep_optimizer.zero_grad()
         self.pred_optimizer.zero_grad()
         self.dyn_optimizer.zero_grad()
+        self.prefix_optimizer.zero_grad()
         
         total_loss = 0.0
 
@@ -888,6 +966,16 @@ class TrainingHelper:
         policy_logits, _, value_logits = self.prediction(latent)
         
         converted_target_rewards = scalar_categorical.scalar_to_categorical_batch(rewards, self.dynamics.support_size, self.dynamics.num_bins, self.device)
+
+        # Value prefix targets: the cumulative discounted reward sum along the
+        # unroll, which is what the LSTM head predicts in one shot instead of
+        # per-step rewards that are summed afterwards.
+        target_prefix = discounted_prefix_targets(rewards, discount=DISCOUNT)
+        converted_target_prefix = scalar_categorical.scalar_to_categorical_batch(
+            target_prefix, self.value_prefix.support_size, self.value_prefix.num_bins, self.device)
+        # The hidden state IS the accumulated reward, so it starts empty at the
+        # beginning of every unroll. Same reason it must reset at a search root.
+        prefix_state = self.value_prefix.initial_state(obs.size(0), self.device)
 
         # Compute losses for the initial step (no reward loss here).
         if not only_dynamics:
@@ -909,6 +997,13 @@ class TrainingHelper:
             # Loss for reward prediction. (reward[0] not used since it is reward for entering obs)
             reward_loss = -torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1).mean()
 
+            # Value prefix over the same unroll. Both heads are trained on the
+            # same trunk for now so they can be compared directly on identical
+            # representations; the per-step head goes away once the tree search
+            # is migrated to consume prefixes.
+            _, prefix_logits, prefix_state = self.value_prefix(latent, prefix_state)
+            prefix_loss = -torch.sum(converted_target_prefix[:, i, :] * F.log_softmax(prefix_logits, dim=1), dim=1).mean()
+
             if not only_dynamics:
                 policy_logits, _, value_logits = self.prediction(latent)
                 
@@ -917,9 +1012,9 @@ class TrainingHelper:
                 # Loss for value prediction.
                 value_loss = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
                 
-                total_loss += reward_loss + policy_loss + value_loss + latent_loss
+                total_loss += reward_loss + prefix_loss + policy_loss + value_loss + latent_loss
             else:
-                total_loss += reward_loss + latent_loss
+                total_loss += reward_loss + prefix_loss + latent_loss
 
         # Backpropagate the total loss.
         total_loss.backward()
@@ -927,6 +1022,7 @@ class TrainingHelper:
         # Step the optimizers.
         self.rep_optimizer.step()
         self.dyn_optimizer.step()
+        self.prefix_optimizer.step()
         if not only_dynamics:
             self.pred_optimizer.step()
         

@@ -193,7 +193,8 @@ def test_legacy_transitions_without_the_key_are_treated_as_searched(trainer):
 # End to end through train_step
 # --------------------------------------------------------------------------
 def build_trainer():
-    from networks import DynamicsNetwork, PredictionNetwork, RepresentationNetwork
+    from networks import (DynamicsNetwork, PredictionNetwork, RepresentationNetwork,
+                          ValuePrefixNetwork)
     import torch.optim as optim
     t = object.__new__(TrainingHelper)
     t.device = CPU
@@ -204,6 +205,11 @@ def build_trainer():
                                  support_size=400, num_bins=51)
     t.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
                                      support_size=2000, num_bins=51)
+    t.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+                                        hidden_size=64,
+                                        support_size=muzero.VALUE_PREFIX_SUPPORT,
+                                        num_bins=51)
+    t.prefix_optimizer = optim.SGD(t.value_prefix.parameters(), lr=1e-4)
     t.rep_optimizer = optim.SGD(t.representation.parameters(), lr=1e-4)
     t.dyn_optimizer = optim.SGD(t.dynamics.parameters(), lr=1e-4)
     t.pred_optimizer = optim.SGD(t.prediction.parameters(), lr=1e-4)
