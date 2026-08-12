@@ -74,7 +74,9 @@ def scalar_from_logits(logits, support):
     expected_value = torch.sum(probs * support.unsqueeze(0).expand_as(probs), dim=1, keepdim=True)
     return expected_value
 
-# Revised PredictionNetwork with categorical value representation and policy clipping.
+# PredictionNetwork with categorical value representation.
+# NOTE: the policy head returns raw logits. Callers are responsible for
+# applying softmax (for acting/priors) or log_softmax (for the training loss).
 class PredictionNetwork(nn.Module):
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21):
         super(PredictionNetwork, self).__init__()
@@ -101,10 +103,7 @@ class PredictionNetwork(nn.Module):
         p = F.adaptive_avg_pool2d(p, (8, 8))
         p = p.contiguous().view(p.size(0), -1)
         policy_logits = self.policy_fc(p)
-        # Convert logits to probabilities and clip for numerical stability.
-        policy_probs = F.softmax(policy_logits, dim=1)
-        policy_probs = torch.clamp(policy_probs, min=1e-6, max=1.0)
-        
+
         # Value branch:
         v = self.relu(self.value_conv(x))
         v = F.adaptive_avg_pool2d(v, (8, 8))
@@ -113,7 +112,7 @@ class PredictionNetwork(nn.Module):
         support = create_support(self.support_size, self.num_bins, latent.device)
         value = scalar_from_logits(value_logits, support)
         
-        return policy_probs, value, value_logits
+        return policy_logits, value, value_logits
 
 # Revised DynamicsNetwork with categorical reward representation.
 class DynamicsNetwork(nn.Module):
