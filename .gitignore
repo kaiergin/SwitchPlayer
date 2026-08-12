@@ -6,3 +6,12 @@ game_storage/*
 model_saves/*
 tetris/*
 training/*
+
+# Model checkpoints
+*.pth
+
+# Logs
+*.log
+
+# Editor
+.vscode/

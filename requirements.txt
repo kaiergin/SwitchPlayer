@@ -1,8 +1,32 @@
-opencv-python
-tensorflow==2.1
-pathlib
-numpy
-matplotlib
-Pillow
-gym
-pyserial
+# ---------------------------------------------------------------------------
+# Active pipeline: MuZero on MsPacman (PyTorch + Ray). Tested on Python 3.11.
+# ---------------------------------------------------------------------------
+torch>=2.0
+ray>=2.9
+numpy>=1.24
+opencv-python>=4.8
+
+# Atari environments. ale-py bundles the ROMs from 0.9 onward; on older
+# versions you also need `pip install autorom[accept-rom-license]`.
+gymnasium>=0.29
+ale-py>=0.9
+
+# Diagnostics (memory.py, muzero.py)
+psutil
+pympler
+
+# ---------------------------------------------------------------------------
+# Tooling and scratch scripts
+# ---------------------------------------------------------------------------
+matplotlib      # image_test.py, distribution.py
+Pillow          # gamefeed.py
+pygame          # playpacman.py (human demonstration capture)
+
+# ---------------------------------------------------------------------------
+# Legacy Switch/Tetris pipeline (controller.py, core.py, tetris.py, envTest.py).
+# That code targets TensorFlow 1.x/2.x on Python 3.7 and is NOT installable
+# alongside the stack above -- use a separate environment if you need it.
+#   tensorflow==2.1
+#   gym==0.17.2
+# ---------------------------------------------------------------------------
+pyserial        # controller.py: USB serial link to the Arduino/Switch

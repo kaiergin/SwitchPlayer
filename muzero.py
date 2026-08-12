@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-import gym
+import gymnasium as gym
 import numpy as np
 import cv2
 import random
@@ -22,16 +22,25 @@ import uuid
 import time
 import asyncio
 import sys
+from EpisodicLifeEnv import EpisodicLifeEnv
 
-TRAINING_BATCHES  = 16
+# Atari envs ship in the ale-py plugin. gymnasium >= 1.0 requires explicit
+# registration; earlier versions register them on import of ale_py.
+try:
+    import ale_py
+    gym.register_envs(ale_py)
+except (ImportError, AttributeError):
+    pass
+
+TRAINING_BATCHES  = 64
 MCTS_BATCHES = 8
 TOTAL_MCTS_SIMS = 32
-MAX_DEPTH = 5
+MAX_DEPTH = 8
 MAX_GAMEPLAY = 20
-MAX_REPLAY = 30
+MAX_REPLAY = 20
 IMAGE_RESHAPE = (84,84)
 STEPS_UNTIL_MCTS = 500
-LATENT_CHANNELS = 128
+LATENT_CHANNELS = 64
 
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
@@ -109,7 +118,7 @@ def apply_temperature(visit_counts, temperature):
     policy = adjusted_counts / np.sum(adjusted_counts)
     return policy
 
-def get_temperature(epoch, initial_temp=1.0, final_temp=0.1, decay_train_steps=50000):
+def get_temperature(epoch, initial_temp=1.0, final_temp=0.1, decay_train_steps=100000):
     """
     Linearly decays temperature from initial_temp to final_temp over decay_train_steps.
     If train steps exceeds decay_train_steps, return final_temp.
@@ -198,19 +207,19 @@ class NetworkHelper:
     def __init__(self, action_space, device, checkpoint_path = 'checkpoint.pth', enable_logging=False):
         self.device = device
         self.action_space = action_space
-        self.representation = RepresentationNetwork(input_channels=4,
+        self.representation = RepresentationNetwork(input_channels=12,
                                                     latent_channels=LATENT_CHANNELS).to(device)
         self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
                                         action_space=action_space,
-                                        support_size=800,
+                                        support_size=400,
                                         num_bins=51).to(device)
         self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=3500,
+                                            support_size=2000,
                                             num_bins=51).to(device)
-        self.rep_optimizer = optim.Adam(self.representation.parameters(), lr=1e-4)
-        self.dyn_optimizer = optim.Adam(self.dynamics.parameters(), lr=1e-4)
-        self.pred_optimizer = optim.Adam(self.prediction.parameters(), lr=1e-4)
+        self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
+        self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
+        self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
         self.training_steps = 0
         self.configure_logger(enable_logging)
         self.load_checkpoint(checkpoint_path)
@@ -284,16 +293,16 @@ class NetworkManager:
         self.network_helper = network_helper
         self.load_dynamics = load_dynamics
         self.device = device
-        self.representation = RepresentationNetwork(input_channels=4,
+        self.representation = RepresentationNetwork(input_channels=12,
                                                     latent_channels=LATENT_CHANNELS).to(device)
         self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=3500,
+                                            support_size=2000,
                                             num_bins=51).to(device)
         if self.load_dynamics:
             self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=800,
+                                            support_size=400,
                                             num_bins=51).to(device)
             
 
@@ -330,7 +339,7 @@ class NetworkManager:
             if self.load_dynamics:
                 self.dynamics.load_state_dict(dyn_dict)
 
-@ray.remote(max_concurrency=MCTS_BATCHES, num_gpus=0.6, num_cpus=MCTS_BATCHES)
+@ray.remote(max_concurrency=MCTS_BATCHES, num_gpus=0.5, num_cpus=MCTS_BATCHES)
 class MCTSHelper:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False, name="MCTSHelper"):
         self.network_manager = NetworkManager(network_ref, action_space=action_space, device=device)
@@ -354,7 +363,7 @@ class MCTSHelper:
         await self.network_manager.setup()
         await self.storage_manager.setup()
     
-    def eval_obs(self, game_trajectory, batch_size=16):
+    def eval_obs(self, game_trajectory, batch_size=32):
         new_traj = []
         for i in range(0, len(game_trajectory), batch_size):
             batch_transitions = game_trajectory[i:i+batch_size]
@@ -387,7 +396,7 @@ class MCTSHelper:
                 game_trajectory = self.eval_obs(game_trajectory=game_trajectory)
                 self.create_tree_from_game(game_trajectory=game_trajectory)
                 if self.network_manager.training_steps < STEPS_UNTIL_MCTS:
-                    self.logger.info("%s steps until MCTS", self.network_manager.training_steps)
+                    self.logger.info("%s steps until MCTS", STEPS_UNTIL_MCTS - self.network_manager.training_steps)
                     for idx, (obs_sample, action_taken, reward, _, _, _) in enumerate(game_trajectory):
                         transition = {
                             "obs": obs_sample,
@@ -405,7 +414,7 @@ class MCTSHelper:
                         improved_policy, value_estimate = await self.run_full_mcts(idx,
                                                                             sim_batches=MCTS_BATCHES,
                                                                             num_simulations=TOTAL_MCTS_SIMS,
-                                                                            c_puct=61.8,
+                                                                            c_puct=32,
                                                                             discount=0.997,
                                                                             temperature=temperature)
                         # Here we create a training sample using the improved target.
@@ -426,7 +435,7 @@ class MCTSHelper:
     # -----------------------------
     # Batch expansion helper function
     # -----------------------------
-    def batch_expand_nodes(self, nodes, batch_size=8):
+    def batch_expand_nodes(self, nodes, batch_size=40):
         """
         Given a list of MCTSNode objects that need expansion, expand them in batches.
         
@@ -531,7 +540,6 @@ class MCTSHelper:
         """
         node = self.current_trajectory[index]
         path = []
-        cumulative_discount = 1.0
         while len(path) < max_depth:
             if not node.children:
                 break  # reached a leaf
@@ -540,19 +548,18 @@ class MCTSHelper:
             best_score = -float('inf')
             best_candidates = []  # List to store (action, child) pairs with highest score.
             for a, child in node.children.items():
-                u = c_puct * child.prior * np.sqrt(total_visits) / (1 + max(child.visit_count, 0))
+                u = c_puct * child.prior * np.sqrt(total_visits) / (1 + child.visit_count + child.virtual_loss)
                 score = child.q_value() - child.virtual_loss + u
                 if score > best_score:
                     best_score = score
-                    best_candidates = [(a, child)]
+                    best_candidates = [child]
                 elif score == best_score:
-                    best_candidates.append((a, child))
+                    best_candidates.append(child)
             # Randomly select one of the best candidates in case of a tie.
-            chosen_action, chosen_child = random.choice(best_candidates)
+            chosen_child = random.choice(best_candidates)
             async with chosen_child.lock:
                 chosen_child.virtual_loss += 1
             node = chosen_child
-            cumulative_discount *= discount
         path.append(node)
         await self.selection_results.put((node, path))
 
@@ -613,7 +620,7 @@ class MCTSHelper:
     def get_value(self, idx):
         return self.current_trajectory[idx].q_value()
 
-@ray.remote(num_gpus=0.3, num_cpus=1)
+@ray.remote(num_gpus=0.4, num_cpus=1)
 class TrainingHelper:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False):
         self.network_helper = network_ref
@@ -621,19 +628,19 @@ class TrainingHelper:
         self.device = device
         self.action_space = action_space
         self.training_steps = 0
-        self.representation = RepresentationNetwork(input_channels=4,
+        self.representation = RepresentationNetwork(input_channels=12,
                                                     latent_channels=LATENT_CHANNELS).to(device)
         self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
                                         action_space=action_space,
-                                        support_size=800,
+                                        support_size=400,
                                         num_bins=51).to(device)
         self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=3500,
+                                            support_size=2000,
                                             num_bins=51).to(device)
-        self.rep_optimizer = optim.Adam(self.representation.parameters(), lr=1e-4)
-        self.dyn_optimizer = optim.Adam(self.dynamics.parameters(), lr=1e-4)
-        self.pred_optimizer = optim.Adam(self.prediction.parameters(), lr=1e-4)
+        self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
+        self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
+        self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
         self.configure_logger(enable_logging)
     
     async def setup(self):
@@ -673,7 +680,7 @@ class TrainingHelper:
         Multi-step unrolling training step.
         
         Expects a batch dictionary with keys:
-        "obs": (B, H, W, C) uint8 images,
+        "obs": (B, unroll_steps+1, C, H, W) uint8 images,
         "actions": (B, unroll_steps) ints,
         "rewards": (B, unroll_steps+1) floats,
         "target_policy": (B, unroll_steps+1, action_space) probabilities,
@@ -699,7 +706,8 @@ class TrainingHelper:
         # ---------------------
         # Step 0: Initial Inference
         # ---------------------
-        latent = self.representation(obs)
+        init_obs = obs[:, 0]
+        latent = self.representation(init_obs)
         policy_logits, _, value_logits = self.prediction(latent)
         
         converted_target_rewards = scalar_categorical.scalar_to_categorical_batch(rewards, self.dynamics.support_size, self.dynamics.num_bins, self.device)
@@ -717,6 +725,9 @@ class TrainingHelper:
         for i in range(1, unroll_steps + 1):
             # Use the action from the previous step to roll forward the latent state.
             latent, _, reward_logits = self.dynamics(latent, actions[:, i - 1])
+            with torch.no_grad():
+                true_latent = self.representation(obs[:, i])
+            latent_loss = F.mse_loss(latent, true_latent, reduction="mean")
             
             # Loss for reward prediction. (reward[0] not used since it is reward for entering obs)
             reward_loss = -torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1).mean()
@@ -729,9 +740,9 @@ class TrainingHelper:
                 # Loss for value prediction.
                 value_loss = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
                 
-                total_loss += reward_loss + policy_loss + value_loss
+                total_loss += reward_loss + policy_loss + value_loss + latent_loss
             else:
-                total_loss += reward_loss
+                total_loss += reward_loss + latent_loss
 
         # Backpropagate the total loss.
         total_loss.backward()
@@ -756,10 +767,9 @@ class TrainingHelper:
                 loss = await self.train_step(batch)
                 self.training_steps += 1
                 self.logger.info(f"Step: {self.training_steps} Training loss: {loss}")
-                if self.training_steps % 1000 == 0 and self.training_steps > 1:
+                if self.training_steps % 100 == 0 and self.training_steps > 1:
                     self.logger.info(f"Saving network at {self.training_steps} training steps")
                     await self.save_networks()
-                await asyncio.sleep(0.2)
         except Exception as e:
             self.logger.error("Exception thrown in training_process %s", e)
         self.logger.info("Training process exiting")
@@ -778,7 +788,7 @@ class TrainingHelper:
         
         Returns:
         A dictionary with keys:
-            "obs": (B, H, W, C) initial observations,
+            "obs": (B, unroll_steps, C, H, W) initial observations,
             "actions": (B, unroll_steps) sequence of actions,
             "rewards": (B, unroll_steps+1) sequence of rewards,
             "target_policy": (B, unroll_steps+1, action_space) target policies,
@@ -797,10 +807,8 @@ class TrainingHelper:
             traj_length = len(traj)
             start_index = np.random.randint(0, traj_length)
             
-            # Get initial observation.
-            init_obs = traj[start_index]["obs"]
-            
             # Prepare lists for unroll data.
+            obs = []
             actions = []
             rewards = []
             target_policy = []
@@ -809,6 +817,7 @@ class TrainingHelper:
             # We need unroll_steps+1 target entries (for step 0 and each unroll step).
             for step in range(unroll_steps + 1):
                 if start_index + step < traj_length:
+                    obs.append(traj[start_index + step]["obs"])
                     node = traj[start_index + step]
                     # Append the target policy and value for each step.
                     target_policy.append(node["target_policy"])
@@ -819,6 +828,7 @@ class TrainingHelper:
                         # For actions, only collect for unroll_steps.
                         actions.append(node["action"])
                 else:
+                    obs.append(traj[traj_length - 1]["obs"])
                     # If the trajectory doesn't have enough transitions, pad with zeros.
                     target_policy.append(np.ones(action_space) / action_space)
                     target_value.append(0.0)
@@ -826,7 +836,7 @@ class TrainingHelper:
                     if step < unroll_steps:
                         actions.append(0)         # or a default action
             
-            batch_obs.append(init_obs)
+            batch_obs.append(obs)
             batch_actions.append(actions)
             batch_rewards.append(rewards)
             batch_target_policy.append(target_policy)
@@ -878,6 +888,7 @@ class MuZeroAgent:
             if not hasattr(np, 'bool8'):
                 np.bool8 = np.bool_
             env = gym.make("MsPacman-v4")
+            env = EpisodicLifeEnv(env)
             while True:
                 self.logger.debug("Starting new game")
                 obs, info = await asyncio.to_thread(env.reset)
@@ -886,17 +897,18 @@ class MuZeroAgent:
                 done = False
                 episode_reward = 0
                 game_trajectory = []  # store tuples of (obs, latent, action)
-                frame_stack = np.repeat(preprocessed_obs[np.newaxis, :, :], 4, axis=0)
+                frame_stack = np.repeat(preprocessed_obs, 4, axis=0)
                 
                 # Play one episode.
                 while not done:
                     preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
-                    frame_stack = np.concatenate([frame_stack[1:, :, :], preprocessed_obs[np.newaxis, :, :]], axis=0)
+                    frame_stack = np.concatenate([frame_stack[3:, :, :], preprocessed_obs], axis=0)
                     with torch.no_grad():
                         policy, value = self.network_manager.initial_inference(frame_stack)
                     action = np.random.choice(np.arange(self.action_space), p=policy)
                     obs, reward, done, _, _ = await asyncio.to_thread(env.step, action)
                     # obs, chosen action, reward for entering obs
+                    reward = min(reward, 400)
                     game_trajectory.append((frame_stack, action, prev_reward))
                     episode_reward += reward
                     prev_reward = reward
@@ -918,9 +930,10 @@ def preprocess_frame(frame, resize_shape=(84, 84)):
         np.array: Processed image.
     """
     # Convert from RGB to grayscale.
-    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    #frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
     # Resize the image to the desired shape.
-    frame = cv2.resize(frame, resize_shape, interpolation=cv2.INTER_AREA)
+    frame = cv2.resize(frame, resize_shape)#, interpolation=cv2.INTER_AREA)
+    frame = np.transpose(frame, (2, 0, 1))
     return frame
 
 
@@ -975,16 +988,17 @@ if __name__ == '__main__':
     training_process = training_instance.training_process.remote()
 
     viewenv = gym.make("MsPacman-v4", render_mode='human')
+    viewenv = EpisodicLifeEnv(viewenv)
     try:
         while True:
             obs, _ = viewenv.reset()
             preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
             done = False
             episode_reward = 0
-            frame_stack = np.repeat(preprocessed_obs[np.newaxis, :, :], 4, axis=0)
+            frame_stack = np.repeat(preprocessed_obs, 4, axis=0)
             while not done:
                 preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
-                frame_stack = np.concatenate([frame_stack[1:, :, :], preprocessed_obs[np.newaxis, :, :]], axis=0)
+                frame_stack = np.concatenate([frame_stack[3:, :, :], preprocessed_obs], axis=0)
                 with torch.no_grad():
                     policy, value = ray.get(network.initial_inference.remote(frame_stack))
                     action = np.random.choice(np.arange(ACTION_SPACE), p=policy)

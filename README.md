@@ -8,14 +8,28 @@ Games to learn:
 * A tweaked version of the MuZero algorithm by DeepMind, custom built for real-time learning
 * A working OpenAI gym environment for playing Tetris 99 on the Nintendo Switch
 
+The MuZero implementation (`muzero.py`, `networks.py`) currently trains against
+`MsPacman-v4` as a testbed; hooking it up to the Switch environment is still to do.
+
 ### To do list
-* Add parallel training calls and priority storage
-* Simplify dynamics by flattening states and using graph search
+* Parallel MCTS and re-analysis
+* Logging to file for debugging
+* Fill replay buffer with random data
+* Mult-step reward?
+* Hyperparameter Tuning
+
+### Custom ideas
+* Heavy reward discounting and small trajectory with no bootstrapped value as initial agent
+* Human gameplay as training for dynamics network
 
 ### Dependencies
 
-Tested on Python 3.7 with TensorFlow 2.1  
-* pip install -r requirements.txt  
+The active MuZero pipeline targets Python 3.11 with PyTorch and Ray.
+* pip install -r requirements.txt
+
+The legacy Switch/Tetris environment (`controller.py`, `core.py`, `tetris.py`,
+`envTest.py`) targets Python 3.7 with TensorFlow and needs a separate
+environment -- see the notes at the bottom of `requirements.txt`.
 
 Currently only support for Windows machines  
 

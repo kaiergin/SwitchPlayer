@@ -14,7 +14,7 @@ TRAIN_ENVIRONMENT = False
 
 
 def show_webcam():
-    cam = cv2.VideoCapture(0)
+    cam = cv2.VideoCapture(1)
     it = 0
     while True:       
         
