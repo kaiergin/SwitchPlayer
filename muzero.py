@@ -265,12 +265,16 @@ class NetworkHelper:
             self.logger.info("No checkpoint found at %s", checkpoint_path)
     
     def initial_inference(self, obs):
-        converted_obs = torch.tensor(obs, dtype=torch.float32, device=self.device) / 255.0
-        converted_obs = converted_obs.unsqueeze(0)
-        latent = self.representation(converted_obs)
-        policy_logits, value, _ = self.prediction(latent)
-        policy_logits = F.softmax(policy_logits, dim=1).cpu().detach().numpy()[0]
-        return policy_logits, value.item()
+        # no_grad must be applied here, not at the call site: Ray actors run in
+        # their own process, so a `with torch.no_grad()` in the driver has no
+        # effect on the graph built inside this method.
+        with torch.no_grad():
+            converted_obs = torch.tensor(obs, dtype=torch.float32, device=self.device) / 255.0
+            converted_obs = converted_obs.unsqueeze(0)
+            latent = self.representation(converted_obs)
+            policy_logits, value, _ = self.prediction(latent)
+            policy = F.softmax(policy_logits, dim=1).cpu().numpy()[0]
+        return policy, value.item()
 
     def update_state(self, rep_state_dict, dyn_state_dict, pred_state_dict, rep_opt, dyn_opt, pred_opt, steps, path = 'checkpoint.pth'):
         self.representation.load_state_dict(rep_state_dict)
@@ -315,19 +319,30 @@ class NetworkManager:
             self.dynamics.load_state_dict(dyn_dict)
 
     def initial_inference(self, obs):
-        converted_obs = torch.tensor(obs, dtype=torch.float32, device=self.device) / 255.0
-        converted_obs = converted_obs.unsqueeze(0)
-        latent = self.representation(converted_obs)
-        policy_logits, value, _ = self.prediction(latent)
-        policy_logits = F.softmax(policy_logits, dim=1).cpu().detach().numpy()[0]
-        return policy_logits, value.item()
+        # no_grad must be applied here, not at the call site: Ray actors run in
+        # their own process, so a `with torch.no_grad()` in the driver has no
+        # effect on the graph built inside this method.
+        with torch.no_grad():
+            converted_obs = torch.tensor(obs, dtype=torch.float32, device=self.device) / 255.0
+            converted_obs = converted_obs.unsqueeze(0)
+            latent = self.representation(converted_obs)
+            policy_logits, value, _ = self.prediction(latent)
+            policy = F.softmax(policy_logits, dim=1).cpu().numpy()[0]
+        return policy, value.item()
     
     def batch_inference(self, batch_obs):
-        converted = torch.tensor(batch_obs, dtype=torch.float32, device=self.device) / 255.0
-        batch_latents = self.representation(converted)
-        batch_policy, batch_value, _ = self.prediction(batch_latents)
-        batch_policy = F.softmax(batch_policy, dim=1).cpu().detach().numpy()
-        batch_value = batch_value.cpu()
+        # Without no_grad the returned latents carry grad_fn, and because every
+        # gameplay node stores one for the lifetime of the episode, the entire
+        # forward graph (all ResNet activations for the batch) is pinned in GPU
+        # memory. That was several GB per episode.
+        with torch.no_grad():
+            converted = torch.tensor(batch_obs, dtype=torch.float32, device=self.device) / 255.0
+            batch_latents = self.representation(converted)
+            batch_policy_logits, batch_value, _ = self.prediction(batch_latents)
+            batch_policy = F.softmax(batch_policy_logits, dim=1).cpu().numpy()
+            # (B, 1) -> (B,) so node.expanded_value is a scalar, matching the
+            # floats used for nodes created in batch_expand_nodes.
+            batch_value = batch_value.squeeze(-1).cpu().numpy()
         return batch_latents, batch_policy, batch_value
     
     async def update_if_needed(self):
@@ -391,6 +406,9 @@ class MCTSHelper:
                     continue
                 else:
                     game_trajectory, _ = game_trajectory_tuple
+                if not game_trajectory:
+                    self.logger.warning("Skipping empty game trajectory")
+                    continue
                 self.logger.debug("Running MCTS_process")
                 trajectory = []
                 game_trajectory = self.eval_obs(game_trajectory=game_trajectory)
@@ -443,6 +461,10 @@ class MCTSHelper:
         nodes: list of MCTSNode objects to expand.
         batch_size: number of nodes to process in a single batch. (actual batch size is batch_size*self.action_space)
         """
+        # Terminal nodes have no successors, and re-expanding an expanded node
+        # would discard its accumulated statistics. Filter both out before the
+        # network call rather than after, so we don't pay for them.
+        nodes = [n for n in nodes if not n.done and not n.is_expanded]
         if not nodes:
             return
 
@@ -476,8 +498,6 @@ class MCTSHelper:
             
             # Update each node in the chunk.
             for j, node in enumerate(chunk):
-                if node.done:
-                    continue
                 start = j * A
                 end = start + A
                 # Assume node.policy is already a numpy array of shape (A,)
@@ -523,8 +543,11 @@ class MCTSHelper:
             prev_node = new_node
             prev_action_taken = action_taken
         path[-1].done = True
-        self.batch_expand_nodes(path)
 
+        # Nodes are expanded lazily, the first time a simulation selects them.
+        # Expanding the whole chain up front allocated action_space child
+        # latents for every timestep in the episode (~5x the episode length)
+        # before the search had even started.
         self.backup_simulation(path, 0)
         self.current_trajectory = path
     
@@ -541,8 +564,8 @@ class MCTSHelper:
         node = self.current_trajectory[index]
         path = []
         while len(path) < max_depth:
-            if not node.children:
-                break  # reached a leaf
+            if not node.is_expanded or node.done:
+                break  # leaf: either not yet expanded, or terminal
             path.append(node)
             total_visits = sum(child.visit_count for child in node.children.values())
             best_score = -float('inf')
@@ -607,6 +630,12 @@ class MCTSHelper:
     # then backup their values.
     # -----------------------------
     async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=0.997, max_depth=MAX_DEPTH, temperature=1.0):
+        # Now that expansion is lazy the root has to be expanded explicitly:
+        # selection stops at unexpanded nodes, and add_noise_to_node writes the
+        # noisy prior through to the children, which must therefore exist.
+        root = self.current_trajectory[index]
+        if not root.is_expanded:
+            self.batch_expand_nodes([root])
         self.add_noise_to_node(index)
         for x in range(max(int(num_simulations // sim_batches), 1)):
             futures = [
