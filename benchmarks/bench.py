@@ -226,8 +226,15 @@ def bench_reanalysis(traj_len=200, strides=(1, 2, 4, 8, 16)):
     return rows
 
 
-def collect_trajectories(episodes=6, cap=400):
-    """Real MsPacman transitions under a random policy, in replay-buffer shape."""
+def collect_trajectories(episodes=20, cap=400, repeat=1):
+    """Real MsPacman transitions in replay-buffer shape.
+
+     holds each sampled action for that many frames. Uniform per-frame
+    random makes Pacman reverse constantly and barely leave its start tile, so
+    it eats almost nothing -- which leaves the reward heads with next to no
+    signal to fit. Holding an action covers ground and raises reward density by
+    roughly an order of magnitude, without needing a trained policy.
+    """
     import gymnasium as gym
     from EpisodicLifeEnv import EpisodicLifeEnv
     from muzero import initial_frame_stack, push_frame, REWARD_CLIP
@@ -238,9 +245,13 @@ def collect_trajectories(episodes=6, cap=400):
         obs, _ = env.reset(seed=ep)
         stack = initial_frame_stack(preprocess_frame(obs, IMAGE_RESHAPE))
         traj, prev_reward, done, steps = [], 0.0, False, 0
+        held = 0
+        action = int(np.random.randint(ACTIONS))
         while not done and steps < cap:
             stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
-            action = int(np.random.randint(ACTIONS))
+            if held >= repeat:
+                action, held = int(np.random.randint(ACTIONS)), 0
+            held += 1
             obs, reward, term, trunc, _ = env.step(action)
             done = term or trunc
             traj.append({"obs": stack, "action": action, "reward": prev_reward,
@@ -254,7 +265,8 @@ def collect_trajectories(episodes=6, cap=400):
     return trajectories
 
 
-def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None, prefix_support=None, unroll=None):
+def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
+                 prefix_support=None, unroll=None, repeat=1, episodes=20):
     """Value-prefix prediction error as a function of unroll depth.
 
     The direct test of EfficientZero's claim. Both heads live on the same trunk
@@ -272,13 +284,16 @@ def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
     K = muzero.UNROLL_STEPS if unroll is None else unroll
     print(f"\n=== value prefix vs per-step reward (gamma={discount}) ===")
     print(f"  collecting trajectories...", flush=True)
-    trajectories = collect_trajectories()
+    trajectories = collect_trajectories(episodes=episodes, repeat=repeat)
     steps_total = sum(len(t) for t in trajectories)
-    print(f"  {len(trajectories)} trajectories, {steps_total} transitions")
+    reward_total = sum(tr["reward"] for t in trajectories for tr in t)
+    print(f"  {len(trajectories)} trajectories, {steps_total} transitions, "
+          f"{reward_total / max(steps_total, 1):.3f} reward/step (action repeat {repeat})")
 
     trainer = _local_trainer(prefix_support)
-    holdout = trajectories[-2:]
-    train_set = trajectories[:-2] or trajectories
+    split = max(len(trajectories) // 5, 1)
+    holdout = trajectories[-split:]
+    train_set = trajectories[:-split] or trajectories
 
     print(f"  training {train_steps} steps (both heads, shared trunk)...", flush=True)
     t0 = time.perf_counter()
@@ -334,6 +349,9 @@ def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
                 target = truth[:, i:i + 1]
                 per_step_err[i] += (running - target).abs().mean().item()
                 prefix_err[i] += (prefix - target).abs().mean().item()
+                # MAE of the trivial always-predict-zero predictor. A head that
+                # cannot beat this has learned nothing, however good its ratio
+                # against the other head happens to look.
                 scale[i] += target.abs().mean().item()
             n += 1
 
@@ -341,15 +359,23 @@ def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
     prefix_err /= n
     scale /= n
 
-    print(f"\n  {'depth':>5} {'true |prefix|':>14} {'per-step MAE':>14} {'LSTM MAE':>12} {'ratio':>8}")
+    print(f"\n  {'':>5} {'--- MAE ---':>30}   {'--- vs predict-0 ---':>22}")
+    print(f"  {'depth':>5} {'predict-0':>10} {'per-step':>9} {'LSTM':>9}   "
+          f"{'per-step':>10} {'LSTM':>10}")
     for i in range(1, K + 1):
-        ratio = per_step_err[i] / max(prefix_err[i], 1e-9)
-        print(f"  {i:>5} {scale[i]:>14.2f} {per_step_err[i]:>14.2f} "
-              f"{prefix_err[i]:>12.2f} {ratio:>7.2f}x")
+        print(f"  {i:>5} {scale[i]:>10.2f} {per_step_err[i]:>9.2f} {prefix_err[i]:>9.2f}   "
+              f"{per_step_err[i] / max(scale[i], 1e-9):>10.2f} "
+              f"{prefix_err[i] / max(scale[i], 1e-9):>10.2f}")
 
-    deep = slice(max(1, K - 1), K + 1)
-    print(f"\n  deepest two steps: per-step {per_step_err[deep].mean():.2f} "
-          f"vs LSTM {prefix_err[deep].mean():.2f}")
+    useful = 0.95   # has to beat the trivial predictor by a real margin
+    beats_ps = int((per_step_err[1:K + 1] < scale[1:K + 1] * useful).sum())
+    beats_lstm = int((prefix_err[1:K + 1] < scale[1:K + 1] * useful).sum())
+    print(f"\n  depths beating predict-zero: per-step {beats_ps}/{K}, LSTM {beats_lstm}/{K}")
+    if beats_ps == 0 and beats_lstm == 0:
+        print("  -> NEITHER head learned anything useful. Any ratio between the")
+        print("     two is noise, and a head that collapsed to predicting zero")
+        print("     will look like it 'won'.")
+
     growth_ps = per_step_err[K] / max(per_step_err[1], 1e-9)
     growth_lstm = prefix_err[K] / max(prefix_err[1], 1e-9)
     print(f"  error growth from depth 1 to {K}: per-step {growth_ps:.2f}x, LSTM {growth_lstm:.2f}x")
@@ -376,10 +402,10 @@ def _local_trainer(prefix_support=None):
                                                             if prefix_support is None else prefix_support),
                                               num_bins=51).to(DEVICE)
     import torch.optim as optim
-    trainer.prefix_optimizer = optim.SGD(trainer.value_prefix.parameters(), lr=1e-4)
-    trainer.rep_optimizer = optim.SGD(trainer.representation.parameters(), lr=1e-4)
-    trainer.dyn_optimizer = optim.SGD(trainer.dynamics.parameters(), lr=1e-4)
-    trainer.pred_optimizer = optim.SGD(trainer.prediction.parameters(), lr=1e-4)
+    trainer.prefix_optimizer = muzero.make_optimizer(trainer.value_prefix.parameters())
+    trainer.rep_optimizer = muzero.make_optimizer(trainer.representation.parameters())
+    trainer.dyn_optimizer = muzero.make_optimizer(trainer.dynamics.parameters())
+    trainer.pred_optimizer = muzero.make_optimizer(trainer.prediction.parameters())
     return trainer
 
 
@@ -522,6 +548,10 @@ def main():
                     help="training steps for the prefix suite")
     ap.add_argument("--prefix-support", type=float, default=None,
                     help="override the value-prefix support ceiling (default: VALUE_PREFIX_SUPPORT)")
+    ap.add_argument("--episodes", type=int, default=20,
+                    help="episodes to collect for the prefix suite")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="hold each sampled action this many frames when collecting")
     ap.add_argument("--unroll", type=int, default=None,
                     help="unroll depth for the prefix suite (default: UNROLL_STEPS)")
     ap.add_argument("--gamma", type=float, default=None,
@@ -538,7 +568,8 @@ def main():
         bench_reanalysis()
     if args.suite in ("prefix", "all"):
         bench_prefix(train_steps=args.train_steps, discount=args.gamma,
-                     prefix_support=args.prefix_support, unroll=args.unroll)
+                     prefix_support=args.prefix_support, unroll=args.unroll,
+                     repeat=args.repeat, episodes=args.episodes)
     if args.suite in ("startup", "all"):
         bench_startup()
     if args.suite in ("actors", "all"):

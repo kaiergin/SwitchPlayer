@@ -220,3 +220,44 @@ def test_transform_fixes_the_resolution_that_a_linear_support_loses():
 
     assert int((linear.sum(dim=(0, 1)) > 1e-6).sum()) <= 2,         "a linear support of the same ceiling collapses these into one bin"
     assert int((transformed.sum(dim=(0, 1)) > 1e-6).sum()) >= 4,         "h() plus scaled bins must resolve them"
+
+
+# --------------------------------------------------------------------------
+# Optimiser state transport
+# --------------------------------------------------------------------------
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA to be meaningful")
+def test_adam_state_leaves_the_gpu_before_transport():
+    """Regression: get_state_dict checked isinstance(tensor) over the TOP level
+    of the state dict only. Optimiser tensors nest two levels down under
+    state[param_id][key], so none of them were found. That was invisible with
+    SGD, which keeps no state -- with Adam it ships exp_avg and exp_avg_sq
+    across Ray still resident on the GPU."""
+    net = torch.nn.Linear(4, 4).cuda()
+    opt = muzero.make_optimizer(net.parameters())
+    net(torch.randn(2, 4).cuda()).sum().backward()
+    opt.step()
+
+    assert opt.state_dict()["state"], "optimiser should have accumulated state"
+    moved = muzero.get_state_dict(opt)
+
+    def every_tensor(obj):
+        if isinstance(obj, torch.Tensor):
+            yield obj
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                yield from every_tensor(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                yield from every_tensor(v)
+
+    tensors = list(every_tensor(moved))
+    assert tensors, "expected nested tensors in Adam state"
+    assert all(t.device.type == "cpu" for t in tensors)
+
+
+def test_nested_structures_survive_the_cpu_move():
+    nested = {"a": torch.ones(2), "b": [torch.zeros(1), {"c": torch.eye(2)}], "n": 7, "s": "x"}
+    out = muzero.to_cpu(nested)
+    assert out["n"] == 7 and out["s"] == "x"
+    assert torch.equal(out["a"], torch.ones(2))
+    assert torch.equal(out["b"][1]["c"], torch.eye(2))

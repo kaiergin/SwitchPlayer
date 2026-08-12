@@ -164,23 +164,28 @@ class ValuePrefixNetwork(nn.Module):
     The hidden state carries the accumulated reward so far, which is why it must
     be reset wherever a new unroll begins -- the start of a training unroll, and
     the root of each search.
+
+    Layer order follows LightZero's EfficientZero reference implementation:
+    conv1x1 -> BatchNorm2d -> activation -> flatten -> LSTM -> BatchNorm1d ->
+    activation -> fc. Both norms matter: the accumulated prefix drifts in scale
+    as the unroll deepens, and without the post-LSTM activation the path from
+    hidden state to logits is linear.
     """
 
     def __init__(self, latent_channels=64, hidden_size=512, support_size=2000,
-                 num_bins=51, pool=(4, 4)):
+                 num_bins=51, head_channels=32, pool=(6, 6)):
         super(ValuePrefixNetwork, self).__init__()
         self.support_size = support_size
         self.num_bins = num_bins
         self.hidden_size = hidden_size
         self.pool = pool
 
-        self.conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
+        self.conv = nn.Conv2d(latent_channels, head_channels, kernel_size=1, bias=False)
+        self.norm_in = nn.BatchNorm2d(head_channels)
         self.relu = nn.ReLU(inplace=False)
-        features = 32 * pool[0] * pool[1]
+        features = head_channels * pool[0] * pool[1]
         self.lstm = nn.LSTM(input_size=features, hidden_size=hidden_size)
-        # BatchNorm on the LSTM output; the accumulated prefix drifts in scale as
-        # the unroll deepens and this keeps the head's input distribution stable.
-        self.norm = nn.BatchNorm1d(hidden_size)
+        self.norm_out = nn.BatchNorm1d(hidden_size)
         self.fc = nn.Linear(hidden_size, num_bins)
 
     def initial_state(self, batch_size, device):
@@ -191,17 +196,21 @@ class ValuePrefixNetwork(nn.Module):
 
     def forward(self, latent, state):
         """One unroll step. Returns (prefix_scalar, prefix_logits, next_state)."""
-        x = self.relu(self.conv(latent))
+        x = self.conv(latent)
+        # BatchNorm needs more than one sample in train mode; a single-row batch
+        # happens during search, where eval-mode running stats apply anyway.
+        batched = latent.size(0) > 1 or not self.training
+        if batched:
+            x = self.norm_in(x)
+        x = self.relu(x)
         x = F.adaptive_avg_pool2d(x, self.pool)
         x = x.contiguous().view(x.size(0), -1).unsqueeze(0)   # (seq=1, batch, feat)
 
         out, state = self.lstm(x, state)
         out = out.squeeze(0)
-        # BatchNorm needs more than one sample; a single-row batch happens during
-        # search, where eval-mode running stats apply anyway.
-        if out.size(0) > 1 or not self.training:
-            out = self.norm(out)
-        prefix_logits = self.fc(out)
+        if batched:
+            out = self.norm_out(out)
+        prefix_logits = self.fc(self.relu(out))
 
         support = create_support(self.support_size, self.num_bins, latent.device)
         prefix = scalar_from_logits(prefix_logits, support)

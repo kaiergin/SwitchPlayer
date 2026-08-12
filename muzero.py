@@ -270,9 +270,37 @@ def masked_policy_loss(policy_logits, target_policy, mask):
     return (per_position * mask).sum() / mask.sum().clamp(min=1.0)
 
 
+def to_cpu(obj):
+    """Recursively move every tensor in a nested structure to CPU.
+
+    Optimiser state_dicts nest their tensors two levels down, under
+    state[param_id][key], so a flat isinstance check over the top level finds
+    none of them. That was harmless only because SGD without momentum keeps no
+    state at all; with Adam it would ship exp_avg and exp_avg_sq across Ray
+    still resident on the GPU.
+    """
+    if isinstance(obj, torch.Tensor):
+        return obj.cpu()
+    if isinstance(obj, dict):
+        return {k: to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(to_cpu(v) for v in obj)
+    return obj
+
+
 def get_state_dict(network):
-    return {k: (v.cpu() if isinstance(v, torch.Tensor) else v)
-        for k, v in network.state_dict().items()}
+    return to_cpu(network.state_dict())
+
+
+LEARNING_RATE = 1e-3
+
+def make_optimizer(params):
+    """Adam. The repo moved Adam -> SGD without a recorded reason, and the one
+    plausible cause -- get_state_dict shipping Adam's GPU-resident state through
+    Ray -- is fixed above. SGD at 1e-4 was slow enough that the value prefix head
+    could not converge inside a benchmark run (benchmarks/RESULTS.md).
+    """
+    return optim.Adam(params, lr=LEARNING_RATE)
 
 LOG_DIR = "logs"
 
@@ -393,10 +421,10 @@ class NetworkHelper:
                                                hidden_size=VALUE_PREFIX_HIDDEN,
                                                support_size=VALUE_PREFIX_SUPPORT,
                                                num_bins=VALUE_PREFIX_BINS).to(device)
-        self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
-        self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
-        self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
-        self.prefix_optimizer = optim.SGD(self.value_prefix.parameters(), lr=1e-4)
+        self.rep_optimizer = make_optimizer(self.representation.parameters())
+        self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
+        self.pred_optimizer = make_optimizer(self.prediction.parameters())
+        self.prefix_optimizer = make_optimizer(self.value_prefix.parameters())
         self.training_steps = 0
         self.logger = configure_actor_logger("NetworkHelper", enable_logging)
         self.load_checkpoint(checkpoint_path)
@@ -910,10 +938,10 @@ class TrainingHelper:
                                                hidden_size=VALUE_PREFIX_HIDDEN,
                                                support_size=VALUE_PREFIX_SUPPORT,
                                                num_bins=VALUE_PREFIX_BINS).to(device)
-        self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
-        self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
-        self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
-        self.prefix_optimizer = optim.SGD(self.value_prefix.parameters(), lr=1e-4)
+        self.rep_optimizer = make_optimizer(self.representation.parameters())
+        self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
+        self.pred_optimizer = make_optimizer(self.prediction.parameters())
+        self.prefix_optimizer = make_optimizer(self.value_prefix.parameters())
         self.logger = configure_actor_logger("TrainingHelper", enable_logging)
         self.logger.info("Initialized TrainingHelper logger.")
 

@@ -139,58 +139,64 @@ overhead is a larger share. Absolute throughput is far higher regardless.
   roughly every 8.5 s, which is frequent for a `torch.save` of the full model
   plus optimiser state.
 
-## Value encoding: the h transform
+## Value encoding and the value prefix
 
 `python benchmarks/bench.py prefix` trains a per-step reward head and an LSTM
-value-prefix head on the same trunk, same batches, same 3000 steps, then
-compares prefix prediction error at each unroll depth on held-out trajectories.
+value-prefix head on the same trunk, same batches, same steps, then compares
+prefix prediction error at each unroll depth on held-out trajectories.
 
-### h() is a large win, for both heads
+### Read this section with the control column
 
-Prefix MAE at unroll depth 5, per-step head:
+The harness now reports the MAE of the trivial **always-predict-zero**
+predictor. It was added after two successive runs produced confident-looking
+results that turned out to be artifacts, and it immediately invalidated both.
 
-| Encoding | MAE @ depth 5 |
-|---|---:|
-| Linear support, 51 bins | 8.08 |
-| **h() + bins scaled to the transformed range** | **1.63** |
+20 episodes, action repeat 8 (0.53 reward/step), Adam at 1e-3, 4000 steps:
 
-A 5x improvement from the encoding alone, no architectural change. With a linear
-support the bins were 40 wide while realistic prefixes were 0-5, so every target
-landed in one bin. Under h() with ~0.5-wide bins in transformed space, the first
-bin covers raw 0-1.25 while the support still reaches the worst case.
+| depth | predict-0 | per-step | LSTM | per-step vs 0 | LSTM vs 0 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.79 | 1.01 | 0.79 | 1.27 | 1.00 |
+| 3 | 1.99 | 2.38 | 1.99 | 1.20 | 1.00 |
+| 5 | 3.33 | 3.70 | 3.33 | 1.11 | 1.00 |
 
-### The value prefix is NOT yet shown to help here
+**Neither head beats the trivial predictor at any depth.** The LSTM sits at
+exactly 1.00 because it collapsed to predicting zero — its decoded output reads
+`-0.00` throughout training. The per-step head appears to have converged to the
+mean reward (~0.53/step), which loses to the mode (zero) on MAE because the
+reward distribution is sparse. Both are constants. Neither has learned
+state-dependent structure.
 
-With both heads properly resolved, per-step wins at every depth:
+Any ratio between the two heads is therefore noise, and a head that collapses to
+a constant will look like it "won".
 
-| depth | true | per-step MAE | LSTM MAE |
-|---:|---:|---:|---:|
-| 1 | 0.27 | **0.28** | 24.38 |
-| 3 | 0.86 | **0.88** | 1.15 |
-| 5 | 1.57 | **1.63** | 2.97 |
+### Two corrections to earlier readings of this benchmark
 
-Extended to depth 10, the ratio peaks at 0.88x around depth 5 and falls again —
-there is no crossover, the LSTM never overtakes.
+1. **The value prefix has never been shown to beat per-step here.** An early run
+   reported 3.30x in its favour; that run gave the prefix head a hand-scaled
+   support while leaving the per-step head on a broken linear one, so it
+   measured the encoding, not the architecture.
+2. **The "h() gives a 5x win" figure was overstated.** Per-step MAE at depth 5
+   did go from 8.08 to 1.63, but against a predict-zero baseline of ~1.26 that
+   is a move from *6.4x worse than a constant* to *roughly equal to a constant*.
+   h() removed a pathology. It did not make the head useful.
 
-**An earlier run appeared to show the LSTM winning 3.30x at depth 5. That was
-confounded**: the prefix head had a hand-scaled support while the per-step head
-was still on the broken linear one. It measured the encoding fix, not the
-architecture.
+h() is still worth keeping on its own merits — signed support (negatives were
+previously unrepresentable), correct round-trip, and resolution that no longer
+collapses realistic values into one bin. Those are verified by
+`tests/test_scalar_categorical.py`, not by this benchmark.
 
-What survives is the error-growth asymmetry — over depth 1 to 10, per-step error
-grows 9.61x while the LSTM's *shrinks* 0.28x, which is the direction state
-aliasing predicts. But the LSTM starts from a bad enough baseline that the trend
-never pays off within a 10-step unroll.
+### Why nothing learns here
 
-Likely explanations, none yet tested:
+Untested, in the order worth checking:
 
-- **Undertrained.** The LSTM has far more parameters and a harder optimisation
-  than a conv head, and 3000 steps of SGD at lr 1e-4 is very little. Its loss is
-  still noisy at the end of training while the per-step head has settled.
-- **Almost no signal.** Under a random policy the true prefix is 0.17-1.79 over
-  ten steps; there is very little reward to predict. EfficientZero's result is on
-  a training agent that actually scores.
-- **Unverified architecture.** Hidden size, pooling and BatchNorm placement were
-  chosen here, not taken from the reference implementation.
+- **Dataset scale.** ~4,000 transitions from a random policy. EfficientZero's
+  results are on 100k environment steps with a training agent.
+- **Task difficulty from these observations.** Predicting whether a pellet is
+  eaten 1-5 steps ahead, from an 84x84 downsample, may simply not be learnable
+  at this data scale.
+- **Loss competition.** The trunk is pulled by policy, value, reward, prefix and
+  latent-consistency losses at once, unweighted and unscaled — see ROADMAP
+  priority 4.
 
-Do not treat the value prefix as validated on this evidence.
+Until a head beats the control, this benchmark cannot discriminate between the
+two architectures. Do not draw conclusions from it about the value prefix.

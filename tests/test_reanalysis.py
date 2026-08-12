@@ -209,10 +209,10 @@ def build_trainer():
                                         hidden_size=64,
                                         support_size=muzero.VALUE_PREFIX_SUPPORT,
                                         num_bins=51)
-    t.prefix_optimizer = optim.SGD(t.value_prefix.parameters(), lr=1e-4)
-    t.rep_optimizer = optim.SGD(t.representation.parameters(), lr=1e-4)
-    t.dyn_optimizer = optim.SGD(t.dynamics.parameters(), lr=1e-4)
-    t.pred_optimizer = optim.SGD(t.prediction.parameters(), lr=1e-4)
+    t.prefix_optimizer = muzero.make_optimizer(t.value_prefix.parameters())
+    t.rep_optimizer = muzero.make_optimizer(t.representation.parameters())
+    t.dyn_optimizer = muzero.make_optimizer(t.dynamics.parameters())
+    t.pred_optimizer = muzero.make_optimizer(t.prediction.parameters())
     return t
 
 
