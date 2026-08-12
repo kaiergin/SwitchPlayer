@@ -185,3 +185,32 @@ def test_eval_obs_latents_are_detached(helper):
         assert latent.grad_fn is None and not latent.requires_grad
         assert policy.shape == (ACTIONS,)
         assert np.ndim(value) == 0, "expanded_value must be a scalar, not a tensor"
+
+
+def test_searching_the_same_index_twice_is_safe(helper):
+    """Regression: the root's latent was released with `del node.latent`, so a
+    second search on the same index raised AttributeError. Re-analysing a
+    stored trajectory means exactly that, and it is on the roadmap."""
+    helper.create_tree_from_game(fake_trajectory(6))
+    first, _ = run_search(helper, index=0)
+    second, _ = run_search(helper, index=0)   # must not raise
+    assert first.sum() == pytest.approx(1.0)
+    assert second.sum() == pytest.approx(1.0)
+
+
+def test_root_latent_is_released_after_search(helper):
+    """The memory win still has to happen -- one latent per timestep held for a
+    whole episode is what the OOM work was about."""
+    helper.create_tree_from_game(fake_trajectory(6))
+    root = helper.current_trajectory[0]
+    assert root.latent is not None
+    run_search(helper, index=0)
+    assert root.latent is None
+
+
+def test_expansion_skips_nodes_with_released_latents(helper):
+    helper.create_tree_from_game(fake_trajectory(6))
+    node = helper.current_trajectory[2]
+    node.latent = None
+    helper.batch_expand_nodes([node])   # must not raise
+    assert not node.is_expanded

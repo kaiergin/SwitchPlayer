@@ -536,9 +536,11 @@ class MCTSHelper:
         batch_size: number of nodes to process in a single batch. (actual batch size is batch_size*self.action_space)
         """
         # Terminal nodes have no successors, and re-expanding an expanded node
-        # would discard its accumulated statistics. Filter both out before the
+        # would discard its accumulated statistics. Nodes whose latent has been
+        # released cannot be expanded at all. Filter all three out before the
         # network call rather than after, so we don't pay for them.
-        nodes = [n for n in nodes if not n.done and not n.is_expanded]
+        nodes = [n for n in nodes
+                 if not n.done and not n.is_expanded and n.latent is not None]
         if not nodes:
             return
 
@@ -710,7 +712,12 @@ class MCTSHelper:
         root_value = node.q_value()
         for action in children_to_drop:
             del node.children[action]
-        del node.latent
+        # Release the latent: the search is finished with it, and holding one
+        # per timestep for a whole episode is the memory cost this avoids.
+        # Assigning None rather than `del` keeps the attribute defined, so
+        # searching the same index twice -- which is what re-analysing a stored
+        # trajectory means -- raises nothing.
+        node.latent = None
         return improved_policy, root_value
 
     # -----------------------------
