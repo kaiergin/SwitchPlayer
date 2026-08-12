@@ -70,12 +70,15 @@ implemented here yet. Verify details against the papers before building.
   already resembles.
 
 ### To do list
+
+See **[ROADMAP.md](ROADMAP.md)** for the prioritised plan and the reasoning
+behind it. Current priority is EfficientZero's end-to-end value prefix.
+
+Unsequenced items:
 * Fill replay buffer with random data
 * Mult-step reward?
 * Hyperparameter Tuning -- c_puct and the search budget both need re-tuning now
   that MCTS values are min-max normalised
-* Rate-limit self-play to the target frame rate so the testbed reproduces the
-  real-time constraint
 
 ### Custom ideas
 * Heavy reward discounting and small trajectory with no bootstrapped value as initial agent
