@@ -11,9 +11,8 @@ opencv-python>=4.8
 gymnasium>=0.29
 ale-py>=0.9
 
-# Diagnostics (memory.py, muzero.py)
+# Diagnostics (memory.py)
 psutil
-pympler
 
 # ---------------------------------------------------------------------------
 # Tooling and scratch scripts

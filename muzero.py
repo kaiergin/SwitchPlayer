@@ -5,13 +5,7 @@ import gymnasium as gym
 import numpy as np
 import cv2
 import random
-import threading
-import concurrent.futures
 import ray
-import copy
-from pympler import asizeof
-import pickle
-import queue
 from collections import deque
 import scalar_categorical
 from memory import print_memory_diagnostics
@@ -19,7 +13,6 @@ from networks import DynamicsNetwork, PredictionNetwork, RepresentationNetwork
 import logging
 import os
 import uuid
-import time
 import asyncio
 import sys
 from EpisodicLifeEnv import EpisodicLifeEnv
@@ -165,6 +158,33 @@ def get_state_dict(network):
     return {k: (v.cpu() if isinstance(v, torch.Tensor) else v)
         for k, v in network.state_dict().items()}
 
+LOG_DIR = "logs"
+
+def configure_actor_logger(name, enable_logging=False, log_dir=LOG_DIR):
+    """Build a logger for a Ray actor, writing to logs/<name>.log.
+
+    Each actor runs in its own process with its own stdout, and the console
+    handler here used to be opt-in, so with default settings a failure inside
+    an actor left no trace anywhere at all. The file handler is unconditional
+    so there is always somewhere to look afterwards.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    if logger.handlers:
+        return logger
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    os.makedirs(log_dir, exist_ok=True)
+    file_handler = logging.FileHandler(os.path.join(log_dir, f"{name}.log"))
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    if enable_logging:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+    return logger
+
 @ray.remote(max_concurrency=8, num_cpus=2)
 class StorageHelper:
     def __init__(self, max_replay=MAX_REPLAY, max_gameplay=MAX_GAMEPLAY):
@@ -259,19 +279,10 @@ class NetworkHelper:
         self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
         self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
         self.training_steps = 0
-        self.configure_logger(enable_logging)
+        self.logger = configure_actor_logger("NetworkHelper", enable_logging)
         self.load_checkpoint(checkpoint_path)
         self.version = uuid.uuid4()
 
-    def configure_logger(self, enable_logging):
-        # Create and configure a logger for this actor
-        self.logger = logging.getLogger("NetworkHelper")
-        self.logger.setLevel(logging.DEBUG)
-        if enable_logging:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(logging.DEBUG)
-            self.logger.addHandler(console_handler)
-    
     def save_checkpoint(self, training_steps, checkpoint_path = 'checkpoint.pth'):
         self.training_steps = training_steps
         checkpoint = {
@@ -401,16 +412,7 @@ class MCTSHelper:
         self.action_space = action_space
         self.selection_results = asyncio.Queue()
         self.min_max_stats = MinMaxStats()  # replaced per search in run_full_mcts
-        self.configure_logger(name, enable_logging)
-
-    def configure_logger(self, name, enable_logging):
-        # Create and configure a logger for this actor
-        self.logger = logging.getLogger(name)
-        self.logger.setLevel(logging.DEBUG)
-        if enable_logging:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(logging.DEBUG)
-            self.logger.addHandler(console_handler)
+        self.logger = configure_actor_logger(name, enable_logging)
         self.logger.info("Initialized MCTSHelper logger.")
 
     async def setup(self):
@@ -485,8 +487,10 @@ class MCTSHelper:
                         trajectory.append(mcts_sample)
                 
                 await self.storage_manager.append_replay_buffer(trajectory)
-        except Exception as e:
-            self.logger.error("Exception thrown in MCTS_process %s", e)
+        except Exception:
+            # exception() rather than error(): this is the only record of why
+            # the actor stopped, and "%s" on the exception drops the traceback.
+            self.logger.exception("MCTS_process failed")
         self.logger.info("MCTS process exiting")
     
     # -----------------------------
@@ -725,21 +729,12 @@ class TrainingHelper:
         self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
         self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
         self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
-        self.configure_logger(enable_logging)
-    
+        self.logger = configure_actor_logger("TrainingHelper", enable_logging)
+        self.logger.info("Initialized TrainingHelper logger.")
+
     async def setup(self):
         await self.storage_manager.setup()
         await self.load_networks()
-
-    def configure_logger(self, enable_logging):
-        # Create and configure a logger for this actor
-        self.logger = logging.getLogger("TrainingHelper")
-        self.logger.setLevel(logging.DEBUG)
-        if enable_logging:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(logging.DEBUG)
-            self.logger.addHandler(console_handler)
-        self.logger.info("Initialized TrainingHelper logger.")
     
     async def load_networks(self):
         representation_state_dict, dynamics_state_dict, prediction_state_dict,\
@@ -854,8 +849,8 @@ class TrainingHelper:
                 if self.training_steps % 100 == 0 and self.training_steps > 1:
                     self.logger.info(f"Saving network at {self.training_steps} training steps")
                     await self.save_networks()
-        except Exception as e:
-            self.logger.error("Exception thrown in training_process %s", e)
+        except Exception:
+            self.logger.exception("training_process failed")
         self.logger.info("Training process exiting")
     
     async def prepare_batch(self, replay_buffer, batch_size, unroll_steps, action_space):
@@ -951,23 +946,13 @@ class MuZeroAgent:
         self.storage_manager = StorageManager(storage_ref, update_replay=False)
         self.device = device
         self.action_space = action_space
-        self.revised_buffer = queue.Queue()
         self.training_steps = 0
-        self.configure_logger(enable_logging)
-    
+        self.logger = configure_actor_logger("MuZeroAgent", enable_logging)
+        self.logger.info("Initialized actor logger.")
+
     async def setup(self):
         await self.network_manager.setup()
         await self.storage_manager.setup()
-
-    def configure_logger(self, enable_logging):
-        # Create and configure a logger for this actor
-        self.logger = logging.getLogger("MuZeroAgent")
-        self.logger.setLevel(logging.DEBUG)
-        if enable_logging:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(logging.DEBUG)
-            self.logger.addHandler(console_handler)
-        self.logger.info("Initialized actor logger.")
 
     async def gameplay_process(self):
         try:
@@ -1020,8 +1005,8 @@ class MuZeroAgent:
                 game_trajectory.append((frame_stack, 0, prev_reward))
 
                 await self.storage_manager.append_gameplay_buffer((game_trajectory, episode_reward))
-        except Exception as e:
-            self.logger.error("Exception thrown in gameplay_process %s", e)
+        except Exception:
+            self.logger.exception("gameplay_process failed")
         self.logger.info("Gameplay process exiting")
 
 
