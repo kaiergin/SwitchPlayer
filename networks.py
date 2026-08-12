@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from scalar_categorical import create_support, scalar_from_logits
+
 # -----------------------------
 # Basic Residual Block
 # -----------------------------
@@ -59,20 +61,10 @@ class RepresentationNetwork(nn.Module):
         x = self.block4(x)
         return x  # latent state of shape (batch, latent_channels, H', W')
 
-# Helper functions to create the support vector and convert logits to a scalar.
-def create_support(support_size, num_bins, device):
-    """
-    Creates a support vector from -support_size to support_size with num_bins discrete values.
-    """
-    return torch.linspace(0, support_size, num_bins, device=device)
-
-def scalar_from_logits(logits, support):
-    """
-    Converts categorical logits into a scalar by applying softmax, then computing the expected value.
-    """
-    probs = F.softmax(logits, dim=1)
-    expected_value = torch.sum(probs * support.unsqueeze(0).expand_as(probs), dim=1, keepdim=True)
-    return expected_value
+# The support and the encode/decode pair live in scalar_categorical, so the
+# transform applied to targets and the one undone on predictions cannot drift
+# apart. support_size is a half-width in TRANSFORMED space; decoded scalars come
+# back in raw units.
 
 # PredictionNetwork with categorical value representation.
 # NOTE: the policy head returns raw logits. Callers are responsible for

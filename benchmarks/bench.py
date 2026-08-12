@@ -254,7 +254,7 @@ def collect_trajectories(episodes=6, cap=400):
     return trajectories
 
 
-def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None, prefix_support=None):
+def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None, prefix_support=None, unroll=None):
     """Value-prefix prediction error as a function of unroll depth.
 
     The direct test of EfficientZero's claim. Both heads live on the same trunk
@@ -269,6 +269,7 @@ def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
     the truth and the errors accumulate through the sum.
     """
     discount = muzero.DISCOUNT if discount is None else discount
+    K = muzero.UNROLL_STEPS if unroll is None else unroll
     print(f"\n=== value prefix vs per-step reward (gamma={discount}) ===")
     print(f"  collecting trajectories...", flush=True)
     trajectories = collect_trajectories()
@@ -284,7 +285,7 @@ def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
     marks = max(train_steps // 5, 1)
     for step in range(train_steps):
         batch = asyncio.run(trainer.prepare_batch(train_set, batch_size,
-                                                  muzero.UNROLL_STEPS, ACTIONS))
+                                                  K, ACTIONS))
         loss = asyncio.run(trainer.train_step(batch))
         if step % marks == 0 or step == train_steps - 1:
             # Decoded prefix at the deepest step, so we can see whether the head
@@ -294,7 +295,7 @@ def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
                 lat = trainer.representation(
                     torch.tensor(batch["obs"][:, 0], dtype=torch.float32, device=DEVICE) / 255.0)
                 st = trainer.value_prefix.initial_state(lat.size(0), DEVICE)
-                for i in range(muzero.UNROLL_STEPS):
+                for i in range(K):
                     lat, _, _ = trainer.dynamics(
                         lat, torch.tensor(batch["actions"][:, i], dtype=torch.long, device=DEVICE))
                     pfx, _, st = trainer.value_prefix(lat, st)
@@ -304,7 +305,6 @@ def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
     print(f"  trained in {time.perf_counter() - t0:.1f}s")
 
     # ---- evaluate on held-out trajectories --------------------------------
-    K = muzero.UNROLL_STEPS
     per_step_err = np.zeros(K + 1)
     prefix_err = np.zeros(K + 1)
     scale = np.zeros(K + 1)
@@ -522,6 +522,8 @@ def main():
                     help="training steps for the prefix suite")
     ap.add_argument("--prefix-support", type=float, default=None,
                     help="override the value-prefix support ceiling (default: VALUE_PREFIX_SUPPORT)")
+    ap.add_argument("--unroll", type=int, default=None,
+                    help="unroll depth for the prefix suite (default: UNROLL_STEPS)")
     ap.add_argument("--gamma", type=float, default=None,
                     help="discount for the prefix suite (default: muzero.DISCOUNT)")
     ap.add_argument("--stride", type=int, default=None,
@@ -535,7 +537,8 @@ def main():
     if args.suite in ("reanalysis", "all"):
         bench_reanalysis()
     if args.suite in ("prefix", "all"):
-        bench_prefix(train_steps=args.train_steps, discount=args.gamma, prefix_support=args.prefix_support)
+        bench_prefix(train_steps=args.train_steps, discount=args.gamma,
+                     prefix_support=args.prefix_support, unroll=args.unroll)
     if args.suite in ("startup", "all"):
         bench_startup()
     if args.suite in ("actors", "all"):

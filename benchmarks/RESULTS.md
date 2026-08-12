@@ -138,3 +138,59 @@ overhead is a larger share. Absolute throughput is far higher regardless.
 - `train_step` at 11.7 steps/s means the 100-step checkpoint interval fires
   roughly every 8.5 s, which is frequent for a `torch.save` of the full model
   plus optimiser state.
+
+## Value encoding: the h transform
+
+`python benchmarks/bench.py prefix` trains a per-step reward head and an LSTM
+value-prefix head on the same trunk, same batches, same 3000 steps, then
+compares prefix prediction error at each unroll depth on held-out trajectories.
+
+### h() is a large win, for both heads
+
+Prefix MAE at unroll depth 5, per-step head:
+
+| Encoding | MAE @ depth 5 |
+|---|---:|
+| Linear support, 51 bins | 8.08 |
+| **h() + bins scaled to the transformed range** | **1.63** |
+
+A 5x improvement from the encoding alone, no architectural change. With a linear
+support the bins were 40 wide while realistic prefixes were 0-5, so every target
+landed in one bin. Under h() with ~0.5-wide bins in transformed space, the first
+bin covers raw 0-1.25 while the support still reaches the worst case.
+
+### The value prefix is NOT yet shown to help here
+
+With both heads properly resolved, per-step wins at every depth:
+
+| depth | true | per-step MAE | LSTM MAE |
+|---:|---:|---:|---:|
+| 1 | 0.27 | **0.28** | 24.38 |
+| 3 | 0.86 | **0.88** | 1.15 |
+| 5 | 1.57 | **1.63** | 2.97 |
+
+Extended to depth 10, the ratio peaks at 0.88x around depth 5 and falls again —
+there is no crossover, the LSTM never overtakes.
+
+**An earlier run appeared to show the LSTM winning 3.30x at depth 5. That was
+confounded**: the prefix head had a hand-scaled support while the per-step head
+was still on the broken linear one. It measured the encoding fix, not the
+architecture.
+
+What survives is the error-growth asymmetry — over depth 1 to 10, per-step error
+grows 9.61x while the LSTM's *shrinks* 0.28x, which is the direction state
+aliasing predicts. But the LSTM starts from a bad enough baseline that the trend
+never pays off within a 10-step unroll.
+
+Likely explanations, none yet tested:
+
+- **Undertrained.** The LSTM has far more parameters and a harder optimisation
+  than a conv head, and 3000 steps of SGD at lr 1e-4 is very little. Its loss is
+  still noisy at the end of training while the per-step head has settled.
+- **Almost no signal.** Under a random policy the true prefix is 0.17-1.79 over
+  ten steps; there is very little reward to predict. EfficientZero's result is on
+  a training agent that actually scores.
+- **Unverified architecture.** Hidden size, pooling and BatchNorm placement were
+  chosen here, not taken from the reference implementation.
+
+Do not treat the value prefix as validated on this evidence.

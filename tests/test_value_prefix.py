@@ -12,8 +12,9 @@ import pytest
 import torch
 
 import muzero
-from muzero import (DISCOUNT, IMAGE_RESHAPE, LATENT_CHANNELS, NUM_BINS, REWARD_CLIP,
-                    UNROLL_STEPS, VALUE_PREFIX_SUPPORT, discounted_prefix_targets)
+from muzero import (DISCOUNT, IMAGE_RESHAPE, LATENT_CHANNELS, REWARD_CLIP, UNROLL_STEPS,
+                    VALUE_PREFIX_BINS, VALUE_PREFIX_CEILING, VALUE_PREFIX_SUPPORT,
+                    discounted_prefix_targets)
 from networks import ValuePrefixNetwork
 from scalar_categorical import scalar_to_categorical_batch
 
@@ -28,7 +29,7 @@ def latents(batch=2):
 @pytest.fixture
 def prefix_net():
     return ValuePrefixNetwork(latent_channels=LATENT_CHANNELS, hidden_size=64,
-                              support_size=VALUE_PREFIX_SUPPORT, num_bins=NUM_BINS)
+                              support_size=VALUE_PREFIX_SUPPORT, num_bins=VALUE_PREFIX_BINS)
 
 
 # --------------------------------------------------------------------------
@@ -86,10 +87,13 @@ def test_low_discount_collapses_the_prefix_onto_early_steps():
 # Support sizing -- the trap flagged in ROADMAP.md
 # --------------------------------------------------------------------------
 def test_support_covers_a_full_unroll_of_clipped_rewards():
-    """Regression guard. The prefix is a SUM, so sizing its support like a single
-    reward (400) would clamp large prefixes to the top bin. Before 0ad73607 that
-    produced an all-zero target and no gradient at all."""
-    assert VALUE_PREFIX_SUPPORT >= REWARD_CLIP * UNROLL_STEPS
+    """Regression guard. The prefix is a SUM, so a ceiling sized like a single
+    reward would clamp large prefixes. Supports are half-widths in h space now,
+    so the check is on the raw ceiling they are derived from."""
+    assert VALUE_PREFIX_CEILING >= REWARD_CLIP * UNROLL_STEPS
+    assert VALUE_PREFIX_SUPPORT == pytest.approx(
+        float(torch.sign(torch.tensor(1.0)) * (torch.sqrt(torch.tensor(VALUE_PREFIX_CEILING + 1.0)) - 1)
+              + 0.001 * VALUE_PREFIX_CEILING), rel=1e-4)
 
 
 @pytest.mark.parametrize("discount", [0.5, 0.9, 0.997, 1.0])
@@ -98,18 +102,20 @@ def test_worst_case_prefix_still_projects_to_full_mass(discount):
     prefix reachable -- must still land inside the support."""
     rewards = torch.full((1, UNROLL_STEPS + 1), float(REWARD_CLIP))
     target = discounted_prefix_targets(rewards, discount=discount)
-    dist = scalar_to_categorical_batch(target, VALUE_PREFIX_SUPPORT, NUM_BINS, CPU)
+    dist = scalar_to_categorical_batch(target, VALUE_PREFIX_SUPPORT, VALUE_PREFIX_BINS, CPU)
     assert torch.allclose(dist.sum(-1), torch.ones(1, UNROLL_STEPS + 1))
-    assert target.max().item() <= VALUE_PREFIX_SUPPORT
+    assert target.max().item() <= VALUE_PREFIX_CEILING
 
 
 def test_undersized_support_would_be_caught():
-    """Shows the failure this guards against: sized like a single reward, the
-    worst-case prefix saturates the ceiling and several steps collapse onto the
-    same top bin."""
+    """Shows the failure this guards against: a support sized for one reward
+    saturates once the prefix accumulates, so several unroll steps collapse onto
+    the same top bin and become indistinguishable."""
+    from scalar_categorical import support_for
     rewards = torch.full((1, UNROLL_STEPS + 1), float(REWARD_CLIP))
     target = discounted_prefix_targets(rewards, discount=1.0)
-    dist = scalar_to_categorical_batch(target, REWARD_CLIP, NUM_BINS, CPU)
+    dist = scalar_to_categorical_batch(target, support_for(REWARD_CLIP),
+                                       VALUE_PREFIX_BINS, CPU)
     saturated = (dist[0, :, -1] > 0.99).sum().item()
     assert saturated >= 3, "undersized support should crush several steps together"
 
@@ -122,7 +128,7 @@ def test_forward_shapes(prefix_net):
     state = prefix_net.initial_state(2, CPU)
     prefix, logits, state = prefix_net(latents(2), state)
     assert prefix.shape == (2, 1)
-    assert logits.shape == (2, NUM_BINS)
+    assert logits.shape == (2, VALUE_PREFIX_BINS)
     assert state[0].shape == (1, 2, 64) and state[1].shape == (1, 2, 64)
 
 
@@ -165,7 +171,8 @@ def test_scalar_decodes_inside_the_support(prefix_net):
     prefix_net.eval()
     with torch.no_grad():
         prefix, _, _ = prefix_net(latents(4), prefix_net.initial_state(4, CPU))
-    assert (prefix >= 0).all() and (prefix <= VALUE_PREFIX_SUPPORT).all()
+    # Signed support now, so a randomly initialised head may predict negatives.
+    assert (prefix.abs() <= VALUE_PREFIX_CEILING * 1.01).all()
 
 
 def test_gradients_reach_the_lstm(prefix_net):
@@ -190,7 +197,7 @@ def test_train_step_trains_the_prefix_head():
     assert any(not torch.equal(b, a) for b, a in zip(before, after)), "prefix head did not train"
 
 
-def test_worst_case_support_wastes_all_resolution_near_zero():
+def test_transform_fixes_the_resolution_that_a_linear_support_loses():
     """The finding from benchmarks/bench.py prefix.
 
     Sizing the support for the worst case (REWARD_CLIP * UNROLL_STEPS) is
@@ -206,11 +213,10 @@ def test_worst_case_support_wastes_all_resolution_near_zero():
     """
     typical = torch.tensor([[0.0, 0.5, 1.0, 2.0, 3.0, 5.0]])
 
-    wide = scalar_to_categorical_batch(typical, VALUE_PREFIX_SUPPORT, NUM_BINS, CPU)
-    bins_used_wide = int((wide.sum(dim=(0, 1)) > 1e-6).sum())
+    transformed = scalar_to_categorical_batch(typical, VALUE_PREFIX_SUPPORT,
+                                              VALUE_PREFIX_BINS, CPU)
+    linear = scalar_to_categorical_batch(typical, VALUE_PREFIX_CEILING,
+                                         VALUE_PREFIX_BINS, CPU, transform=False)
 
-    narrow = scalar_to_categorical_batch(typical, 32, NUM_BINS, CPU)
-    bins_used_narrow = int((narrow.sum(dim=(0, 1)) > 1e-6).sum())
-
-    assert bins_used_wide <= 2, "worst-case support collapses realistic values into one bin"
-    assert bins_used_narrow >= 5, "a data-scaled support resolves them"
+    assert int((linear.sum(dim=(0, 1)) > 1e-6).sum()) <= 2,         "a linear support of the same ceiling collapses these into one bin"
+    assert int((transformed.sum(dim=(0, 1)) > 1e-6).sum()) >= 4,         "h() plus scaled bins must resolve them"

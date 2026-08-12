@@ -42,13 +42,40 @@ UNROLL_STEPS = 5
 # value prefix exists to fix, so a low value will understate that change.
 DISCOUNT = 0.997
 REWARD_CLIP = 400
-# The value prefix is a discounted SUM over UNROLL_STEPS rewards, so its support
-# has to cover that sum rather than a single reward. REWARD_CLIP * UNROLL_STEPS
-# is a safe ceiling for any DISCOUNT <= 1. Undersizing it clamps large prefixes
-# to the top bin, which is the all-zero-target hole fixed in 0ad73607.
-VALUE_PREFIX_SUPPORT = REWARD_CLIP * UNROLL_STEPS
+# Raw-unit ceilings. The value prefix is a discounted SUM over UNROLL_STEPS
+# rewards, so it needs a ceiling that covers the sum rather than one reward.
+VALUE_PREFIX_CEILING = REWARD_CLIP * UNROLL_STEPS
+VALUE_CEILING = 5000
+# Supports are half-widths in h-TRANSFORMED space, derived from those ceilings.
+# h() compresses hard -- a raw 2000 becomes ~46 -- which is what lets a fixed
+# bin count cover the worst case AND still resolve values near zero. With a
+# linear support the bins were 40 wide while realistic prefixes were 0-5, so
+# every target landed in bin 0 and the head could not train (measured in
+# benchmarks/RESULTS.md).
+REWARD_SUPPORT = scalar_categorical.support_for(REWARD_CLIP)
+VALUE_PREFIX_SUPPORT = scalar_categorical.support_for(VALUE_PREFIX_CEILING)
+VALUE_SUPPORT = scalar_categorical.support_for(VALUE_CEILING)
+
+# Target bin width in transformed space. h() shrinks the range but not the bin
+# COUNT, so a fixed 51 bins still left 1.8-wide bins over the prefix support --
+# raw 0 to 7 in one bin, against realistic prefixes of 0-5. Bins have to scale
+# with the transformed range. MuZero uses 601 bins over +/-300, i.e. width 1.0;
+# 0.5 buys finer resolution near zero, which is where the rewards actually are.
+H_BIN_WIDTH = 0.5
+
+def bins_for(support):
+    """Odd bin count giving ~H_BIN_WIDTH resolution across +/- support.
+
+    Odd so the centre bin sits exactly on zero -- a value of zero should encode
+    as one bin, not split across two.
+    """
+    n = int(2 * support / H_BIN_WIDTH) + 1
+    return n if n % 2 == 1 else n + 1
+
+REWARD_BINS = bins_for(REWARD_SUPPORT)
+VALUE_PREFIX_BINS = bins_for(VALUE_PREFIX_SUPPORT)
+VALUE_BINS = bins_for(VALUE_SUPPORT)
 VALUE_PREFIX_HIDDEN = 512
-NUM_BINS = 51
 # Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
 # them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
 # slower than self-play generates data even with two MCTS actors, so the
@@ -356,16 +383,16 @@ class NetworkHelper:
                                                     latent_channels=LATENT_CHANNELS).to(device)
         self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
                                         action_space=action_space,
-                                        support_size=400,
-                                        num_bins=51).to(device)
+                                        support_size=REWARD_SUPPORT,
+                                        num_bins=REWARD_BINS).to(device)
         self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=2000,
-                                            num_bins=51).to(device)
+                                            support_size=VALUE_SUPPORT,
+                                            num_bins=VALUE_BINS).to(device)
         self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                                hidden_size=VALUE_PREFIX_HIDDEN,
                                                support_size=VALUE_PREFIX_SUPPORT,
-                                               num_bins=NUM_BINS).to(device)
+                                               num_bins=VALUE_PREFIX_BINS).to(device)
         self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
         self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
         self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)
@@ -461,17 +488,17 @@ class NetworkManager:
                                                     latent_channels=LATENT_CHANNELS).to(device)
         self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=2000,
-                                            num_bins=51).to(device)
+                                            support_size=VALUE_SUPPORT,
+                                            num_bins=VALUE_BINS).to(device)
         if self.load_dynamics:
             self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=REWARD_CLIP,
-                                            num_bins=NUM_BINS).to(device)
+                                            support_size=REWARD_SUPPORT,
+                                            num_bins=REWARD_BINS).to(device)
             self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                                    hidden_size=VALUE_PREFIX_HIDDEN,
                                                    support_size=VALUE_PREFIX_SUPPORT,
-                                                   num_bins=NUM_BINS).to(device)
+                                                   num_bins=VALUE_PREFIX_BINS).to(device)
             
 
     async def setup(self):
@@ -873,16 +900,16 @@ class TrainingHelper:
                                                     latent_channels=LATENT_CHANNELS).to(device)
         self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
                                         action_space=action_space,
-                                        support_size=400,
-                                        num_bins=51).to(device)
+                                        support_size=REWARD_SUPPORT,
+                                        num_bins=REWARD_BINS).to(device)
         self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
                                             action_space=action_space,
-                                            support_size=2000,
-                                            num_bins=51).to(device)
+                                            support_size=VALUE_SUPPORT,
+                                            num_bins=VALUE_BINS).to(device)
         self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                                hidden_size=VALUE_PREFIX_HIDDEN,
                                                support_size=VALUE_PREFIX_SUPPORT,
-                                               num_bins=NUM_BINS).to(device)
+                                               num_bins=VALUE_PREFIX_BINS).to(device)
         self.rep_optimizer = optim.SGD(self.representation.parameters(), lr=1e-4)
         self.dyn_optimizer = optim.SGD(self.dynamics.parameters(), lr=1e-4)
         self.pred_optimizer = optim.SGD(self.prediction.parameters(), lr=1e-4)

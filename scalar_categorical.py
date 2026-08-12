@@ -1,65 +1,117 @@
+"""Encoding scalars (rewards, values, value prefixes) as categorical distributions.
+
+This is the single home for the encode/decode contract. Two pieces:
+
+1. An invertible transform h() that compresses large magnitudes, so a fixed
+   number of bins can cover a wide range while still resolving small values.
+2. A two-hot projection onto a symmetric support in transformed space.
+
+Both directions must stay paired: targets go through h() before projection, and
+predictions come back through h_inverse() after decoding, so everything outside
+this module works in raw units.
+"""
 import torch
-import numpy as np
+import torch.nn.functional as F
 
-def scalar_to_categorical_batch(scalars, support_size, num_bins, device):
+# The linear term in h(). Keeps the transform invertible and stops the gradient
+# vanishing far from the origin.
+H_EPSILON = 0.001
+
+
+def h_transform(x, eps=H_EPSILON):
+    """MuZero's invertible value transform (Pohlen et al. 2018, MuZero appendix F).
+
+        h(x) = sign(x) * (sqrt(|x| + 1) - 1) + eps * x
+
+    Square-root compression, so the useful range grows quadratically with the
+    support while resolution near zero stays fine. h(2000) is about 46, which is
+    why 51 bins can cover a full unroll of clipped rewards and still tell 1
+    apart from 5 -- the resolution failure measured in benchmarks/RESULTS.md,
+    where a linear support left 40-wide bins and every realistic target landed
+    in bin 0.
     """
-    Converts a batch of scalar values into a categorical distribution over a fixed support.
-    
+    return torch.sign(x) * (torch.sqrt(torch.abs(x) + 1.0) - 1.0) + eps * x
+
+
+def h_inverse(x, eps=H_EPSILON):
+    """Exact inverse of h_transform.
+
+    Solving eps*u^2 + u - (1 + eps + |h|) = 0 for u = sqrt(|x| + 1) gives
+
+        |x| = ((sqrt(1 + 4*eps*(|h| + 1 + eps)) - 1) / (2*eps))^2 - 1
+    """
+    root = torch.sqrt(1.0 + 4.0 * eps * (torch.abs(x) + 1.0 + eps))
+    return torch.sign(x) * (((root - 1.0) / (2.0 * eps)) ** 2 - 1.0)
+
+
+def create_support(support_size, num_bins, device):
+    """A symmetric support from -support_size to +support_size, in h-space.
+
+    Symmetric because the old non-negative support made negative values
+    literally unrepresentable -- any negative reward or value clamped to zero,
+    so a head could express "worth little" but never "bad".
+    """
+    return torch.linspace(-support_size, support_size, num_bins, device=device)
+
+
+def scalar_from_logits(logits, support, invert=True):
+    """Decode categorical logits to a scalar, back in raw units.
+
+    Takes the expectation over the support, then undoes h(). Pass invert=False
+    to stay in transformed space (only useful for diagnostics).
+    """
+    probs = F.softmax(logits, dim=1)
+    expected = torch.sum(probs * support.unsqueeze(0).expand_as(probs), dim=1, keepdim=True)
+    return h_inverse(expected) if invert else expected
+
+
+def scalar_to_categorical_batch(scalars, support_size, num_bins, device, transform=True):
+    """Project raw scalars onto a two-hot categorical target.
+
     Args:
-        scalars (torch.Tensor): A tensor of scalar values, shape can be (B,) or (B, unroll_steps).
-        support_size (float): The maximum value of the support (v_max). For non-negative support, v_min is 0.
-        num_bins (int): Number of bins in the support.
-        device: Torch device for creating the target distribution.
-        
+        scalars: raw values, shape (B,) or (B, T).
+        support_size: half-width of the support, in TRANSFORMED space.
+        num_bins: number of bins across [-support_size, +support_size].
+        device: torch device for the target.
+        transform: apply h() first. Leave True unless the input is already
+            transformed.
+
     Returns:
-        torch.Tensor: A tensor of shape (*original_shape, num_bins) representing the target distributions.
+        (*scalars.shape, num_bins), each row summing to 1.
     """
-    v_min = 0.0
-    v_max = support_size
-
-    # Save the original shape (e.g., (B,) or (B, unroll_steps))
     original_shape = scalars.shape
+    scalars = scalars.reshape(-1)
+    if transform:
+        scalars = h_transform(scalars)
 
-    # Flatten the scalars into a 1D tensor.
-    scalars = scalars.view(-1)
+    v_min, v_max = -float(support_size), float(support_size)
     scalars = scalars.clamp(v_min, v_max)
-    
-    # Compute the bin width.
+
     delta = (v_max - v_min) / (num_bins - 1)
-    
-    # Map scalars to continuous indices in the support.
-    indices = (scalars - v_min) / delta  # Shape: (N,)
-    lower_idx = torch.floor(indices).long()  # Shape: (N,)
-    upper_idx = lower_idx + 1  # Shape: (N,)
-    
-    # Compute interpolation weights.
-    upper_weight = indices - lower_idx.float()  # Shape: (N,)
-    lower_weight = 1.0 - upper_weight             # Shape: (N,)
-    
-    # Ensure that the upper index does not exceed num_bins - 1.
+    indices = (scalars - v_min) / delta
+    lower_idx = torch.floor(indices).long()
+    upper_idx = lower_idx + 1
+
+    upper_weight = indices - lower_idx.float()
+    lower_weight = 1.0 - upper_weight
+
+    # Keep the upper index in range. At the very top of the support this makes
+    # it equal the lower index, which is why the scatters below must accumulate.
     upper_idx = torch.where(upper_idx < num_bins, upper_idx, lower_idx)
-    
-    N = scalars.shape[0]
-    target = torch.zeros(N, num_bins, device=device)
-    
-    # scatter_add_, not scatter_: at the top of the support the clamp above
-    # forces upper_idx == lower_idx, and two plain scatters alias -- the second
-    # overwrites the first with upper_weight, which is 0.0 there. That produced
-    # an all-zero "distribution" for any scalar at or above support_size, and
-    # cross-entropy against an all-zero target contributes exactly no gradient.
-    # Since gameplay clips rewards with min(reward, 400) and the reward support
-    # is also 400, every large reward landed in that hole.
+
+    target = torch.zeros(scalars.shape[0], num_bins, device=device)
+
+    # scatter_add_, not scatter_: where the clamp forces upper_idx == lower_idx,
+    # two plain scatters alias and the second overwrites the first's weight of
+    # 1.0 with upper_weight, which is 0.0 there. That produced an all-zero
+    # "distribution" for anything at the edge of the support, and cross-entropy
+    # against all zeros contributes exactly no gradient.
     target.scatter_add_(1, lower_idx.unsqueeze(1), lower_weight.unsqueeze(1))
     target.scatter_add_(1, upper_idx.unsqueeze(1), upper_weight.unsqueeze(1))
-    
-    # Reshape back to the original shape with an added dimension for the bins.
-    target = target.view(*original_shape, num_bins)
-    return target
 
-# The former in-module expected_distribution() helper and its test lived here.
-# They mirrored the implementation line for line -- including the aliasing bug
-# fixed above -- so they would have agreed with the broken behaviour had anyone
-# run them. Coverage moved to tests/test_scalar_categorical.py, which checks
-# independent properties (mass sums to 1, expected value round-trips) rather
-# than comparing against a second copy of the same arithmetic.
+    return target.view(*original_shape, num_bins)
 
+
+def support_for(raw_ceiling):
+    """Half-width of support needed, in h-space, to cover +/- raw_ceiling."""
+    return float(h_transform(torch.tensor(float(raw_ceiling))))
