@@ -4,6 +4,17 @@ RTX 4070 (12 GB, sm_89) · 16 logical cores · Python 3.12.10 · torch 2.13.0+cu
 
 Reproduce with `python benchmarks/bench.py all`. Numbers are medians.
 
+> **Read these against the frame budget, not as throughput.** This is a
+> real-time RL project (see README): the number that decides whether the system
+> works is acting latency per frame — `initial_inference` at **2.24 ms**, about
+> 13% of a 60 fps budget.
+>
+> ALE runs MsPacman at ~4,900 steps/s, roughly **80x real time**. Throughput
+> ratios measured here therefore overstate the pressure on the real system,
+> where self-play is capped at the console's frame rate. The producer/consumer
+> section below is honest about the testbed but should not be read as a
+> statement about live play.
+
 ## Components
 
 | Stage | Median | Throughput |
