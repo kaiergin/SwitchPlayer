@@ -188,7 +188,11 @@ class StorageManager:
     
     async def update_if_needed(self):
         if self.update_replay and not await self.storage_helper.is_replay_up_to_date.remote(self.replay_version):
-            self.replay_version, updates = await self.storage_helper.get_replay_buffer_updates.remote()
+            # The version has to be passed through. Without it the helper falls
+            # into its ValueError branch and ships the entire replay buffer --
+            # potentially gigabytes of frame stacks -- on every single call,
+            # and duplicates entries locally until the deque fills.
+            self.replay_version, updates = await self.storage_helper.get_replay_buffer_updates.remote(self.replay_version)
             self.replay_buffer.extend(updates)
     
     async def append_replay_buffer(self, new_item):
@@ -891,7 +895,9 @@ class TrainingHelper:
 class MuZeroAgent:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False):
         self.network_manager = NetworkManager(network_ref, action_space=action_space, device=device, load_dynamics=False)
-        self.storage_manager = StorageManager(storage_ref)
+        # The agent only ever writes to the gameplay buffer, so it has no reason
+        # to mirror the replay buffer.
+        self.storage_manager = StorageManager(storage_ref, update_replay=False)
         self.device = device
         self.action_space = action_space
         self.revised_buffer = queue.Queue()
@@ -919,6 +925,12 @@ class MuZeroAgent:
             env = gym.make("MsPacman-v4")
             env = EpisodicLifeEnv(env)
             while True:
+                # Refresh weights between episodes. Without this the behaviour
+                # policy stayed frozen at whatever setup() loaded, so self-play
+                # kept generating data from the initial network forever and the
+                # policy improvement loop never closed. (Refreshing per episode
+                # rather than per step keeps acting real-time.)
+                await self.network_manager.update_if_needed()
                 self.logger.debug("Starting new game")
                 obs, info = await asyncio.to_thread(env.reset)
                 preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
