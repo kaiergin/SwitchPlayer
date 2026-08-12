@@ -41,6 +41,10 @@ MAX_REPLAY = 20
 IMAGE_RESHAPE = (84,84)
 STEPS_UNTIL_MCTS = 500
 LATENT_CHANNELS = 64
+# Q is normalised to [0,1] by MinMaxStats before the exploration term is added,
+# so this is on the usual AlphaZero/MuZero scale. It is NOT comparable to the
+# values used before normalisation existed (61.8, then 32).
+C_PUCT = 1.25
 
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
@@ -70,6 +74,30 @@ def add_dirichlet_noise(prior, epsilon=0.25, alpha=0.03):
     noisy_prior = (1 - epsilon) * prior + epsilon * noise
     return noisy_prior
 
+class MinMaxStats:
+    """Tracks the value range seen during one search so Q can be normalised.
+
+    Without this the PUCT exploration term is inert. Q here is a raw discounted
+    return, which for MsPacman runs into the hundreds or thousands, while
+    c_puct * prior * sqrt(N) / (1 + n) is order 10 -- so selection is
+    effectively greedy no matter how c_puct is tuned. Normalising Q into [0,1]
+    puts the two terms on the same scale and makes c_puct mean what it does in
+    the AlphaZero/MuZero papers.
+    """
+
+    def __init__(self):
+        self.maximum = -float('inf')
+        self.minimum = float('inf')
+
+    def update(self, value):
+        self.maximum = max(self.maximum, value)
+        self.minimum = min(self.minimum, value)
+
+    def normalize(self, value):
+        if self.maximum > self.minimum:
+            return (value - self.minimum) / (self.maximum - self.minimum)
+        return value
+
 # -----------------------------
 # MCTS Node Definition
 # -----------------------------
@@ -92,7 +120,13 @@ class MCTSNode:
         self.is_gameplay = is_gameplay
 
     def q_value(self):
-        return self.value_sum / self.visit_count if self.visit_count > 0 else 0.0
+        # Virtual loss counts as a visit contributing zero value -- the standard
+        # "assume the in-flight simulation lost" trick that makes concurrent
+        # simulations diversify. Applying it here rather than subtracting a raw
+        # count from the selection score keeps the penalty on the same scale as
+        # the normalised Q.
+        visits = self.visit_count + self.virtual_loss
+        return self.value_sum / visits if visits > 0 else 0.0
 
 def apply_temperature(visit_counts, temperature):
     """
@@ -366,6 +400,7 @@ class MCTSHelper:
         self.device = device
         self.action_space = action_space
         self.selection_results = asyncio.Queue()
+        self.min_max_stats = MinMaxStats()  # replaced per search in run_full_mcts
         self.configure_logger(name, enable_logging)
 
     def configure_logger(self, name, enable_logging):
@@ -436,7 +471,7 @@ class MCTSHelper:
                         improved_policy, value_estimate = await self.run_full_mcts(idx,
                                                                             sim_batches=MCTS_BATCHES,
                                                                             num_simulations=TOTAL_MCTS_SIMS,
-                                                                            c_puct=32,
+                                                                            c_puct=C_PUCT,
                                                                             discount=0.997,
                                                                             temperature=temperature)
                         # Here we create a training sample using the improved target.
@@ -524,13 +559,15 @@ class MCTSHelper:
     # -----------------------------
     # Backup Phase: Propagate the leaf value up the simulation path.
     # -----------------------------
-    def backup_simulation(self, path, leaf_value, discount=0.997):
+    def backup_simulation(self, path, leaf_value, discount=0.997, min_max_stats=None):
         backup_value = leaf_value
         for n in reversed(path):
             n.visit_count += 1
             n.value_sum += backup_value
-            backup_value = n.reward + discount * backup_value
             n.virtual_loss = 0.0
+            backup_value = n.reward + discount * backup_value
+            if min_max_stats is not None:
+                min_max_stats.update(n.q_value())
 
     def create_tree_from_game(self, game_trajectory):
         prev_node = None
@@ -571,12 +608,14 @@ class MCTSHelper:
             if not node.is_expanded or node.done:
                 break  # leaf: either not yet expanded, or terminal
             path.append(node)
-            total_visits = sum(child.visit_count for child in node.children.values())
+            total_visits = sum(child.visit_count + child.virtual_loss for child in node.children.values())
             best_score = -float('inf')
             best_candidates = []  # List to store (action, child) pairs with highest score.
             for a, child in node.children.items():
                 u = c_puct * child.prior * np.sqrt(total_visits) / (1 + child.visit_count + child.virtual_loss)
-                score = child.q_value() - child.virtual_loss + u
+                # Virtual loss is already folded into q_value() via the visit
+                # count; subtracting it again here would swamp a [0,1] Q.
+                score = self.min_max_stats.normalize(child.q_value()) + u
                 if score > best_score:
                     best_score = score
                     best_candidates = [child]
@@ -591,22 +630,32 @@ class MCTSHelper:
         await self.selection_results.put((node, path))
 
     async def expand_selected(self, discount):
-        unique_leaves = []
-        ids = []
+        simulations = []
         while not self.selection_results.empty():
-            leaf, path = await self.selection_results.get()
-            if not leaf.is_expanded and leaf.id not in ids:
-                ids.append(leaf.id)
-                unique_leaves.append([leaf, path])
-        self.batch_expand_nodes([t[0] for t in unique_leaves])
+            simulations.append(await self.selection_results.get())
 
-        # Backup: For each simulation, backup the leaf value along its path.
-        for leaf, path in unique_leaves:
-            if leaf.done:
-                leaf_value = 0
-            else:
-                leaf_value = leaf.expanded_value
-            self.backup_simulation(path, leaf_value, discount=discount)
+        # Expand each distinct leaf once; batch_expand_nodes drops the terminal
+        # and already-expanded ones itself.
+        unique_leaves = []
+        seen = set()
+        for leaf, _ in simulations:
+            if leaf.id not in seen:
+                seen.add(leaf.id)
+                unique_leaves.append(leaf)
+        self.batch_expand_nodes(unique_leaves)
+
+        # Back up EVERY simulation, not just the ones that caused an expansion.
+        # Simulations dropped here previously (a duplicate leaf within the
+        # batch, or a leaf that was already expanded) never reached
+        # backup_simulation -- the only place virtual_loss is cleared. So
+        # virtual loss accumulated monotonically on the most-visited nodes and
+        # progressively steered the search away from precisely the actions it
+        # had found to be good. Their visits were lost too, so the effective
+        # simulation budget was well under num_simulations.
+        for leaf, path in simulations:
+            leaf_value = 0.0 if leaf.done else leaf.expanded_value
+            self.backup_simulation(path, leaf_value, discount=discount,
+                                   min_max_stats=self.min_max_stats)
 
     def drop_non_gameplay_children_and_compute_improvements(self, idx, temperature=1.0):
         children_to_drop = []
@@ -638,6 +687,8 @@ class MCTSHelper:
         # selection stops at unexpanded nodes, and add_noise_to_node writes the
         # noisy prior through to the children, which must therefore exist.
         root = self.current_trajectory[index]
+        # Value normalisation is per-search, as in the MuZero paper.
+        self.min_max_stats = MinMaxStats()
         if not root.is_expanded:
             self.batch_expand_nodes([root])
         self.add_noise_to_node(index)
