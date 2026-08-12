@@ -76,6 +76,10 @@ REWARD_BINS = bins_for(REWARD_SUPPORT)
 VALUE_PREFIX_BINS = bins_for(VALUE_PREFIX_SUPPORT)
 VALUE_BINS = bins_for(VALUE_SUPPORT)
 VALUE_PREFIX_HIDDEN = 512
+# Whether the tree takes its edge rewards from the value-prefix LSTM or from
+# the per-step reward head. Both heads are always trained; this selects which
+# one the search actually consumes, so the two can be compared end to end.
+USE_VALUE_PREFIX_IN_TREE = True
 # Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
 # them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
 # slower than self-play generates data even with two MCTS actors, so the
@@ -179,10 +183,20 @@ class MinMaxStats:
 # MCTS Node Definition
 # -----------------------------
 class MCTSNode:
-    def __init__(self, latent, prior, reward=0.0, policy = None, expanded_value = None, is_gameplay = False):
+    def __init__(self, latent, prior, reward=0.0, policy = None, expanded_value = None,
+                 is_gameplay = False, prefix = 0.0, prefix_state = None):
         self.latent = latent            # torch.Tensor (latent state)
         self.prior = prior              # float value
         self.reward = reward            # immediate reward
+        # Cumulative UNDISCOUNTED reward from the search root to this node, and
+        # the LSTM state that produced it. Undiscounted so that an edge reward is
+        # exactly the difference between a child's prefix and its parent's --
+        # discounting stays in backup_simulation, where it always was, rather
+        # than being baked into the model's own prediction and then divided back
+        # out by depth. The paper writes the prefix discounted; this keeps the
+        # arithmetic in one place.
+        self.prefix = prefix
+        self.prefix_state = prefix_state
         self.children = {}              # dict: action -> child node
         self.visit_count = 0
         self.value_sum = 0.0
@@ -724,6 +738,8 @@ class MCTSHelper:
                 next_latents, rewards, _ = self.network_manager.dynamics(latent_batch, action_tensor)
                 batch_policy_logits, estimated_values, _ = self.network_manager.prediction(next_latents)
                 next_policy = F.softmax(batch_policy_logits, dim=1).cpu().numpy()
+
+                child_prefixes, child_states = self.expand_prefixes(chunk, next_latents, A)
             
             # Update each node in the chunk.
             for j, node in enumerate(chunk):
@@ -736,16 +752,61 @@ class MCTSHelper:
                         continue
                     idx = start + a
                     # Create the child node with latent state
+                    if child_prefixes is None:
+                        edge_reward = (rewards[idx].item() if rewards[idx].ndim == 0
+                                       else rewards[idx].squeeze().item())
+                        child_prefix, child_state = 0.0, None
+                    else:
+                        # The prefix accumulates from the search root, so the
+                        # reward on this edge alone is the increment over the
+                        # parent. Undiscounted, so backup_simulation applies the
+                        # discount exactly as it does for real gameplay rewards.
+                        child_prefix = float(child_prefixes[idx])
+                        edge_reward = child_prefix - node.prefix
+                        child_state = (child_states[0][:, idx:idx + 1].clone(),
+                                       child_states[1][:, idx:idx + 1].clone())
+                    # Create the child node with latent state
                     child = MCTSNode(
-                        latent=next_latents[idx].unsqueeze(0), 
-                        prior=policy[a], 
-                        reward=rewards[idx].item() if rewards[idx].ndim == 0 else rewards[idx].squeeze().item(),
+                        latent=next_latents[idx].unsqueeze(0),
+                        prior=policy[a],
+                        reward=edge_reward,
                         policy=next_policy[idx],
-                        expanded_value=estimated_values[idx].item()
+                        expanded_value=estimated_values[idx].item(),
+                        prefix=child_prefix,
+                        prefix_state=child_state,
                     )
                     node.children[a] = child
                 node.is_expanded = True
         
+    def expand_prefixes(self, chunk, next_latents, action_space):
+        """Step the value-prefix LSTM from each parent's state, once per child.
+
+        Returns (prefixes, state) aligned with next_latents, or (None, None) when
+        the tree is configured to use the per-step reward head instead.
+        """
+        if not USE_VALUE_PREFIX_IN_TREE or not hasattr(self.network_manager, "value_prefix"):
+            return None, None
+
+        prefix_net = self.network_manager.value_prefix
+        parent_states = []
+        for node in chunk:
+            state = node.prefix_state
+            if state is None:
+                state = prefix_net.initial_state(1, self.device)
+            parent_states.append(state)
+
+        # (1, num_chunk, H) -> one copy per action -> (1, num_chunk*A, H)
+        h = torch.cat([s[0] for s in parent_states], dim=1).repeat_interleave(action_space, dim=1)
+        c = torch.cat([s[1] for s in parent_states], dim=1).repeat_interleave(action_space, dim=1)
+
+        was_training = prefix_net.training
+        prefix_net.eval()
+        try:
+            prefixes, _, state = prefix_net(next_latents, (h.contiguous(), c.contiguous()))
+        finally:
+            prefix_net.train(was_training)
+        return prefixes.squeeze(-1).cpu().numpy(), state
+
     # -----------------------------
     # Backup Phase: Propagate the leaf value up the simulation path.
     # -----------------------------
@@ -884,6 +945,9 @@ class MCTSHelper:
         root = self.current_trajectory[index]
         # Value normalisation is per-search, as in the MuZero paper.
         self.min_max_stats = MinMaxStats()
+        # The prefix accumulates from the root, so it restarts at every search.
+        root.prefix = 0.0
+        root.prefix_state = None
         if not root.is_expanded:
             self.batch_expand_nodes([root])
         self.add_noise_to_node(index)
@@ -1025,7 +1089,11 @@ class TrainingHelper:
         # Value prefix targets: the cumulative discounted reward sum along the
         # unroll, which is what the LSTM head predicts in one shot instead of
         # per-step rewards that are summed afterwards.
-        target_prefix = discounted_prefix_targets(rewards, discount=DISCOUNT)
+        # UNDISCOUNTED (discount=1.0), matching what the tree consumes: an edge
+        # reward there is the difference between a child's prefix and its
+        # parent's, and that identity only holds without discounting baked in.
+        # backup_simulation applies the discount, as it does for real rewards.
+        target_prefix = discounted_prefix_targets(rewards, discount=1.0)
         converted_target_prefix = scalar_categorical.scalar_to_categorical_batch(
             target_prefix, self.value_prefix.support_size, self.value_prefix.num_bins, self.device)
         # The hidden state IS the accumulated reward, so it starts empty at the

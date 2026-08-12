@@ -261,3 +261,80 @@ def test_nested_structures_survive_the_cpu_move():
     assert out["n"] == 7 and out["s"] == "x"
     assert torch.equal(out["a"], torch.ones(2))
     assert torch.equal(out["b"][1]["c"], torch.eye(2))
+
+
+# --------------------------------------------------------------------------
+# The tree consumes prefixes
+# --------------------------------------------------------------------------
+def tree_helper():
+    from muzero import MCTSHelper
+    return MCTSHelper(action_space=5, device=CPU, network_ref=None,
+                      storage_ref=None, enable_logging=False)
+
+
+def chain(helper, length=6):
+    h, w = IMAGE_RESHAPE[0] // 4, IMAGE_RESHAPE[1] // 4
+    traj = [(None, i % 5, float(i), torch.randn(1, LATENT_CHANNELS, h, w),
+             np.full(5, 0.2), float(i)) for i in range(length)]
+    helper.create_tree_from_game(traj)
+    return helper.current_trajectory
+
+
+def test_edge_reward_is_the_prefix_difference():
+    """The identity the tree relies on. It only holds because the prefix target
+    is undiscounted -- with discounting baked in, the difference would be
+    gamma^depth times the reward and the backup would double-discount."""
+    helper = tree_helper()
+    root = chain(helper)[0]
+    root.prefix, root.prefix_state = 0.0, None
+    helper.batch_expand_nodes([root])
+
+    imagined = [c for c in root.children.values() if not c.is_gameplay]
+    assert imagined, "expected imagined children"
+    for child in imagined:
+        assert child.reward == pytest.approx(child.prefix - root.prefix, abs=1e-5)
+
+
+def test_prefix_accumulates_down_a_path():
+    helper = tree_helper()
+    root = chain(helper)[0]
+    root.prefix, root.prefix_state = 0.0, None
+    helper.batch_expand_nodes([root])
+    child = next(c for c in root.children.values() if not c.is_gameplay)
+    helper.batch_expand_nodes([child])
+
+    grandchild = next(c for c in child.children.values() if not c.is_gameplay)
+    # Two hops from the root, so the grandchild's prefix is the sum of both edges.
+    assert grandchild.prefix == pytest.approx(child.reward + grandchild.reward, abs=1e-4)
+
+
+def test_children_carry_their_own_lstm_state():
+    helper = tree_helper()
+    root = chain(helper)[0]
+    root.prefix, root.prefix_state = 0.0, None
+    helper.batch_expand_nodes([root])
+    states = [c.prefix_state for c in root.children.values() if not c.is_gameplay]
+    assert all(s is not None for s in states)
+    assert all(s[0].shape[1] == 1 for s in states), "one column of state per node"
+    # Different actions must not share a state tensor.
+    assert states[0][0].data_ptr() != states[1][0].data_ptr()
+
+
+def test_search_resets_the_prefix_at_the_root():
+    """The prefix accumulates from the root, so it has to restart at every
+    search -- otherwise the second root inherits the first one's total."""
+    helper = tree_helper()
+    nodes = chain(helper, length=8)
+    nodes[2].prefix, nodes[2].prefix_state = 999.0, None
+    asyncio.run(helper.run_full_mcts(2, num_simulations=4, sim_batches=4, c_puct=1.25))
+    assert nodes[2].prefix == 0.0
+
+
+def test_per_step_head_feeds_the_tree_when_the_flag_is_off(monkeypatch):
+    monkeypatch.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", False)
+    helper = tree_helper()
+    root = chain(helper)[0]
+    helper.batch_expand_nodes([root])
+    imagined = [c for c in root.children.values() if not c.is_gameplay]
+    assert all(c.prefix_state is None for c in imagined)
+    assert any(c.reward != 0.0 for c in imagined), "should use the reward head"
