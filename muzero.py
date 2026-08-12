@@ -34,6 +34,14 @@ MAX_REPLAY = 20
 IMAGE_RESHAPE = (84,84)
 STEPS_UNTIL_MCTS = 500
 LATENT_CHANNELS = 64
+# Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
+# them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
+# slower than self-play generates data even with two MCTS actors, so the
+# gameplay buffer overflows and get_max_gameplay discards the excess at random
+# (see benchmarks/RESULTS.md). Unsearched timesteps still contribute
+# observation, action, reward and Monte Carlo value targets; only their policy
+# loss is masked. Set to 1 to search every step.
+REANALYSE_STRIDE = 4
 # Q is normalised to [0,1] by MinMaxStats before the exploration term is added,
 # so this is on the usual AlphaZero/MuZero scale. It is NOT comparable to the
 # values used before normalisation existed (61.8, then 32).
@@ -187,6 +195,21 @@ def get_temperature(epoch, initial_temp=1.0, final_temp=0.1, decay_train_steps=1
     if epoch >= decay_train_steps:
         return final_temp
     return initial_temp - (initial_temp - final_temp) * (epoch / decay_train_steps)
+
+def masked_policy_loss(policy_logits, target_policy, mask):
+    """Cross-entropy averaged over the positions that carry a real target.
+
+    Reanalysis searches a strided subset of timesteps, so most positions hold a
+    uniform placeholder. Averaging across all of them would train the policy
+    toward uniform in proportion to the stride -- the sharper the search got,
+    the harder the placeholders would pull against it.
+
+    Returns 0 when nothing in the batch is masked in; clamping the denominator
+    keeps that branch-free so it does not force a device sync.
+    """
+    per_position = -torch.sum(target_policy * F.log_softmax(policy_logits, dim=1), dim=1)
+    return (per_position * mask).sum() / mask.sum().clamp(min=1.0)
+
 
 def get_state_dict(network):
     return {k: (v.cpu() if isinstance(v, torch.Tensor) else v)
@@ -493,29 +516,44 @@ class MCTSHelper:
                             "action": action_taken,
                             "reward": reward,
                             "target_policy": np.ones(self.action_space) / self.action_space,
-                            "target_value": self.get_value(idx)
+                            "target_value": self.get_value(idx),
+                            # A uniform target during warmup is deliberate: it
+                            # settles the priors before the first real search.
+                            "has_policy_target": True,
                         }
                         trajectory.append(transition)
                 else:
-                    self.logger.info("starting mcts tree search")
+                    searched = self.select_reanalysis_indices(len(game_trajectory))
+                    temperature = get_temperature(self.network_manager.training_steps)
+                    self.logger.info("MCTS on %s of %s timesteps (stride %s)",
+                                     len(searched), len(game_trajectory), REANALYSE_STRIDE)
                     for idx, (obs_sample, action_taken, reward, _, _, _) in enumerate(game_trajectory):
-                        self.logger.info("Running MCTS index %s out of %s", idx, len(game_trajectory))
-                        temperature = get_temperature(self.network_manager.training_steps)
-                        improved_policy, value_estimate = await self.run_full_mcts(idx,
-                                                                            sim_batches=MCTS_BATCHES,
-                                                                            num_simulations=TOTAL_MCTS_SIMS,
-                                                                            c_puct=C_PUCT,
-                                                                            discount=0.997,
-                                                                            temperature=temperature)
-                        # Here we create a training sample using the improved target.
-                        mcts_sample = {
+                        if idx in searched:
+                            self.logger.debug("Running MCTS index %s out of %s", idx, len(game_trajectory))
+                            improved_policy, value_estimate = await self.run_full_mcts(idx,
+                                                                                sim_batches=MCTS_BATCHES,
+                                                                                num_simulations=TOTAL_MCTS_SIMS,
+                                                                                c_puct=C_PUCT,
+                                                                                discount=0.997,
+                                                                                temperature=temperature)
+                            has_policy_target = True
+                        else:
+                            # Not searched. The Monte Carlo return backed up by
+                            # create_tree_from_game is still a valid value
+                            # target, but there is no improved policy here, so
+                            # the policy loss is masked out rather than trained
+                            # toward a placeholder that would drag it uniform.
+                            improved_policy = np.ones(self.action_space) / self.action_space
+                            value_estimate = self.get_value(idx)
+                            has_policy_target = False
+                        trajectory.append({
                             "obs": obs_sample,
                             "action": action_taken,
                             "reward": reward,
                             "target_policy": improved_policy,
-                            "target_value": value_estimate
-                        }
-                        trajectory.append(mcts_sample)
+                            "target_value": value_estimate,
+                            "has_policy_target": has_policy_target,
+                        })
                 
                 await self.storage_manager.append_replay_buffer(trajectory)
         except Exception:
@@ -743,6 +781,24 @@ class MCTSHelper:
             await self.expand_selected(discount)
         return self.drop_non_gameplay_children_and_compute_improvements(index, temperature=temperature)
 
+    def select_reanalysis_indices(self, length, stride=None):
+        """Timesteps to run a search on, evenly spaced with a random offset.
+
+        A stride rather than a random sample, so coverage along the episode is
+        uniform; a random offset so successive passes over the buffer land on
+        different positions and the whole episode gets covered over time.
+        """
+        stride = REANALYSE_STRIDE if stride is None else stride
+        if length <= 0:
+            return set()
+        if stride <= 1:
+            return set(range(length))
+        # Cap the offset at the trajectory length: an episode shorter than the
+        # stride would otherwise draw an offset past its end and be reanalysed
+        # with no searched timesteps at all, contributing zero policy targets.
+        offset = random.randrange(min(stride, length))
+        return set(range(offset, length, stride))
+
     def get_value(self, idx):
         return self.current_trajectory[idx].q_value()
 
@@ -811,6 +867,11 @@ class TrainingHelper:
         rewards = torch.tensor(batch["rewards"], dtype=torch.float32, device=self.device)
         target_policy = torch.tensor(batch["target_policy"], dtype=torch.float32, device=self.device)
         target_value = torch.tensor(batch["target_value"], dtype=torch.float32, device=self.device)
+        # Positions whose target_policy is a real improved policy rather than a
+        # placeholder. Reanalysis only searches every REANALYSE_STRIDE-th step,
+        # and trajectory padding is never a real target.
+        policy_mask = torch.tensor(np.asarray(batch["has_policy_target"]),
+                                   dtype=torch.float32, device=self.device)
         
         # Zero out the gradients for all optimizers.
         self.rep_optimizer.zero_grad()
@@ -830,7 +891,7 @@ class TrainingHelper:
 
         # Compute losses for the initial step (no reward loss here).
         if not only_dynamics:
-            policy_loss_0 = -torch.sum(target_policy[:, 0, :] * F.log_softmax(policy_logits, dim=1), dim=1).mean()
+            policy_loss_0 = masked_policy_loss(policy_logits, target_policy[:, 0, :], policy_mask[:, 0])
             converted_target_values = scalar_categorical.scalar_to_categorical_batch(target_value, self.prediction.support_size, self.prediction.num_bins, self.device)
             value_loss_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
             total_loss += policy_loss_0 + value_loss_0
@@ -851,8 +912,8 @@ class TrainingHelper:
             if not only_dynamics:
                 policy_logits, _, value_logits = self.prediction(latent)
                 
-                # Loss for policy prediction.
-                policy_loss = -torch.sum(target_policy[:, i, :] * F.log_softmax(policy_logits, dim=1), dim=1).mean()
+                # Loss for policy prediction, over the positions that have one.
+                policy_loss = masked_policy_loss(policy_logits, target_policy[:, i, :], policy_mask[:, i])
                 # Loss for value prediction.
                 value_loss = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
                 
@@ -908,13 +969,18 @@ class TrainingHelper:
             "actions": (B, unroll_steps) sequence of actions,
             "rewards": (B, unroll_steps+1) sequence of rewards,
             "target_policy": (B, unroll_steps+1, action_space) target policies,
-            "target_value": (B, unroll_steps+1) target values.
+            "target_value": (B, unroll_steps+1) target values,
+            "has_policy_target": (B, unroll_steps+1) bool, whether that position
+                carries a real improved policy. False for timesteps reanalysis
+                skipped and for padding past the end of a trajectory; the
+                policy loss is masked there.
         """
         batch_obs = []
         batch_actions = []
         batch_rewards = []
         batch_target_policy = []
         batch_target_value = []
+        batch_has_policy = []
         
         # For each sample, randomly choose a trajectory and a starting index.
         for _ in range(batch_size):
@@ -929,6 +995,7 @@ class TrainingHelper:
             rewards = []
             target_policy = []
             target_value = []
+            has_policy = []
             
             # We need unroll_steps+1 target entries (for step 0 and each unroll step).
             for step in range(unroll_steps + 1):
@@ -938,6 +1005,9 @@ class TrainingHelper:
                     # Append the target policy and value for each step.
                     target_policy.append(node["target_policy"])
                     target_value.append(node["target_value"])
+                    # Trajectories written before reanalysis subsampling have no
+                    # such key; every position in them was searched.
+                    has_policy.append(node.get("has_policy_target", True))
                     # reward for entering node (reward[0] will not be used)
                     rewards.append(node["reward"])
                     if step < unroll_steps:
@@ -949,6 +1019,7 @@ class TrainingHelper:
                     target_policy.append(np.ones(action_space) / action_space)
                     target_value.append(0.0)
                     rewards.append(0.0)
+                    has_policy.append(False)   # padding is not a real target
                     if step < unroll_steps:
                         actions.append(0)         # or a default action
             
@@ -957,6 +1028,7 @@ class TrainingHelper:
             batch_rewards.append(rewards)
             batch_target_policy.append(target_policy)
             batch_target_value.append(target_value)
+            batch_has_policy.append(has_policy)
         
         # Convert lists to numpy arrays.
         batch_obs = np.array(batch_obs)  # (B, H, W, C)
@@ -964,13 +1036,15 @@ class TrainingHelper:
         batch_rewards = np.array(batch_rewards)  # (B, unroll_steps)
         batch_target_policy = np.array(batch_target_policy)  # (B, unroll_steps+1, action_space)
         batch_target_value = np.array(batch_target_value)  # (B, unroll_steps+1)
+        batch_has_policy = np.array(batch_has_policy)  # (B, unroll_steps+1)
         
         return {
             "obs": batch_obs,
             "actions": batch_actions,
             "rewards": batch_rewards,
             "target_policy": batch_target_policy,
-            "target_value": batch_target_value
+            "target_value": batch_target_value,
+            "has_policy_target": batch_has_policy
         }
 
 #Agent will be single threaded for real time learning

@@ -176,6 +176,55 @@ def bench_components(traj_len=200):
     return {"search": m_search, "eval": m_eval, "selfplay_step": m_single, "train": m_train}
 
 
+def bench_reanalysis(traj_len=200, strides=(1, 2, 4, 8, 16)):
+    """Cost of reanalysing one trajectory as a function of REANALYSE_STRIDE.
+
+    Skipping timesteps means each search starts from a colder tree -- lazy
+    expansion lets neighbouring searches share subtrees -- so the saving is not
+    automatically linear in the stride. That is the thing to measure.
+    """
+    print(f"\n=== reanalysis stride ({traj_len}-step trajectory) ===")
+    print(f"  {'stride':>6} {'searched':>9} {'wall':>8} {'per search':>11} "
+          f"{'traj/min':>9} {'speedup':>8}")
+
+    helper = MCTSHelper(action_space=ACTIONS, device=DEVICE,
+                        network_ref=None, storage_ref=None)
+    raw = fake_trajectory(traj_len)
+    baseline = None
+    rows = []
+
+    async def one_pass(stride):
+        evaluated = helper.eval_obs(raw)
+        helper.create_tree_from_game(evaluated)
+        chosen = helper.select_reanalysis_indices(len(evaluated), stride=stride)
+        t0 = time.perf_counter()
+        for idx in range(len(evaluated)):
+            if idx in chosen:
+                await helper.run_full_mcts(idx, num_simulations=TOTAL_MCTS_SIMS,
+                                           sim_batches=MCTS_BATCHES, c_puct=C_PUCT)
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
+        return time.perf_counter() - t0, len(chosen)
+
+    asyncio.run(one_pass(8))  # warm up
+    for stride in strides:
+        samples = [asyncio.run(one_pass(stride)) for _ in range(3)]
+        wall = statistics.median(s[0] for s in samples)
+        searched = samples[0][1]
+        per_search = wall / max(searched, 1)
+        per_min = 60.0 / wall
+        baseline = baseline or per_min
+        rows.append((stride, searched, wall, per_search, per_min, per_min / baseline))
+        print(f"  {stride:>6} {searched:>9} {wall:>7.2f}s {per_search*1000:>10.1f}ms "
+              f"{per_min:>9.1f} {per_min/baseline:>7.2f}x")
+
+    print()
+    cold = rows[-1][3] / rows[0][3]
+    print(f"  per-search cost at stride {rows[-1][0]} is {cold:.2f}x the stride-1 cost")
+    print("  (>1 means skipping indices really does cost tree reuse)")
+    return rows
+
+
 def _local_trainer():
     """A TrainingHelper without Ray or a storage handle."""
     from muzero import TrainingHelper
@@ -209,10 +258,11 @@ def _fake_batch(size, unroll):
 # ---------------------------------------------------------------------------
 # actor scaling
 # ---------------------------------------------------------------------------
-def bench_actors(counts=(1, 2, 3), trajectories=6, traj_len=60):
+def bench_actors(counts=(1, 2, 3), trajectories=6, traj_len=60, stride=None):
     import ray
 
-    print(f"\n=== MCTS actor scaling ({trajectories} trajectories x {traj_len} steps) ===")
+    label = "every step" if stride == 1 else f"stride {stride or muzero.REANALYSE_STRIDE}"
+    print(f"\n=== MCTS actor scaling ({trajectories} trajectories x {traj_len} steps, {label}) ===")
     print(f"  {'actors':>6} {'wall':>9} {'traj/min':>10} {'speedup':>9} {'GPU MB':>9} {'GPU/actor':>10}")
 
     baseline = None
@@ -234,7 +284,7 @@ def bench_actors(counts=(1, 2, 3), trajectories=6, traj_len=60):
 
             work = [fake_trajectory(traj_len) for _ in range(trajectories)]
             t0 = time.perf_counter()
-            futures = [actors[i % n].reanalyse.remote(w) for i, w in enumerate(work)]
+            futures = [actors[i % n].reanalyse.remote(w, stride) for i, w in enumerate(work)]
             ray.get(futures)
             wall = time.perf_counter() - t0
             peak = gpu_memory_mb()
@@ -273,13 +323,15 @@ try:
             self.eval_obs(fake_trajectory(4))
             return True
 
-        async def reanalyse(self, trajectory):
+        async def reanalyse(self, trajectory, stride=None):
             t0 = time.perf_counter()
             evaluated = self.eval_obs(trajectory)
             self.create_tree_from_game(evaluated)
+            chosen = self.select_reanalysis_indices(len(evaluated), stride=stride)
             for idx in range(len(evaluated)):
-                await self.run_full_mcts(idx, num_simulations=TOTAL_MCTS_SIMS,
-                                         sim_batches=MCTS_BATCHES, c_puct=C_PUCT)
+                if idx in chosen:
+                    await self.run_full_mcts(idx, num_simulations=TOTAL_MCTS_SIMS,
+                                             sim_batches=MCTS_BATCHES, c_puct=C_PUCT)
             return time.perf_counter() - t0
 except ImportError:
     _BenchMCTS = None
@@ -324,20 +376,24 @@ def bench_startup():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("suite", choices=["components", "actors", "startup", "all"])
+    ap.add_argument("suite", choices=["components", "actors", "startup", "reanalysis", "all"])
     ap.add_argument("--trajectories", type=int, default=6)
     ap.add_argument("--traj-len", type=int, default=60)
     ap.add_argument("--actors", type=int, nargs="+", default=[1, 2, 3])
+    ap.add_argument("--stride", type=int, default=None,
+                    help="reanalysis stride for the actor suite (default: REANALYSE_STRIDE)")
     args = ap.parse_args()
 
     print(f"device: {DEVICE}"
           + (f" ({torch.cuda.get_device_name(0)})" if DEVICE.type == "cuda" else ""))
     if args.suite in ("components", "all"):
         bench_components()
+    if args.suite in ("reanalysis", "all"):
+        bench_reanalysis()
     if args.suite in ("startup", "all"):
         bench_startup()
     if args.suite in ("actors", "all"):
-        bench_actors(args.actors, args.trajectories, args.traj_len)
+        bench_actors(args.actors, args.trajectories, args.traj_len, args.stride)
 
 
 if __name__ == "__main__":

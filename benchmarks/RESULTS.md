@@ -56,30 +56,65 @@ kernel launches (8 leaves × 5 actions = 40 evals per expansion), so the device
 is launch-latency bound rather than compute bound, and extra processes mostly
 queue behind each other.
 
-## The producer/consumer gap
+## Reanalysis stride
 
-Scaled to a realistic 200-step episode:
+Searching every timestep was the whole problem. Cost of reanalysing one
+200-step trajectory as `REANALYSE_STRIDE` varies:
 
-| | Rate |
-|---|---:|
-| Self-play generates | ~122 trajectories/min |
-| Reanalysis consumes, 1 actor | ~32 trajectories/min |
-| Reanalysis consumes, 2 actors | ~49 trajectories/min |
-| Reanalysis consumes, 3 actors | ~51 trajectories/min |
+| Stride | Searched | Wall | Per search | traj/min | Speedup |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 200 | 2.09 s | 10.5 ms | 28.6 | 1.00x |
+| 2 | 100 | 1.07 s | 10.7 ms | 56.3 | 1.97x |
+| **4** | **50** | **0.55 s** | **11.0 ms** | **109.1** | **3.81x** |
+| 8 | 25 | 0.32 s | 12.8 ms | 188.0 | 6.56x |
+| 16 | 13 | 0.16 s | 12.0 ms | 383.5 | 13.39x |
 
-Self-play outruns reanalysis by **~2.5x even with two MCTS actors**, and adding
-actors cannot close the gap. `MAX_GAMEPLAY = 20` therefore overflows in steady
-state and `get_max_gameplay` discards the excess at random.
+The saving is close to linear. Skipping indices does cost some tree reuse —
+lazy expansion lets neighbouring searches share subtrees — but only 1.15x on
+per-search cost even at stride 16, so it barely eats into the win.
 
-Adding MCTS actors is not the lever. The options that are:
+## The producer/consumer gap, before and after
 
-- **Reanalyse a subset of timesteps** rather than all of them. Nothing requires
-  a search at every index; sampling would cut the cost proportionally.
+End-to-end through real Ray actors, 100-step trajectories:
+
+| | 1 actor | 2 actors | 3 actors |
+|---|---:|---:|---:|
+| Search every step | 69.4 | 113.5 | — |
+| **Stride 4** | **277.5** | **439.0** | 477.7 |
+
+At two actors that is a **3.87x** improvement in trajectories reanalysed per
+minute. Scaled to a 200-step episode against self-play's ~122 trajectories/min:
+
+| | Rate | vs self-play |
+|---|---:|---|
+| Self-play generates | ~122/min | — |
+| Reanalysis, every step, 2 actors | ~57/min | **2.1x deficit** |
+| Reanalysis, stride 4, 1 actor | ~139/min | 1.1x surplus |
+| Reanalysis, stride 4, 2 actors | ~220/min | **1.8x surplus** |
+
+The gameplay buffer no longer overflows, so `get_max_gameplay` stops silently
+discarding self-play at random.
+
+Note that **one actor is now enough** to keep up, with ~14% margin.
+`NUM_MCTS_ACTORS = 2` is kept for headroom — episode lengths vary and the
+margin is cheap — but dropping to 1 to reclaim 2 CPUs and a GPU share is a
+reasonable call.
+
+Stride 2 would leave only ~112/min against 122/min needed, i.e. still short.
+Stride 4 is the first setting with real margin, which is why it is the default.
+
+Remaining levers, if more is ever needed:
+
 - **Lower `TOTAL_MCTS_SIMS`** (32 today). Cost is close to linear in sims.
-- **Raise `MCTS_BATCHES`** (8 today) so each expansion is a bigger kernel. 40
-  nodes cost 4.1x what 8 nodes cost for 5x the work, so there is real headroom.
-- **Throttle self-play**, which is cheap anyway — it is inference-latency bound
-  at 2.24 ms/step, not env bound at 0.20 ms/step.
+- **Raise `MCTS_BATCHES`** (8 today) so each expansion is a bigger kernel: 40
+  nodes cost 4.1x what 8 cost for 5x the work. Costs search quality, since
+  more simulations run without seeing each other's results.
+- **Throttle self-play**, which is cheap anyway — inference-latency bound at
+  2.24 ms/step, not env bound at 0.20 ms/step.
+
+Scaling efficiency across actors is *worse* at stride 4 (57%) than at stride 1
+(82%), which is expected: less GPU work per trajectory means coordination
+overhead is a larger share. Absolute throughput is far higher regardless.
 
 ## Incidental findings
 
