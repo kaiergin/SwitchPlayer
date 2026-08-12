@@ -989,7 +989,10 @@ class MuZeroAgent:
                 done = False
                 episode_reward = 0
                 game_trajectory = []  # store tuples of (obs, latent, action)
-                frame_stack = np.repeat(preprocessed_obs, 4, axis=0)
+                # tile, not repeat: the frame is (C,H,W), and repeat would
+                # interleave channels into [R,R,R,R,G,G,G,G,B,B,B,B] while the
+                # rolling update below assumes four consecutive RGB frames.
+                frame_stack = np.tile(preprocessed_obs, (4, 1, 1))
                 
                 # Play one episode.
                 while not done:
@@ -998,12 +1001,24 @@ class MuZeroAgent:
                     with torch.no_grad():
                         policy, value = self.network_manager.initial_inference(frame_stack)
                     action = np.random.choice(np.arange(self.action_space), p=policy)
-                    obs, reward, done, _, _ = await asyncio.to_thread(env.step, action)
+                    obs, reward, terminated, truncated, _ = await asyncio.to_thread(env.step, action)
+                    done = terminated or truncated
                     # obs, chosen action, reward for entering obs
                     reward = min(reward, 400)
                     game_trajectory.append((frame_stack, action, prev_reward))
                     episode_reward += reward
                     prev_reward = reward
+
+                # Record the terminal state. The loop above assigns the final
+                # step's reward to prev_reward and then exits, so without this
+                # the last reward of every episode -- often the informative one
+                # -- was dropped, and create_tree_from_game ended up marking a
+                # non-terminal node as done. The action is a placeholder; no
+                # action is ever taken from a terminal state.
+                preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
+                frame_stack = np.concatenate([frame_stack[3:, :, :], preprocessed_obs], axis=0)
+                game_trajectory.append((frame_stack, 0, prev_reward))
+
                 await self.storage_manager.append_gameplay_buffer((game_trajectory, episode_reward))
         except Exception as e:
             self.logger.error("Exception thrown in gameplay_process %s", e)
@@ -1087,14 +1102,15 @@ if __name__ == '__main__':
             preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
             done = False
             episode_reward = 0
-            frame_stack = np.repeat(preprocessed_obs, 4, axis=0)
+            frame_stack = np.tile(preprocessed_obs, (4, 1, 1))  # see gameplay_process
             while not done:
                 preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
                 frame_stack = np.concatenate([frame_stack[3:, :, :], preprocessed_obs], axis=0)
                 with torch.no_grad():
                     policy, value = ray.get(network.initial_inference.remote(frame_stack))
                     action = np.random.choice(np.arange(ACTION_SPACE), p=policy)
-                    obs, reward, done, _, _ = viewenv.step(action)
+                    obs, reward, terminated, truncated, _ = viewenv.step(action)
+                    done = terminated or truncated
                     episode_reward += reward
             print(f"Reward: {episode_reward}")
             print_memory_diagnostics()

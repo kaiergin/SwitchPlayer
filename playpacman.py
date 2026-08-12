@@ -88,7 +88,8 @@ try:
             # Get the action from the arrow keys (default is 0 if none are pressed)
             action = get_action_from_keys()
             # Step the environment using the chosen action
-            observation, reward, done, _, _ = env.step(action)
+            observation, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
 
             # Save the (frame, action) pair for the current game trajectory
             current_game_trajectory.append((preprocessed_obs, action, prev_reward))
