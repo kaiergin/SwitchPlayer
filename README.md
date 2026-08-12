@@ -12,11 +12,10 @@ The MuZero implementation (`muzero.py`, `networks.py`) currently trains against
 `MsPacman-v4` as a testbed; hooking it up to the Switch environment is still to do.
 
 ### To do list
-* Parallel MCTS and re-analysis
-* Logging to file for debugging
 * Fill replay buffer with random data
 * Mult-step reward?
-* Hyperparameter Tuning
+* Hyperparameter Tuning -- c_puct and the search budget both need re-tuning now
+  that MCTS values are min-max normalised
 
 ### Custom ideas
 * Heavy reward discounting and small trajectory with no bootstrapped value as initial agent

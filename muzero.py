@@ -39,6 +39,40 @@ LATENT_CHANNELS = 64
 # values used before normalisation existed (61.8, then 32).
 C_PUCT = 1.25
 
+# ---------------------------------------------------------------------------
+# Ray resource budget
+#
+# Fractional num_gpus is bookkeeping, not enforcement: it decides how many
+# actors may share a device and does not cap memory. The requests must sum to
+# no more than the cluster total, because Ray does NOT raise when an actor
+# cannot be scheduled -- it queues it indefinitely, so ray.get(setup.remote())
+# just never returns. The previous fractions summed to exactly 1.0 GPU, which
+# is why a second MCTS actor could only ever hang.
+#
+# Resources are applied with .options() at construction rather than baked into
+# the @ray.remote decorators, so the MCTS share can be split across actors and
+# so GPU requests can be dropped entirely on a machine without CUDA.
+# ---------------------------------------------------------------------------
+NUM_MCTS_ACTORS = 2
+
+CPU_STORAGE  = 1   # async data shuffling only
+CPU_NETWORK  = 1   # async; the work is on the GPU
+CPU_TRAINING = 2   # prepare_batch does real numpy work
+CPU_AGENT    = 2   # event loop + the thread asyncio.to_thread runs env.step on
+CPU_MCTS     = 2   # selection is single-threaded asyncio; eval_obs is numpy
+
+GPU_NETWORK  = 0.05
+GPU_TRAINING = 0.30
+GPU_AGENT    = 0.05
+
+def mcts_gpu_share(num_mcts_actors=NUM_MCTS_ACTORS):
+    """The MCTS actors do by far the most inference, so they split whatever the
+    other three actors leave behind. Derived from the actor count rather than
+    hardcoded, so changing NUM_MCTS_ACTORS cannot silently oversubscribe."""
+    return round((1.0 - GPU_NETWORK - GPU_TRAINING - GPU_AGENT) / num_mcts_actors, 4)
+
+GPU_MCTS = mcts_gpu_share()
+
 if not hasattr(np, 'bool8'):
     np.bool8 = np.bool_
 
@@ -185,7 +219,7 @@ def configure_actor_logger(name, enable_logging=False, log_dir=LOG_DIR):
         logger.addHandler(console_handler)
     return logger
 
-@ray.remote(max_concurrency=8, num_cpus=2)
+@ray.remote(max_concurrency=8)
 class StorageHelper:
     def __init__(self, max_replay=MAX_REPLAY, max_gameplay=MAX_GAMEPLAY):
         self.gameplay_buffer = deque(maxlen=max_gameplay)
@@ -260,7 +294,7 @@ class StorageManager:
         return await self.storage_helper.get_max_gameplay.remote()
 
 #create versioning like storage
-@ray.remote(max_concurrency=8, num_gpus=0.05, num_cpus=2)
+@ray.remote(max_concurrency=8)
 class NetworkHelper:
     def __init__(self, action_space, device, checkpoint_path = 'checkpoint.pth', enable_logging=False):
         self.device = device
@@ -403,7 +437,12 @@ class NetworkManager:
             if self.load_dynamics:
                 self.dynamics.load_state_dict(dyn_dict)
 
-@ray.remote(max_concurrency=MCTS_BATCHES, num_gpus=0.5, num_cpus=MCTS_BATCHES)
+# max_concurrency governs concurrent *Ray* calls into the actor, of which there
+# are only ever setup() and MCTS_process(). It was tied to MCTS_BATCHES, but the
+# simulation coroutines are created by asyncio.gather inside MCTS_process and so
+# are not Ray calls at all -- max_concurrency never applied to them. MCTS_BATCHES
+# is now purely the simulation batch size.
+@ray.remote(max_concurrency=4)
 class MCTSHelper:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False, name="MCTSHelper"):
         self.network_manager = NetworkManager(network_ref, action_space=action_space, device=device)
@@ -708,7 +747,7 @@ class MCTSHelper:
     def get_value(self, idx):
         return self.current_trajectory[idx].q_value()
 
-@ray.remote(num_gpus=0.4, num_cpus=1)
+@ray.remote
 class TrainingHelper:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False):
         self.network_helper = network_ref
@@ -937,7 +976,7 @@ class TrainingHelper:
         }
 
 #Agent will be single threaded for real time learning
-@ray.remote(max_concurrency=1, num_gpus=0.05, num_cpus=1)
+@ray.remote(max_concurrency=1)
 class MuZeroAgent:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False):
         self.network_manager = NetworkManager(network_ref, action_space=action_space, device=device, load_dynamics=False)
@@ -1029,6 +1068,48 @@ def preprocess_frame(frame, resize_shape=(84, 84)):
     return frame
 
 
+def resource_plan(num_mcts_actors=NUM_MCTS_ACTORS, use_cuda=True):
+    """Total CPU and GPU the actor fleet will request."""
+    cpu = (CPU_STORAGE + CPU_NETWORK + CPU_TRAINING + CPU_AGENT
+           + CPU_MCTS * num_mcts_actors)
+    gpu = 0.0
+    if use_cuda:
+        gpu = (GPU_NETWORK + GPU_TRAINING + GPU_AGENT
+               + mcts_gpu_share(num_mcts_actors) * num_mcts_actors)
+    return cpu, gpu
+
+
+def check_cluster_resources(num_mcts_actors=NUM_MCTS_ACTORS, use_cuda=True):
+    """Fail loudly when the fleet cannot possibly be scheduled.
+
+    Ray does not raise when an actor's resource request exceeds what the
+    cluster has -- it queues the actor indefinitely, so ray.get() on its
+    setup() call simply never returns. Turning that silent hang into an error
+    at startup is the difference between a one-line config fix and an evening
+    spent wondering which actor deadlocked.
+    """
+    resources = ray.cluster_resources()
+    have_cpu = resources.get("CPU", 0)
+    have_gpu = resources.get("GPU", 0)
+    want_cpu, want_gpu = resource_plan(num_mcts_actors, use_cuda)
+
+    problems = []
+    if want_cpu > have_cpu:
+        problems.append(f"CPU: requesting {want_cpu:g}, cluster has {have_cpu:g}")
+    if want_gpu > have_gpu + 1e-9:
+        problems.append(f"GPU: requesting {want_gpu:g}, cluster has {have_gpu:g}")
+    if problems:
+        raise RuntimeError(
+            "Actor resource requests exceed the Ray cluster. Ray would queue "
+            "the surplus actors forever rather than raising:\n  "
+            + "\n  ".join(problems)
+            + f"\nLower NUM_MCTS_ACTORS (currently {num_mcts_actors}) or the "
+              "per-actor budgets at the top of muzero.py."
+        )
+    print(f"Resource plan: {want_cpu:g}/{have_cpu:g} CPU, "
+          f"{want_gpu:g}/{have_gpu:g} GPU, {num_mcts_actors} MCTS actor(s)")
+
+
 # -----------------------------
 # Main Loop Example with Full MCTS Sample Generation
 # -----------------------------
@@ -1036,33 +1117,46 @@ if __name__ == '__main__':
     ray.init(include_dashboard=True, dashboard_port=8265)#log_to_driver=True)
     ACTION_SPACE = 5
     ENABLE_LOGGING = True
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    network = NetworkHelper.remote(
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if use_cuda else "cpu")
+
+    def gpu(fraction):
+        # Requesting a GPU on a machine that has none queues the actor forever,
+        # exactly like over-subscribing one. Ask for nothing instead.
+        return fraction if use_cuda else 0
+
+    check_cluster_resources(NUM_MCTS_ACTORS, use_cuda)
+
+    network = NetworkHelper.options(
+                                num_cpus=CPU_NETWORK,
+                                num_gpus=gpu(GPU_NETWORK)).remote(
                                 action_space=ACTION_SPACE,
                                 device=device,
                                 enable_logging=ENABLE_LOGGING)
-    storage = StorageHelper.remote()
-    agent = MuZeroAgent.remote(
+    storage = StorageHelper.options(num_cpus=CPU_STORAGE).remote()
+    agent = MuZeroAgent.options(
+                                num_cpus=CPU_AGENT,
+                                num_gpus=gpu(GPU_AGENT)).remote(
                                 action_space=ACTION_SPACE,
                                 device=device,
                                 network_ref=network,
                                 storage_ref=storage,
                                 enable_logging=ENABLE_LOGGING)
-    mcts_instance = MCTSHelper.remote(
+    mcts_instances = [
+        MCTSHelper.options(
+                                num_cpus=CPU_MCTS,
+                                num_gpus=gpu(GPU_MCTS)).remote(
                                 action_space=ACTION_SPACE,
                                 device=device,
                                 network_ref=network,
                                 storage_ref=storage,
                                 enable_logging=ENABLE_LOGGING,
-                                name='process1')
-    # mcts_instance2 = MCTSHelper.remote(
-    #                             action_space=ACTION_SPACE,
-    #                             device=device,
-    #                             network_ref=network,
-    #                             storage_ref=storage,
-    #                             enable_logging=ENABLE_LOGGING,
-    #                             name='process2')
-    training_instance = TrainingHelper.remote(
+                                name=f'MCTSHelper{i}')
+        for i in range(NUM_MCTS_ACTORS)
+    ]
+    training_instance = TrainingHelper.options(
+                                num_cpus=CPU_TRAINING,
+                                num_gpus=gpu(GPU_TRAINING)).remote(
                                 action_space=ACTION_SPACE,
                                 device=device,
                                 network_ref=network,
@@ -1070,13 +1164,11 @@ if __name__ == '__main__':
                                 enable_logging=ENABLE_LOGGING)
 
     ray.get(agent.setup.remote())
-    ray.get(mcts_instance.setup.remote())
-    # ray.get(mcts_instance2.setup.remote())
+    ray.get([m.setup.remote() for m in mcts_instances])
     ray.get(training_instance.setup.remote())
 
     gameplay_process = agent.gameplay_process.remote()
-    MCTS_process = mcts_instance.MCTS_process.remote()
-    # MCTS_process2 = mcts_instance2.MCTS_process.remote()
+    mcts_processes = [m.MCTS_process.remote() for m in mcts_instances]
     training_process = training_instance.training_process.remote()
 
     viewenv = gym.make("MsPacman-v4", render_mode='human')
@@ -1102,6 +1194,6 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\nCtrl+C detected. Exiting gracefully...")
         ray.cancel(gameplay_process)
-        ray.cancel(MCTS_process)
-        # ray.cancel(MCTS_process2)
+        for mcts_process in mcts_processes:
+            ray.cancel(mcts_process)
         ray.cancel(training_process)
