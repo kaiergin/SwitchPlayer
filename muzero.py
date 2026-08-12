@@ -1003,15 +1003,12 @@ class MuZeroAgent:
                 done = False
                 episode_reward = 0
                 game_trajectory = []  # store tuples of (obs, latent, action)
-                # tile, not repeat: the frame is (C,H,W), and repeat would
-                # interleave channels into [R,R,R,R,G,G,G,G,B,B,B,B] while the
-                # rolling update below assumes four consecutive RGB frames.
-                frame_stack = np.tile(preprocessed_obs, (4, 1, 1))
+                frame_stack = initial_frame_stack(preprocessed_obs)
                 
                 # Play one episode.
                 while not done:
                     preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
-                    frame_stack = np.concatenate([frame_stack[3:, :, :], preprocessed_obs], axis=0)
+                    frame_stack = push_frame(frame_stack, preprocessed_obs)
                     with torch.no_grad():
                         policy, value = self.network_manager.initial_inference(frame_stack)
                     action = np.random.choice(np.arange(self.action_space), p=policy)
@@ -1030,13 +1027,30 @@ class MuZeroAgent:
                 # non-terminal node as done. The action is a placeholder; no
                 # action is ever taken from a terminal state.
                 preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
-                frame_stack = np.concatenate([frame_stack[3:, :, :], preprocessed_obs], axis=0)
+                frame_stack = push_frame(frame_stack, preprocessed_obs)
                 game_trajectory.append((frame_stack, 0, prev_reward))
 
                 await self.storage_manager.append_gameplay_buffer((game_trajectory, episode_reward))
         except Exception:
             self.logger.exception("gameplay_process failed")
         self.logger.info("Gameplay process exiting")
+
+
+def initial_frame_stack(frame, num_frames=4):
+    """Build the starting (num_frames*C, H, W) stack by repeating one frame.
+
+    np.tile, not np.repeat: repeat interleaves the channel planes into
+    [R,R,R,R,G,G,G,G,B,B,B,B], whereas push_frame below treats the stack as
+    consecutive whole frames. The mismatch corrupted the first observation of
+    every episode and stayed wrong for num_frames steps as it shifted through.
+    """
+    return np.tile(frame, (num_frames, 1, 1))
+
+
+def push_frame(frame_stack, frame):
+    """Drop the oldest frame from the stack and append the newest."""
+    channels = frame.shape[0]
+    return np.concatenate([frame_stack[channels:, :, :], frame], axis=0)
 
 
 def preprocess_frame(frame, resize_shape=(84, 84)):
@@ -1189,10 +1203,10 @@ if __name__ == '__main__':
             preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
             done = False
             episode_reward = 0
-            frame_stack = np.tile(preprocessed_obs, (4, 1, 1))  # see gameplay_process
+            frame_stack = initial_frame_stack(preprocessed_obs)
             while not done:
                 preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
-                frame_stack = np.concatenate([frame_stack[3:, :, :], preprocessed_obs], axis=0)
+                frame_stack = push_frame(frame_stack, preprocessed_obs)
                 with torch.no_grad():
                     policy, value = ray.get(network.initial_inference.remote(frame_stack))
                     action = np.random.choice(np.arange(ACTION_SPACE), p=policy)
