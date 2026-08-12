@@ -15,3 +15,10 @@ training/*
 
 # Editor
 .vscode/
+
+# Virtualenv
+.venv/
+venv/
+
+# Benchmark output
+benchmarks/results/
