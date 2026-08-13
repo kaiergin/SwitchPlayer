@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 import torch
 
+import muzero
 from muzero import LATENT_CHANNELS, IMAGE_RESHAPE, NetworkManager
 from networks import DynamicsNetwork, PredictionNetwork, RepresentationNetwork
 
@@ -27,9 +28,11 @@ def latent():
 # --------------------------------------------------------------------------
 # Shapes
 # --------------------------------------------------------------------------
-def test_representation_downsamples_by_four(latent):
-    h, w = IMAGE_RESHAPE
-    assert latent.shape == (2, LATENT_CHANNELS, h // 4, w // 4)
+def test_representation_downsamples_to_the_declared_latent_size(latent):
+    """LATENT_HW is a constant consumers rely on; it must not drift from what
+    the network actually emits."""
+    assert latent.shape == (2, LATENT_CHANNELS, muzero.LATENT_HW, muzero.LATENT_HW)
+    assert IMAGE_RESHAPE[0] // muzero.LATENT_HW == 14, "84 -> 6 is a 14x reduction"
 
 
 def test_dynamics_preserves_latent_shape(latent):

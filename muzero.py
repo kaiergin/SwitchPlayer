@@ -35,7 +35,14 @@ MAX_GAMEPLAY = 20
 MAX_REPLAY = 20
 IMAGE_RESHAPE = (84,84)
 STEPS_UNTIL_MCTS = 500
-LATENT_CHANNELS = 64
+# 128 channels at 6x6 = 4,608 values (18 KB/node), against 64 at 21x21 = 28,224
+# (110 KB). Channels widen as resolution falls, so the residual blocks run at
+# small spatial sizes: roughly 3x less convolution work for 6x less memory.
+LATENT_CHANNELS = 128
+# Spatial size the representation network emits: 84 -> 42 -> 21 -> 11 -> 6
+# through four stride-2 convolutions. Kept here so consumers stop hardcoding a
+# divisor of the observation size; test_networks asserts it matches reality.
+LATENT_HW = 6
 UNROLL_STEPS = 5
 # gamma. Effective planning horizon is roughly 1/(1-DISCOUNT), so ~333 steps
 # here. Lowering it shortens credit assignment and converges faster to a worse

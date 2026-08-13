@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 
+import muzero
 from muzero import IMAGE_RESHAPE, LATENT_CHANNELS, MCTSHelper
 
 ACTIONS = 5
@@ -20,7 +21,7 @@ def helper():
 def fake_trajectory(length=6):
     """Entries in the shape eval_obs produces: (obs, action, reward, latent,
     policy, expanded_value)."""
-    h, w = IMAGE_RESHAPE[0] // 4, IMAGE_RESHAPE[1] // 4
+    h = w = muzero.LATENT_HW
     return [
         (None, i % ACTIONS, float(i * 10),
          torch.randn(1, LATENT_CHANNELS, h, w),

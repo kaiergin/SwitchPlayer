@@ -120,7 +120,7 @@ def bench_components(traj_len=200):
     # -- expansion ------------------------------------------------------------
     helper = MCTSHelper(action_space=ACTIONS, device=DEVICE,
                         network_ref=None, storage_ref=None)
-    h, w = IMAGE_RESHAPE[0] // 4, IMAGE_RESHAPE[1] // 4
+    h = w = muzero.LATENT_HW
 
     def expand(n):
         nodes = [muzero.MCTSNode(latent=torch.randn(1, LATENT_CHANNELS, h, w, device=DEVICE),
@@ -416,6 +416,7 @@ def _fake_batch(size, unroll):
         "rewards": np.random.rand(size, unroll + 1) * 100,
         "target_policy": np.full((size, unroll + 1, ACTIONS), 1 / ACTIONS),
         "target_value": np.random.rand(size, unroll + 1) * 500,
+        "has_policy_target": np.ones((size, unroll + 1), dtype=bool),
     }
 
 

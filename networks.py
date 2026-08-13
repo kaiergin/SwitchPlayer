@@ -40,26 +40,47 @@ class BasicBlock(nn.Module):
 # Representation Network
 # -----------------------------
 class RepresentationNetwork(nn.Module):
+    """Encodes an 84x84 observation stack down to 6x6, a 16x downsample.
+
+    Previously 84x84 -> 21x21, only 4x. That produced a latent LARGER in bytes
+    than the observation it encoded (110 KB against 83 KB, and 1.12x a raw
+    uncompressed Atari frame) and carried 12x more spatial positions than either
+    MuZero or EfficientZero use on Atari. No head ever consumed more than 8x8 of
+    it, so the resolution was computed, propagated through every dynamics
+    rollout, stored on every tree node, and then pooled away unused.
+
+    Channels widen as resolution falls, so the expensive residual blocks sit at
+    small spatial sizes rather than large ones.
+    """
+
     def __init__(self, input_channels=3, latent_channels=128):
         super(RepresentationNetwork, self).__init__()
         self.relu = nn.ReLU(inplace=False)
-        self.conv1 = nn.Conv2d(input_channels, 64,
-                               kernel_size=3, stride=2, padding=1)
-        self.block1 = BasicBlock(64, 64)
-        self.block2 = BasicBlock(64, 64)
-        self.conv2 = nn.Conv2d(64, latent_channels,
-                               kernel_size=3, stride=2, padding=1)
+        c1, c2 = max(latent_channels // 4, 8), max(latent_channels // 2, 16)
+
+        self.conv1 = nn.Conv2d(input_channels, c1, kernel_size=3, stride=2, padding=1)  # 84 -> 42
+        self.conv2 = nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1)              # 42 -> 21
+        self.block1 = BasicBlock(c2, c2)
+        self.conv3 = nn.Conv2d(c2, latent_channels, kernel_size=3, stride=2, padding=1)  # 21 -> 11
+        self.conv4 = nn.Conv2d(latent_channels, latent_channels,
+                               kernel_size=3, stride=2, padding=1)                       # 11 -> 6
+        self.block2 = BasicBlock(latent_channels, latent_channels)
         self.block3 = BasicBlock(latent_channels, latent_channels)
-        self.block4 = BasicBlock(latent_channels, latent_channels)
-        
+
     def forward(self, x):
+        # Downsample hard before spending residual blocks. At batch 1 -- the
+        # acting path -- this network is kernel-launch bound rather than compute
+        # bound, so layer COUNT costs more than layer width. Three blocks here
+        # against the previous four, and the two cheap early convolutions run
+        # back to back instead of sandwiching a block at 42x42.
         x = self.relu(self.conv1(x))
-        x = self.block1(x)
-        x = self.block2(x)
         x = self.relu(self.conv2(x))
+        x = self.block1(x)
+        x = self.relu(self.conv3(x))
+        x = self.relu(self.conv4(x))
+        x = self.block2(x)
         x = self.block3(x)
-        x = self.block4(x)
-        return x  # latent state of shape (batch, latent_channels, H', W')
+        return x  # latent state of shape (batch, latent_channels, 6, 6)
 
 # The support and the encode/decode pair live in scalar_categorical, so the
 # transform applied to targets and the one undone on predictions cannot drift
@@ -70,18 +91,23 @@ class RepresentationNetwork(nn.Module):
 # NOTE: the policy head returns raw logits. Callers are responsible for
 # applying softmax (for acting/priors) or log_softmax (for the training loss).
 class PredictionNetwork(nn.Module):
-    def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21):
+    def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
+                 pool=(6, 6)):
         super(PredictionNetwork, self).__init__()
+        # Pool to the latent's own spatial size. This was hardcoded to 8x8, which
+        # against a 6x6 latent would INTERPOLATE UP -- inventing resolution that
+        # is not there and paying for it in the fully connected layer.
+        self.pool = pool
         self.block = BasicBlock(latent_channels, latent_channels)
         self.relu = nn.ReLU(inplace=False)
         
         # Policy head:
         self.policy_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
-        self.policy_fc = nn.Linear(32 * 8 * 8, action_space)
+        self.policy_fc = nn.Linear(32 * pool[0] * pool[1], action_space)
         
         # Value head now outputs categorical logits instead of a single scalar.
         self.value_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
-        self.value_fc = nn.Linear(32 * 8 * 8, num_bins)
+        self.value_fc = nn.Linear(32 * pool[0] * pool[1], num_bins)
         
         self.support_size = support_size
         self.num_bins = num_bins
@@ -92,13 +118,13 @@ class PredictionNetwork(nn.Module):
         
         # Policy branch:
         p = self.relu(self.policy_conv(x))
-        p = F.adaptive_avg_pool2d(p, (8, 8))
+        p = F.adaptive_avg_pool2d(p, self.pool)
         p = p.contiguous().view(p.size(0), -1)
         policy_logits = self.policy_fc(p)
 
         # Value branch:
         v = self.relu(self.value_conv(x))
-        v = F.adaptive_avg_pool2d(v, (8, 8))
+        v = F.adaptive_avg_pool2d(v, self.pool)
         v = v.contiguous().view(v.size(0), -1)
         value_logits = self.value_fc(v)  # shape: (batch_size, num_bins)
         support = create_support(self.support_size, self.num_bins, latent.device)
@@ -108,8 +134,10 @@ class PredictionNetwork(nn.Module):
 
 # Revised DynamicsNetwork with categorical reward representation.
 class DynamicsNetwork(nn.Module):
-    def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21):
+    def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
+                 pool=(6, 6)):
         super(DynamicsNetwork, self).__init__()
+        self.pool = pool
         self.action_space = action_space
         self.support_size = support_size
         self.num_bins = num_bins
@@ -122,7 +150,7 @@ class DynamicsNetwork(nn.Module):
         
         # Reward head now outputs categorical logits.
         self.reward_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
-        self.reward_fc = nn.Linear(32 * 8 * 8, num_bins)
+        self.reward_fc = nn.Linear(32 * pool[0] * pool[1], num_bins)
         
     def forward(self, latent, action):
         batch_size = latent.size(0)
@@ -137,7 +165,7 @@ class DynamicsNetwork(nn.Module):
         
         # Reward branch:
         r = self.relu(self.reward_conv(x))
-        r = F.adaptive_avg_pool2d(r, (8, 8))
+        r = F.adaptive_avg_pool2d(r, self.pool)
         r = r.contiguous().view(batch_size, -1)
         reward_logits = self.reward_fc(r)
         support = create_support(self.support_size, self.num_bins, latent.device)

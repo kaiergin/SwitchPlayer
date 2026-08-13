@@ -19,7 +19,8 @@ from networks import ValuePrefixNetwork
 from scalar_categorical import scalar_to_categorical_batch
 
 CPU = torch.device("cpu")
-LATENT_HW = (IMAGE_RESHAPE[0] // 4, IMAGE_RESHAPE[1] // 4)
+from muzero import LATENT_HW as _HW
+LATENT_HW = (_HW, _HW)
 
 
 def latents(batch=2):
@@ -278,7 +279,7 @@ def prefix_tree(monkeypatch):
 
 
 def chain(helper, length=6):
-    h, w = IMAGE_RESHAPE[0] // 4, IMAGE_RESHAPE[1] // 4
+    h = w = muzero.LATENT_HW
     traj = [(None, i % 5, float(i), torch.randn(1, LATENT_CHANNELS, h, w),
              np.full(5, 0.2), float(i)) for i in range(length)]
     helper.create_tree_from_game(traj)
