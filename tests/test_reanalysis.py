@@ -227,6 +227,26 @@ def fake_batch(size, unroll, mask):
     }
 
 
+def test_batch_sampling_is_uniform_over_transitions():
+    """Regression: prepare_batch picked a trajectory uniformly FIRST, so every
+    transition of a short episode was sampled more often than one of a long
+    episode, in inverse proportion to episode length."""
+    trainer = build_trainer()
+
+    def make_traj(length, tag):
+        return [{"obs": np.zeros(1, dtype=np.uint8), "action": 0, "reward": tag,
+                 "target_policy": np.ones(ACTIONS) / ACTIONS, "target_value": 0.0,
+                 "has_policy_target": True} for _ in range(length)]
+
+    replay = [make_traj(90, 1.0), make_traj(10, 0.0)]
+    np.random.seed(0)
+    batch = asyncio.run(trainer.prepare_batch(replay, 400, 2, ACTIONS))
+    long_fraction = (batch["rewards"][:, 0] == 1.0).mean()
+    assert 0.85 < long_fraction < 0.95, (
+        f"90% of transitions live in the long trajectory but {long_fraction:.0%} "
+        "of samples came from it")
+
+
 def test_train_step_runs_with_a_partial_mask():
     trainer = build_trainer()
     mask = np.zeros((2, 3), dtype=bool)

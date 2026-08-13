@@ -1423,10 +1423,16 @@ class TrainingHelper:
         batch_target_value = []
         batch_has_policy = []
         
-        # For each sample, randomly choose a trajectory and a starting index.
+        # Sample uniformly over TRANSITIONS, not trajectories: weighting each
+        # trajectory by its length. Picking a trajectory uniformly first
+        # oversamples the transitions of short episodes in proportion to how
+        # short they are -- a 100-step death was sampled 6x as often per
+        # transition as a 600-step run.
+        trajectories = list(replay_buffer)
+        lengths = np.array([len(t) for t in trajectories], dtype=np.float64)
+        traj_probs = lengths / lengths.sum()
         for _ in range(batch_size):
-            # Sample a trajectory uniformly.
-            traj = random.choice(replay_buffer)
+            traj = trajectories[np.random.choice(len(trajectories), p=traj_probs)]
             traj_length = len(traj)
             start_index = np.random.randint(0, traj_length)
             
