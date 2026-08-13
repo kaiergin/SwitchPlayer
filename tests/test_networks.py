@@ -131,3 +131,45 @@ def test_initial_inference_does_not_leak_graph(manager):
     policy, value = manager.initial_inference(obs)
     assert torch.is_grad_enabled() == before
     assert isinstance(value, float)
+
+
+# --------------------------------------------------------------------------
+# BatchNorm mode: inference consumers eval, training copies train
+# --------------------------------------------------------------------------
+def test_inference_consumers_run_in_eval_mode(manager):
+    """Regression: no code path ever called .eval(), so acting normalised each
+    batch-1 frame by its own spatial statistics and search batches both used
+    and polluted the running stats. The function that acted was not the
+    function training optimised."""
+    assert not manager.representation.training
+    assert not manager.prediction.training
+    assert not manager.dynamics.training
+    assert not manager.value_prefix.training
+
+
+def test_eval_mode_survives_a_weight_pull(manager):
+    """load_state_dict refreshes weights and BN running stats but must not
+    flip the module back into train mode."""
+    fresh = NetworkManager(None, action_space=ACTIONS, device=CPU)
+    manager.representation.load_state_dict(fresh.representation.state_dict())
+    assert not manager.representation.training
+
+
+def test_network_helper_serves_in_eval_mode(tmp_path):
+    from muzero import NetworkHelper
+    helper = NetworkHelper(action_space=ACTIONS, device=CPU,
+                           checkpoint_path=str(tmp_path / "missing.pth"))
+    for net in (helper.representation, helper.dynamics,
+                helper.prediction, helper.value_prefix):
+        assert not net.training
+
+
+def test_training_copies_stay_in_train_mode():
+    """TrainingHelper's networks are the one place BatchNorm should be
+    accumulating running statistics."""
+    from muzero import TrainingHelper
+    trainer = TrainingHelper(action_space=ACTIONS, device=CPU,
+                             network_ref=None, storage_ref=None)
+    for net in (trainer.representation, trainer.dynamics,
+                trainer.prediction, trainer.value_prefix):
+        assert net.training

@@ -154,10 +154,22 @@ class Run:
         for name, net in nets.items():
             setattr(self.searcher.network_manager, name, net)
 
+        # Eval is the resting state: because the searcher shares the trainer's
+        # networks, self-play, search, and evaluation all run through the same
+        # objects, and BatchNorm must read running statistics there -- exactly
+        # as the pipeline's NetworkManager consumers do. run_one enters train
+        # mode only around train_step, the one place batch statistics belong.
+        self.set_train_mode(False)
+
         import gymnasium as gym
         from EpisodicLifeEnv import EpisodicLifeEnv
         self.env = EpisodicLifeEnv(gym.make("MsPacman-v4"))
         self.replay = []
+
+    def set_train_mode(self, training):
+        for net in (self.trainer.representation, self.trainer.dynamics,
+                    self.trainer.prediction, self.trainer.value_prefix):
+            net.train(training)
 
     # -- self-play ---------------------------------------------------------
     def play_episode(self, greedy=False, cap=600):
@@ -201,16 +213,19 @@ class Run:
 
     # -- evaluation --------------------------------------------------------
     def evaluate(self, episodes=4, batches=8):
-        """Greedy episode return, plus prediction errors against predict-zero."""
+        """Greedy episode return, plus prediction errors against predict-zero.
+
+        Runs entirely in eval mode -- the resting state. The greedy episodes
+        used to run BEFORE the nets were switched, so evaluation acting went
+        through train-mode BatchNorm: a different function from the one the
+        prediction-error metrics measured a few lines later.
+        """
         returns = [self.play_episode(greedy=True)[1] for _ in range(episodes)]
 
         K = muzero.UNROLL_STEPS
         errs = {"per_step": 0.0, "prefix": 0.0, "control": 0.0, "value": 0.0,
                 "value_control": 0.0}
         if self.replay:
-            for net in (self.trainer.representation, self.trainer.dynamics,
-                        self.trainer.prediction, self.trainer.value_prefix):
-                net.eval()
             with torch.no_grad():
                 for _ in range(batches):
                     b = asyncio.run(self.trainer.prepare_batch(self.replay, 32, K, ACTIONS))
@@ -235,9 +250,6 @@ class Run:
                     errs["per_step"] += (running - tgt).abs().mean().item()
                     errs["prefix"] += (prefix - tgt).abs().mean().item()
                     errs["control"] += tgt.abs().mean().item()
-            for net in (self.trainer.representation, self.trainer.dynamics,
-                        self.trainer.prediction, self.trainer.value_prefix):
-                net.train()
             errs = {k: v / batches for k, v in errs.items()}
 
         return {"return_mean": float(np.mean(returns)),
@@ -255,11 +267,13 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 if len(run.replay) > muzero.MAX_REPLAY:
                     run.replay.pop(0)
 
+            run.set_train_mode(True)
             for _ in range(train_steps):
                 batch = asyncio.run(run.trainer.prepare_batch(
                     run.replay, muzero.TRAINING_BATCHES, muzero.UNROLL_STEPS, ACTIONS))
                 asyncio.run(run.trainer.train_step(batch))
                 run.trainer.training_steps += 1
+            run.set_train_mode(False)
 
             if it == iterations:
                 # Save the trained weights. The first full ablation discarded

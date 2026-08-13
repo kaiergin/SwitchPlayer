@@ -537,6 +537,11 @@ class NetworkHelper:
         self.training_steps = 0
         self.logger = configure_actor_logger("NetworkHelper", enable_logging)
         self.load_checkpoint(checkpoint_path)
+        # The helper stores and serves weights -- TrainingHelper trains its own
+        # copies and pushes them back. Its only forward passes are inference
+        # (the viewer path), so BatchNorm runs in eval mode here too.
+        for net in (self.representation, self.dynamics, self.prediction, self.value_prefix):
+            net.eval()
         self.version = uuid.uuid4()
 
     def save_checkpoint(self, training_steps, checkpoint_path = 'checkpoint.pth'):
@@ -636,6 +641,17 @@ class NetworkManager:
                                                    hidden_size=VALUE_PREFIX_HIDDEN,
                                                    support_size=VALUE_PREFIX_SUPPORT,
                                                    num_bins=VALUE_PREFIX_BINS).to(device)
+        # Inference-only consumer: BatchNorm must read the running statistics
+        # training accumulated, not the statistics of whatever batch -- or
+        # single acting frame -- happens to pass through (which also polluted
+        # the running stats themselves). load_state_dict refreshes weights and
+        # running stats but never touches this flag, so once here holds across
+        # every weight pull.
+        self.representation.eval()
+        self.prediction.eval()
+        if self.load_dynamics:
+            self.dynamics.eval()
+            self.value_prefix.eval()
 
     async def setup(self):
         await self._pull_state()
