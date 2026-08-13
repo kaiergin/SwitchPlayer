@@ -103,9 +103,15 @@ interested in — how future reward is predicted through the dynamics network.
 
 ## Priority 2 — SimSiam consistency loss
 
-**Status: partial.** `train_step` has
-`F.mse_loss(latent, true_latent)` against a `no_grad` target — the right idea in
-its weakest form.
+**Status: DONE.** `networks.LatentProjector` carries EfficientZero's projection
+and prediction heads (fc-BN-ReLU shapes from the reference implementation);
+`train_step`'s `latent_loss` is negative cosine similarity through them, online
+branch through projection + prediction, target branch projection-only under
+`no_grad`. `CONSISTENCY_LOSS_WEIGHT` moved to EfficientZero's 2.0. The
+projector is training-only — inference consumers never project — but its
+weights and optimizer ride the checkpoint/state-transfer path so training
+resumes cleanly (pre-projector checkpoints still load, with a fresh projector).
+Observation augmentations (the paper reports they help) remain unexplored.
 
 ### What it is
 
@@ -124,14 +130,15 @@ SimSiam introduced to prevent collapse. The dynamics model is what re-analysis
 quality rests on, and this is the densest training signal available for it:
 a few hundred dimensions per step against a scalar reward.
 
-### What changes
+### What changed
 
-`networks.py` gains a projector and predictor MLP; `train_step`'s `latent_loss`
-becomes negative cosine similarity through them. Stop-gradient stays on the
-representation branch, which the current code already gets right.
+`networks.py` gained `LatentProjector` (projector + predictor MLPs);
+`train_step`'s `latent_loss` is negative cosine similarity through them, with
+stop-gradient on the representation branch. Widths follow the EfficientZero
+reference (1024/1024/512).
 
-*(verify)* projector/predictor widths and whether augmentations are applied to
-observations — the paper reports augmentation helps, and there are none here.
+*(open)* observation augmentations — the paper reports they help, and there
+are none here.
 
 ---
 

@@ -111,6 +111,35 @@ def test_train_step_reads_use_h_transform_at_call_time():
 
 
 # --------------------------------------------------------------------------
+# SimSiam consistency loss
+# --------------------------------------------------------------------------
+def test_consistency_loss_is_negative_cosine():
+    a = torch.tensor([[1.0, 0.0], [0.0, 2.0]])
+    b = torch.tensor([[0.0, 1.0], [3.0, 0.0]])   # orthogonal to a, row-wise
+    assert muzero.consistency_loss(a, a).item() == pytest.approx(-1.0)
+    assert muzero.consistency_loss(a, b).item() == pytest.approx(0.0)
+
+
+def test_consistency_loss_is_scale_free():
+    """The reason for cosine over MSE: shrinking the latents must not reduce
+    the loss, or the representation can collapse its way to a good score."""
+    a = torch.tensor([[3.0, 1.0], [0.5, 2.0]])
+    b = torch.tensor([[1.0, 2.0], [2.0, 0.5]])
+    assert muzero.consistency_loss(a * 1e-3, b).item() == pytest.approx(
+        muzero.consistency_loss(a, b).item(), abs=1e-5)
+
+
+def test_consistency_target_is_stop_gradient():
+    """The SimSiam stop-grad is load-bearing; the helper must detach the
+    target even if a caller forgets to."""
+    online = torch.randn(3, 8, requires_grad=True)
+    target = torch.randn(3, 8, requires_grad=True)
+    muzero.consistency_loss(online, target).backward()
+    assert online.grad is not None
+    assert target.grad is None
+
+
+# --------------------------------------------------------------------------
 # Reward clipping
 # --------------------------------------------------------------------------
 def test_clip_reward_uses_the_constant_and_is_symmetric():

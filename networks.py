@@ -180,6 +180,53 @@ class DynamicsNetwork(nn.Module):
         return next_latent, reward, reward_logits
 
 
+class LatentProjector(nn.Module):
+    """EfficientZero's self-supervised consistency heads (section 4.1; SimSiam).
+
+    Plain latent MSE toward a moving target -- what this replaces -- has a
+    known failure mode: the easiest way for the dynamics output to match the
+    representation's is for BOTH to drift toward low-information latents that
+    are easy to predict rather than useful. Two properties remove it:
+
+    * the loss is cosine similarity, which is scale-free, so shrinking latent
+      norms buys nothing;
+    * the branches are asymmetric -- online goes through projection AND
+      prediction, the target through projection only with gradients stopped --
+      which is the SimSiam arrangement that makes the matching problem
+      non-trivial.
+
+    Layer shapes follow the EfficientZero reference implementation:
+    projection fc-BN-ReLU / fc-BN-ReLU / fc-BN, prediction fc-BN-ReLU / fc.
+    Training-only: inference consumers never project, so NetworkManager does
+    not carry one.
+    """
+
+    def __init__(self, latent_dim, proj_hidden=1024, proj_out=1024, pred_hidden=512):
+        super(LatentProjector, self).__init__()
+        self.projection = nn.Sequential(
+            nn.Linear(latent_dim, proj_hidden),
+            nn.BatchNorm1d(proj_hidden),
+            nn.ReLU(inplace=False),
+            nn.Linear(proj_hidden, proj_hidden),
+            nn.BatchNorm1d(proj_hidden),
+            nn.ReLU(inplace=False),
+            nn.Linear(proj_hidden, proj_out),
+            nn.BatchNorm1d(proj_out),
+        )
+        self.prediction = nn.Sequential(
+            nn.Linear(proj_out, pred_hidden),
+            nn.BatchNorm1d(pred_hidden),
+            nn.ReLU(inplace=False),
+            nn.Linear(pred_hidden, proj_out),
+        )
+
+    def forward(self, latent, with_prediction):
+        """Project a (B, C, H, W) latent. with_prediction=True is the online
+        branch; False is the target branch (detach at the call site)."""
+        x = self.projection(latent.flatten(start_dim=1))
+        return self.prediction(x) if with_prediction else x
+
+
 class ValuePrefixNetwork(nn.Module):
     """Predicts the discounted reward SUM over an unroll, end to end.
 

@@ -9,8 +9,8 @@ import ray
 from collections import deque
 import scalar_categorical
 from memory import print_memory_diagnostics
-from networks import (DynamicsNetwork, PredictionNetwork, RepresentationNetwork,
-                      ValuePrefixNetwork)
+from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
+                      RepresentationNetwork, ValuePrefixNetwork)
 import logging
 import os
 import uuid
@@ -116,7 +116,7 @@ VALUE_LOSS_WEIGHT = 0.25        # MuZero's Atari setting
 POLICY_LOSS_WEIGHT = 1.0
 REWARD_LOSS_WEIGHT = 1.0
 PREFIX_LOSS_WEIGHT = 1.0
-CONSISTENCY_LOSS_WEIGHT = 1.0   # the latent MSE; EfficientZero weights its SimSiam loss 2.0
+CONSISTENCY_LOSS_WEIGHT = 2.0   # EfficientZero's setting for its SimSiam loss
 # Gradient flowing back through each recurrent dynamics step is halved, so it
 # does not compound across the unroll.
 LATENT_GRADIENT_SCALE = 0.5
@@ -393,6 +393,17 @@ def discounted_prefix_targets(rewards, discount=None):
     return torch.cat([torch.zeros_like(rewards[:, :1]), prefix], dim=1)
 
 
+def consistency_loss(online, target):
+    """The SimSiam objective: negative cosine similarity, -1 at a perfect match.
+
+    target is detached here as well as at the call site. The stop-gradient is
+    load-bearing -- it is half of what prevents the representation collapse
+    this loss exists to avoid -- so it must not depend on the caller
+    remembering to no_grad the target branch.
+    """
+    return -F.cosine_similarity(online, target.detach(), dim=1).mean()
+
+
 def clip_reward(reward, ceiling=None):
     """Symmetric clip to the reward support's raw ceiling.
 
@@ -580,17 +591,20 @@ class NetworkHelper:
                                                hidden_size=VALUE_PREFIX_HIDDEN,
                                                support_size=VALUE_PREFIX_SUPPORT,
                                                num_bins=VALUE_PREFIX_BINS).to(device)
+        self.projector = LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW).to(device)
         self.rep_optimizer = make_optimizer(self.representation.parameters())
         self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
         self.pred_optimizer = make_optimizer(self.prediction.parameters())
         self.prefix_optimizer = make_optimizer(self.value_prefix.parameters())
+        self.proj_optimizer = make_optimizer(self.projector.parameters())
         self.training_steps = 0
         self.logger = configure_actor_logger("NetworkHelper", enable_logging)
         self.load_checkpoint(checkpoint_path)
         # The helper stores and serves weights -- TrainingHelper trains its own
         # copies and pushes them back. Its only forward passes are inference
         # (the viewer path), so BatchNorm runs in eval mode here too.
-        for net in (self.representation, self.dynamics, self.prediction, self.value_prefix):
+        for net in (self.representation, self.dynamics, self.prediction,
+                    self.value_prefix, self.projector):
             net.eval()
         self.version = uuid.uuid4()
 
@@ -605,6 +619,8 @@ class NetworkHelper:
             'pred_optimizer_state_dict': self.pred_optimizer.state_dict(),
             'value_prefix_state_dict': self.value_prefix.state_dict(),
             'prefix_optimizer_state_dict': self.prefix_optimizer.state_dict(),
+            'projector_state_dict': self.projector.state_dict(),
+            'proj_optimizer_state_dict': self.proj_optimizer.state_dict(),
             'training_steps': training_steps
         }
         torch.save(checkpoint, checkpoint_path)
@@ -621,6 +637,14 @@ class NetworkHelper:
             self.rep_optimizer.load_state_dict(checkpoint['rep_optimizer_state_dict'])
             self.dyn_optimizer.load_state_dict(checkpoint['dyn_optimizer_state_dict'])
             self.pred_optimizer.load_state_dict(checkpoint['pred_optimizer_state_dict'])
+            # Checkpoints written before the SimSiam projector existed have no
+            # entry for it; a fresh projector is fine (it is training-only and
+            # carries no policy), so old checkpoints must keep loading.
+            if 'projector_state_dict' in checkpoint:
+                self.projector.load_state_dict(checkpoint['projector_state_dict'])
+                self.proj_optimizer.load_state_dict(checkpoint['proj_optimizer_state_dict'])
+            else:
+                self.logger.info("Checkpoint predates the projector; keeping fresh init")
             self.training_steps =  checkpoint['training_steps']
             self.logger.info("Checkpoint loaded successfully from %s", checkpoint_path)
         else:
@@ -643,10 +667,12 @@ class NetworkHelper:
         self.dynamics.load_state_dict(state["dynamics"])
         self.prediction.load_state_dict(state["prediction"])
         self.value_prefix.load_state_dict(state["value_prefix"])
+        self.projector.load_state_dict(state["projector"])
         self.rep_optimizer.load_state_dict(state["rep_optimizer"])
         self.dyn_optimizer.load_state_dict(state["dyn_optimizer"])
         self.pred_optimizer.load_state_dict(state["pred_optimizer"])
         self.prefix_optimizer.load_state_dict(state["prefix_optimizer"])
+        self.proj_optimizer.load_state_dict(state["proj_optimizer"])
         self.save_checkpoint(state["training_steps"], checkpoint_path=path)
 
     def get_state(self):
@@ -660,10 +686,12 @@ class NetworkHelper:
             "dynamics":         get_state_dict(self.dynamics),
             "prediction":       get_state_dict(self.prediction),
             "value_prefix":     get_state_dict(self.value_prefix),
+            "projector":        get_state_dict(self.projector),
             "rep_optimizer":    get_state_dict(self.rep_optimizer),
             "dyn_optimizer":    get_state_dict(self.dyn_optimizer),
             "pred_optimizer":   get_state_dict(self.pred_optimizer),
             "prefix_optimizer": get_state_dict(self.prefix_optimizer),
+            "proj_optimizer":   get_state_dict(self.proj_optimizer),
             "training_steps":   self.training_steps,
             "version":          self.version,
         }
@@ -1266,10 +1294,12 @@ class TrainingHelper:
                                                hidden_size=VALUE_PREFIX_HIDDEN,
                                                support_size=VALUE_PREFIX_SUPPORT,
                                                num_bins=VALUE_PREFIX_BINS).to(device)
+        self.projector = LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW).to(device)
         self.rep_optimizer = make_optimizer(self.representation.parameters())
         self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
         self.pred_optimizer = make_optimizer(self.prediction.parameters())
         self.prefix_optimizer = make_optimizer(self.value_prefix.parameters())
+        self.proj_optimizer = make_optimizer(self.projector.parameters())
         self.logger = configure_actor_logger("TrainingHelper", enable_logging)
         self.logger.info("Initialized TrainingHelper logger.")
 
@@ -1285,10 +1315,12 @@ class TrainingHelper:
         self.dynamics.load_state_dict(state["dynamics"])
         self.prediction.load_state_dict(state["prediction"])
         self.value_prefix.load_state_dict(state["value_prefix"])
+        self.projector.load_state_dict(state["projector"])
         self.rep_optimizer.load_state_dict(state["rep_optimizer"])
         self.dyn_optimizer.load_state_dict(state["dyn_optimizer"])
         self.pred_optimizer.load_state_dict(state["pred_optimizer"])
         self.prefix_optimizer.load_state_dict(state["prefix_optimizer"])
+        self.proj_optimizer.load_state_dict(state["proj_optimizer"])
 
     async def save_networks(self):
         await self.network_helper.update_state.remote({
@@ -1296,10 +1328,12 @@ class TrainingHelper:
             "dynamics":         self.dynamics.state_dict(),
             "prediction":       self.prediction.state_dict(),
             "value_prefix":     self.value_prefix.state_dict(),
+            "projector":        self.projector.state_dict(),
             "rep_optimizer":    self.rep_optimizer.state_dict(),
             "dyn_optimizer":    self.dyn_optimizer.state_dict(),
             "pred_optimizer":   self.pred_optimizer.state_dict(),
             "prefix_optimizer": self.prefix_optimizer.state_dict(),
+            "proj_optimizer":   self.proj_optimizer.state_dict(),
             "training_steps":   self.training_steps,
         })
         
@@ -1338,6 +1372,7 @@ class TrainingHelper:
         self.pred_optimizer.zero_grad()
         self.dyn_optimizer.zero_grad()
         self.prefix_optimizer.zero_grad()
+        self.proj_optimizer.zero_grad()
         
         total_loss = 0.0
 
@@ -1385,9 +1420,17 @@ class TrainingHelper:
             latent = scale_gradient(latent, LATENT_GRADIENT_SCALE)
             # Use the action from the previous step to roll forward the latent state.
             latent, _, reward_logits = self.dynamics(latent, actions[:, i - 1])
+            # SimSiam consistency (EfficientZero 4.1), replacing plain latent
+            # MSE. Online branch: the dynamics-predicted latent through
+            # projection AND prediction. Target branch: the representation of
+            # the real observation through projection only, gradients stopped.
+            # Cosine rather than MSE, so latents cannot drift small to make
+            # the matching easier.
             with torch.no_grad():
                 true_latent = self.representation(obs[:, i])
-            latent_loss = F.mse_loss(latent, true_latent, reduction="mean")
+                target_proj = self.projector(true_latent, with_prediction=False)
+            online_proj = self.projector(latent, with_prediction=True)
+            latent_loss = consistency_loss(online_proj, target_proj)
             
             # Loss for reward prediction. (reward[0] not used since it is reward for entering obs)
             reward_loss = -torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1).mean()
@@ -1428,6 +1471,7 @@ class TrainingHelper:
         self.dyn_optimizer.step()
         self.prefix_optimizer.step()
         self.pred_optimizer.step()
+        self.proj_optimizer.step()
         
         return total_loss.item()
 

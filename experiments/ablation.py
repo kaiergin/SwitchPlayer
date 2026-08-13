@@ -41,8 +41,8 @@ import muzero
 from muzero import (C_PUCT, IMAGE_RESHAPE, LATENT_CHANNELS, MCTS_BATCHES, MCTSHelper,
                     TOTAL_MCTS_SIMS, TrainingHelper, initial_frame_stack,
                     preprocess_frame, push_frame)
-from networks import (DynamicsNetwork, PredictionNetwork, RepresentationNetwork,
-                      ValuePrefixNetwork)
+from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
+                      RepresentationNetwork, ValuePrefixNetwork)
 
 RESULTS = pathlib.Path(__file__).resolve().parent.parent / "benchmarks" / "results"
 ACTIONS = 5
@@ -132,6 +132,7 @@ def build_networks(spec):
                                         hidden_size=muzero.VALUE_PREFIX_HIDDEN,
                                         support_size=prefix_sup, num_bins=prefix_bins,
                                         transform=transform).to(DEVICE),
+        projector=LatentProjector(LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE),
     )
 
 
@@ -155,6 +156,7 @@ class Run:
         self.trainer.dyn_optimizer = muzero.make_optimizer(nets["dynamics"].parameters())
         self.trainer.pred_optimizer = muzero.make_optimizer(nets["prediction"].parameters())
         self.trainer.prefix_optimizer = muzero.make_optimizer(nets["value_prefix"].parameters())
+        self.trainer.proj_optimizer = muzero.make_optimizer(nets["projector"].parameters())
 
         # The searcher shares the trainer's networks, so re-analysis always uses
         # current weights -- the equivalent of NetworkManager.update_if_needed.
@@ -178,7 +180,8 @@ class Run:
 
     def set_train_mode(self, training):
         for net in (self.trainer.representation, self.trainer.dynamics,
-                    self.trainer.prediction, self.trainer.value_prefix):
+                    self.trainer.prediction, self.trainer.value_prefix,
+                    self.trainer.projector):
             net.train(training)
 
     # -- self-play ---------------------------------------------------------

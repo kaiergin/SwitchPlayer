@@ -193,8 +193,8 @@ def test_legacy_transitions_without_the_key_are_treated_as_searched(trainer):
 # End to end through train_step
 # --------------------------------------------------------------------------
 def build_trainer():
-    from networks import (DynamicsNetwork, PredictionNetwork, RepresentationNetwork,
-                          ValuePrefixNetwork)
+    from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
+                          RepresentationNetwork, ValuePrefixNetwork)
     import torch.optim as optim
     t = object.__new__(TrainingHelper)
     t.device = CPU
@@ -209,10 +209,12 @@ def build_trainer():
                                         hidden_size=64,
                                         support_size=muzero.VALUE_PREFIX_SUPPORT,
                                         num_bins=51)
+    t.projector = LatentProjector(LATENT_CHANNELS * muzero.LATENT_HW ** 2)
     t.prefix_optimizer = muzero.make_optimizer(t.value_prefix.parameters())
     t.rep_optimizer = muzero.make_optimizer(t.representation.parameters())
     t.dyn_optimizer = muzero.make_optimizer(t.dynamics.parameters())
     t.pred_optimizer = muzero.make_optimizer(t.prediction.parameters())
+    t.proj_optimizer = muzero.make_optimizer(t.projector.parameters())
     return t
 
 

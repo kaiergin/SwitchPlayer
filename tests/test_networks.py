@@ -176,6 +176,44 @@ def test_training_copies_stay_in_train_mode():
 
 
 # --------------------------------------------------------------------------
+# SimSiam projector (EfficientZero 4.1)
+# --------------------------------------------------------------------------
+def test_projector_branches_share_output_shape(latent):
+    from networks import LatentProjector
+    proj = LatentProjector(latent[0].numel())
+    target = proj(latent, with_prediction=False)
+    online = proj(latent, with_prediction=True)
+    assert target.shape == online.shape == (2, 1024)
+
+
+def test_checkpoint_roundtrips_the_projector(tmp_path):
+    from muzero import NetworkHelper
+    path = str(tmp_path / "ck.pth")
+    helper = NetworkHelper(action_space=ACTIONS, device=CPU, checkpoint_path=path)
+    helper.save_checkpoint(5, checkpoint_path=path)
+
+    reloaded = NetworkHelper(action_space=ACTIONS, device=CPU, checkpoint_path=path)
+    a = helper.projector.state_dict()
+    b = reloaded.projector.state_dict()
+    assert all(torch.equal(a[k], b[k]) for k in a)
+
+
+def test_pre_projector_checkpoint_still_loads(tmp_path):
+    """Checkpoints written before SimSiam landed have no projector entry; they
+    must load with a fresh projector rather than raising KeyError -- the
+    projector is training-only and carries no policy."""
+    from muzero import NetworkHelper
+    path = str(tmp_path / "ck.pth")
+    NetworkHelper(action_space=ACTIONS, device=CPU,
+                  checkpoint_path=path).save_checkpoint(5, checkpoint_path=path)
+    ck = torch.load(path)
+    del ck["projector_state_dict"]
+    del ck["proj_optimizer_state_dict"]
+    torch.save(ck, path)
+    NetworkHelper(action_space=ACTIONS, device=CPU, checkpoint_path=path)  # must not raise
+
+
+# --------------------------------------------------------------------------
 # The decode transform flag
 # --------------------------------------------------------------------------
 def test_decode_honours_the_transform_flag(latent):
