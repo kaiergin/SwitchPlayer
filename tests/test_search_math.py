@@ -56,25 +56,25 @@ def test_noise_epsilon_zero_is_identity():
     assert add_dirichlet_noise(prior, epsilon=0.0) == pytest.approx(prior)
 
 
-def test_default_alpha_is_near_one_hot_on_small_action_spaces():
-    """Documents a known tuning smell rather than asserting it is correct.
+def test_default_alpha_is_muzeros_atari_setting():
+    """alpha was 0.03 -- AlphaGo's value, tuned for 361 moves -- which over 5
+    actions made the Dirichlet sample effectively one-hot: ~92% of the noise
+    mass landed on a single random action, so root exploration perturbed one
+    arm instead of spreading. 0.25 is MuZero's Atari setting. This pins the
+    defaults on BOTH noise entry points so they cannot silently diverge."""
+    import inspect
 
-    alpha=0.03 is AlphaGo's value, tuned for 361 moves. Over 5 actions the
-    Dirichlet sample is effectively one-hot, so exploration noise concentrates
-    on a single random action instead of spreading. Left as-is for now; this
-    test is here so a deliberate retune shows up as a failure rather than
-    silently changing search behaviour.
-    """
+    import muzero
+    assert inspect.signature(add_dirichlet_noise).parameters["alpha"].default == 0.25
+    assert inspect.signature(muzero.MCTSHelper.add_noise_to_node).parameters["alpha"].default == 0.25
+
     np.random.seed(0)
     concentration = {
         a: np.array([np.random.dirichlet([a] * 5) for _ in range(500)]).max(axis=1).mean()
-        for a in (0.03, 0.25, 1.0)
+        for a in (0.03, 0.25)
     }
-    # A single action takes ~92% of the noise mass at the current setting.
-    assert concentration[0.03] > 0.85
-    # Values conventional for a 5-action space spread it far more evenly.
+    assert concentration[0.03] > 0.85          # what the old default did
     assert concentration[0.25] < concentration[0.03] - 0.15
-    assert concentration[1.0] < 0.7
 
 
 # --------------------------------------------------------------------------

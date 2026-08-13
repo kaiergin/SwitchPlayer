@@ -127,6 +127,12 @@ LATENT_GRADIENT_SCALE = 0.5
 # ---------------------------------------------------------------------------
 GAME_FPS = 60.0
 SELF_PLAY_REAL_TIME = True      # False lets self-play run as fast as the hardware allows
+# Acting samples the policy head at this temperature. With no search on the
+# acting path, this IS the exploration mechanism, so it stays at 1.0 while the
+# get_temperature schedule sharpens the TARGETS instead. Lower it deliberately
+# and one knob at a time -- decaying acting entropy and target temperature
+# together is how exploration collapses.
+ACTING_TEMPERATURE = 1.0
 # Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
 # them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
 # slower than self-play generates data even with two MCTS actors, so the
@@ -190,7 +196,7 @@ def print_tree(node, depth=0):
         print(f"{indent}  Action {action}:")
         print_tree(child, depth + 1)
 
-def add_dirichlet_noise(prior, epsilon=0.25, alpha=0.03):
+def add_dirichlet_noise(prior, epsilon=0.25, alpha=0.25):
     """
     Adds Dirichlet noise to a given prior policy.
     
@@ -351,8 +357,13 @@ class RateLimiter:
             self.next_at = now
 
 
-def discounted_prefix_targets(rewards, discount=DISCOUNT):
+def discounted_prefix_targets(rewards, discount=None):
     """Cumulative discounted reward sums along an unroll.
+
+    The default resolves DISCOUNT at call time, not in the signature -- the
+    same default-argument binding that silently pinned backup_simulation's
+    Monte Carlo targets to 0.997 and would make any runtime DISCOUNT override
+    (the ablation harness) measure nothing here.
 
     `rewards` is (B, unroll+1) where rewards[:, i] is the reward for *entering*
     step i. rewards[:, 0] therefore belongs to the state the unroll starts from
@@ -362,6 +373,7 @@ def discounted_prefix_targets(rewards, discount=DISCOUNT):
 
     with column 0 zero: nothing is accumulated before the first step.
     """
+    discount = DISCOUNT if discount is None else discount
     steps = rewards.shape[1] - 1
     weights = discount ** torch.arange(steps, device=rewards.device, dtype=rewards.dtype)
     prefix = torch.cumsum(rewards[:, 1:] * weights, dim=1)
@@ -973,7 +985,10 @@ class MCTSHelper:
         self.backup_simulation(path, 0)
         self.current_trajectory = path
     
-    def add_noise_to_node(self, idx, epsilon = 0.25, alpha = 0.03):
+    # alpha=0.25 is MuZero's Atari setting. The old 0.03 was AlphaGo's value,
+    # tuned for 361 moves: over 5 actions it made the Dirichlet sample
+    # effectively one-hot, ~92% of the noise mass on a single random action.
+    def add_noise_to_node(self, idx, epsilon = 0.25, alpha = 0.25):
         node = self.current_trajectory[idx]
         node.policy = add_dirichlet_noise(node.policy, epsilon=epsilon, alpha=alpha)
         for action, child in node.children.items():
@@ -1544,6 +1559,9 @@ class MuZeroAgent:
                     frame_stack = push_frame(frame_stack, preprocessed_obs)
                     with torch.no_grad():
                         policy, value = self.network_manager.initial_inference(frame_stack)
+                    if ACTING_TEMPERATURE != 1.0:
+                        policy = policy ** (1.0 / ACTING_TEMPERATURE)
+                        policy = policy / policy.sum()
                     action = np.random.choice(np.arange(self.action_space), p=policy)
                     obs, reward, terminated, truncated, _ = await asyncio.to_thread(env.step, action)
                     done = terminated or truncated

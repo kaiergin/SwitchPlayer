@@ -36,6 +36,21 @@ def prefix_net():
 # --------------------------------------------------------------------------
 # Prefix targets
 # --------------------------------------------------------------------------
+def test_default_discount_resolves_at_call_time():
+    """Regression class, not yet a live bug: a `discount=DISCOUNT` signature
+    default binds the value at import, so a runtime override of
+    muzero.DISCOUNT (which is exactly what the ablation harness does) would be
+    silently ignored by any caller relying on the default -- the same binding
+    that pinned backup_simulation's targets to 0.997."""
+    saved = muzero.DISCOUNT
+    muzero.DISCOUNT = 0.5
+    try:
+        out = discounted_prefix_targets(torch.tensor([[0.0, 1.0, 1.0]]))
+        assert out[0, 2].item() == pytest.approx(1.0 + 0.5)
+    finally:
+        muzero.DISCOUNT = saved
+
+
 def test_prefix_at_step_zero_is_always_zero():
     """Nothing is accumulated before the unroll starts. rewards[:, 0] is the
     reward for entering the state the unroll begins from, so it belongs to no
