@@ -261,6 +261,22 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 asyncio.run(run.trainer.train_step(batch))
                 run.trainer.training_steps += 1
 
+            if it == iterations:
+                # Save the trained weights. The first full ablation discarded
+                # 4.9 hours of training because nothing here wrote them out,
+                # which made it impossible to watch an agent afterwards or to
+                # resume from one.
+                ckpt = RESULTS / f"weights-{arm}-seed{seed}.pth"
+                torch.save({
+                    "arm": arm, "seed": seed, "spec": {k: v for k, v in spec.items()},
+                    "training_steps": run.trainer.training_steps,
+                    "representation": run.trainer.representation.state_dict(),
+                    "dynamics": run.trainer.dynamics.state_dict(),
+                    "prediction": run.trainer.prediction.state_dict(),
+                    "value_prefix": run.trainer.value_prefix.state_dict(),
+                }, ckpt)
+                print(f"  saved {ckpt.name}", flush=True)
+
             if it % eval_every == 0 or it == iterations:
                 metrics = run.evaluate()
                 record = {"arm": arm, "seed": seed, "iteration": it,
