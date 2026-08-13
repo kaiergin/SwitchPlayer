@@ -224,7 +224,6 @@ def fake_batch(size, unroll, mask):
         "target_policy": np.full((size, unroll + 1, ACTIONS), 1.0 / ACTIONS),
         "target_value": np.random.rand(size, unroll + 1) * 100,
         "has_policy_target": mask,
-        "is_real": np.ones((size, unroll + 1), dtype=bool),
     }
 
 
@@ -256,31 +255,34 @@ def test_masking_changes_the_loss():
     assert full != none
 
 
-# --------------------------------------------------------------------------
-# Padding must not teach anything
-# --------------------------------------------------------------------------
-def test_prepare_batch_marks_padding_as_not_real(trainer):
-    """Regression: padding past the end of a trajectory contributes
-    target_value 0.0 and reward 0.0, and only the POLICY half was masked. Every
-    value head was therefore taught "this state is worth nothing" at every
-    episode end -- 1-8% of positions depending on trajectory length, always
-    biased the same direction."""
+def test_padding_carries_a_true_value_target_not_a_placeholder(trainer):
+    """Padding past the end of a trajectory repeats the TERMINAL observation,
+    whose value really is zero -- there is no future reward. So target_value 0.0
+    is correct signal and is deliberately trained on.
+
+    Only the policy is masked there, because a uniform policy is fabricated
+    whereas a zero value is true. An earlier change masked the value, reward and
+    prefix as well; that removed correct signal and was reverted.
+    """
     traj = [transition(True) for _ in range(3)]
     batch = prepare(trainer, [traj], size=8, unroll=5)
-    assert "is_real" in batch
-    assert not batch["is_real"][:, 4:].any(), "positions past the end must be marked"
-    assert batch["is_real"][:, 0].all(), "step 0 is never padding"
+
+    # Positions past the end repeat the last observation and take value 0.
+    assert (batch["target_value"][:, 4:] == 0.0).all()
+    assert (batch["rewards"][:, 4:] == 0.0).all()
+    # ...but their policy is a placeholder and is masked out.
+    assert not batch["has_policy_target"][:, 4:].any()
 
 
-def test_padding_does_not_contribute_to_the_value_loss():
-    """A batch that is entirely padding past step 0 must produce the same value
-    loss as one truncated to its real positions."""
-    from muzero import masked_categorical_loss
-    logits = torch.randn(4, 11)
-    target = torch.softmax(torch.randn(4, 11), dim=1)
+def test_truncation_is_currently_indistinguishable_from_termination():
+    """Known gap, deliberately not fixed: `done = terminated or truncated`
+    everywhere, and create_tree_from_game bootstraps 0 for both. A truncated
+    episode is NOT worth zero -- the game was still going.
 
-    all_real = masked_categorical_loss(logits, target, torch.ones(4))
-    half = masked_categorical_loss(logits, target, torch.tensor([1.0, 1.0, 0.0, 0.0]))
-    subset = masked_categorical_loss(logits[:2], target[:2], torch.ones(2))
-    assert float(half) == pytest.approx(float(subset), abs=1e-6)
-    assert float(half) != pytest.approx(float(all_real), abs=1e-6)
+    It does not fire today: MsPacman-v4 has max_episode_steps=None, so the env
+    never truncates, and measured episodes run ~217 steps against the harness's
+    600 cap. It would matter for a stronger policy, a TimeLimit wrapper, or the
+    Switch target, where session boundaries are truncations.
+    """
+    import gymnasium as gym
+    assert gym.spec("MsPacman-v4").max_episode_steps is None

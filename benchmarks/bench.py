@@ -417,7 +417,6 @@ def _fake_batch(size, unroll):
         "target_policy": np.full((size, unroll + 1, ACTIONS), 1 / ACTIONS),
         "target_value": np.random.rand(size, unroll + 1) * 500,
         "has_policy_target": np.ones((size, unroll + 1), dtype=bool),
-        "is_real": np.ones((size, unroll + 1), dtype=bool),
     }
 
 
