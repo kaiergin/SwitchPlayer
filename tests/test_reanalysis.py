@@ -224,6 +224,7 @@ def fake_batch(size, unroll, mask):
         "target_policy": np.full((size, unroll + 1, ACTIONS), 1.0 / ACTIONS),
         "target_value": np.random.rand(size, unroll + 1) * 100,
         "has_policy_target": mask,
+        "is_real": np.ones((size, unroll + 1), dtype=bool),
     }
 
 
@@ -253,3 +254,33 @@ def test_masking_changes_the_loss():
     batch["has_policy_target"] = np.zeros((2, 3), dtype=bool)
     none = asyncio.run(trainer.train_step(batch))
     assert full != none
+
+
+# --------------------------------------------------------------------------
+# Padding must not teach anything
+# --------------------------------------------------------------------------
+def test_prepare_batch_marks_padding_as_not_real(trainer):
+    """Regression: padding past the end of a trajectory contributes
+    target_value 0.0 and reward 0.0, and only the POLICY half was masked. Every
+    value head was therefore taught "this state is worth nothing" at every
+    episode end -- 1-8% of positions depending on trajectory length, always
+    biased the same direction."""
+    traj = [transition(True) for _ in range(3)]
+    batch = prepare(trainer, [traj], size=8, unroll=5)
+    assert "is_real" in batch
+    assert not batch["is_real"][:, 4:].any(), "positions past the end must be marked"
+    assert batch["is_real"][:, 0].all(), "step 0 is never padding"
+
+
+def test_padding_does_not_contribute_to_the_value_loss():
+    """A batch that is entirely padding past step 0 must produce the same value
+    loss as one truncated to its real positions."""
+    from muzero import masked_categorical_loss
+    logits = torch.randn(4, 11)
+    target = torch.softmax(torch.randn(4, 11), dim=1)
+
+    all_real = masked_categorical_loss(logits, target, torch.ones(4))
+    half = masked_categorical_loss(logits, target, torch.tensor([1.0, 1.0, 0.0, 0.0]))
+    subset = masked_categorical_loss(logits[:2], target[:2], torch.ones(2))
+    assert float(half) == pytest.approx(float(subset), abs=1e-6)
+    assert float(half) != pytest.approx(float(all_real), abs=1e-6)

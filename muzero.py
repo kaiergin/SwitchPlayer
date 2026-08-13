@@ -364,6 +364,16 @@ def discounted_prefix_targets(rewards, discount=DISCOUNT):
     return torch.cat([torch.zeros_like(rewards[:, :1]), prefix], dim=1)
 
 
+def masked_categorical_loss(logits, target_dist, mask):
+    """Cross-entropy averaged over the positions that carry a real target.
+
+    Returns 0 when nothing in the batch is masked in; clamping the denominator
+    keeps that branch-free so it does not force a device sync.
+    """
+    per_position = -torch.sum(target_dist * F.log_softmax(logits, dim=1), dim=1)
+    return (per_position * mask).sum() / mask.sum().clamp(min=1.0)
+
+
 def masked_policy_loss(policy_logits, target_policy, mask):
     """Cross-entropy averaged over the positions that carry a real target.
 
@@ -1144,7 +1154,7 @@ class TrainingHelper:
     # -----------------------------
     # Training Step: remote method to update networks
     # -----------------------------
-    async def train_step(self, batch, only_dynamics = False):
+    async def train_step(self, batch):
         """
         Multi-step unrolling training step.
         
@@ -1169,6 +1179,13 @@ class TrainingHelper:
         # and trajectory padding is never a real target.
         policy_mask = torch.tensor(np.asarray(batch["has_policy_target"]),
                                    dtype=torch.float32, device=self.device)
+        # Positions that are real transitions rather than padding past the end of
+        # a trajectory. Padding contributes target_value 0.0 and reward 0.0, and
+        # only the POLICY half was ever masked -- so every value head was being
+        # taught "this state is worth nothing" at every episode end, on 1-8% of
+        # positions depending on trajectory length, always biased the same way.
+        real_mask = torch.tensor(np.asarray(batch["is_real"]),
+                                 dtype=torch.float32, device=self.device)
         
         # Zero out the gradients for all optimizers.
         self.rep_optimizer.zero_grad()
@@ -1202,12 +1219,12 @@ class TrainingHelper:
         prefix_state = self.value_prefix.initial_state(obs.size(0), self.device)
 
         # Compute losses for the initial step (no reward loss here).
-        if not only_dynamics:
-            policy_loss_0 = masked_policy_loss(policy_logits, target_policy[:, 0, :], policy_mask[:, 0])
-            converted_target_values = scalar_categorical.scalar_to_categorical_batch(target_value, self.prediction.support_size, self.prediction.num_bins, self.device)
-            value_loss_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
-            total_loss += (POLICY_LOSS_WEIGHT * policy_loss_0
-                           + VALUE_LOSS_WEIGHT * value_loss_0)
+        policy_loss_0 = masked_policy_loss(policy_logits, target_policy[:, 0, :], policy_mask[:, 0])
+        converted_target_values = scalar_categorical.scalar_to_categorical_batch(target_value, self.prediction.support_size, self.prediction.num_bins, self.device)
+        value_loss_0 = masked_categorical_loss(
+            value_logits, converted_target_values[:, 0, :], real_mask[:, 0])
+        total_loss += (POLICY_LOSS_WEIGHT * policy_loss_0
+                       + VALUE_LOSS_WEIGHT * value_loss_0)
 
         # ---------------------
         # Unroll for each subsequent step
@@ -1223,32 +1240,30 @@ class TrainingHelper:
             latent_loss = F.mse_loss(latent, true_latent, reduction="mean")
             
             # Loss for reward prediction. (reward[0] not used since it is reward for entering obs)
-            reward_loss = -torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1).mean()
+            reward_loss = masked_categorical_loss(
+                reward_logits, converted_target_rewards[:, i, :], real_mask[:, i])
 
             # Value prefix over the same unroll. Both heads are trained on the
             # same trunk for now so they can be compared directly on identical
             # representations; the per-step head goes away once the tree search
             # is migrated to consume prefixes.
             _, prefix_logits, prefix_state = self.value_prefix(latent, prefix_state)
-            prefix_loss = -torch.sum(converted_target_prefix[:, i, :] * F.log_softmax(prefix_logits, dim=1), dim=1).mean()
+            prefix_loss = masked_categorical_loss(
+                prefix_logits, converted_target_prefix[:, i, :], real_mask[:, i])
 
-            if not only_dynamics:
-                policy_logits, _, value_logits = self.prediction(latent)
-                
-                # Loss for policy prediction, over the positions that have one.
-                policy_loss = masked_policy_loss(policy_logits, target_policy[:, i, :], policy_mask[:, i])
-                # Loss for value prediction.
-                value_loss = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
-                
-                step_loss = (REWARD_LOSS_WEIGHT * reward_loss
-                             + PREFIX_LOSS_WEIGHT * prefix_loss
-                             + POLICY_LOSS_WEIGHT * policy_loss
-                             + VALUE_LOSS_WEIGHT * value_loss
-                             + CONSISTENCY_LOSS_WEIGHT * latent_loss)
-            else:
-                step_loss = (REWARD_LOSS_WEIGHT * reward_loss
-                             + PREFIX_LOSS_WEIGHT * prefix_loss
-                             + CONSISTENCY_LOSS_WEIGHT * latent_loss)
+            policy_logits, _, value_logits = self.prediction(latent)
+
+            # Loss for policy prediction, over the positions that have one.
+            policy_loss = masked_policy_loss(policy_logits, target_policy[:, i, :], policy_mask[:, i])
+            # Loss for value prediction, over the positions that are real.
+            value_loss = masked_categorical_loss(
+                value_logits, converted_target_values[:, i, :], real_mask[:, i])
+
+            step_loss = (REWARD_LOSS_WEIGHT * reward_loss
+                         + PREFIX_LOSS_WEIGHT * prefix_loss
+                         + POLICY_LOSS_WEIGHT * policy_loss
+                         + VALUE_LOSS_WEIGHT * value_loss
+                         + CONSISTENCY_LOSS_WEIGHT * latent_loss)
 
             # Each unroll step contributes 1/K of the gradient, so the total does
             # not scale with how far the unroll runs.
@@ -1261,8 +1276,7 @@ class TrainingHelper:
         self.rep_optimizer.step()
         self.dyn_optimizer.step()
         self.prefix_optimizer.step()
-        if not only_dynamics:
-            self.pred_optimizer.step()
+        self.pred_optimizer.step()
         
         return total_loss.item()
 
@@ -1315,6 +1329,7 @@ class TrainingHelper:
         batch_target_policy = []
         batch_target_value = []
         batch_has_policy = []
+        batch_is_real = []
         
         # For each sample, randomly choose a trajectory and a starting index.
         for _ in range(batch_size):
@@ -1330,6 +1345,7 @@ class TrainingHelper:
             target_policy = []
             target_value = []
             has_policy = []
+            is_real = []
             
             # We need unroll_steps+1 target entries (for step 0 and each unroll step).
             for step in range(unroll_steps + 1):
@@ -1342,6 +1358,7 @@ class TrainingHelper:
                     # Trajectories written before reanalysis subsampling have no
                     # such key; every position in them was searched.
                     has_policy.append(node.get("has_policy_target", True))
+                    is_real.append(True)
                     # reward for entering node (reward[0] will not be used)
                     rewards.append(node["reward"])
                     if step < unroll_steps:
@@ -1354,6 +1371,7 @@ class TrainingHelper:
                     target_value.append(0.0)
                     rewards.append(0.0)
                     has_policy.append(False)   # padding is not a real target
+                    is_real.append(False)
                     if step < unroll_steps:
                         actions.append(0)         # or a default action
             
@@ -1363,6 +1381,7 @@ class TrainingHelper:
             batch_target_policy.append(target_policy)
             batch_target_value.append(target_value)
             batch_has_policy.append(has_policy)
+            batch_is_real.append(is_real)
         
         # Convert lists to numpy arrays.
         batch_obs = np.array(batch_obs)  # (B, H, W, C)
@@ -1371,6 +1390,7 @@ class TrainingHelper:
         batch_target_policy = np.array(batch_target_policy)  # (B, unroll_steps+1, action_space)
         batch_target_value = np.array(batch_target_value)  # (B, unroll_steps+1)
         batch_has_policy = np.array(batch_has_policy)  # (B, unroll_steps+1)
+        batch_is_real = np.array(batch_is_real)  # (B, unroll_steps+1)
         
         return {
             "obs": batch_obs,
@@ -1378,7 +1398,8 @@ class TrainingHelper:
             "rewards": batch_rewards,
             "target_policy": batch_target_policy,
             "target_value": batch_target_value,
-            "has_policy_target": batch_has_policy
+            "has_policy_target": batch_has_policy,
+            "is_real": batch_is_real
         }
 
 #Agent will be single threaded for real time learning
