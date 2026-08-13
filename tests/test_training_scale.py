@@ -111,6 +111,20 @@ def test_train_step_reads_use_h_transform_at_call_time():
 
 
 # --------------------------------------------------------------------------
+# Reward clipping
+# --------------------------------------------------------------------------
+def test_clip_reward_uses_the_constant_and_is_symmetric():
+    """Regression: the acting path hardcoded min(reward, 400), so changing
+    REWARD_CLIP would resize the categorical supports while the data kept the
+    old bound. min() also never clipped the negative side, which MsPacman
+    hides but signed-reward targets (Tetris 99) will not."""
+    assert muzero.clip_reward(10_000.0) == muzero.REWARD_CLIP
+    assert muzero.clip_reward(-10_000.0) == -muzero.REWARD_CLIP
+    assert muzero.clip_reward(7) == 7.0
+    assert muzero.clip_reward(10_000.0, ceiling=5.0) == 5.0
+
+
+# --------------------------------------------------------------------------
 # Real-time pacing
 # --------------------------------------------------------------------------
 class FakeUnwrapped:

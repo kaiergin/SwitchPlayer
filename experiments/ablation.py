@@ -194,7 +194,7 @@ class Run:
             obs, reward, term, trunc, _ = self.env.step(action)
             done = term or trunc
             traj.append((stack, action, prev_reward))
-            prev_reward = min(float(reward), muzero.REWARD_CLIP)
+            prev_reward = muzero.clip_reward(reward)
             total += float(reward)
             steps += 1
         traj.append((push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE)), 0, prev_reward))
