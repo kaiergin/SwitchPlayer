@@ -88,7 +88,7 @@ def test_initial_backup_is_the_monte_carlo_return(helper):
 def run_search(helper, index=0, sims=8, batches=4):
     return asyncio.run(helper.run_full_mcts(index, num_simulations=sims,
                                             sim_batches=batches, c_puct=1.25,
-                                            discount=0.997, temperature=1.0))
+                                            discount=0.997))
 
 
 def test_root_is_expanded_by_the_search(helper):
@@ -291,6 +291,8 @@ def test_normalisation_is_seeded_before_the_first_simulation(helper):
 
 
 def test_baseline_visits_are_subtracted_exactly(helper):
+    """Also pins that the policy target is the RAW visit fraction -- the
+    paper's target. Temperature belongs to action selection, not targets."""
     helper.create_tree_from_game(fake_trajectory(6))
     root = helper.current_trajectory[0]
     helper.batch_expand_nodes([root])
@@ -298,7 +300,7 @@ def test_baseline_visits_are_subtracted_exactly(helper):
     for a, child in root.children.items():
         child.visit_count = 7 + (a + 1)   # this search added a+1 visits
     policy, _, _ = helper.drop_non_gameplay_children_and_compute_improvements(
-        0, temperature=1.0, baseline=baseline)
+        0, baseline=baseline)
     expected = np.arange(1, ACTIONS + 1, dtype=float)
     assert policy == pytest.approx(expected / expected.sum())
 

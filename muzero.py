@@ -312,6 +312,11 @@ def get_temperature(epoch, initial_temp=1.0, final_temp=0.1, decay_train_steps=1
     """
     Linearly decays temperature from initial_temp to final_temp over decay_train_steps.
     If train steps exceeds decay_train_steps, return final_temp.
+
+    Reserved for the ACTING side (apply_temperature on a sampled policy).
+    It used to sharpen the reanalysis policy targets, which deviates from the
+    paper: MuZero's targets are always raw visit fractions, and temperature
+    applies only to action selection during self-play.
     """
     if epoch >= decay_train_steps:
         return final_temp
@@ -386,6 +391,20 @@ def discounted_prefix_targets(rewards, discount=None):
     weights = discount ** torch.arange(steps, device=rewards.device, dtype=rewards.dtype)
     prefix = torch.cumsum(rewards[:, 1:] * weights, dim=1)
     return torch.cat([torch.zeros_like(rewards[:, :1]), prefix], dim=1)
+
+
+def clip_reward(reward, ceiling=None):
+    """Symmetric clip to the reward support's raw ceiling.
+
+    One home for the clip, resolved against REWARD_CLIP at call time: the
+    acting path hardcoded `min(reward, 400)`, so changing the constant would
+    have resized the categorical supports while the actual data kept the old
+    bound -- a silent codec mismatch. Symmetric (min() alone ignores the
+    negative side) because MsPacman never goes negative but the Switch targets
+    will.
+    """
+    ceiling = REWARD_CLIP if ceiling is None else ceiling
+    return float(np.clip(reward, -ceiling, ceiling))
 
 
 def masked_policy_loss(policy_logits, target_policy, mask):
@@ -801,7 +820,6 @@ class MCTSHelper:
                         trajectory.append(transition)
                 else:
                     searched = self.select_reanalysis_indices(len(game_trajectory))
-                    temperature = get_temperature(self.network_manager.training_steps)
                     self.logger.info("MCTS on %s of %s timesteps (stride %s)",
                                      len(searched), len(game_trajectory), REANALYSE_STRIDE)
                     for idx, (obs_sample, action_taken, reward, _, _, _) in enumerate(game_trajectory):
@@ -811,8 +829,7 @@ class MCTSHelper:
                                                                                 sim_batches=MCTS_BATCHES,
                                                                                 num_simulations=TOTAL_MCTS_SIMS,
                                                                                 c_puct=C_PUCT,
-                                                                                discount=DISCOUNT,
-                                                                                temperature=temperature)
+                                                                                discount=DISCOUNT)
                         else:
                             # Not searched. The value target is an n-step
                             # return bootstrapped by the CURRENT network
@@ -1102,7 +1119,7 @@ class MCTSHelper:
                 onward = child.expanded_value
             self.min_max_stats.update(child.reward + discount * onward)
 
-    def drop_non_gameplay_children_and_compute_improvements(self, idx, temperature=1.0, baseline=None):
+    def drop_non_gameplay_children_and_compute_improvements(self, idx, baseline=None):
         baseline = baseline or {}
         children_to_drop = []
         node = self.current_trajectory[idx]
@@ -1122,7 +1139,13 @@ class MCTSHelper:
         ])
         has_policy = bool(visit_counts.sum() > 0)
         if has_policy:
-            improved_policy = apply_temperature(visit_counts, temperature)
+            # RAW visit fractions, per the paper. MuZero's policy target is
+            # always the untempered visit distribution; temperature exists only
+            # for action SELECTION during self-play. Sharpening targets on a
+            # schedule -- what get_temperature used to do here -- trains the
+            # head toward the argmax of a 32-simulation count vector, i.e.
+            # toward search noise, increasingly confidently as training runs.
+            improved_policy = visit_counts / visit_counts.sum()
         else:
             # No visits to read -- a terminal root has no successors to search.
             # The uniform vector is a shape placeholder only: has_policy False
@@ -1144,7 +1167,7 @@ class MCTSHelper:
     # Full MCTS: Run multiple simulations, batch expand unexpanded leaves,
     # then backup their values.
     # -----------------------------
-    async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=None, max_depth=MAX_DEPTH, temperature=1.0):
+    async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=None, max_depth=MAX_DEPTH):
         discount = DISCOUNT if discount is None else discount
         # Now that expansion is lazy the root has to be expanded explicitly:
         # selection stops at unexpanded nodes, and add_noise_to_node writes the
@@ -1172,7 +1195,7 @@ class MCTSHelper:
             await asyncio.gather(*futures)
             await self.expand_selected(discount)
         return self.drop_non_gameplay_children_and_compute_improvements(
-            index, temperature=temperature, baseline=baseline_visits)
+            index, baseline=baseline_visits)
 
     def select_reanalysis_indices(self, length, stride=None):
         """Timesteps to run a search on, evenly spaced with a random offset.
@@ -1587,7 +1610,7 @@ class MuZeroAgent:
                     done = terminated or truncated
                     await limiter.wait()
                     # obs, chosen action, reward for entering obs
-                    reward = min(reward, 400)
+                    reward = clip_reward(reward)
                     game_trajectory.append((frame_stack, action, prev_reward))
                     episode_reward += reward
                     prev_reward = reward
