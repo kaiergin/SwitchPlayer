@@ -92,8 +92,12 @@ class RepresentationNetwork(nn.Module):
 # applying softmax (for acting/priors) or log_softmax (for the training loss).
 class PredictionNetwork(nn.Module):
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
-                 pool=(6, 6)):
+                 pool=(6, 6), transform=True):
         super(PredictionNetwork, self).__init__()
+        # Whether decoded scalars come back through h_inverse. Must match the
+        # transform flag the training side passes to scalar_to_categorical_batch
+        # (muzero.USE_H_TRANSFORM), or encode and decode stop being inverses.
+        self.transform = transform
         # Pool to the latent's own spatial size. This was hardcoded to 8x8, which
         # against a 6x6 latent would INTERPOLATE UP -- inventing resolution that
         # is not there and paying for it in the fully connected layer.
@@ -128,15 +132,17 @@ class PredictionNetwork(nn.Module):
         v = v.contiguous().view(v.size(0), -1)
         value_logits = self.value_fc(v)  # shape: (batch_size, num_bins)
         support = create_support(self.support_size, self.num_bins, latent.device)
-        value = scalar_from_logits(value_logits, support)
+        value = scalar_from_logits(value_logits, support, invert=self.transform)
         
         return policy_logits, value, value_logits
 
 # Revised DynamicsNetwork with categorical reward representation.
 class DynamicsNetwork(nn.Module):
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
-                 pool=(6, 6)):
+                 pool=(6, 6), transform=True):
         super(DynamicsNetwork, self).__init__()
+        # See PredictionNetwork: must match the encode side's transform flag.
+        self.transform = transform
         self.pool = pool
         self.action_space = action_space
         self.support_size = support_size
@@ -169,7 +175,7 @@ class DynamicsNetwork(nn.Module):
         r = r.contiguous().view(batch_size, -1)
         reward_logits = self.reward_fc(r)
         support = create_support(self.support_size, self.num_bins, latent.device)
-        reward = scalar_from_logits(reward_logits, support)
+        reward = scalar_from_logits(reward_logits, support, invert=self.transform)
 
         return next_latent, reward, reward_logits
 
@@ -201,8 +207,10 @@ class ValuePrefixNetwork(nn.Module):
     """
 
     def __init__(self, latent_channels=64, hidden_size=512, support_size=2000,
-                 num_bins=51, head_channels=32, pool=(6, 6)):
+                 num_bins=51, head_channels=32, pool=(6, 6), transform=True):
         super(ValuePrefixNetwork, self).__init__()
+        # See PredictionNetwork: must match the encode side's transform flag.
+        self.transform = transform
         self.support_size = support_size
         self.num_bins = num_bins
         self.hidden_size = hidden_size
@@ -241,5 +249,5 @@ class ValuePrefixNetwork(nn.Module):
         prefix_logits = self.fc(self.relu(out))
 
         support = create_support(self.support_size, self.num_bins, latent.device)
-        prefix = scalar_from_logits(prefix_logits, support)
+        prefix = scalar_from_logits(prefix_logits, support, invert=self.transform)
         return prefix, prefix_logits, state

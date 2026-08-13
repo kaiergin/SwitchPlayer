@@ -83,6 +83,14 @@ def bins_for(support):
 REWARD_BINS = bins_for(REWARD_SUPPORT)
 VALUE_PREFIX_BINS = bins_for(VALUE_PREFIX_SUPPORT)
 VALUE_BINS = bins_for(VALUE_SUPPORT)
+# h() on BOTH sides of the categorical codec: encode (train_step reads this at
+# call time, so the ablation can override it per arm) and decode (the networks
+# take it at construction via transform=...). The first "no-transform" ablation
+# arm only changed support sizes -- h() was still applied, so it measured a
+# mis-scaled h-encoding rather than the linear one; this flag exists so that
+# arm can test what its label says. Change both sides together or the codec
+# stops being an inverse pair.
+USE_H_TRANSFORM = True
 VALUE_PREFIX_HIDDEN = 512
 # Whether the tree takes its edge rewards from the value-prefix LSTM or from
 # the per-step reward head. Both heads are always trained; this selects which
@@ -1317,7 +1325,9 @@ class TrainingHelper:
         latent = self.representation(init_obs)
         policy_logits, _, value_logits = self.prediction(latent)
         
-        converted_target_rewards = scalar_categorical.scalar_to_categorical_batch(rewards, self.dynamics.support_size, self.dynamics.num_bins, self.device)
+        converted_target_rewards = scalar_categorical.scalar_to_categorical_batch(
+            rewards, self.dynamics.support_size, self.dynamics.num_bins, self.device,
+            transform=USE_H_TRANSFORM)
 
         # Value prefix targets: the cumulative discounted reward sum along the
         # unroll, which is what the LSTM head predicts in one shot instead of
@@ -1328,14 +1338,17 @@ class TrainingHelper:
         # backup_simulation applies the discount, as it does for real rewards.
         target_prefix = discounted_prefix_targets(rewards, discount=1.0)
         converted_target_prefix = scalar_categorical.scalar_to_categorical_batch(
-            target_prefix, self.value_prefix.support_size, self.value_prefix.num_bins, self.device)
+            target_prefix, self.value_prefix.support_size, self.value_prefix.num_bins, self.device,
+            transform=USE_H_TRANSFORM)
         # The hidden state IS the accumulated reward, so it starts empty at the
         # beginning of every unroll. Same reason it must reset at a search root.
         prefix_state = self.value_prefix.initial_state(obs.size(0), self.device)
 
         # Compute losses for the initial step (no reward loss here).
         policy_loss_0 = masked_policy_loss(policy_logits, target_policy[:, 0, :], policy_mask[:, 0])
-        converted_target_values = scalar_categorical.scalar_to_categorical_batch(target_value, self.prediction.support_size, self.prediction.num_bins, self.device)
+        converted_target_values = scalar_categorical.scalar_to_categorical_batch(
+            target_value, self.prediction.support_size, self.prediction.num_bins, self.device,
+            transform=USE_H_TRANSFORM)
         value_loss_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
         total_loss += (POLICY_LOSS_WEIGHT * policy_loss_0
                        + VALUE_LOSS_WEIGHT * value_loss_0)

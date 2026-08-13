@@ -66,8 +66,11 @@ ARMS = {
     },
     "no-transform": {
         "USE_VALUE_PREFIX_IN_TREE": False,
+        "USE_H_TRANSFORM": False,
         "_linear_support": True,
-        "_doc": "Pre-h() encoding: linear support, 51 bins, as before f08dbdf1.",
+        "_doc": "Pre-h() encoding: linear support, 51 bins, h() off on encode "
+                "AND decode. (The archived first run of this arm was mislabeled: "
+                "only the supports changed and h() still applied.)",
     },
     "horizon-0.9": {
         "USE_VALUE_PREFIX_IN_TREE": True,
@@ -102,7 +105,11 @@ def arm_config(arm):
 
 def build_networks(spec):
     """Fresh networks for one run. `_linear_support` reproduces the encoding
-    that predated the h() transform, for the ablation."""
+    that predated the h() transform: raw-ceiling supports AND transform=False
+    on the decode side (the arm spec disables the encode side via
+    USE_H_TRANSFORM). Changing only the supports, as the first run of this arm
+    did, still applies h() and tests a mis-scaled encoding instead."""
+    transform = not spec.get("_linear_support")
     if spec.get("_linear_support"):
         reward_sup, reward_bins = muzero.REWARD_CLIP, 51
         prefix_sup, prefix_bins = muzero.VALUE_PREFIX_CEILING, 51
@@ -116,12 +123,15 @@ def build_networks(spec):
         representation=RepresentationNetwork(input_channels=12,
                                              latent_channels=LATENT_CHANNELS).to(DEVICE),
         dynamics=DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                 support_size=reward_sup, num_bins=reward_bins).to(DEVICE),
+                                 support_size=reward_sup, num_bins=reward_bins,
+                                 transform=transform).to(DEVICE),
         prediction=PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                     support_size=value_sup, num_bins=value_bins).to(DEVICE),
+                                     support_size=value_sup, num_bins=value_bins,
+                                     transform=transform).to(DEVICE),
         value_prefix=ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                         hidden_size=muzero.VALUE_PREFIX_HIDDEN,
-                                        support_size=prefix_sup, num_bins=prefix_bins).to(DEVICE),
+                                        support_size=prefix_sup, num_bins=prefix_bins,
+                                        transform=transform).to(DEVICE),
     )
 
 

@@ -224,6 +224,17 @@ opens at ~650 and takes 20 iterations to converge; with h() it is near zero
 immediately. And it stabilises runs — final-return spread across seeds is 4.5
 with h() against 105.0 without.
 
+**Correction (later audit):** the `no-transform` arm in this run was mislabeled.
+It swapped the support sizes to raw ceilings, but `scalar_to_categorical_batch`
+still applied h() — the transform flag was not threaded through — so the arm
+measured h() on a catastrophically mis-scaled support (±400 in a transformed
+space where no real target exceeds ~75), not the historical linear encoding.
+The "never beat the control" verdict stands, since the arm's encoding was
+broken either way, but the clean linear-vs-h() evidence is the bench.py
+before/after above (8.08 → 1.63 MAE), not this arm. `USE_H_TRANSFORM` has
+since been threaded end to end, so a re-run of this arm now tests what its
+label says.
+
 ### The value prefix does not learn. Anywhere.
 
 `prefix / control` is **1.000 in every single arm**, including the arm where the

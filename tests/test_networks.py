@@ -173,3 +173,22 @@ def test_training_copies_stay_in_train_mode():
     for net in (trainer.representation, trainer.dynamics,
                 trainer.prediction, trainer.value_prefix):
         assert net.training
+
+
+# --------------------------------------------------------------------------
+# The decode transform flag
+# --------------------------------------------------------------------------
+def test_decode_honours_the_transform_flag(latent):
+    """The first no-transform ablation arm was mislabeled because this flag
+    did not exist: it changed the support sizes but h() still applied on both
+    sides of the codec. transform=False must decode the raw expectation;
+    transform=True is h_inverse of exactly that expectation."""
+    from scalar_categorical import h_inverse
+    dyn = DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
+                          support_size=400, num_bins=BINS, transform=False)
+    with torch.no_grad():
+        _, linear, _ = dyn(latent, torch.zeros(2, dtype=torch.long))
+        dyn.transform = True
+        _, transformed, _ = dyn(latent, torch.zeros(2, dtype=torch.long))
+    assert torch.allclose(h_inverse(linear), transformed, rtol=1e-4, atol=1e-3)
+    assert not torch.allclose(linear, transformed)

@@ -96,6 +96,20 @@ def test_train_step_still_finite_with_scaling():
     assert np.isfinite(loss)
 
 
+def test_train_step_reads_use_h_transform_at_call_time():
+    """The ablation's no-transform arm overrides muzero.USE_H_TRANSFORM at
+    runtime; train_step has to pick that up, not a value captured at import."""
+    from tests.test_reanalysis import build_trainer, fake_batch
+    saved = muzero.USE_H_TRANSFORM
+    muzero.USE_H_TRANSFORM = False
+    try:
+        mask = np.ones((2, muzero.UNROLL_STEPS + 1), dtype=bool)
+        loss = asyncio.run(build_trainer().train_step(fake_batch(2, muzero.UNROLL_STEPS, mask)))
+        assert np.isfinite(loss)
+    finally:
+        muzero.USE_H_TRANSFORM = saved
+
+
 # --------------------------------------------------------------------------
 # Real-time pacing
 # --------------------------------------------------------------------------
