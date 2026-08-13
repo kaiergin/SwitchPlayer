@@ -17,9 +17,23 @@ assumed. Formulas are quoted from the papers; implementation details marked
 
 ## Priority 1 — End-to-end value prefix
 
-**Status: not implemented.** No recurrent module exists in the repo;
-`DynamicsNetwork` predicts a scalar reward per unroll step, which is exactly
-what this replaces.
+**Status: BUILT, MEASURED, AND TURNED OFF.** `ValuePrefixNetwork` is
+implemented, matches LightZero's architecture, is trained alongside the per-step
+head and can drive the tree via `USE_VALUE_PREFIX_IN_TREE`.
+
+It does not learn. Across four independent measurements — culminating in a
+5-arm, 2-seed, 60-iteration ablation with search in the loop — the head sits at
+exactly **1.000x a predict-zero control** in every arm, i.e. collapsed to
+predicting zero, while the per-step head reaches 0.24x. The flag therefore
+defaults to `False`: the tree reads the signal that demonstrably learns.
+
+This says nothing about EfficientZero or LightZero, neither of which was run.
+It says *this* implementation fails *here*. Leading untested suspect: the prefix
+target is a 5-step undiscounted sum, mostly zero with rare spikes, over 183
+bins — the centre bin is a strong local optimum. Priority 4 (now done) may
+change this; it has not been re-measured since.
+
+The description below is kept as the design record.
 
 ### What it is
 
@@ -123,10 +137,20 @@ observations — the paper reports augmentation helps, and there are none here.
 
 ## Priority 3 — Signed support and an invertible value transform
 
-**Status: not implemented, and the code contradicts its own docstring.**
-`create_support` in `networks.py:63` is documented as *"a support vector from
--support_size to support_size"* but returns `torch.linspace(0, support_size, ...)`.
-`scalar_categorical.py` hardcodes `v_min = 0.0` and clamps to it.
+**Status: DONE, and the one change with clean positive evidence.**
+
+Note this was never an *addition* to MuZero — h() and a symmetric support are
+both specified in the MuZero paper. The repo was deviating from baseline; this
+brought it back.
+
+Measured: the reward head reaches **0.24x** a predict-zero control with h() and
+**1.12x** without, i.e. it only learns at all with the transform. The value
+head's error opens near 650 without it and near zero with it, and cross-seed
+spread in final return drops from 105 to 4.5.
+
+Bin counts are derived per head from the transformed range (`bins_for`), because
+h() shrinks the range but not the bin *count* — 51 bins still left raw 0-7 in a
+single bin. The original description follows.
 
 ### Why it matters
 
