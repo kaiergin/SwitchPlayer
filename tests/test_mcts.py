@@ -352,3 +352,48 @@ def test_nstep_value_does_not_bootstrap_a_terminal_state(helper):
     expected = sum(0.997 ** (k - 1) * helper.current_trajectory[k].reward
                    for k in range(1, 5))
     assert helper.nstep_value(0, n=4, discount=0.997) == pytest.approx(expected)
+
+
+def test_nstep_value_bootstraps_the_nearest_search_ahead(helper):
+    """The paper's v is a SEARCH value. The bootstrap stretches to the nearest
+    searched index at or past idx+n, and a search value at idx itself is never
+    consulted -- a position's own target always opens with real rewards."""
+    helper.create_tree_from_game(fake_trajectory(20))
+    n, discount = 10, 0.9
+    search_values = {0: 999.0, 12: 500.0}   # 0 is behind the horizon; 12 is nearest at/past 10
+    traj = helper.current_trajectory
+    expected = sum(discount ** (k - 1) * traj[k].reward for k in range(1, 13))
+    expected += discount ** 12 * 500.0
+    got = helper.nstep_value(0, n=n, discount=discount, search_values=search_values)
+    assert got == pytest.approx(expected)
+
+
+def test_nstep_value_uses_a_search_value_exactly_at_the_horizon(helper):
+    helper.create_tree_from_game(fake_trajectory(20))
+    n, discount = 10, 0.9
+    traj = helper.current_trajectory
+    expected = sum(discount ** (k - 1) * traj[k].reward for k in range(1, 11))
+    expected += discount ** 10 * 250.0
+    got = helper.nstep_value(0, n=n, discount=discount, search_values={10: 250.0})
+    assert got == pytest.approx(expected)
+
+
+def test_nstep_value_falls_back_to_the_network_when_no_search_lies_ahead(helper):
+    """Search values behind the horizon must not change the target: the tail
+    stays at idx+n on the current network's expanded_value."""
+    helper.create_tree_from_game(fake_trajectory(20))
+    n, discount = 10, 0.9
+    with_behind = helper.nstep_value(0, n=n, discount=discount,
+                                     search_values={2: 999.0})
+    without = helper.nstep_value(0, n=n, discount=discount)
+    assert with_behind == pytest.approx(without)
+
+
+def test_nstep_value_ignores_a_search_value_on_a_terminal_node(helper):
+    """A terminal node's onward value is 0 by definition, even if a search ran
+    there and recorded something else."""
+    helper.create_tree_from_game(fake_trajectory(5))
+    expected = sum(0.997 ** (k - 1) * helper.current_trajectory[k].reward
+                   for k in range(1, 5))
+    got = helper.nstep_value(0, n=4, discount=0.997, search_values={4: 123.0})
+    assert got == pytest.approx(expected)

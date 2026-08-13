@@ -208,18 +208,23 @@ class Run:
         evaluated = self.searcher.eval_obs(traj)
         self.searcher.create_tree_from_game(evaluated)
         searched = self.searcher.select_reanalysis_indices(len(evaluated))
+        # Two passes, mirroring MCTS_process: search first, then build the
+        # paper's n-step targets with the root values as bootstraps -- a
+        # position is never trained on its own search value.
+        results = {}
+        for idx in sorted(searched):
+            results[idx] = asyncio.run(self.searcher.run_full_mcts(
+                idx, num_simulations=TOTAL_MCTS_SIMS, sim_batches=MCTS_BATCHES,
+                c_puct=C_PUCT, discount=muzero.DISCOUNT))
+        search_values = {i: r[1] for i, r in results.items()}
         out = []
         for idx, (obs, action, reward, *_ ) in enumerate(evaluated):
-            if idx in searched:
-                policy, value, has_target = asyncio.run(self.searcher.run_full_mcts(
-                    idx, num_simulations=TOTAL_MCTS_SIMS, sim_batches=MCTS_BATCHES,
-                    c_puct=C_PUCT, discount=muzero.DISCOUNT))
+            if idx in results:
+                policy, _, has_target = results[idx]
             else:
-                # n-step return bootstrapped by the current network
-                # (MuZero-Reanalyze), not the behaviour policy's MC return.
                 policy = np.full(ACTIONS, 1.0 / ACTIONS)
-                value = self.searcher.nstep_value(idx)
                 has_target = False
+            value = self.searcher.nstep_value(idx, search_values=search_values)
             out.append({"obs": obs, "action": action, "reward": reward,
                         "target_policy": policy, "target_value": value,
                         "has_policy_target": has_target})
