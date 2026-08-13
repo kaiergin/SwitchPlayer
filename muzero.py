@@ -79,7 +79,14 @@ VALUE_PREFIX_HIDDEN = 512
 # Whether the tree takes its edge rewards from the value-prefix LSTM or from
 # the per-step reward head. Both heads are always trained; this selects which
 # one the search actually consumes, so the two can be compared end to end.
-USE_VALUE_PREFIX_IN_TREE = True
+#
+# Default False on measured evidence. Over a 5-arm, 2-seed, 60-iteration
+# ablation (~15k training steps each, benchmarks/RESULTS.md) the per-step head
+# reached 0.24x the error of a predict-zero control while the prefix head sat at
+# exactly 1.000x in every arm -- collapsed to predicting zero, i.e. feeding the
+# search edge rewards of ~0. Feeding the tree a signal that demonstrably learns
+# beats feeding it one that demonstrably does not.
+USE_VALUE_PREFIX_IN_TREE = False
 # Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
 # them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
 # slower than self-play generates data even with two MCTS actors, so the

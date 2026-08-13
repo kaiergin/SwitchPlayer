@@ -200,3 +200,62 @@ Untested, in the order worth checking:
 
 Until a head beats the control, this benchmark cannot discriminate between the
 two architectures. Do not draw conclusions from it about the value prefix.
+
+## Ablation: 5 arms x 2 seeds x 60 iterations (4.9 h)
+
+`python experiments/ablation.py`. Each iteration is 2 self-play episodes,
+re-analysis with MCTS, and 250 training steps — about 15,000 training steps per
+run, on real self-play data with search in the loop.
+
+### h() works. This is the first properly controlled evidence for anything.
+
+Reward-prediction error over the last five evaluations, as a ratio to the
+predict-zero control (below 1 means the head learned something):
+
+| Arm | per-step / control | verdict |
+|---|---:|---|
+| per-step (with h) | **0.24** | learned |
+| horizon-0.9 (with h) | **0.13** | learned |
+| value-prefix (with h) | **0.29** | learned |
+| **no-transform (linear)** | **1.12** | **never beat the control** |
+
+The same encoding change also fixes the value head's start: without h() its MAE
+opens at ~650 and takes 20 iterations to converge; with h() it is near zero
+immediately. And it stabilises runs — final-return spread across seeds is 4.5
+with h() against 105.0 without.
+
+### The value prefix does not learn. Anywhere.
+
+`prefix / control` is **1.000 in every single arm**, including the arm where the
+prefix is driving the tree. The head is collapsed to predicting zero, so in that
+arm MCTS was running with edge rewards of ~0 throughout.
+
+That is now four independent measurements agreeing. `USE_VALUE_PREFIX_IN_TREE`
+therefore defaults to False.
+
+Leading hypothesis, untested: the prefix target is a 5-step undiscounted sum,
+mostly zero with occasional spikes, encoded over 183 bins. Predicting the centre
+bin is a strong local optimum, and the prefix loss competes unweighted against
+four others (ROADMAP priority 4). The per-step head faces a milder version of
+the same skew over 79 bins and escapes it.
+
+### Return differences are noise at this scale
+
+| Arm | final return | seed spread | peak | change over run |
+|---|---:|---:|---:|---:|
+| per-step | 85.2 ± 39.6 | 4.5 | 470 | −71.0 |
+| value-prefix | 136.2 ± 81.7 | 52.5 | 350 | +15.2 |
+| no-transform | 91.5 ± 58.5 | 105.0 | 222 | +24.5 |
+| **horizon-0.9** | 131.0 ± 45.5 | **8.0** | **500** | **+50.8** |
+| horizon-0.5 | 108.0 ± 35.2 | 10.0 | 345 | +37.8 |
+
+value-prefix leads per-step by +51 (Cohen's d 0.75), but its seed spread is 52.5
+against per-step's 4.5, on n=2. That is not a result. Note also that the
+value-prefix arm was effectively planning with no reward model at all, since its
+head outputs zero — worth a hypothesis that a broken reward model in the tree is
+worse than none, but not a claim.
+
+**gamma=0.9 is the most consistent arm**: smallest seed spread (8.0), largest
+improvement over the run (+50.8), highest single evaluation (500). Kai's
+fast-convergence intuition holds up on consistency even though the final means
+are within noise of each other.

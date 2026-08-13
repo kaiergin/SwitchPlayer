@@ -266,7 +266,12 @@ def test_nested_structures_survive_the_cpu_move():
 # --------------------------------------------------------------------------
 # The tree consumes prefixes
 # --------------------------------------------------------------------------
-def tree_helper():
+@pytest.fixture
+def prefix_tree(monkeypatch):
+    """The tree reads the per-step head by default (see USE_VALUE_PREFIX_IN_TREE
+    and the ablation behind it), so tests of the prefix path must force it on
+    rather than inherit whichever default is current."""
+    monkeypatch.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", True)
     from muzero import MCTSHelper
     return MCTSHelper(action_space=5, device=CPU, network_ref=None,
                       storage_ref=None, enable_logging=False)
@@ -280,11 +285,11 @@ def chain(helper, length=6):
     return helper.current_trajectory
 
 
-def test_edge_reward_is_the_prefix_difference():
+def test_edge_reward_is_the_prefix_difference(prefix_tree):
     """The identity the tree relies on. It only holds because the prefix target
     is undiscounted -- with discounting baked in, the difference would be
     gamma^depth times the reward and the backup would double-discount."""
-    helper = tree_helper()
+    helper = prefix_tree
     root = chain(helper)[0]
     root.prefix, root.prefix_state = 0.0, None
     helper.batch_expand_nodes([root])
@@ -295,8 +300,8 @@ def test_edge_reward_is_the_prefix_difference():
         assert child.reward == pytest.approx(child.prefix - root.prefix, abs=1e-5)
 
 
-def test_prefix_accumulates_down_a_path():
-    helper = tree_helper()
+def test_prefix_accumulates_down_a_path(prefix_tree):
+    helper = prefix_tree
     root = chain(helper)[0]
     root.prefix, root.prefix_state = 0.0, None
     helper.batch_expand_nodes([root])
@@ -308,8 +313,8 @@ def test_prefix_accumulates_down_a_path():
     assert grandchild.prefix == pytest.approx(child.reward + grandchild.reward, abs=1e-4)
 
 
-def test_children_carry_their_own_lstm_state():
-    helper = tree_helper()
+def test_children_carry_their_own_lstm_state(prefix_tree):
+    helper = prefix_tree
     root = chain(helper)[0]
     root.prefix, root.prefix_state = 0.0, None
     helper.batch_expand_nodes([root])
@@ -320,10 +325,10 @@ def test_children_carry_their_own_lstm_state():
     assert states[0][0].data_ptr() != states[1][0].data_ptr()
 
 
-def test_search_resets_the_prefix_at_the_root():
+def test_search_resets_the_prefix_at_the_root(prefix_tree):
     """The prefix accumulates from the root, so it has to restart at every
     search -- otherwise the second root inherits the first one's total."""
-    helper = tree_helper()
+    helper = prefix_tree
     nodes = chain(helper, length=8)
     nodes[2].prefix, nodes[2].prefix_state = 999.0, None
     asyncio.run(helper.run_full_mcts(2, num_simulations=4, sim_batches=4, c_puct=1.25))
@@ -332,7 +337,9 @@ def test_search_resets_the_prefix_at_the_root():
 
 def test_per_step_head_feeds_the_tree_when_the_flag_is_off(monkeypatch):
     monkeypatch.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", False)
-    helper = tree_helper()
+    from muzero import MCTSHelper
+    helper = MCTSHelper(action_space=5, device=CPU, network_ref=None,
+                        storage_ref=None, enable_logging=False)
     root = chain(helper)[0]
     helper.batch_expand_nodes([root])
     imagined = [c for c in root.children.values() if not c.is_gameplay]
