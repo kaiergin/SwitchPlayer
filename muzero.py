@@ -636,7 +636,6 @@ class NetworkManager:
                                                    hidden_size=VALUE_PREFIX_HIDDEN,
                                                    support_size=VALUE_PREFIX_SUPPORT,
                                                    num_bins=VALUE_PREFIX_BINS).to(device)
-            
 
     async def setup(self):
         await self._pull_state()
@@ -918,7 +917,9 @@ class MCTSHelper:
             n.virtual_loss = 0.0
             backup_value = n.reward + discount * backup_value
             if min_max_stats is not None:
-                min_max_stats.update(n.q_value())
+                # Track the same composite selection normalises: r + discount*V,
+                # not V alone, or the recorded range is on the wrong scale.
+                min_max_stats.update(n.reward + discount * n.q_value())
 
     def create_tree_from_game(self, game_trajectory):
         prev_node = None
@@ -964,9 +965,23 @@ class MCTSHelper:
             best_candidates = []  # List to store (action, child) pairs with highest score.
             for a, child in node.children.items():
                 u = c_puct * child.prior * np.sqrt(total_visits) / (1 + child.visit_count + child.virtual_loss)
-                # Virtual loss is already folded into q_value() via the visit
-                # count; subtracting it again here would swamp a [0,1] Q.
-                score = self.min_max_stats.normalize(child.q_value()) + u
+                # Score the edge as r + discount * V(child) -- the paper's
+                # Q(s,a). q_value() alone is the value from the child ONWARD:
+                # backup folds the edge reward into the parent's statistics, so
+                # scoring on it left selection blind to immediate reward
+                # differences between actions. Virtual loss is already folded
+                # into q_value() via the visit count; subtracting it again here
+                # would swamp a [0,1] Q. An unvisited child reads its network
+                # value estimate rather than 0, which on this tree's raw-return
+                # scale would rank every imagined child beneath the gameplay
+                # child before a single simulation had judged them.
+                if child.visit_count + child.virtual_loss > 0:
+                    onward = child.q_value()
+                elif child.done:
+                    onward = 0.0
+                else:
+                    onward = child.expanded_value
+                score = self.min_max_stats.normalize(child.reward + discount * onward) + u
                 if score > best_score:
                     best_score = score
                     best_candidates = [child]
@@ -1008,15 +1023,42 @@ class MCTSHelper:
             self.backup_simulation(path, leaf_value, discount=discount,
                                    min_max_stats=self.min_max_stats)
 
-    def drop_non_gameplay_children_and_compute_improvements(self, idx, temperature=1.0):
+    def seed_min_max_stats(self, root, discount):
+        """Prime the per-search normalisation range from values already in the tree.
+
+        MinMaxStats starts empty and normalize() is the identity until it has
+        seen a range, so the first selection round used to score on RAW values:
+        the gameplay child's backed-up Monte Carlo return (order hundreds)
+        against exploration terms of order 0.3, which sent the entire first
+        batch of simulations down the behaviour trajectory. Seeding from the
+        root's children puts round one on the same [0,1] footing as every
+        later round.
+        """
+        for child in root.children.values():
+            if child.visit_count > 0:
+                onward = child.q_value()
+            elif child.done:
+                onward = 0.0
+            else:
+                onward = child.expanded_value
+            self.min_max_stats.update(child.reward + discount * onward)
+
+    def drop_non_gameplay_children_and_compute_improvements(self, idx, temperature=1.0, baseline=None):
+        baseline = baseline or {}
         children_to_drop = []
         node = self.current_trajectory[idx]
         for action, child in node.children.items():
             if not child.is_gameplay:
                 children_to_drop.append(action)
-        # Compute improved policy from the root's children.
+        # Improved policy from the visits THIS search allocated. Raw counts also
+        # include the chain backup's bookkeeping visit and simulations from
+        # earlier searches, which reach this node only along the gameplay chain
+        # -- both sit on the behaviour action, so counting them biases every
+        # policy target toward the action the agent already took. The inherited
+        # visits still warm the Q estimates; they just don't get read out as
+        # this search's conclusion.
         visit_counts = np.array([
-            node.children[a].visit_count if a in node.children else 0
+            node.children[a].visit_count - baseline.get(a, 0) if a in node.children else 0
             for a in range(self.action_space)
         ])
         if visit_counts.sum() > 0:
@@ -1052,6 +1094,12 @@ class MCTSHelper:
         if not root.is_expanded:
             self.batch_expand_nodes([root])
         self.add_noise_to_node(index)
+        self.seed_min_max_stats(root, discount)
+        # Visits the root's children carry INTO this search: the chain backup's
+        # bookkeeping visit plus traffic from earlier searches through the
+        # shared tree. Snapshotted so the improved policy can count only what
+        # this search's own budget decides.
+        baseline_visits = {a: child.visit_count for a, child in root.children.items()}
         for x in range(max(int(num_simulations // sim_batches), 1)):
             futures = [
                 self.selection_task_no_expand(index, c_puct, discount, max_depth)
@@ -1059,7 +1107,8 @@ class MCTSHelper:
             ]
             await asyncio.gather(*futures)
             await self.expand_selected(discount)
-        return self.drop_non_gameplay_children_and_compute_improvements(index, temperature=temperature)
+        return self.drop_non_gameplay_children_and_compute_improvements(
+            index, temperature=temperature, baseline=baseline_visits)
 
     def select_reanalysis_indices(self, length, stride=None):
         """Timesteps to run a search on, evenly spaced with a random offset.

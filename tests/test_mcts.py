@@ -215,3 +215,102 @@ def test_expansion_skips_nodes_with_released_latents(helper):
     node.latent = None
     helper.batch_expand_nodes([node])   # must not raise
     assert not node.is_expanded
+
+
+# --------------------------------------------------------------------------
+# Selection scoring: r + discount * V, normalisation seeding, policy targets
+# --------------------------------------------------------------------------
+def make_uniform_children(helper, length=4):
+    """Expand the root and flatten its children to a controlled baseline:
+    equal priors, no visits, identical onward values, zero edge rewards."""
+    helper.create_tree_from_game(fake_trajectory(length))
+    root = helper.current_trajectory[0]
+    helper.batch_expand_nodes([root])
+    for child in root.children.values():
+        child.prior = 1.0 / ACTIONS
+        child.visit_count, child.value_sum, child.virtual_loss = 0, 0.0, 0.0
+        child.expanded_value, child.reward, child.done = 10.0, 0.0, False
+    helper.min_max_stats = muzero.MinMaxStats()
+    helper.min_max_stats.update(0.0)
+    helper.min_max_stats.update(100.0)
+    return root
+
+
+def select_once(helper):
+    asyncio.run(helper.selection_task_no_expand(0, 1.25, 0.997))
+    leaf, _ = helper.selection_results.get_nowait()
+    return leaf
+
+
+def test_selection_prefers_the_larger_edge_reward(helper):
+    """Regression: selection scored children on q_value() alone -- the value
+    from the child ONWARD, since backup folds the edge reward into the parent
+    -- so two actions with identical futures but different immediate rewards
+    were indistinguishable at the decision point. The paper's score is
+    r + discount * V(child)."""
+    root = make_uniform_children(helper)
+    root.children[2].reward = 50.0
+    assert select_once(helper) is root.children[2]
+
+
+def test_unvisited_children_score_their_network_value_not_zero(helper):
+    """With onward value pinned to 0 for unvisited children, every imagined
+    child ranked beneath a gameplay child whose Monte Carlo return sat at the
+    top of the normalisation range; expanded_value puts them on comparable
+    footing before their first visit."""
+    root = make_uniform_children(helper)
+    root.children[1].expanded_value = 90.0
+    assert select_once(helper) is root.children[1]
+
+
+def test_backup_records_the_composite_q_for_normalisation(helper):
+    """MinMaxStats must track the same quantity selection normalises:
+    r + discount * V(node), not V(node) alone."""
+    node = muzero.MCTSNode(latent=None, prior=1.0, reward=10.0)
+    stats = muzero.MinMaxStats()
+    helper.backup_simulation([node], 5.0, discount=0.5, min_max_stats=stats)
+    assert stats.maximum == pytest.approx(10.0 + 0.5 * 5.0)
+    assert stats.minimum == pytest.approx(10.0 + 0.5 * 5.0)
+
+
+def test_normalisation_is_seeded_before_the_first_simulation(helper):
+    """Regression: MinMaxStats started every search empty, normalize() was the
+    identity, and round one compared the gameplay child's raw Monte Carlo
+    return (order hundreds here) against exploration terms of order 0.3 --
+    flooding the entire first batch of simulations down the behaviour path."""
+    helper.create_tree_from_game(fake_trajectory(6))
+    root = helper.current_trajectory[0]
+    helper.batch_expand_nodes([root])
+    helper.min_max_stats = muzero.MinMaxStats()
+    helper.seed_min_max_stats(root, discount=0.997)
+    assert helper.min_max_stats.maximum > helper.min_max_stats.minimum
+
+
+def test_baseline_visits_are_subtracted_exactly(helper):
+    helper.create_tree_from_game(fake_trajectory(6))
+    root = helper.current_trajectory[0]
+    helper.batch_expand_nodes([root])
+    baseline = {a: 7 for a in root.children}
+    for a, child in root.children.items():
+        child.visit_count = 7 + (a + 1)   # this search added a+1 visits
+    policy, _ = helper.drop_non_gameplay_children_and_compute_improvements(
+        0, temperature=1.0, baseline=baseline)
+    expected = np.arange(1, ACTIONS + 1, dtype=float)
+    assert policy == pytest.approx(expected / expected.sum())
+
+
+def test_improved_policy_excludes_visits_inherited_from_earlier_searches(helper):
+    """Regression: raw visit counts fed apply_temperature, so the chain
+    backup's bookkeeping visit and traffic from earlier searches -- which can
+    only reach a node along the behaviour trajectory -- biased every policy
+    target toward the action the agent actually took."""
+    helper.create_tree_from_game(fake_trajectory(8))
+    root = helper.current_trajectory[0]
+    gameplay_action = 0   # fake_trajectory takes action i % ACTIONS at step i
+    child = root.children[gameplay_action]
+    inherited = 100
+    child.value_sum *= (child.visit_count + inherited) / child.visit_count
+    child.visit_count += inherited
+    policy, _ = run_search(helper, sims=8, batches=4)
+    assert policy[gameplay_action] < 0.9, (
+        "policy target still dominated by visits this search never made")
