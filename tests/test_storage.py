@@ -156,7 +156,7 @@ def test_taking_a_trajectory_removes_it(storage):
     async def scenario():
         for i in range(3):
             await helper.append_gameplay_buffer(f"game{i}")
-        taken = [await helper.get_max_gameplay() for _ in range(3)]
+        taken = [await helper.take_random_gameplay() for _ in range(3)]
         return taken, list(helper.gameplay_buffer)
 
     taken, left = sync(scenario())
@@ -167,4 +167,4 @@ def test_taking_a_trajectory_removes_it(storage):
 
 def test_empty_gameplay_buffer_returns_none(storage):
     helper, _ = storage
-    assert sync(helper.get_max_gameplay()) is None
+    assert sync(helper.take_random_gameplay()) is None

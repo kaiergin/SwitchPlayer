@@ -136,7 +136,7 @@ ACTING_TEMPERATURE = 1.0
 # Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
 # them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
 # slower than self-play generates data even with two MCTS actors, so the
-# gameplay buffer overflows and get_max_gameplay discards the excess at random
+# gameplay buffer overflows and take_random_gameplay discards the excess at random
 # (see benchmarks/RESULTS.md). Unsearched timesteps still contribute
 # observation, action, reward and n-step value targets (nstep_value); only
 # their policy loss is masked. Set to 1 to search every step.
@@ -489,13 +489,20 @@ class StorageHelper:
         async with self.gameplay_lock:
             self.gameplay_buffer.append(new_item)
     
-    async def get_max_gameplay(self):
+    async def take_random_gameplay(self):
+        """Pop a random trajectory for reanalysis, or None if the buffer is empty.
+
+        Was get_max_gameplay: priority ("max") selection was the intent but
+        never implemented, so the name now matches the behaviour. Removal is
+        what makes several MCTS actors safe -- no two may reanalyse the same
+        trajectory.
+        """
         async with self.gameplay_lock:
             if len(self.gameplay_buffer) == 0:
                 return None
-            idx, max_item = random.choice(list(enumerate(self.gameplay_buffer)))
+            idx, item = random.choice(list(enumerate(self.gameplay_buffer)))
             del self.gameplay_buffer[idx]
-            return max_item
+            return item
     
 
 class StorageManager:
@@ -524,8 +531,8 @@ class StorageManager:
     async def append_gameplay_buffer(self, new_item):
         await self.storage_helper.append_gameplay_buffer.remote(new_item)
 
-    async def get_max_gameplay(self):
-        return await self.storage_helper.get_max_gameplay.remote()
+    async def take_random_gameplay(self):
+        return await self.storage_helper.take_random_gameplay.remote()
 
 #create versioning like storage
 class NetworkHelper:
@@ -749,7 +756,7 @@ class MCTSHelper:
             while True:
                 await self.storage_manager.update_if_needed()
                 await self.network_manager.update_if_needed()
-                game_trajectory_tuple = await self.storage_manager.get_max_gameplay()
+                game_trajectory_tuple = await self.storage_manager.take_random_gameplay()
                 if game_trajectory_tuple == None:
                     self.logger.debug("MCTS_process sleeping")
                     await asyncio.sleep(1)
@@ -1635,11 +1642,15 @@ def preprocess_frame(frame, resize_shape=(84, 84)):
 # max_concurrency governs concurrent *Ray* calls into an actor. MCTSHelper's
 # was tied to MCTS_BATCHES on the assumption that it limited the simulation
 # coroutines, but those are created by asyncio.gather inside MCTS_process and
-# are not Ray calls at all. MCTS_BATCHES is purely the simulation batch size.
+# are not Ray calls at all. Worse, MCTSHelper keeps per-search state on the
+# instance (current_trajectory, min_max_stats, selection_results), so two
+# concurrent Ray calls into one actor would silently corrupt each other's
+# searches. The design is one long-running MCTS_process call per actor, after
+# a setup call that completes first; max_concurrency=1 enforces it.
 # ---------------------------------------------------------------------------
 StorageActor  = ray.remote(max_concurrency=8)(StorageHelper)
 NetworkActor  = ray.remote(max_concurrency=8)(NetworkHelper)
-MCTSActor     = ray.remote(max_concurrency=4)(MCTSHelper)
+MCTSActor     = ray.remote(max_concurrency=1)(MCTSHelper)
 TrainingActor = ray.remote(TrainingHelper)
 AgentActor    = ray.remote(max_concurrency=1)(MuZeroAgent)
 

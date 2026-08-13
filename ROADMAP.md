@@ -227,7 +227,7 @@ Cheap to build, and it changes how every subsequent benchmark should be read.
 | Issue | Where | Note |
 |---|---|---|
 | `get_state_dict` ignores nested optimiser state | `muzero.py` | Works only because SGD is stateless; silently ships GPU tensors if Adam returns |
-| `get_max_gameplay` samples at random despite the name | `muzero.py` | Priority storage was the original intent; less urgent now the buffer no longer overflows |
+| `take_random_gameplay` (né `get_max_gameplay`) samples at random | `muzero.py` | Renamed to match the behaviour; priority selection remains an option if reanalysis ever falls behind again |
 | Dirichlet `alpha=0.03` over 5 actions | `muzero.py` | ~92% of noise mass on one action, documented in `tests/test_search_math.py`. Moot if Gumbel ever lands, since it removes Dirichlet |
 | `playpacman.py` frame stack is broken | `playpacman.py` | `np.repeat(obs, 12, axis=0)` on `(84,84,3)` gives `(1008,84,3)`; stores single frames, not stacks. Needs a decision on the human-demo data format |
 

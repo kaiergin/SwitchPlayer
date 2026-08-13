@@ -103,7 +103,7 @@ minute. Scaled to a 200-step episode against self-play's ~122 trajectories/min:
 | Reanalysis, stride 4, 1 actor | ~139/min | 1.1x surplus |
 | Reanalysis, stride 4, 2 actors | ~220/min | **1.8x surplus** |
 
-The gameplay buffer no longer overflows, so `get_max_gameplay` stops silently
+The gameplay buffer no longer overflows, so `take_random_gameplay` (then named `get_max_gameplay`) stops silently
 discarding self-play at random.
 
 Note that **one actor is now enough** to keep up, with ~14% margin.
