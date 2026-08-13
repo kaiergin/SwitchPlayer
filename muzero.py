@@ -16,6 +16,7 @@ import os
 import uuid
 import asyncio
 import sys
+import time
 from EpisodicLifeEnv import EpisodicLifeEnv
 
 # Atari envs ship in the ale-py plugin. gymnasium >= 1.0 requires explicit
@@ -87,6 +88,38 @@ VALUE_PREFIX_HIDDEN = 512
 # search edge rewards of ~0. Feeding the tree a signal that demonstrably learns
 # beats feeding it one that demonstrably does not.
 USE_VALUE_PREFIX_IN_TREE = False
+
+# ---------------------------------------------------------------------------
+# Loss weighting and gradient scaling (MuZero appendix G)
+#
+# Every loss term used to be summed raw and every unroll step contributed at
+# full weight, so a K-step unroll multiplied the gradient reaching the
+# representation by roughly K, and the value head -- whose target has by far the
+# widest range -- dominated the others.
+# ---------------------------------------------------------------------------
+VALUE_LOSS_WEIGHT = 0.25        # MuZero's Atari setting
+POLICY_LOSS_WEIGHT = 1.0
+REWARD_LOSS_WEIGHT = 1.0
+PREFIX_LOSS_WEIGHT = 1.0
+CONSISTENCY_LOSS_WEIGHT = 1.0   # the latent MSE; EfficientZero weights its SimSiam loss 2.0
+# Gradient flowing back through each recurrent dynamics step is halved, so it
+# does not compound across the unroll.
+LATENT_GRADIENT_SCALE = 0.5
+
+# ---------------------------------------------------------------------------
+# Real-time pacing
+#
+# The console runs at 60 frames/s and on hardware the agent would decide once
+# per frame. In ALE one env.step covers `frameskip` raw frames, so real time is
+# GAME_FPS / frameskip decisions per second -- 17.1 for MsPacman-v4's stochastic
+# (2,5) skip, NOT 60. Pacing at 60 would run the game 3.5x faster than real time
+# and defeat the point of the limiter.
+#
+# Unpaced, ALE runs ~80x real time, so producer/consumer ratios measured against
+# it answer a question the real system never asks (see benchmarks/RESULTS.md).
+# ---------------------------------------------------------------------------
+GAME_FPS = 60.0
+SELF_PLAY_REAL_TIME = True      # False lets self-play run as fast as the hardware allows
 # Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
 # them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
 # slower than self-play generates data even with two MCTS actors, so the
@@ -258,6 +291,54 @@ def get_temperature(epoch, initial_temp=1.0, final_temp=0.1, decay_train_steps=1
     if epoch >= decay_train_steps:
         return final_temp
     return initial_temp - (initial_temp - final_temp) * (epoch / decay_train_steps)
+
+def scale_gradient(tensor, scale):
+    """Identity on the forward pass; multiplies the gradient by `scale`.
+
+    The standard MuZero trick: `x*s + x.detach()*(1-s)` is exactly x going
+    forward, and has derivative s going back.
+    """
+    return tensor * scale + tensor.detach() * (1.0 - scale)
+
+
+def real_time_step_period(env, game_fps=GAME_FPS):
+    """Seconds per agent decision corresponding to real-time play.
+
+    Reads the env's frameskip rather than assuming one: MsPacman-v4 samples it
+    from (2, 5), so a decision covers 3.5 raw frames on average and real time is
+    ~17 decisions/second, not 60.
+    """
+    skip = getattr(env.unwrapped, "_frameskip", None) or 1
+    if isinstance(skip, (tuple, list)):
+        skip = sum(skip) / len(skip)
+    return float(skip) / game_fps
+
+
+class RateLimiter:
+    """Paces a loop to a target period without drift or catch-up bursts."""
+
+    def __init__(self, period):
+        self.period = period
+        self.next_at = None
+        self.behind = 0
+
+    async def wait(self):
+        if not self.period:
+            return
+        now = time.perf_counter()
+        if self.next_at is None:
+            self.next_at = now
+        self.next_at += self.period
+        delay = self.next_at - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+        else:
+            # Running behind. Reset the clock rather than sprinting to catch up,
+            # which would produce exactly the faster-than-real-time burst the
+            # limiter exists to prevent.
+            self.behind += 1
+            self.next_at = now
+
 
 def discounted_prefix_targets(rewards, discount=DISCOUNT):
     """Cumulative discounted reward sums along an unroll.
@@ -1118,12 +1199,16 @@ class TrainingHelper:
             policy_loss_0 = masked_policy_loss(policy_logits, target_policy[:, 0, :], policy_mask[:, 0])
             converted_target_values = scalar_categorical.scalar_to_categorical_batch(target_value, self.prediction.support_size, self.prediction.num_bins, self.device)
             value_loss_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
-            total_loss += policy_loss_0 + value_loss_0
+            total_loss += (POLICY_LOSS_WEIGHT * policy_loss_0
+                           + VALUE_LOSS_WEIGHT * value_loss_0)
 
         # ---------------------
         # Unroll for each subsequent step
         # ---------------------
         for i in range(1, unroll_steps + 1):
+            # Halve the gradient entering each recurrent step so it does not
+            # compound across the unroll.
+            latent = scale_gradient(latent, LATENT_GRADIENT_SCALE)
             # Use the action from the previous step to roll forward the latent state.
             latent, _, reward_logits = self.dynamics(latent, actions[:, i - 1])
             with torch.no_grad():
@@ -1148,9 +1233,19 @@ class TrainingHelper:
                 # Loss for value prediction.
                 value_loss = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
                 
-                total_loss += reward_loss + prefix_loss + policy_loss + value_loss + latent_loss
+                step_loss = (REWARD_LOSS_WEIGHT * reward_loss
+                             + PREFIX_LOSS_WEIGHT * prefix_loss
+                             + POLICY_LOSS_WEIGHT * policy_loss
+                             + VALUE_LOSS_WEIGHT * value_loss
+                             + CONSISTENCY_LOSS_WEIGHT * latent_loss)
             else:
-                total_loss += reward_loss + prefix_loss + latent_loss
+                step_loss = (REWARD_LOSS_WEIGHT * reward_loss
+                             + PREFIX_LOSS_WEIGHT * prefix_loss
+                             + CONSISTENCY_LOSS_WEIGHT * latent_loss)
+
+            # Each unroll step contributes 1/K of the gradient, so the total does
+            # not scale with how far the unroll runs.
+            total_loss += scale_gradient(step_loss, 1.0 / unroll_steps)
 
         # Backpropagate the total loss.
         total_loss.backward()
@@ -1302,6 +1397,10 @@ class MuZeroAgent:
                 np.bool8 = np.bool_
             env = gym.make("MsPacman-v4")
             env = EpisodicLifeEnv(env)
+            period = real_time_step_period(env) if SELF_PLAY_REAL_TIME else 0.0
+            self.logger.info("Self-play paced at %.1f decisions/s (%s)",
+                             (1.0 / period) if period else float("inf"),
+                             "real time" if period else "unlimited")
             while True:
                 # Refresh weights between episodes. Without this the behaviour
                 # policy stayed frozen at whatever setup() loaded, so self-play
@@ -1310,6 +1409,7 @@ class MuZeroAgent:
                 # rather than per step keeps acting real-time.)
                 await self.network_manager.update_if_needed()
                 self.logger.debug("Starting new game")
+                limiter = RateLimiter(period)
                 obs, info = await asyncio.to_thread(env.reset)
                 preprocessed_obs = preprocess_frame(obs, resize_shape=IMAGE_RESHAPE)
                 prev_reward = 0.0
@@ -1327,6 +1427,7 @@ class MuZeroAgent:
                     action = np.random.choice(np.arange(self.action_space), p=policy)
                     obs, reward, terminated, truncated, _ = await asyncio.to_thread(env.step, action)
                     done = terminated or truncated
+                    await limiter.wait()
                     # obs, chosen action, reward for entering obs
                     reward = min(reward, 400)
                     game_trajectory.append((frame_stack, action, prev_reward))

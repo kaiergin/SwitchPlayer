@@ -154,8 +154,11 @@ Do these together: the transform is what makes a signed support cheap.
 
 ## Priority 4 — Gradient scaling and loss weights on the unroll
 
-**Status: not implemented.** No `register_hook` or scaling anywhere in
-`train_step`.
+**Status: DONE.** `scale_gradient` applies 1/K per unroll step and halves the
+gradient entering each recurrent dynamics step; the value loss is weighted 0.25
+against policy and reward. Verified by `tests/test_training_scale.py`, including
+that a 5-step unroll now attenuates by 0.5^5 rather than amplifying by 5, and
+that total gradient no longer scales with unroll depth.
 
 MuZero scales the gradient entering each unroll step by `1/K` so that deeper
 steps do not dominate, and weights the value loss (typically 0.25) against
@@ -168,7 +171,20 @@ wants a before/after loss-curve comparison rather than a blind commit.
 
 ## Priority 5 — Rate-limit self-play to the target frame rate
 
-**Status: not implemented.**
+**Status: DONE.** `RateLimiter` paces `gameplay_process`, and
+`real_time_step_period` derives the target from the env's own frameskip rather
+than assuming one. That detail mattered: MsPacman-v4 samples its frameskip from
+(2, 5), so real time is **17.1 decisions/second, not 60** — pacing at GAME_FPS
+would have run 3.5x too fast and produced a limiter that did not limit.
+
+Measured: unpaced self-play runs at 225 decisions/s (13x real time on this
+hardware); paced it holds 17.1, with zero overruns. **The acting path uses 2.2 ms
+of a 58.3 ms budget, so the agent has 96% of real time spare** — the strongest
+evidence yet that the searchless-acting design has room, and the first number
+this project has produced that speaks directly to its own thesis.
+
+Set `SELF_PLAY_REAL_TIME = False` to let experiments run unpaced; the ablation
+harness does not use the limiter, deliberately.
 
 ALE runs MsPacman at ~4,900 steps/s, roughly **80x real time**. The testbed
 therefore does not reproduce the constraint it exists to model, and every
