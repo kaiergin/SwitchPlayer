@@ -131,11 +131,12 @@ def test_virtual_loss_is_fully_released(helper):
 
 def test_search_produces_a_valid_improved_policy(helper):
     helper.create_tree_from_game(fake_trajectory(8))
-    policy, value = run_search(helper)
+    policy, value, has_policy = run_search(helper)
     assert policy.shape == (ACTIONS,)
     assert policy.sum() == pytest.approx(1.0)
     assert (policy >= 0).all()
     assert isinstance(float(value), float)
+    assert has_policy is True
 
 
 def test_value_range_is_recorded_for_normalisation(helper):
@@ -156,12 +157,15 @@ def test_gameplay_children_survive_expansion(helper):
     assert len(chain[0].children) == ACTIONS
 
 
-def test_terminal_root_degrades_to_uniform(helper):
-    """The last node of an episode has no successors; searching from it must not
-    raise and should fall back to a uniform target."""
+def test_terminal_root_yields_no_policy_target(helper):
+    """The last node of an episode has no successors; searching from it must
+    not raise, and the uniform placeholder it returns must be flagged as NOT a
+    target -- otherwise the policy head is trained toward uniform on terminal
+    observations."""
     helper.create_tree_from_game(fake_trajectory(4))
-    policy, _ = run_search(helper, index=3)
+    policy, _, has_policy = run_search(helper, index=3)
     assert policy == pytest.approx(np.full(ACTIONS, 1.0 / ACTIONS))
+    assert has_policy is False
 
 
 def test_terminal_nodes_are_never_expanded(helper):
@@ -193,8 +197,8 @@ def test_searching_the_same_index_twice_is_safe(helper):
     second search on the same index raised AttributeError. Re-analysing a
     stored trajectory means exactly that, and it is on the roadmap."""
     helper.create_tree_from_game(fake_trajectory(6))
-    first, _ = run_search(helper, index=0)
-    second, _ = run_search(helper, index=0)   # must not raise
+    first, _, _ = run_search(helper, index=0)
+    second, _, _ = run_search(helper, index=0)   # must not raise
     assert first.sum() == pytest.approx(1.0)
     assert second.sum() == pytest.approx(1.0)
 
@@ -293,7 +297,7 @@ def test_baseline_visits_are_subtracted_exactly(helper):
     baseline = {a: 7 for a in root.children}
     for a, child in root.children.items():
         child.visit_count = 7 + (a + 1)   # this search added a+1 visits
-    policy, _ = helper.drop_non_gameplay_children_and_compute_improvements(
+    policy, _, _ = helper.drop_non_gameplay_children_and_compute_improvements(
         0, temperature=1.0, baseline=baseline)
     expected = np.arange(1, ACTIONS + 1, dtype=float)
     assert policy == pytest.approx(expected / expected.sum())
@@ -311,6 +315,38 @@ def test_improved_policy_excludes_visits_inherited_from_earlier_searches(helper)
     inherited = 100
     child.value_sum *= (child.visit_count + inherited) / child.visit_count
     child.visit_count += inherited
-    policy, _ = run_search(helper, sims=8, batches=4)
+    policy, _, _ = run_search(helper, sims=8, batches=4)
     assert policy[gameplay_action] < 0.9, (
         "policy target still dominated by visits this search never made")
+
+
+# --------------------------------------------------------------------------
+# n-step value targets for unsearched positions (MuZero-Reanalyze)
+# --------------------------------------------------------------------------
+def test_nstep_value_bootstraps_the_current_network(helper):
+    """Unsearched positions get n real rewards plus the CURRENT network's
+    value at the tail -- not the behaviour policy's Monte Carlo return, which
+    goes stale as the policy moves."""
+    helper.create_tree_from_game(fake_trajectory(8))
+    n, discount = 3, 0.9
+    traj = helper.current_trajectory
+    expected = sum(discount ** (k - 1) * traj[k].reward for k in range(1, n + 1))
+    expected += discount ** n * traj[n].expanded_value
+    assert helper.nstep_value(0, n=n, discount=discount) == pytest.approx(expected)
+
+
+def test_nstep_value_falls_back_to_monte_carlo_at_episode_end(helper):
+    """A horizon that runs past the end consumes every remaining reward and
+    bootstraps nothing, which is exactly the chain backup's MC return."""
+    helper.create_tree_from_game(fake_trajectory(5))
+    assert helper.nstep_value(2, n=10, discount=0.997) == pytest.approx(
+        helper.get_value(2))
+
+
+def test_nstep_value_does_not_bootstrap_a_terminal_state(helper):
+    """A horizon landing exactly on the terminal node must use 0 for its
+    onward value, not the network's estimate of the terminal observation."""
+    helper.create_tree_from_game(fake_trajectory(5))
+    expected = sum(0.997 ** (k - 1) * helper.current_trajectory[k].reward
+                   for k in range(1, 5))
+    assert helper.nstep_value(0, n=4, discount=0.997) == pytest.approx(expected)

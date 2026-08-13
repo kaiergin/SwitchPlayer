@@ -132,9 +132,13 @@ SELF_PLAY_REAL_TIME = True      # False lets self-play run as fast as the hardwa
 # slower than self-play generates data even with two MCTS actors, so the
 # gameplay buffer overflows and get_max_gameplay discards the excess at random
 # (see benchmarks/RESULTS.md). Unsearched timesteps still contribute
-# observation, action, reward and Monte Carlo value targets; only their policy
-# loss is masked. Set to 1 to search every step.
+# observation, action, reward and n-step value targets (nstep_value); only
+# their policy loss is masked. Set to 1 to search every step.
 REANALYSE_STRIDE = 4
+# n-step horizon for the value targets of unsearched timesteps, as in
+# MuZero-Reanalyze: TD_STEPS real rewards, then bootstrap the CURRENT
+# network's value. MuZero's Atari setting (td_steps=10).
+TD_STEPS = 10
 # Q is normalised to [0,1] by MinMaxStats before the exploration term is added,
 # so this is on the usual AlphaZero/MuZero scale. It is NOT comparable to the
 # values used before normalisation existed (61.8, then 32).
@@ -755,10 +759,17 @@ class MCTSHelper:
                             "action": action_taken,
                             "reward": reward,
                             "target_policy": np.ones(self.action_space) / self.action_space,
+                            # Pure Monte Carlo during warmup: the network is
+                            # untrained, so an n-step target would bootstrap
+                            # noise.
                             "target_value": self.get_value(idx),
-                            # A uniform target during warmup is deliberate: it
-                            # settles the priors before the first real search.
-                            "has_policy_target": True,
+                            # The uniform policy is a placeholder, not a
+                            # target. Training toward it at full weight spent
+                            # the whole warmup confidently pulling the logits
+                            # flat, which the first real search targets then
+                            # had to fight back out of. An untrained head is
+                            # already high-entropy, so masking loses nothing.
+                            "has_policy_target": False,
                         }
                         trajectory.append(transition)
                 else:
@@ -769,21 +780,23 @@ class MCTSHelper:
                     for idx, (obs_sample, action_taken, reward, _, _, _) in enumerate(game_trajectory):
                         if idx in searched:
                             self.logger.debug("Running MCTS index %s out of %s", idx, len(game_trajectory))
-                            improved_policy, value_estimate = await self.run_full_mcts(idx,
+                            improved_policy, value_estimate, has_policy_target = await self.run_full_mcts(idx,
                                                                                 sim_batches=MCTS_BATCHES,
                                                                                 num_simulations=TOTAL_MCTS_SIMS,
                                                                                 c_puct=C_PUCT,
                                                                                 discount=DISCOUNT,
                                                                                 temperature=temperature)
-                            has_policy_target = True
                         else:
-                            # Not searched. The Monte Carlo return backed up by
-                            # create_tree_from_game is still a valid value
-                            # target, but there is no improved policy here, so
-                            # the policy loss is masked out rather than trained
-                            # toward a placeholder that would drag it uniform.
+                            # Not searched. The value target is an n-step
+                            # return bootstrapped by the CURRENT network
+                            # (MuZero-Reanalyze), not the trajectory's Monte
+                            # Carlo return, which is the behaviour policy's
+                            # result and goes stale as the policy moves. There
+                            # is no improved policy here, so the policy loss is
+                            # masked out rather than trained toward a
+                            # placeholder that would drag it uniform.
                             improved_policy = np.ones(self.action_space) / self.action_space
-                            value_estimate = self.get_value(idx)
+                            value_estimate = self.nstep_value(idx)
                             has_policy_target = False
                         trajectory.append({
                             "obs": obs_sample,
@@ -1077,9 +1090,14 @@ class MCTSHelper:
             node.children[a].visit_count - baseline.get(a, 0) if a in node.children else 0
             for a in range(self.action_space)
         ])
-        if visit_counts.sum() > 0:
+        has_policy = bool(visit_counts.sum() > 0)
+        if has_policy:
             improved_policy = apply_temperature(visit_counts, temperature)
         else:
+            # No visits to read -- a terminal root has no successors to search.
+            # The uniform vector is a shape placeholder only: has_policy False
+            # masks it out of the loss, rather than training the policy head
+            # toward uniform on terminal observations.
             improved_policy = np.ones(self.action_space) / self.action_space
         root_value = node.q_value()
         for action in children_to_drop:
@@ -1090,7 +1108,7 @@ class MCTSHelper:
         # searching the same index twice -- which is what re-analysing a stored
         # trajectory means -- raises nothing.
         node.latent = None
-        return improved_policy, root_value
+        return improved_policy, root_value, has_policy
 
     # -----------------------------
     # Full MCTS: Run multiple simulations, batch expand unexpanded leaves,
@@ -1146,6 +1164,33 @@ class MCTSHelper:
 
     def get_value(self, idx):
         return self.current_trajectory[idx].q_value()
+
+    def nstep_value(self, idx, n=None, discount=None):
+        """MuZero-Reanalyze value target: n real rewards, then bootstrap the
+        CURRENT network's value estimate.
+
+        The Monte Carlo alternative -- q_value() from the chain backup -- is
+        the return the BEHAVIOUR policy earned when the trajectory was played,
+        which mis-values positions in proportion to how far the policy has
+        moved since. expanded_value was computed by eval_obs with today's
+        weights, so bootstrapping it re-values everything past the horizon on
+        every reanalysis pass, at no extra cost.
+
+        Falls back to the pure Monte Carlo return when the episode ends inside
+        the horizon: nothing follows a terminal state, so there is nothing to
+        bootstrap -- and a terminal tail node's onward value is exactly 0.
+        """
+        n = TD_STEPS if n is None else n
+        discount = DISCOUNT if discount is None else discount
+        traj = self.current_trajectory
+        value, g = 0.0, 1.0
+        for k in range(1, n + 1):
+            if idx + k >= len(traj):
+                return value
+            value += g * traj[idx + k].reward
+            g *= discount
+        tail = traj[idx + n]
+        return value + g * (0.0 if tail.done else tail.expanded_value)
 
 class TrainingHelper:
     def __init__(self, action_space, device, network_ref, storage_ref, enable_logging=False):

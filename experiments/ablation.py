@@ -198,13 +198,14 @@ class Run:
         out = []
         for idx, (obs, action, reward, *_ ) in enumerate(evaluated):
             if idx in searched:
-                policy, value = asyncio.run(self.searcher.run_full_mcts(
+                policy, value, has_target = asyncio.run(self.searcher.run_full_mcts(
                     idx, num_simulations=TOTAL_MCTS_SIMS, sim_batches=MCTS_BATCHES,
                     c_puct=C_PUCT, discount=muzero.DISCOUNT))
-                has_target = True
             else:
+                # n-step return bootstrapped by the current network
+                # (MuZero-Reanalyze), not the behaviour policy's MC return.
                 policy = np.full(ACTIONS, 1.0 / ACTIONS)
-                value = self.searcher.get_value(idx)
+                value = self.searcher.nstep_value(idx)
                 has_target = False
             out.append({"obs": obs, "action": action, "reward": reward,
                         "target_policy": policy, "target_value": value,
