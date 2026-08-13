@@ -31,7 +31,7 @@ back toward the paper without discussion:
 |---|---|---|
 | MCTS selects every action | Agent samples the policy head directly (`MuZeroAgent.gameplay_process`) | Search does not fit the frame budget |
 | Search produces actions | Search runs off the critical path as offline re-analysis over stored trajectories (`MCTSHelper`) | Keeps acting latency independent of search cost |
-| Bootstrapped n-step value targets | Monte Carlo returns, no bootstrapping, during warmup | See "Custom ideas" below |
+| Bootstrapped n-step value targets | Monte Carlo only during warmup; afterwards searched roots return tree values (which bootstrap the network at chain leaves) and unsearched positions get n-step returns bootstrapped by the current network, as in MuZero-Reanalyze | Pure MC holds only while the network is untrained — see "Custom ideas" |
 
 ### Measuring against the goal
 
@@ -81,7 +81,7 @@ Unsequenced items:
   that MCTS values are min-max normalised
 
 ### Custom ideas
-* Heavy reward discounting and small trajectory with no bootstrapped value as initial agent
+* Heavy reward discounting and small trajectory with no bootstrapped value as initial agent (warmup only: once search starts, targets bootstrap the network — tree leaves during search, n-step tails on unsearched positions)
 * Human gameplay as training for dynamics network
 
 ### Dependencies
