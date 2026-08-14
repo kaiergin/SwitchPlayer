@@ -72,6 +72,20 @@ ARMS = {
                 "AND decode. (The archived first run of this arm was mislabeled: "
                 "only the supports changed and h() still applied.)",
     },
+    "gumbel": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.9,
+        "USE_GUMBEL_SEARCH": True,
+        "_doc": "horizon-0.9 configuration with Gumbel reanalysis targets "
+                "(softmax(logits + sigma(completedQ)), sequential halving).",
+    },
+    "puct-search": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.9,
+        "USE_GUMBEL_SEARCH": False,
+        "_doc": "Identical to the gumbel arm except the search: classic PUCT "
+                "visit-count targets with Dirichlet noise. The controlled pair.",
+    },
     "horizon-0.9": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.9,
@@ -243,7 +257,7 @@ class Run:
 
         K = muzero.UNROLL_STEPS
         errs = {"per_step": 0.0, "prefix": 0.0, "control": 0.0, "value": 0.0,
-                "value_control": 0.0}
+                "value_control": 0.0, "policy_entropy": 0.0, "policy_maxp": 0.0}
         if self.replay:
             with torch.no_grad():
                 for _ in range(batches):
@@ -255,9 +269,15 @@ class Run:
                     truth = muzero.discounted_prefix_targets(rews, discount=1.0)
 
                     latent = self.trainer.representation(obs[:, 0])
-                    _, value, _ = self.trainer.prediction(latent)
+                    policy_logits, value, _ = self.trainer.prediction(latent)
                     errs["value"] += (value.squeeze(-1) - tval[:, 0]).abs().mean().item()
                     errs["value_control"] += tval[:, 0].abs().mean().item()
+                    # Policy sharpening: the returns panel is too noisy to show
+                    # whether the head is learning at all (uniform over 5
+                    # actions: entropy 1.609, max-p 0.20).
+                    p = torch.softmax(policy_logits, dim=1)
+                    errs["policy_entropy"] += (-p * torch.log(p + 1e-12)).sum(dim=1).mean().item()
+                    errs["policy_maxp"] += p.max(dim=1).values.mean().item()
 
                     state = self.trainer.value_prefix.initial_state(obs.size(0), DEVICE)
                     running = torch.zeros(obs.size(0), 1, device=DEVICE)
@@ -319,7 +339,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     fh.write(json.dumps(record) + "\n")
                 print(f"  [{arm} s{seed}] iter {it:>3}  return {metrics['return_mean']:>7.1f}  "
                       f"prefix {metrics['prefix']:>6.2f} / control {metrics['control']:>6.2f}  "
-                      f"per-step {metrics['per_step']:>6.2f}", flush=True)
+                      f"per-step {metrics['per_step']:>6.2f}  "
+                      f"H(pi) {metrics.get('policy_entropy', 0.0):>5.2f}", flush=True)
         run.env.close()
 
 
