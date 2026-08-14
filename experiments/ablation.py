@@ -86,6 +86,24 @@ ARMS = {
         "_doc": "Identical to the gumbel arm except the search: classic PUCT "
                 "visit-count targets with Dirichlet noise. The controlled pair.",
     },
+    "act-temp-1.5": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.9,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 1.5,
+        "_doc": "gumbel arm plus a mild acting-entropy floor. Measured: sharp "
+                "Gumbel targets collapsed behaviour entropy (H 1.61 -> 0.78) "
+                "and returns sagged after an early peak -- the acting path IS "
+                "the exploration here, and it narrowed with the policy.",
+    },
+    "act-temp-2.0": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.9,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 2.0,
+        "_doc": "gumbel arm plus a stronger acting-entropy floor; brackets the "
+                "knob with act-temp-1.5.",
+    },
     "horizon-0.9": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.9,
@@ -207,7 +225,16 @@ class Run:
             stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
             with torch.no_grad():
                 policy, _ = self.searcher.network_manager.initial_inference(stack)
-            action = int(policy.argmax()) if greedy else int(np.random.choice(ACTIONS, p=policy))
+            if greedy:
+                action = int(policy.argmax())
+            else:
+                # Acting-side exploration floor, mirroring gameplay_process.
+                # Read per step so an arm override applies; identity at 1.0.
+                t = muzero.ACTING_TEMPERATURE
+                if t != 1.0:
+                    policy = policy ** (1.0 / t)
+                    policy = policy / policy.sum()
+                action = int(np.random.choice(ACTIONS, p=policy))
             obs, reward, term, trunc, _ = self.env.step(action)
             done = term or trunc
             traj.append((stack, action, prev_reward))
