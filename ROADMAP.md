@@ -235,7 +235,7 @@ Cheap to build, and it changes how every subsequent benchmark should be read.
 |---|---|---|
 | `get_state_dict` ignores nested optimiser state | `muzero.py` | Works only because SGD is stateless; silently ships GPU tensors if Adam returns |
 | `take_random_gameplay` (né `get_max_gameplay`) samples at random | `muzero.py` | Renamed to match the behaviour; priority selection remains an option if reanalysis ever falls behind again |
-| Dirichlet `alpha=0.03` over 5 actions | `muzero.py` | ~92% of noise mass on one action, documented in `tests/test_search_math.py`. Moot if Gumbel ever lands, since it removes Dirichlet |
+| Dirichlet `alpha` tuning | `muzero.py` | Retuned 0.03 → 0.25 (MuZero's Atari value); only reachable with `USE_GUMBEL_SEARCH=False`, since the Gumbel path uses no Dirichlet noise at all |
 | `playpacman.py` frame stack is broken | `playpacman.py` | `np.repeat(obs, 12, axis=0)` on `(84,84,3)` gives `(1008,84,3)`; stores single frames, not stacks. Needs a decision on the human-demo data format |
 
 ---
@@ -244,17 +244,23 @@ Cheap to build, and it changes how every subsequent benchmark should be read.
 
 ### Gumbel MuZero
 
-**Deferred, not rejected.** Its headline benefit — policy improvement at
-single-digit simulation counts — pays off when search must fit a frame budget.
-With search offline at 32 simulations over 5 actions, visit counts differentiate
-fine and the failure mode does not arise.
+**IMPLEMENTED for the reanalysis targets, gated by `USE_GUMBEL_SEARCH`
+(default True; False restores PUCT unchanged).** The original deferral assumed
+"visit counts differentiate fine at 32 sims over 5 actions" — measured false
+(2026-08-14, weights at 30k steps): one PUCT search added ~0.12 nats over the
+prior, two searches of the same position disagreed by ~0.08 with 71% argmax
+self-agreement, and the policy head was still near-uniform (entropy 1.49 vs
+1.61) after 30k steps. The visit-count improvement operator was too weak at
+this budget; its CE fixed point sits near uniform.
 
-**Revisit if:** search moves onto the acting path (measured: n≤8 fits ~40% of a
-60 fps frame, n=32 needs 94%), **or** if re-analysis throughput becomes binding
-again and trading simulations for timestep coverage looks attractive — n=8 at
-stride 2 costs 0.7x of n=32 at stride 4 while producing 2x the policy targets.
-That trade assumes n=8 Gumbel targets match n=32 visit-count targets, which the
-paper does not establish for Ms. Pac-Man; it would need measuring.
+What landed: sequential halving over the top-`GUMBEL_MAX_CANDIDATES` root
+actions by g + logits, deterministic visit-matching selection below the root,
+and the `softmax(logits + sigma(completedQ))` policy target with v_mix
+completion for unvisited actions. No Dirichlet noise on the Gumbel path — the
+fresh Gumbel draws are the exploration, and `node.policy` is never mutated.
+Search on the acting path remains out of scope (real-time budget); if that
+ever changes, this same machinery is what would run there (measured: n≤8 fits
+~40% of a 60 fps frame).
 
 ### EfficientZero off-policy correction
 

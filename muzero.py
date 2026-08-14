@@ -156,6 +156,25 @@ REANALYSE_STRIDE = 4
 # accounts for the stretch), and falls back to the current network's value
 # where no search lies ahead. MuZero's Atari setting (td_steps=10).
 TD_STEPS = 10
+# ---------------------------------------------------------------------------
+# Gumbel search (Danihelka et al. 2022) for the reanalysis policy targets.
+#
+# Measured motivation (2026-08-14, saved weights at 30k steps): with PUCT at
+# 32 sims over 5 actions and 25% Dirichlet noise, one search added ~0.12 nats
+# of information over the prior, and two independent searches of the SAME
+# position disagreed with each other almost as much (~0.08) -- the visit-count
+# target is mostly noise at this budget, and the policy CE fixed point under
+# it sits near uniform. Gumbel's target is softmax(logits + sigma(completedQ))
+# instead of visit fractions, which stays informative at small budgets, and
+# fresh Gumbel draws per search replace Dirichlet noise entirely.
+#
+# USE_GUMBEL_SEARCH gates the whole path; False restores the PUCT search
+# unchanged. Read at call time, so it can be flipped per ablation arm.
+# ---------------------------------------------------------------------------
+USE_GUMBEL_SEARCH = True
+GUMBEL_MAX_CANDIDATES = 4      # top-m root actions by g + logits (of 5)
+GUMBEL_C_VISIT = 50.0          # sigma(q) = (c_visit + max_visits) * c_scale * q
+GUMBEL_C_SCALE = 1.0           # paper defaults
 # Q is normalised to [0,1] by MinMaxStats before the exploration term is added,
 # so this is on the usual AlphaZero/MuZero scale. It is NOT comparable to the
 # values used before normalisation existed (61.8, then 32).
@@ -1161,13 +1180,21 @@ class MCTSHelper:
                 onward = child.expanded_value
             self.min_max_stats.update(child.reward + discount * onward)
 
+    def release_root(self, node):
+        """Prune imagined children and release the latent once a search is done.
+
+        Holding one latent per timestep for a whole episode is the memory cost
+        this avoids. Assigning None rather than `del` keeps the attribute
+        defined, so searching the same index twice -- which is what
+        re-analysing a stored trajectory means -- raises nothing.
+        """
+        for action in [a for a, child in node.children.items() if not child.is_gameplay]:
+            del node.children[action]
+        node.latent = None
+
     def drop_non_gameplay_children_and_compute_improvements(self, idx, baseline=None):
         baseline = baseline or {}
-        children_to_drop = []
         node = self.current_trajectory[idx]
-        for action, child in node.children.items():
-            if not child.is_gameplay:
-                children_to_drop.append(action)
         # Improved policy from the visits THIS search allocated. Raw counts also
         # include the chain backup's bookkeeping visit and simulations from
         # earlier searches, which reach this node only along the gameplay chain
@@ -1195,14 +1222,7 @@ class MCTSHelper:
             # toward uniform on terminal observations.
             improved_policy = np.ones(self.action_space) / self.action_space
         root_value = node.q_value()
-        for action in children_to_drop:
-            del node.children[action]
-        # Release the latent: the search is finished with it, and holding one
-        # per timestep for a whole episode is the memory cost this avoids.
-        # Assigning None rather than `del` keeps the attribute defined, so
-        # searching the same index twice -- which is what re-analysing a stored
-        # trajectory means -- raises nothing.
-        node.latent = None
+        self.release_root(node)
         return improved_policy, root_value, has_policy
 
     # -----------------------------
@@ -1211,6 +1231,9 @@ class MCTSHelper:
     # -----------------------------
     async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=None, max_depth=MAX_DEPTH):
         discount = DISCOUNT if discount is None else discount
+        if USE_GUMBEL_SEARCH:
+            return await self.run_gumbel_mcts(index, num_simulations=num_simulations,
+                                              discount=discount, max_depth=max_depth)
         # Now that expansion is lazy the root has to be expanded explicitly:
         # selection stops at unexpanded nodes, and add_noise_to_node writes the
         # noisy prior through to the children, which must therefore exist.
@@ -1238,6 +1261,155 @@ class MCTSHelper:
             await self.expand_selected(discount)
         return self.drop_non_gameplay_children_and_compute_improvements(
             index, baseline=baseline_visits)
+
+    # -----------------------------
+    # Gumbel search (Danihelka et al. 2022): sequential halving at the root,
+    # deterministic visit-matching below it, and a policy target built from
+    # completed Q-values instead of visit fractions.
+    # -----------------------------
+    async def run_gumbel_mcts(self, index, num_simulations=32, discount=None, max_depth=MAX_DEPTH):
+        discount = DISCOUNT if discount is None else discount
+        root = self.current_trajectory[index]
+        self.min_max_stats = MinMaxStats()
+        root.prefix = 0.0
+        root.prefix_state = None
+        if not root.is_expanded:
+            self.batch_expand_nodes([root])
+        if not root.children:
+            # Terminal root: nothing to search, no real policy target.
+            return (np.ones(self.action_space) / self.action_space,
+                    root.q_value(), False)
+        self.seed_min_max_stats(root, discount)
+        # No Dirichlet noise: the Gumbel draws ARE the exploration, fresh per
+        # search, and unlike the noise they never contaminate node.policy.
+        logits = np.log(np.asarray(root.policy, dtype=np.float64) + 1e-9)
+        gumbels = np.random.gumbel(size=self.action_space)
+        baseline = {a: child.visit_count for a, child in root.children.items()}
+
+        m = max(1, min(GUMBEL_MAX_CANDIDATES, self.action_space, num_simulations))
+        available = [int(a) for a in np.argsort(-(gumbels + logits)) if a in root.children]
+        current = available[:m]
+
+        # Sequential halving: split the budget over ceil(log2(m)) phases, visit
+        # each surviving candidate equally within a phase, keep the top half by
+        # g + logits + sigma(qhat). The last phase spends whatever remains.
+        total_phases = max(1, int(np.ceil(np.log2(len(current))))) if len(current) > 1 else 1
+        sims_left = num_simulations
+        for phase in range(total_phases):
+            if not current or sims_left <= 0:
+                break
+            if phase == total_phases - 1 or len(current) == 1:
+                per_candidate = max(1, sims_left // len(current))
+            else:
+                per_candidate = max(1, int(num_simulations / (total_phases * len(current))))
+            schedule = [a for a in current for _ in range(per_candidate)][:sims_left]
+            for i in range(0, len(schedule), len(current)):
+                batch = schedule[i:i + len(current)]
+                await asyncio.gather(*[
+                    self.gumbel_selection_task(index, a, discount, max_depth)
+                    for a in batch])
+                await self.expand_selected(discount)
+            sims_left -= len(schedule)
+            if len(current) > 1:
+                current = self._halve_candidates(root, current, gumbels, logits,
+                                                 discount, baseline)
+
+        improved_policy = self._gumbel_improved_policy(root, logits, discount,
+                                                       baseline=baseline)
+        root_value = root.q_value()
+        self.release_root(root)
+        return improved_policy, root_value, True
+
+    async def gumbel_selection_task(self, index, root_action, discount, max_depth=MAX_DEPTH):
+        """One simulation with the root action forced by the halving schedule;
+        below the root, selection is the paper's deterministic visit-matching
+        rule (no Gumbel, no PUCT)."""
+        node = self.current_trajectory[index]
+        path = []
+        forced = root_action
+        while len(path) < max_depth:
+            if not node.is_expanded or node.done:
+                break
+            path.append(node)
+            if forced is not None:
+                a, forced = forced, None
+            else:
+                a = self._nonroot_select(node, discount)
+            child = node.children[a]
+            async with child.lock:
+                child.virtual_loss += 1
+            node = child
+        path.append(node)
+        await self.selection_results.put((node, path))
+
+    def _normalized_q(self, child, discount):
+        """The same composite selection scores: r + discount * V, normalized.
+        Unvisited children read their network value, as in PUCT selection."""
+        if child.visit_count + child.virtual_loss > 0:
+            onward = child.q_value()
+        elif child.done:
+            onward = 0.0
+        else:
+            onward = child.expanded_value
+        return self.min_max_stats.normalize(child.reward + discount * onward)
+
+    def _sigma_scale(self, node, baseline=None):
+        baseline = baseline or {}
+        max_n = max((child.visit_count - baseline.get(a, 0)
+                     for a, child in node.children.items()), default=0)
+        return (GUMBEL_C_VISIT + max_n) * GUMBEL_C_SCALE
+
+    def _halve_candidates(self, root, current, gumbels, logits, discount, baseline):
+        sigma = self._sigma_scale(root, baseline)
+        scored = sorted(current,
+                        key=lambda a: gumbels[a] + logits[a]
+                        + sigma * self._normalized_q(root.children[a], discount),
+                        reverse=True)
+        return scored[:max(1, len(current) // 2)]
+
+    def _gumbel_improved_policy(self, node, logits, discount, baseline=None):
+        """softmax(logits + sigma(completedQ)) over ALL actions -- the paper's
+        policy target. Visited actions contribute their search Q; unvisited
+        ones are completed with v_mix, the visit-weighted blend of the node's
+        own network value and the values its visited children returned. This
+        is what stays informative at small budgets: the target is built from
+        value ESTIMATES, not from a handful of noisy visit counts."""
+        baseline = baseline or {}
+        prior = np.asarray(node.policy, dtype=np.float64)
+        visited = {a: child for a, child in node.children.items()
+                   if child.visit_count - baseline.get(a, 0) > 0}
+        qhat = {a: self._normalized_q(child, discount) for a, child in visited.items()}
+        own_value = node.expanded_value if node.expanded_value is not None else node.q_value()
+        v_hat = self.min_max_stats.normalize(own_value)
+        if visited:
+            n_total = sum(child.visit_count - baseline.get(a, 0)
+                          for a, child in visited.items())
+            pi_visited = max(sum(prior[a] for a in visited), 1e-9)
+            weighted = sum(prior[a] * qhat[a] for a in visited) / pi_visited
+            v_mix = (v_hat + n_total * weighted) / (1.0 + n_total)
+        else:
+            v_mix = v_hat
+        completed = np.full(self.action_space, v_mix)
+        for a, q in qhat.items():
+            completed[a] = q
+        z = logits + self._sigma_scale(node, baseline) * completed
+        z -= z.max()
+        pi = np.exp(z)
+        return pi / pi.sum()
+
+    def _nonroot_select(self, node, discount):
+        """Deterministic visit-matching: pick the action whose visit share lags
+        its improved-policy probability the most. Distributes descents in
+        proportion to pi' without any sampling noise; virtual loss counts as a
+        visit, which is what diversifies concurrent simulations."""
+        pi = self._gumbel_improved_policy(
+            node, np.log(np.asarray(node.policy, dtype=np.float64) + 1e-9), discount)
+        counts = np.zeros(self.action_space)
+        for a, child in node.children.items():
+            counts[a] = child.visit_count + child.virtual_loss
+        total = counts.sum()
+        score = pi - counts / (1.0 + total)
+        return max(node.children.keys(), key=lambda a: score[a])
 
     def select_reanalysis_indices(self, length, stride=None):
         """Timesteps to run a search on, evenly spaced with a random offset.

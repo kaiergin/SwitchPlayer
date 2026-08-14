@@ -18,6 +18,13 @@ def helper():
                       network_ref=None, storage_ref=None, enable_logging=False)
 
 
+@pytest.fixture
+def puct(monkeypatch):
+    """Force the classic PUCT search for tests that pin its visit-count
+    arithmetic; everything else runs whatever USE_GUMBEL_SEARCH selects."""
+    monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)
+
+
 def fake_trajectory(length=6):
     """Entries in the shape eval_obs produces: (obs, action, reward, latent,
     policy, expanded_value)."""
@@ -305,7 +312,7 @@ def test_baseline_visits_are_subtracted_exactly(helper):
     assert policy == pytest.approx(expected / expected.sum())
 
 
-def test_improved_policy_excludes_visits_inherited_from_earlier_searches(helper):
+def test_improved_policy_excludes_visits_inherited_from_earlier_searches(helper, puct):
     """Regression: raw visit counts fed apply_temperature, so the chain
     backup's bookkeeping visit and traffic from earlier searches -- which can
     only reach a node along the behaviour trajectory -- biased every policy
@@ -320,6 +327,84 @@ def test_improved_policy_excludes_visits_inherited_from_earlier_searches(helper)
     policy, _, _ = run_search(helper, sims=8, batches=4)
     assert policy[gameplay_action] < 0.9, (
         "policy target still dominated by visits this search never made")
+
+
+# --------------------------------------------------------------------------
+# Gumbel search (Danihelka et al. 2022)
+# --------------------------------------------------------------------------
+def test_gumbel_spends_exactly_the_budget(helper):
+    helper.create_tree_from_game(fake_trajectory(10))
+    root = helper.current_trajectory[0]
+    before = root.visit_count
+    run_search(helper, sims=32, batches=8)
+    assert root.visit_count == before + 32
+
+
+def test_gumbel_does_not_mutate_the_prior(helper):
+    """PUCT wrote Dirichlet noise into node.policy before every search; the
+    Gumbel draws live outside the node, so the stored prior must survive."""
+    helper.create_tree_from_game(fake_trajectory(8))
+    root = helper.current_trajectory[0]
+    prior = np.array(root.policy).copy()
+    run_search(helper)
+    assert np.array_equal(np.array(root.policy), prior)
+
+
+def test_gumbel_target_ranks_by_completed_q(helper):
+    """The policy target is softmax(logits + sigma(completedQ)): with equal
+    priors, a clearly better searched action must dominate -- this is the
+    informativeness at small budgets that visit fractions cannot give."""
+    helper.create_tree_from_game(fake_trajectory(4))
+    root = helper.current_trajectory[0]
+    helper.batch_expand_nodes([root])
+    for child in root.children.values():
+        child.prior = 1.0 / ACTIONS
+        child.visit_count, child.value_sum, child.virtual_loss = 4, 4 * 10.0, 0.0
+        child.reward, child.done, child.expanded_value = 0.0, False, 10.0
+    root.children[3].value_sum = 4 * 90.0
+    root.policy = np.full(ACTIONS, 1.0 / ACTIONS)
+    root.expanded_value = 10.0
+    helper.min_max_stats = muzero.MinMaxStats()
+    helper.min_max_stats.update(0.0)
+    helper.min_max_stats.update(100.0)
+    logits = np.log(np.full(ACTIONS, 1.0 / ACTIONS))
+    pi = helper._gumbel_improved_policy(root, logits, 0.997, baseline={})
+    assert pi.argmax() == 3
+    assert pi[3] > 0.9
+
+
+def test_gumbel_completes_unvisited_actions_with_the_mixed_value(helper):
+    """An unvisited action is scored with v_mix, not 0: if the only visited
+    action came back clearly below the node's own value estimate, the target
+    must NOT concentrate on it just because it was the one searched."""
+    helper.create_tree_from_game(fake_trajectory(4))
+    root = helper.current_trajectory[0]
+    helper.batch_expand_nodes([root])
+    for child in root.children.values():
+        child.prior = 1.0 / ACTIONS
+        child.visit_count, child.value_sum, child.virtual_loss = 0, 0.0, 0.0
+        child.reward, child.done, child.expanded_value = 0.0, False, 10.0
+    root.children[1].visit_count = 4
+    root.children[1].value_sum = 4 * 10.0     # searched, and mediocre
+    root.policy = np.full(ACTIONS, 1.0 / ACTIONS)
+    root.expanded_value = 80.0                # the node itself looks better
+    helper.min_max_stats = muzero.MinMaxStats()
+    helper.min_max_stats.update(0.0)
+    helper.min_max_stats.update(100.0)
+    logits = np.log(np.full(ACTIONS, 1.0 / ACTIONS))
+    pi = helper._gumbel_improved_policy(root, logits, 0.997, baseline={})
+    assert pi.argmax() != 1
+    assert pi[1] < 0.05
+
+
+def test_flag_off_restores_visit_fraction_targets(helper, puct):
+    """With USE_GUMBEL_SEARCH False the target must be the PUCT path's raw
+    visit fractions -- quantised to multiples of 1/sims, which the Gumbel
+    softmax target essentially never is."""
+    helper.create_tree_from_game(fake_trajectory(8))
+    policy, _, has_policy = run_search(helper, sims=8, batches=4)
+    assert has_policy is True
+    assert np.allclose(policy * 8, np.round(policy * 8))
 
 
 # --------------------------------------------------------------------------
