@@ -45,7 +45,15 @@ from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
                       RepresentationNetwork, ValuePrefixNetwork)
 
 RESULTS = pathlib.Path(__file__).resolve().parent.parent / "benchmarks" / "results"
+# Environment defaults. MsPacman keeps its historical 5-action restriction and
+# 600-step (single-life) episode cap; other games take the env's full action
+# space and their own cap via --env / --actions / --episode-cap. TAG suffixes
+# every output file for a non-default env, so Pong results never mix with the
+# MsPacman history in ablation.jsonl.
+ENV_NAME = "MsPacman-v4"
 ACTIONS = 5
+EPISODE_CAP = 600
+TAG = ""
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -103,6 +111,18 @@ ARMS = {
         "ACTING_TEMPERATURE": 2.0,
         "_doc": "gumbel arm plus a stronger acting-entropy floor; brackets the "
                 "knob with act-temp-1.5.",
+    },
+    "pong-100k": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.997,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 1.5,
+        "_doc": "Equivalence check against the Atari-100k table (Pong: random "
+                "-20.7, SimPLe 12.8, MuZero@100k -6.7, EfficientZero 20.6). "
+                "Best current config, with gamma back at 0.997 -- a Pong rally "
+                "spans seconds, and gamma=0.9's ~10-decision horizon is "
+                "shorter than one ball crossing. Run with --env Pong-v4 "
+                "--episode-cap 3000 --episodes-per-iter 1.",
     },
     "horizon-0.9": {
         "USE_VALUE_PREFIX_IN_TREE": True,
@@ -207,7 +227,7 @@ class Run:
 
         import gymnasium as gym
         from EpisodicLifeEnv import EpisodicLifeEnv
-        self.env = EpisodicLifeEnv(gym.make("MsPacman-v4"))
+        self.env = EpisodicLifeEnv(gym.make(ENV_NAME))
         self.replay = []
 
     def set_train_mode(self, training):
@@ -217,7 +237,8 @@ class Run:
             net.train(training)
 
     # -- self-play ---------------------------------------------------------
-    def play_episode(self, greedy=False, cap=600):
+    def play_episode(self, greedy=False, cap=None):
+        cap = EPISODE_CAP if cap is None else cap
         obs, _ = self.env.reset()
         stack = initial_frame_stack(preprocess_frame(obs, IMAGE_RESHAPE))
         traj, prev_reward, total, done, steps = [], 0.0, 0.0, False, 0
@@ -346,7 +367,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 # 4.9 hours of training because nothing here wrote them out,
                 # which made it impossible to watch an agent afterwards or to
                 # resume from one.
-                ckpt = RESULTS / f"weights-{arm}-seed{seed}.pth"
+                ckpt = RESULTS / f"weights{TAG}-{arm}-seed{seed}.pth"
                 torch.save({
                     "arm": arm, "seed": seed, "spec": {k: v for k, v in spec.items()},
                     "training_steps": run.trainer.training_steps,
@@ -420,12 +441,13 @@ def plot(path, out_dir):
                  "A predictor that does not beat its dashed control has learned nothing.",
                  fontsize=12)
     fig.tight_layout()
-    target = out_dir / "ablation.png"
+    target = out_dir / f"ablation{TAG}.png"
     fig.savefig(target, dpi=140)
     print(f"wrote {target}")
 
 
 def main():
+    global ENV_NAME, ACTIONS, EPISODE_CAP, TAG
     ap = argparse.ArgumentParser()
     ap.add_argument("--arms", nargs="+", default=["per-step", "value-prefix"],
                     choices=sorted(ARMS))
@@ -434,14 +456,36 @@ def main():
     ap.add_argument("--episodes-per-iter", type=int, default=2)
     ap.add_argument("--train-steps", type=int, default=200)
     ap.add_argument("--eval-every", type=int, default=2)
+    ap.add_argument("--env", default="MsPacman-v4",
+                    help="ALE env id; non-default envs get suffixed output files")
+    ap.add_argument("--actions", type=int, default=None,
+                    help="restrict to the first N actions; default: env's full "
+                         "space (MsPacman keeps its historical 5)")
+    ap.add_argument("--episode-cap", type=int, default=None,
+                    help="self-play/eval step cap; default 600 (MsPacman "
+                         "single-life scale)")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
 
+    ENV_NAME = args.env
+    if args.env != "MsPacman-v4":
+        TAG = "-" + args.env.split("-")[0].lower()
+    if args.episode_cap:
+        EPISODE_CAP = args.episode_cap
+    if args.actions:
+        ACTIONS = args.actions
+    elif args.env != "MsPacman-v4":
+        import gymnasium as gym
+        probe = gym.make(args.env)
+        ACTIONS = int(probe.action_space.n)
+        probe.close()
+
     RESULTS.mkdir(parents=True, exist_ok=True)
-    out = RESULTS / "ablation.jsonl"
+    out = RESULTS / f"ablation{TAG}.jsonl"
 
     if not args.plot_only:
-        print(f"device {DEVICE} | arms {args.arms} | seeds {args.seeds} | "
+        print(f"device {DEVICE} | env {ENV_NAME} ({ACTIONS} actions, cap {EPISODE_CAP}) | "
+              f"arms {args.arms} | seeds {args.seeds} | "
               f"{args.iterations} iterations x ({args.episodes_per_iter} episodes + "
               f"{args.train_steps} train steps)")
         for arm in args.arms:
