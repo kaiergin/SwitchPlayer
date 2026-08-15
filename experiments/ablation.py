@@ -124,6 +124,36 @@ ARMS = {
                 "shorter than one ball crossing. Run with --env Pong-v4 "
                 "--episode-cap 3000 --episodes-per-iter 1.",
     },
+    # Learning-rate sweep at the benchmark's replay ratio (~1 update/env-step,
+    # i.e. --train-steps 1000): Adam 1e-3 was chosen to fix a bug, never tuned,
+    # and it interacts directly with replay ratio -- too hot overfits the small
+    # buffer, too cold under-trains, and either corrupts the equivalence test's
+    # conclusion. Judge on the low-noise metrics (head MAE vs control, policy
+    # entropy trajectory), not returns.
+    "pong-lr-3e-4": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.997,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 1.5,
+        "LEARNING_RATE": 3e-4,
+        "_doc": "pong-100k at Adam lr 3e-4.",
+    },
+    "pong-lr-1e-3": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.997,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 1.5,
+        "LEARNING_RATE": 1e-3,
+        "_doc": "pong-100k at Adam lr 1e-3 (the current default; control).",
+    },
+    "pong-lr-3e-3": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.997,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 1.5,
+        "LEARNING_RATE": 3e-3,
+        "_doc": "pong-100k at Adam lr 3e-3.",
+    },
     "horizon-0.9": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.9,
