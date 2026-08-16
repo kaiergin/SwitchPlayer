@@ -121,8 +121,12 @@ ARMS = {
                 "-20.7, SimPLe 12.8, MuZero@100k -6.7, EfficientZero 20.6). "
                 "Best current config, with gamma back at 0.997 -- a Pong rally "
                 "spans seconds, and gamma=0.9's ~10-decision horizon is "
-                "shorter than one ball crossing. Run with --env Pong-v4 "
-                "--episode-cap 3000 --episodes-per-iter 1.",
+                "shorter than one ball crossing. Run with "
+                "--env PongDeterministic-v4 --episode-cap 3000 "
+                "--episodes-per-iter 1. Deterministic, NOT Pong-v4: the "
+                "benchmark protocol is fixed skip-4, while Pong-v4's "
+                "stochastic (2,5) frameskip randomises action duration on a "
+                "timing game -- the first Pong runs carried that confound.",
     },
     # Learning-rate sweep at the benchmark's replay ratio (~1 update/env-step,
     # i.e. --train-steps 1000): Adam 1e-3 was chosen to fix a bug, never tuned,
