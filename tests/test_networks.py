@@ -176,6 +176,28 @@ def test_training_copies_stay_in_train_mode():
 
 
 # --------------------------------------------------------------------------
+# Hidden-state min-max scaling (MuZero appendix G)
+# --------------------------------------------------------------------------
+def test_representation_latent_is_scaled_to_unit_range(latent):
+    """Appendix G: the emitted hidden state is min-max scaled per sample.
+    Without it the latent scale drifts with unroll depth and search depth --
+    the instability the paper says this scaling exists to prevent."""
+    flat = latent.flatten(start_dim=1)
+    assert flat.min(dim=1).values.max().item() == pytest.approx(0.0, abs=1e-4)
+    assert flat.max(dim=1).values.min().item() == pytest.approx(1.0, abs=1e-4)
+
+
+def test_dynamics_latent_is_scaled_to_unit_range(latent):
+    dyn = DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
+                          support_size=400, num_bins=BINS)
+    with torch.no_grad():
+        nxt, _, _ = dyn(latent, torch.zeros(2, dtype=torch.long))
+    flat = nxt.flatten(start_dim=1)
+    assert flat.min(dim=1).values.max().item() == pytest.approx(0.0, abs=1e-4)
+    assert flat.max(dim=1).values.min().item() == pytest.approx(1.0, abs=1e-4)
+
+
+# --------------------------------------------------------------------------
 # SimSiam projector (EfficientZero 4.1)
 # --------------------------------------------------------------------------
 def test_projector_branches_share_output_shape(latent):

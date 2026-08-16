@@ -276,6 +276,11 @@ class Run:
         import gymnasium as gym
         from EpisodicLifeEnv import EpisodicLifeEnv
         self.env = EpisodicLifeEnv(gym.make(ENV_NAME))
+        # Seed the env stream too. Without this the module docstring's
+        # paired-seed claim was false: gymnasium draws np_random from OS
+        # entropy on an unseeded reset, so no run was reproducible even
+        # against itself.
+        self.env.reset(seed=seed)
         self.replay = []
 
     def set_train_mode(self, training):
@@ -316,13 +321,21 @@ class Run:
             prev_reward = muzero.clip_reward(reward)
             total += float(reward)
             steps += 1
+        terminated = done
+        if not terminated:
+            # The cap truncated the episode mid-game. EpisodicLifeEnv only
+            # truly resets on real game over, so without forcing it the next
+            # reset() would RESUME the same match mid-rally -- every later
+            # "episode" becoming an overlapping window of one continuous game,
+            # eval windows starting wherever self-play left off.
+            self.env.was_real_done = True
         traj.append((push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE)), 0, prev_reward))
-        return traj, total, steps
+        return traj, total, steps, terminated
 
     # -- re-analysis -------------------------------------------------------
-    def reanalyse(self, traj):
+    def reanalyse(self, traj, terminated=True):
         evaluated = self.searcher.eval_obs(traj)
-        self.searcher.create_tree_from_game(evaluated)
+        self.searcher.create_tree_from_game(evaluated, terminated=terminated)
         searched = self.searcher.select_reanalysis_indices(len(evaluated))
         # Two passes, mirroring MCTS_process: search first, then build the
         # paper's n-step targets with the root values as bootstraps -- a
@@ -347,7 +360,7 @@ class Run:
         return out
 
     # -- evaluation --------------------------------------------------------
-    def evaluate(self, episodes=4, batches=8):
+    def evaluate(self, episodes=8, batches=8):
         """Greedy episode return, plus prediction errors against predict-zero.
 
         Runs entirely in eval mode -- the resting state. The greedy episodes
@@ -403,8 +416,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         started = time.time()
         for it in range(1, iterations + 1):
             for _ in range(episodes_per_iter):
-                traj, _, _ = run.play_episode()
-                run.replay.append(run.reanalyse(traj))
+                traj, _, _, terminated = run.play_episode()
+                run.replay.append(run.reanalyse(traj, terminated=terminated))
                 if len(run.replay) > muzero.MAX_REPLAY:
                     run.replay.pop(0)
 

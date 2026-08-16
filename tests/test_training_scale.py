@@ -167,11 +167,12 @@ class FakeEnv:
 
 
 def test_step_period_accounts_for_frameskip():
-    """Regression on a mistake worth not repeating: MsPacman-v4 samples its
-    frameskip from (2, 5), so one decision covers 3.5 raw frames and real time
-    is ~17 decisions/s. Pacing at GAME_FPS would run 3.5x too fast."""
+    """MsPacman-v4 samples its frameskip via ALE's integers(2, 5) -- an
+    EXCLUSIVE high, so {2,3,4} with mean 3.0, and real time is 20 decisions/s.
+    The first version of this pacing averaged the tuple bounds (3.5) and ran
+    the 'real-time' agent ~14% slower than real time."""
     period = real_time_step_period(FakeEnv((2, 5)))
-    assert 1.0 / period == pytest.approx(60.0 / 3.5, rel=1e-3)
+    assert 1.0 / period == pytest.approx(60.0 / 3.0, rel=1e-3)
     assert 1.0 / period < GAME_FPS
 
 

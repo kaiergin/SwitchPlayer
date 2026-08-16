@@ -1,3 +1,5 @@
+import itertools
+
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -126,9 +128,9 @@ LATENT_GRADIENT_SCALE = 0.5
 #
 # The console runs at 60 frames/s and on hardware the agent would decide once
 # per frame. In ALE one env.step covers `frameskip` raw frames, so real time is
-# GAME_FPS / frameskip decisions per second -- 17.1 for MsPacman-v4's stochastic
-# (2,5) skip, NOT 60. Pacing at 60 would run the game 3.5x faster than real time
-# and defeat the point of the limiter.
+# GAME_FPS / frameskip decisions per second -- 20 for MsPacman-v4's stochastic
+# (2,5) skip (ALE samples {2,3,4}, mean 3.0), NOT 60. Pacing at 60 would run
+# the game ~3x faster than real time and defeat the point of the limiter.
 #
 # Unpaced, ALE runs ~80x real time, so producer/consumer ratios measured against
 # it answer a question the real system never asks (see benchmarks/RESULTS.md).
@@ -172,9 +174,19 @@ TD_STEPS = 10
 # unchanged. Read at call time, so it can be flipped per ablation arm.
 # ---------------------------------------------------------------------------
 USE_GUMBEL_SEARCH = True
-GUMBEL_MAX_CANDIDATES = 4      # top-m root actions by g + logits (of 5)
+# m = min(GUMBEL_MAX_CANDIDATES, actions, sims); 16 is the paper's Atari cap,
+# so with 5-6 actions every action is admitted -- the earlier value of 4
+# permanently hid one action per search from visitation.
+GUMBEL_MAX_CANDIDATES = 16
 GUMBEL_C_VISIT = 50.0          # sigma(q) = (c_visit + max_visits) * c_scale * q
-GUMBEL_C_SCALE = 1.0           # paper defaults
+# 0.1 is the paper's setting FOR MIN-MAX NORMALIZED Q (its Atari appendix, and
+# mctx's qtransform_completed_by_mix_value default) -- normalized advantages
+# scale to roughly [-5, 5]. This sat at 1.0 ("paper defaults" -- the board-game
+# regime, wrong for normalized Q): sigma ~50-60 amplified 32-sim Q noise into
+# near-one-hot policy targets, disabled the Gumbel/logit exploration terms,
+# and collapsed behaviour entropy -- the paper's own cscale ablation warns of
+# exactly this failure.
+GUMBEL_C_SCALE = 0.1
 # ---------------------------------------------------------------------------
 # Act-time search -- a TEST feature, not the product. The end goal of this
 # project is acting WITHOUT search (the real-time thesis), so this defaults
@@ -377,7 +389,10 @@ def real_time_step_period(env, game_fps=GAME_FPS):
     """
     skip = getattr(env.unwrapped, "_frameskip", None) or 1
     if isinstance(skip, (tuple, list)):
-        skip = sum(skip) / len(skip)
+        # ALE samples integers(low, high) with an EXCLUSIVE high -- (2,5) draws
+        # from {2,3,4}, mean 3.0. Averaging the tuple bounds gave 3.5 and paced
+        # the "real-time" agent ~14% slower than real time.
+        skip = (skip[0] + skip[1] - 1) / 2
     return float(skip) / game_fps
 
 
@@ -493,14 +508,21 @@ def get_state_dict(network):
 
 
 LEARNING_RATE = 1e-3
+# The papers' only explicit regularizer (MuZero: L2 c=1e-4; EfficientZero:
+# weight decay 1e-4) and their gradient-stability lever (EfficientZero clips
+# grad norm at 5). Both were absent entirely.
+WEIGHT_DECAY = 1e-4
+MAX_GRAD_NORM = 5.0
 
 def make_optimizer(params):
-    """Adam. The repo moved Adam -> SGD without a recorded reason, and the one
+    """AdamW. The repo moved Adam -> SGD without a recorded reason, and the one
     plausible cause -- get_state_dict shipping Adam's GPU-resident state through
     Ray -- is fixed above. SGD at 1e-4 was slow enough that the value prefix head
-    could not converge inside a benchmark run (benchmarks/RESULTS.md).
+    could not converge inside a benchmark run (benchmarks/RESULTS.md). AdamW so
+    the papers' 1e-4 weight decay is decoupled rather than folded into the
+    adaptive gradient.
     """
-    return optim.Adam(params, lr=LEARNING_RATE)
+    return optim.AdamW(params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
 LOG_DIR = "logs"
 
@@ -1061,17 +1083,23 @@ class MCTSHelper:
         # That made any experiment varying gamma measure nothing.
         discount = DISCOUNT if discount is None else discount
         backup_value = leaf_value
-        for n in reversed(path):
+        last = len(path) - 1
+        for i, n in enumerate(reversed(path)):
             n.visit_count += 1
             n.value_sum += backup_value
             n.virtual_loss = 0.0
             backup_value = n.reward + discount * backup_value
-            if min_max_stats is not None:
+            if min_max_stats is not None and i != last:
                 # Track the same composite selection normalises: r + discount*V,
                 # not V alone, or the recorded range is on the wrong scale.
+                # The search ROOT (path[0], iterated last) is excluded: its
+                # reward is the edge INTO the root, outside the searched
+                # subtree, and folding it in inflates the range -- compressing
+                # every normalized advantage precisely at positions that follow
+                # big reward events.
                 min_max_stats.update(n.reward + discount * n.q_value())
 
-    def create_tree_from_game(self, game_trajectory):
+    def create_tree_from_game(self, game_trajectory, terminated=True):
         prev_node = None
         prev_action_taken = None
         path = []
@@ -1085,13 +1113,19 @@ class MCTSHelper:
             path.append(new_node)
             prev_node = new_node
             prev_action_taken = action_taken
-        path[-1].done = True
+        path[-1].done = terminated
 
         # Nodes are expanded lazily, the first time a simulation selects them.
         # Expanding the whole chain up front allocated action_space child
         # latents for every timestep in the episode (~5x the episode length)
         # before the search had even started.
-        self.backup_simulation(path, 0)
+        #
+        # Chain backup leaf: 0 at a true terminal. A TRUNCATED tail (the
+        # harness episode cap) is not terminal -- backing up 0 there taught
+        # V=0 at a mid-game state on every capped trajectory -- so it
+        # bootstraps the network's value instead.
+        leaf_value = 0.0 if terminated else (path[-1].expanded_value or 0.0)
+        self.backup_simulation(path, leaf_value)
         self.current_trajectory = path
     
     # alpha=0.25 is MuZero's Atari setting. The old 0.03 was AlphaGo's value,
@@ -1663,9 +1697,6 @@ class TrainingHelper:
         # Unroll for each subsequent step
         # ---------------------
         for i in range(1, unroll_steps + 1):
-            # Halve the gradient entering each recurrent step so it does not
-            # compound across the unroll.
-            latent = scale_gradient(latent, LATENT_GRADIENT_SCALE)
             # Use the action from the previous step to roll forward the latent state.
             latent, _, reward_logits = self.dynamics(latent, actions[:, i - 1])
             # SimSiam consistency (EfficientZero 4.1), replacing plain latent
@@ -1711,9 +1742,27 @@ class TrainingHelper:
             # not scale with how far the unroll runs.
             total_loss += scale_gradient(step_loss, 1.0 / unroll_steps)
 
+            # Halve the gradient on the RECURRENT path only, AFTER this step's
+            # heads have consumed the latent at full strength -- MuZero appendix
+            # G's placement. Scaling before the dynamics call (as this used to)
+            # also scaled the representation's output on step one, so every
+            # unrolled loss -- including the whole SimSiam consistency signal
+            # -- reached the representation at half the specified strength:
+            # 0.5^k instead of 0.5^(k-1).
+            latent = scale_gradient(latent, LATENT_GRADIENT_SCALE)
+
         # Backpropagate the total loss.
         total_loss.backward()
-        
+
+        # One global norm across every module, EfficientZero's max_grad_norm=5.
+        torch.nn.utils.clip_grad_norm_(
+            itertools.chain(self.representation.parameters(),
+                            self.dynamics.parameters(),
+                            self.prediction.parameters(),
+                            self.value_prefix.parameters(),
+                            self.projector.parameters()),
+            MAX_GRAD_NORM)
+
         # Step the optimizers.
         self.rep_optimizer.step()
         self.dyn_optimizer.step()
@@ -1953,8 +2002,11 @@ def preprocess_frame(frame, resize_shape=(84, 84)):
     """
     # Convert from RGB to grayscale.
     #frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-    # Resize the image to the desired shape.
-    frame = cv2.resize(frame, resize_shape)#, interpolation=cv2.INTER_AREA)
+    # Resize with INTER_AREA -- the standard Atari choice. The flag had been
+    # commented out, falling back to INTER_LINEAR, whose 2x2 sampling skips
+    # input rows on a 210->84 reduction: 1-2px sprites (pellets, the Pong
+    # ball) alias in and out of existence depending on sub-pixel phase.
+    frame = cv2.resize(frame, resize_shape, interpolation=cv2.INTER_AREA)
     frame = np.transpose(frame, (2, 0, 1))
     return frame
 

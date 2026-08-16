@@ -277,11 +277,41 @@ def test_unvisited_children_score_their_network_value_not_zero(helper):
 def test_backup_records_the_composite_q_for_normalisation(helper):
     """MinMaxStats must track the same quantity selection normalises:
     r + discount * V(node), not V(node) alone."""
-    node = muzero.MCTSNode(latent=None, prior=1.0, reward=10.0)
+    root = muzero.MCTSNode(latent=None, prior=1.0, reward=0.0)
+    child = muzero.MCTSNode(latent=None, prior=1.0, reward=10.0)
     stats = muzero.MinMaxStats()
-    helper.backup_simulation([node], 5.0, discount=0.5, min_max_stats=stats)
+    helper.backup_simulation([root, child], 5.0, discount=0.5, min_max_stats=stats)
     assert stats.maximum == pytest.approx(10.0 + 0.5 * 5.0)
     assert stats.minimum == pytest.approx(10.0 + 0.5 * 5.0)
+
+
+def test_backup_excludes_the_roots_entering_reward_from_the_range(helper):
+    """The search root's reward is the edge INTO the root -- outside the
+    searched subtree. Folding it into MinMaxStats inflated the range right
+    after big reward events and compressed every normalized advantage."""
+    root = muzero.MCTSNode(latent=None, prior=1.0, reward=400.0)
+    child = muzero.MCTSNode(latent=None, prior=1.0, reward=1.0)
+    stats = muzero.MinMaxStats()
+    helper.backup_simulation([root, child], 2.0, discount=0.5, min_max_stats=stats)
+    # Only the child's in-tree composite (1 + 0.5*2 = 2) enters the range;
+    # the root's 400-composite must not.
+    assert stats.maximum == pytest.approx(2.0)
+
+
+def test_truncated_chain_bootstraps_instead_of_faking_a_terminal(helper):
+    """A capped (truncated) episode's tail is NOT terminal: marking it done
+    taught V=0 at a mid-game state on every capped trajectory, and nstep_value
+    refused to bootstrap past it."""
+    helper.create_tree_from_game(fake_trajectory(5), terminated=False)
+    tail = helper.current_trajectory[-1]
+    assert not tail.done
+    # The chain backup bootstraps the network's value at the truncated tail.
+    assert tail.q_value() == pytest.approx(tail.expanded_value)
+    # And nstep_value's horizon landing on the tail uses its network value.
+    expected = sum(0.997 ** (k - 1) * helper.current_trajectory[k].reward
+                   for k in range(1, 5))
+    expected += 0.997 ** 4 * tail.expanded_value
+    assert helper.nstep_value(0, n=4, discount=0.997) == pytest.approx(expected)
 
 
 def test_normalisation_is_seeded_before_the_first_simulation(helper):
@@ -394,7 +424,9 @@ def test_gumbel_completes_unvisited_actions_with_the_mixed_value(helper):
     logits = np.log(np.full(ACTIONS, 1.0 / ACTIONS))
     pi = helper._gumbel_improved_policy(root, logits, 0.997, baseline={})
     assert pi.argmax() != 1
-    assert pi[1] < 0.05
+    # At the paper's c_scale=0.1 (sigma ~5.4) the demotion is real but soft:
+    # below the uniform share, not crushed to zero as the old sigma ~54 did.
+    assert pi[1] < 1.0 / ACTIONS
 
 
 def test_act_search_returns_a_valid_action_and_restores_state(helper):
@@ -414,7 +446,10 @@ def test_search_action_is_the_halving_survivor(helper, monkeypatch):
     (g + logits + sigma(qhat)) must pick it: sigma's ~50x scale dwarfs the
     Gumbel draws once the value gap is real. All actions are admitted as
     candidates so the (random) Gumbel top-m cut cannot exclude the best one
-    -- with the default m=4 of 5 that exclusion is a 1-in-5 flake."""
+    -- with the default m=4 of 5 that exclusion is a 1-in-5 flake. The Gumbel
+    draws are seeded: at the paper's c_scale=0.1 the sigma-scaled value gap is
+    ~4.3 logits, decisive but not beyond a tail Gumbel draw."""
+    np.random.seed(1)
     monkeypatch.setattr(muzero, "GUMBEL_MAX_CANDIDATES", ACTIONS)
     helper.create_tree_from_game(fake_trajectory(4))
     root = helper.current_trajectory[0]

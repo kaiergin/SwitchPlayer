@@ -4,6 +4,21 @@ import torch.nn.functional as F
 
 from scalar_categorical import create_support, scalar_from_logits
 
+
+def renormalize(latent):
+    """MuZero appendix G hidden-state scaling: min-max each sample to [0, 1].
+
+    Applied to the output of BOTH latent-emitting networks. Without it the
+    latent scale is unbounded and drifts with depth across the 5-step unroll
+    and the search tree -- the instability the paper says this exists to
+    prevent, and which the SimSiam loss was otherwise fighting alone.
+    """
+    flat = latent.flatten(start_dim=1)
+    mn = flat.min(dim=1, keepdim=True).values
+    mx = flat.max(dim=1, keepdim=True).values
+    flat = (flat - mn) / (mx - mn + 1e-5)
+    return flat.view_as(latent)
+
 # -----------------------------
 # Basic Residual Block
 # -----------------------------
@@ -80,7 +95,8 @@ class RepresentationNetwork(nn.Module):
         x = self.relu(self.conv4(x))
         x = self.block2(x)
         x = self.block3(x)
-        return x  # latent state of shape (batch, latent_channels, 6, 6)
+        # latent state of shape (batch, latent_channels, 6, 6), scaled to [0,1]
+        return renormalize(x)
 
 # The support and the encode/decode pair live in scalar_categorical, so the
 # transform applied to targets and the one undone on predictions cannot drift
@@ -167,8 +183,11 @@ class DynamicsNetwork(nn.Module):
         x = self.relu(self.conv1(x))
         x = self.block1(x)
         x = self.block2(x)
+        # Appendix G scaling on the emitted state; the reward branch below
+        # reads the same renormalized latent every other head will see.
+        x = renormalize(x)
         next_latent = x
-        
+
         # Reward branch:
         r = self.relu(self.reward_conv(x))
         r = F.adaptive_avg_pool2d(r, self.pool)
