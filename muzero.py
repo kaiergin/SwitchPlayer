@@ -175,6 +175,21 @@ USE_GUMBEL_SEARCH = True
 GUMBEL_MAX_CANDIDATES = 4      # top-m root actions by g + logits (of 5)
 GUMBEL_C_VISIT = 50.0          # sigma(q) = (c_visit + max_visits) * c_scale * q
 GUMBEL_C_SCALE = 1.0           # paper defaults
+# ---------------------------------------------------------------------------
+# Act-time search -- a TEST feature, not the product. The end goal of this
+# project is acting WITHOUT search (the real-time thesis), so this defaults
+# False and exists only to measure what the papers' search-based acting
+# contributes: the Pong equivalence runs isolated the missing piece as
+# bootstrapping -- a raw-prior actor never collects the successes the value
+# function needs to differentiate actions. When True, harness SELF-PLAY acts
+# via a fresh ACT_SEARCH_SIMS-simulation Gumbel search per step, taking the
+# sequential-halving survivor (the Gumbel draw is the exploration). Greedy
+# EVALUATION never searches regardless, so every eval still measures the
+# deployable raw-policy agent; the real-time pipeline agent cannot search at
+# all (it does not load the dynamics network).
+# ---------------------------------------------------------------------------
+USE_SEARCH_ACTING = False
+ACT_SEARCH_SIMS = 8            # measured ~40% of a 60fps frame at this budget
 # Q is normalised to [0,1] by MinMaxStats before the exploration term is added,
 # so this is on the usual AlphaZero/MuZero scale. It is NOT comparable to the
 # values used before normalisation existed (61.8, then 32).
@@ -805,6 +820,7 @@ class MCTSHelper:
         self.action_space = action_space
         self.selection_results = asyncio.Queue()
         self.min_max_stats = MinMaxStats()  # replaced per search in run_full_mcts
+        self.last_search_action = None      # set by run_gumbel_mcts; read by act_search
         self.logger = configure_actor_logger(name, enable_logging)
         self.logger.info("Initialized MCTSHelper logger.")
 
@@ -1276,7 +1292,9 @@ class MCTSHelper:
         if not root.is_expanded:
             self.batch_expand_nodes([root])
         if not root.children:
-            # Terminal root: nothing to search, no real policy target.
+            # Terminal root: nothing to search, no real policy target, and no
+            # informed action either.
+            self.last_search_action = int(np.random.randint(self.action_space))
             return (np.ones(self.action_space) / self.action_space,
                     root.q_value(), False)
         self.seed_min_max_stats(root, discount)
@@ -1317,8 +1335,40 @@ class MCTSHelper:
         improved_policy = self._gumbel_improved_policy(root, logits, discount,
                                                        baseline=baseline)
         root_value = root.q_value()
+        # The paper's acting rule: the sequential-halving survivor, scored by
+        # g + logits + sigma(qhat). Stashed rather than returned so the
+        # reanalysis callers' 3-tuple contract stays put; act_search reads it
+        # immediately after the call (one search at a time by design).
+        sigma = self._sigma_scale(root, baseline)
+        self.last_search_action = max(
+            current, key=lambda a: gumbels[a] + logits[a]
+            + sigma * self._normalized_q(root.children[a], discount))
         self.release_root(root)
         return improved_policy, root_value, True
+
+    async def act_search(self, obs_stack, num_simulations=None, discount=None):
+        """One tiny Gumbel search from a live observation; returns the action.
+
+        TEST feature (USE_SEARCH_ACTING): the papers bootstrap by searching at
+        act time, which is exactly what the raw-policy actor cannot do -- see
+        the Pong equivalence finding. Builds a fresh one-node tree, so it
+        neither reads nor disturbs any reanalysis state; the caller's
+        current_trajectory is saved and restored around the search.
+        """
+        num_simulations = ACT_SEARCH_SIMS if num_simulations is None else num_simulations
+        latents, policies, values = self.network_manager.batch_inference(
+            np.asarray(obs_stack)[None])
+        root = MCTSNode(latent=latents[0:1], prior=1.0)
+        root.policy = policies[0]
+        root.expanded_value = float(values[0])
+        saved = getattr(self, "current_trajectory", None)
+        self.current_trajectory = [root]
+        try:
+            await self.run_gumbel_mcts(0, num_simulations=num_simulations,
+                                       discount=discount)
+            return int(self.last_search_action)
+        finally:
+            self.current_trajectory = saved
 
     async def gumbel_selection_task(self, index, root_action, discount, max_depth=MAX_DEPTH):
         """One simulation with the root action forced by the halving schedule;

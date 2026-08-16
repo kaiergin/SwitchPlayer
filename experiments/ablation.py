@@ -154,6 +154,20 @@ ARMS = {
         "LEARNING_RATE": 3e-3,
         "_doc": "pong-100k at Adam lr 3e-3.",
     },
+    "pong-act-search": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.997,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 1.5,
+        "LEARNING_RATE": 3e-4,
+        "USE_SEARCH_ACTING": True,
+        "_doc": "pong-lr-3e-4 plus the paper's acting mode, TEST ONLY: 8-sim "
+                "Gumbel search per self-play step, halving survivor acts (the "
+                "Gumbel draw is the exploration; ACTING_TEMPERATURE unused on "
+                "this branch). Greedy eval still never searches, so returns "
+                "measure the deployable raw-policy agent. Tests the "
+                "bootstrapping finding from the matched-budget run.",
+    },
     "horizon-0.9": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.9,
@@ -274,18 +288,24 @@ class Run:
         traj, prev_reward, total, done, steps = [], 0.0, 0.0, False, 0
         while not done and steps < cap:
             stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
-            with torch.no_grad():
-                policy, _ = self.searcher.network_manager.initial_inference(stack)
-            if greedy:
-                action = int(policy.argmax())
+            if not greedy and muzero.USE_SEARCH_ACTING:
+                # TEST feature: paper-style act-time search during self-play.
+                # Greedy evaluation deliberately never takes this branch -- it
+                # must always measure the deployable raw-policy agent.
+                action = asyncio.run(self.searcher.act_search(stack))
             else:
-                # Acting-side exploration floor, mirroring gameplay_process.
-                # Read per step so an arm override applies; identity at 1.0.
-                t = muzero.ACTING_TEMPERATURE
-                if t != 1.0:
-                    policy = policy ** (1.0 / t)
-                    policy = policy / policy.sum()
-                action = int(np.random.choice(ACTIONS, p=policy))
+                with torch.no_grad():
+                    policy, _ = self.searcher.network_manager.initial_inference(stack)
+                if greedy:
+                    action = int(policy.argmax())
+                else:
+                    # Acting-side exploration floor, mirroring gameplay_process.
+                    # Read per step so an arm override applies; identity at 1.0.
+                    t = muzero.ACTING_TEMPERATURE
+                    if t != 1.0:
+                        policy = policy ** (1.0 / t)
+                        policy = policy / policy.sum()
+                    action = int(np.random.choice(ACTIONS, p=policy))
             obs, reward, term, trunc, _ = self.env.step(action)
             done = term or trunc
             traj.append((stack, action, prev_reward))

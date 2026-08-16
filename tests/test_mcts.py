@@ -397,6 +397,40 @@ def test_gumbel_completes_unvisited_actions_with_the_mixed_value(helper):
     assert pi[1] < 0.05
 
 
+def test_act_search_returns_a_valid_action_and_restores_state(helper):
+    """act_search is the TEST-ONLY paper acting mode: a fresh one-node tree
+    per live observation. It must return a legal action and leave the
+    reanalysis chain exactly as it found it."""
+    helper.create_tree_from_game(fake_trajectory(6))
+    chain = helper.current_trajectory
+    obs = np.random.randint(0, 255, (12, *muzero.IMAGE_RESHAPE), dtype=np.uint8)
+    action = asyncio.run(helper.act_search(obs, num_simulations=8))
+    assert 0 <= action < ACTIONS
+    assert helper.current_trajectory is chain
+
+
+def test_search_action_is_the_halving_survivor(helper, monkeypatch):
+    """With one action's completed Q overwhelmingly best, the survivor rule
+    (g + logits + sigma(qhat)) must pick it: sigma's ~50x scale dwarfs the
+    Gumbel draws once the value gap is real. All actions are admitted as
+    candidates so the (random) Gumbel top-m cut cannot exclude the best one
+    -- with the default m=4 of 5 that exclusion is a 1-in-5 flake."""
+    monkeypatch.setattr(muzero, "GUMBEL_MAX_CANDIDATES", ACTIONS)
+    helper.create_tree_from_game(fake_trajectory(4))
+    root = helper.current_trajectory[0]
+    helper.batch_expand_nodes([root])
+    for child in root.children.values():
+        child.prior = 1.0 / ACTIONS
+        child.visit_count, child.value_sum, child.virtual_loss = 4, 4 * 10.0, 0.0
+        child.reward, child.done, child.expanded_value = 0.0, False, 10.0
+    root.children[2].value_sum = 4 * 90.0
+    root.policy = np.full(ACTIONS, 1.0 / ACTIONS)
+    root.expanded_value = 10.0
+    asyncio.run(helper.run_full_mcts(0, num_simulations=8, sim_batches=4,
+                                     discount=0.997))
+    assert helper.last_search_action == 2
+
+
 def test_flag_off_restores_visit_fraction_targets(helper, puct):
     """With USE_GUMBEL_SEARCH False the target must be the PUCT path's raw
     visit fractions -- quantised to multiples of 1/sims, which the Gumbel
