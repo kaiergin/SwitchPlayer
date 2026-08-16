@@ -54,6 +54,11 @@ ENV_NAME = "MsPacman-v4"
 ACTIONS = 5
 EPISODE_CAP = 600
 TAG = ""
+# --frameskip N overrides the env's registered frameskip (e.g. Pong-v4 with
+# frameskip=4 = the benchmark's fixed action-repeat; the registered default is
+# the stochastic (2,5) skip, which the Atari-100k protocol does not use). This
+# ale-py registers no *Deterministic-v4 ids, hence the kwarg route.
+FRAMESKIP = None
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -121,12 +126,12 @@ ARMS = {
                 "-20.7, SimPLe 12.8, MuZero@100k -6.7, EfficientZero 20.6). "
                 "Best current config, with gamma back at 0.997 -- a Pong rally "
                 "spans seconds, and gamma=0.9's ~10-decision horizon is "
-                "shorter than one ball crossing. Run with "
-                "--env PongDeterministic-v4 --episode-cap 3000 "
-                "--episodes-per-iter 1. Deterministic, NOT Pong-v4: the "
-                "benchmark protocol is fixed skip-4, while Pong-v4's "
-                "stochastic (2,5) frameskip randomises action duration on a "
-                "timing game -- the first Pong runs carried that confound.",
+                "shorter than one ball crossing. Run with --env Pong-v4 "
+                "--frameskip 4 --episode-cap 3000 --episodes-per-iter 1. "
+                "The --frameskip 4 is mandatory: the benchmark protocol is "
+                "fixed skip-4, while Pong-v4's registered stochastic (2,5) "
+                "skip randomises action duration on a timing game -- the "
+                "first Pong runs carried that confound.",
     },
     # Learning-rate sweep at the benchmark's replay ratio (~1 update/env-step,
     # i.e. --train-steps 1000): Adam 1e-3 was chosen to fix a bug, never tuned,
@@ -275,7 +280,8 @@ class Run:
 
         import gymnasium as gym
         from EpisodicLifeEnv import EpisodicLifeEnv
-        self.env = EpisodicLifeEnv(gym.make(ENV_NAME))
+        env_kwargs = {"frameskip": FRAMESKIP} if FRAMESKIP else {}
+        self.env = EpisodicLifeEnv(gym.make(ENV_NAME, **env_kwargs))
         # Seed the env stream too. Without this the module docstring's
         # paired-seed claim was false: gymnasium draws np_random from OS
         # entropy on an unseeded reset, so no run was reproducible even
@@ -531,6 +537,9 @@ def main():
     ap.add_argument("--episode-cap", type=int, default=None,
                     help="self-play/eval step cap; default 600 (MsPacman "
                          "single-life scale)")
+    ap.add_argument("--frameskip", type=int, default=None,
+                    help="fixed frameskip override (benchmark protocol: 4); "
+                         "default keeps the env registration's skip")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
 
@@ -539,6 +548,8 @@ def main():
         TAG = "-" + args.env.split("-")[0].lower()
     if args.episode_cap:
         EPISODE_CAP = args.episode_cap
+    if args.frameskip:
+        FRAMESKIP = args.frameskip
     if args.actions:
         ACTIONS = args.actions
     elif args.env != "MsPacman-v4":
@@ -551,7 +562,8 @@ def main():
     out = RESULTS / f"ablation{TAG}.jsonl"
 
     if not args.plot_only:
-        print(f"device {DEVICE} | env {ENV_NAME} ({ACTIONS} actions, cap {EPISODE_CAP}) | "
+        print(f"device {DEVICE} | env {ENV_NAME} ({ACTIONS} actions, cap {EPISODE_CAP}, "
+              f"skip {FRAMESKIP or 'registered'}) | "
               f"arms {args.arms} | seeds {args.seeds} | "
               f"{args.iterations} iterations x ({args.episodes_per_iter} episodes + "
               f"{args.train_steps} train steps)")
