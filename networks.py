@@ -292,6 +292,8 @@ class ValuePrefixNetwork(nn.Module):
         self.support_size = support_size
         self.num_bins = num_bins
         self.hidden_size = hidden_size
+        self.head_channels = head_channels
+        self.fc_hidden = fc_hidden
         self.pool = pool
 
         self.conv = nn.Conv2d(latent_channels, head_channels, kernel_size=1, bias=False)

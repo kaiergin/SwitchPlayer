@@ -127,11 +127,31 @@ def test_bootstrap_comes_from_the_lagged_target_model(monkeypatch):
         assert batch["target_value"][b, 0] == pytest.approx(expected, rel=1e-4)
 
 
+def probe_all_four_targets(trainer, obs):
+    """One decoupled fingerprint PER target net, so a partial sync (some nets
+    double-buffered, others direct-copied or frozen) is visible per component.
+    Fixed inputs everywhere: the prediction/dynamics/prefix probes must not
+    move just because the representation did."""
+    with torch.no_grad():
+        obs_t = torch.tensor(obs[None], dtype=torch.float32) / 255.0
+        lat = trainer.target_representation(obs_t)
+        fixed = torch.ones_like(lat)
+        _, v, _ = trainer.target_prediction(fixed)
+        _, r, _ = trainer.target_dynamics(fixed, torch.tensor([0]))
+        p, _, _ = trainer.target_value_prefix(
+            fixed, trainer.target_value_prefix.initial_state(1, CPU))
+    return np.array([float(lat.abs().sum()), float(v.squeeze()),
+                     float(r.squeeze()), float(p.squeeze())])
+
+
 def test_target_model_is_double_buffered(monkeypatch):
     """EfficientZero's train.py: 'the interval of the current model and the
     target model is between x and 2x' -- each sync loads the snapshot taken
     at the PREVIOUS sync. So a mutation of the online nets must survive ONE
-    sync (which loads the pre-mutation snapshot) and land only after TWO."""
+    sync (which loads the pre-mutation snapshot) and land only after TWO.
+    All FOUR nets are mutated and probed separately: a partial target model
+    (round-8 counterfactual: only representation+prediction syncing) must
+    fail here."""
     monkeypatch.setattr(muzero, "USE_TARGET_MODEL", True)
     monkeypatch.setattr(muzero, "PER_ENABLED", False)
     monkeypatch.setattr(muzero, "TARGET_MODEL_INTERVAL", 200)
@@ -140,22 +160,27 @@ def test_target_model_is_double_buffered(monkeypatch):
     np.random.seed(8)
     traj = obs_traj([1.0] * 6, [0.0] * 6, truncated=True)
     trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)   # creates + first sync
-    frozen = target_value_of(trainer, traj[3]["obs"])
+    frozen = probe_all_four_targets(trainer, traj[3]["obs"])
     with torch.no_grad():
         # Non-uniform noise: a constant shift on zero-init value weights
         # yields equal logits per bin, which still decodes to ~0.
         torch.manual_seed(0)
-        for p in trainer.prediction.parameters():
-            p.add_(torch.randn_like(p))
+        for net in (trainer.representation, trainer.prediction,
+                    trainer.dynamics, trainer.value_prefix):
+            for p in net.parameters():
+                p.add_(torch.randn_like(p))
     trainer.training_steps = 100     # inside the interval: no re-sync
     trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)
-    assert target_value_of(trainer, traj[3]["obs"]) == pytest.approx(frozen)
+    assert probe_all_four_targets(trainer, traj[3]["obs"]) == pytest.approx(frozen)
     trainer.training_steps = 250     # sync 2 loads the PRE-mutation snapshot
     trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)
-    assert target_value_of(trainer, traj[3]["obs"]) == pytest.approx(frozen)
+    assert probe_all_four_targets(trainer, traj[3]["obs"]) == pytest.approx(frozen)
     trainer.training_steps = 500     # sync 3 loads the post-mutation snapshot
     trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)
-    assert target_value_of(trainer, traj[3]["obs"]) != pytest.approx(frozen)
+    after = probe_all_four_targets(trainer, traj[3]["obs"])
+    for name, was, now in zip(("representation", "prediction",
+                               "dynamics", "value_prefix"), frozen, after):
+        assert now != pytest.approx(was), f"target {name} never synced"
 
 
 def test_truncated_padding_bootstraps_through_the_target_model(monkeypatch):
@@ -216,3 +241,50 @@ def test_refresh_targets_researches_the_oldest_trajectories(monkeypatch):
     # The searcher's own networks are restored after the target-model swap.
     assert run.searcher.network_manager.representation is saved_nets[0]
     assert run.searcher.network_manager.dynamics is saved_nets[1]
+
+
+def test_refresh_searches_through_the_lagged_target_model(monkeypatch):
+    """Counterfactual-proof routing test (round-8 finding: the plain refresh
+    test passes even when refresh searches the ONLINE nets, because target and
+    online coincide on a fresh trainer). Here the online nets AND the
+    searcher's own nets are poisoned AFTER the target sync: only searches
+    routed through the lagged snapshot can produce sane root values."""
+    sys.path.insert(0, str(__import__("pathlib").Path(
+        __file__).resolve().parent.parent / "experiments"))
+    import ablation
+    monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)
+    run = object.__new__(ablation.Run)
+    run.trainer = make_trainer()
+    run.trainer.training_steps = 500
+    run.trainer._ensure_target_model()          # snapshot the sane weights
+    run.searcher = muzero.MCTSHelper(action_space=ACTIONS, device=CPU,
+                                     network_ref=None, storage_ref=None)
+    np.random.seed(13)
+    traj = obs_traj([1.0] * 3, [5.0] * 3)
+    for t in traj:
+        t["born_step"] = 0
+    run.replay = [traj]
+    nm = run.searcher.network_manager
+    torch.manual_seed(1)
+    with torch.no_grad():
+        for net in (run.trainer.representation, run.trainer.prediction,
+                    run.trainer.dynamics, run.trainer.value_prefix,
+                    nm.representation, nm.prediction, nm.dynamics,
+                    nm.value_prefix):
+            for p in net.parameters():
+                p.add_(torch.randn_like(p) * 1e6)
+    # The poison must be potent, or this test has no power: a value read
+    # through the poisoned searcher nets must NOT look sane (in practice the
+    # 1e6-scale weights overflow to NaN).
+    nm.representation.eval(), nm.prediction.eval()
+    with torch.no_grad():
+        lat = nm.representation(torch.tensor(traj[0]["obs"][None],
+                                             dtype=torch.float32) / 255.0)
+        _, poisoned_v, _ = nm.prediction(lat)
+    pv = float(poisoned_v.squeeze())
+    assert not (np.isfinite(pv) and abs(pv) < 1.0), "poison is inert"
+    run.refresh_targets(1)
+    for t in traj:
+        v = t["root_value"]
+        assert np.isfinite(v) and abs(v) < 1.0, \
+            "refresh search leaked through the poisoned online nets"

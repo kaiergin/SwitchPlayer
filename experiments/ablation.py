@@ -505,12 +505,12 @@ class Run:
 
     def refresh_targets(self, count):
         """EfficientZero's reanalyze, policy half (approximated): re-search
-        every position of the `count` OLDEST trajectories with the current
-        network -- noisy, as their reanalyze workers search -- replacing
-        policy targets and root values, recomputing priorities, and resetting
-        ages. Their revisit_policy_search_rate=0.99 re-searches sampled
-        positions per batch on a CPU fleet; this is the compute-bounded
-        analogue."""
+        every position of the `count` OLDEST trajectories through the LAGGED
+        TARGET MODEL -- noisy, as their reanalyze workers search -- replacing
+        policy targets and root values, recomputing priorities, and stamping
+        the refresh rotation (ages are preserved). Their
+        revisit_policy_search_rate=0.99 re-searches sampled positions per
+        batch on a CPU fleet; this is the compute-bounded analogue."""
         if not self.replay:
             return
         # Rotation stamp is refreshed_step, NOT born_step: fresh policy
@@ -540,17 +540,24 @@ class Run:
                     terminal_record = i == len(traj) - 1
                     if terminal_record and not t.get("has_policy_target", True):
                         # Terminated tail: carried no search then, none now.
-                        t["refreshed_step"] = now
                         continue
                     _, pol, val = asyncio.run(self.searcher.act_search(
                         t["obs"], greedy=terminal_record))
                     t["target_policy"] = np.asarray(pol, dtype=np.float64)
                     t["root_value"] = float(val)
-                    t["refreshed_step"] = now
                 for idx, t in enumerate(traj):
-                    z0 = muzero.paper_value_target(traj, idx, muzero.TD_STEPS,
-                                                   muzero.DISCOUNT)
+                    # Priority against the z the trainer will actually compute
+                    # for this position: the 4.3 age-shrunk horizon, not the
+                    # full TD_STEPS (refresh candidates are the oldest, where
+                    # it shrinks most).
+                    age = max(0, now - t.get("born_step", now))
+                    z0 = muzero.paper_value_target(
+                        traj, idx, muzero.paper_horizon(age), muzero.DISCOUNT)
                     t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
+                    # Stamped only after every search in the trajectory
+                    # completed: a mid-refresh failure must not leave a
+                    # half-refreshed trajectory looking fresh to the rotation.
+                    t["refreshed_step"] = now
         finally:
             (nm.representation, nm.prediction,
              nm.dynamics, nm.value_prefix) = saved

@@ -2096,8 +2096,15 @@ class TrainingHelper:
                 support_size=self.value_prefix.support_size,
                 num_bins=self.value_prefix.num_bins,
                 transform=self.value_prefix.transform,
-                head_channels=PREFIX_HEAD_CHANNELS,
-                fc_hidden=PREFIX_FC_HIDDEN).to(self.device)
+                head_channels=self.value_prefix.head_channels,
+                fc_hidden=self.value_prefix.fc_hidden).to(self.device)
+            # Structural, not conventional: target nets never see an
+            # optimizer, and every forward is no-grad anyway.
+            for net in (self.target_representation, self.target_prediction,
+                        self.target_dynamics, self.target_value_prefix):
+                net.eval()
+                for p in net.parameters():
+                    p.requires_grad_(False)
             self._target_synced_at = None
             self._target_snapshot = None
         if (self._target_synced_at is None
