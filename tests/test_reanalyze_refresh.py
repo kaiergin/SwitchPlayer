@@ -109,11 +109,16 @@ def target_value_of(trainer, obs):
 
 
 def online_value_of(trainer, obs):
-    trainer.representation.eval(), trainer.prediction.eval()
+    was_training = [(net, net.training)
+                    for net in (trainer.representation, trainer.prediction)]
+    for net, _ in was_training:
+        net.eval()
     with torch.no_grad():
         latent = trainer.representation(
             torch.tensor(obs[None], dtype=torch.float32) / 255.0)
         _, v, _ = trainer.prediction(latent)
+    for net, mode in was_training:
+        net.train(mode)
     return float(v.squeeze())
 
 
@@ -154,6 +159,10 @@ def test_bootstrap_comes_from_the_lagged_target_model(monkeypatch):
             expected = rsum + g * tv
         assert batch["target_value"][b, 0] == pytest.approx(expected, rel=1e-4)
     assert pending_tails >= 2, "no window exercised the target-model forward"
+    # The pigeonhole above assumes sampling WITHOUT replacement; if that ever
+    # regresses to with-replacement this fails loudly instead of the >= 2
+    # assert becoming a ~5% flake.
+    assert len({id(r) for r in batch["sample_refs"]}) == 12
 
 
 def probe_all_four_targets(trainer, obs):

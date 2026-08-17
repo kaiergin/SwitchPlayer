@@ -531,11 +531,12 @@ class Run:
         self.trainer._ensure_target_model()
         nm = self.searcher.network_manager
         saved = (nm.representation, nm.prediction, nm.dynamics, nm.value_prefix)
-        nm.representation = self.trainer.target_representation
-        nm.prediction = self.trainer.target_prediction
-        nm.dynamics = self.trainer.target_dynamics
-        nm.value_prefix = self.trainer.target_value_prefix
         try:
+            # Inside the try: a partial swap must still hit the restore.
+            nm.representation = self.trainer.target_representation
+            nm.prediction = self.trainer.target_prediction
+            nm.dynamics = self.trainer.target_dynamics
+            nm.value_prefix = self.trainer.target_value_prefix
             for ti in oldest:
                 traj = self.replay[ti]
                 for i, t in enumerate(traj):
