@@ -140,6 +140,17 @@ def test_consistency_target_is_stop_gradient():
 
 
 # --------------------------------------------------------------------------
+# Staged LR decay
+# --------------------------------------------------------------------------
+def test_decay_optimizer_lr_scales_every_group():
+    net = torch.nn.Linear(2, 2)
+    opt = muzero.make_optimizer(net.parameters())
+    before = opt.param_groups[0]["lr"]
+    muzero.decay_optimizer_lr([opt], 0.1)
+    assert opt.param_groups[0]["lr"] == pytest.approx(before * 0.1)
+
+
+# --------------------------------------------------------------------------
 # DrQ augmentation
 # --------------------------------------------------------------------------
 def test_augmentation_is_temporally_coherent():

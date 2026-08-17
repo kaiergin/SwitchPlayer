@@ -85,6 +85,25 @@ ARMS = {
                 "AND decode. (The archived first run of this arm was mislabeled: "
                 "only the supports changed and h() still applied.)",
     },
+    "pong-kit2": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.997,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 1.5,
+        "LEARNING_RATE": 3e-4,
+        "MAX_REPLAY": 60,
+        "USE_AUGMENTATION": True,
+        "TD_STEPS": 5,
+        "REANALYSE_STRIDE": 2,
+        "TRAINING_BATCHES": 128,
+        "LR_DECAY_AT": 0.75,
+        "_doc": "pong-kit plus the remaining published-config numbers: "
+                "EfficientZero's td_steps=5, doubled policy-target density "
+                "(stride 2), batch 128 (the 4070's honest step toward their "
+                "256), and a single x0.1 LR decay at 75% of the run. Fires "
+                "only if pong-kit floors -- completing the protocol, not "
+                "guessing. Same run flags as pong-kit.",
+    },
     "gumbel": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.9,
@@ -451,6 +470,14 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 asyncio.run(run.trainer.train_step(batch))
                 run.trainer.training_steps += 1
             run.set_train_mode(False)
+
+            if muzero.LR_DECAY_AT and it == max(1, int(iterations * muzero.LR_DECAY_AT)):
+                muzero.decay_optimizer_lr(
+                    (run.trainer.rep_optimizer, run.trainer.dyn_optimizer,
+                     run.trainer.pred_optimizer, run.trainer.prefix_optimizer,
+                     run.trainer.proj_optimizer), muzero.LR_DECAY_FACTOR)
+                print(f"  [{arm} s{seed}] lr decayed x{muzero.LR_DECAY_FACTOR} "
+                      f"at iter {it}", flush=True)
 
             if it == iterations:
                 # Save the trained weights. The first full ablation discarded

@@ -547,6 +547,19 @@ LEARNING_RATE = 1e-3
 # grad norm at 5). Both were absent entirely.
 WEIGHT_DECAY = 1e-4
 MAX_GRAD_NORM = 5.0
+# Staged LR decay, the papers' schedule shape (they decay x0.1 in steps; ours
+# is a single stage). None disables. The HARNESS applies it once at this
+# fraction of a run's iterations -- the Ray pipeline has no bounded run length
+# to anchor a fraction to, so it ignores these.
+LR_DECAY_AT = None
+LR_DECAY_FACTOR = 0.1
+
+
+def decay_optimizer_lr(optimizers, factor):
+    """Multiply every param group's learning rate by `factor`."""
+    for opt in optimizers:
+        for group in opt.param_groups:
+            group["lr"] *= factor
 
 def make_optimizer(params):
     """AdamW. The repo moved Adam -> SGD without a recorded reason, and the one
