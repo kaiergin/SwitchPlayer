@@ -274,6 +274,21 @@ for _spec in ARMS.values():
 
 
 @contextlib.contextmanager
+def _run_length_globals(iterations, train_steps):
+    """Run-length-dependent paper constants: the staged acting temperature's
+    total and EfficientZero 4.3's horizon-decay denominator (their
+    auto_td_steps = 0.3 * training_steps). Exception-safe like arm_config, so
+    a mid-run failure cannot leak them into whatever runs next."""
+    muzero.TEMPERATURE_TOTAL_STEPS = iterations * train_steps
+    muzero.OFFPOLICY_DECAY_STEPS = max(1, int(0.3 * iterations * train_steps))
+    try:
+        yield
+    finally:
+        muzero.TEMPERATURE_TOTAL_STEPS = None
+        muzero.OFFPOLICY_DECAY_STEPS = None
+
+
+@contextlib.contextmanager
 def arm_config(arm):
     """Apply an arm's overrides to the muzero module, then restore."""
     overrides = {k: v for k, v in ARMS[arm].items() if not k.startswith("_")}
@@ -560,12 +575,7 @@ class Run:
 
 
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out):
-    with arm_config(arm) as spec:
-        # Run-length-dependent paper constants: the staged acting temperature
-        # and EfficientZero 4.3's horizon-decay denominator (their
-        # auto_td_steps = 0.3 * training_steps).
-        muzero.TEMPERATURE_TOTAL_STEPS = iterations * train_steps
-        muzero.OFFPOLICY_DECAY_STEPS = max(1, int(0.3 * iterations * train_steps))
+    with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         run = Run(arm, seed, spec)
         started = time.time()
         for it in range(1, iterations + 1):
@@ -624,10 +634,6 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                       f"per-step {metrics['per_step']:>6.2f}  "
                       f"H(pi) {metrics.get('policy_entropy', 0.0):>5.2f}", flush=True)
         run.env.close()
-        # Run-length-dependent globals do not go through arm_config; reset
-        # them so nothing leaks into whatever runs next.
-        muzero.TEMPERATURE_TOTAL_STEPS = None
-        muzero.OFFPOLICY_DECAY_STEPS = None
 
 
 # ---------------------------------------------------------------------------

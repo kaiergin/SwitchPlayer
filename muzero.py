@@ -1480,7 +1480,10 @@ class MCTSHelper:
         # this search's own budget decides.
         baseline_visits = {a: child.visit_count for a, child in root.children.items()}
         # Spend the budget EXACTLY: the old `sims // batches` rounds silently
-        # dropped the remainder (50 sims at batch 8 ran 48).
+        # dropped the remainder (50 sims at batch 8 ran 48). Fail fast on a
+        # non-positive batch size -- the loop would otherwise spin forever,
+        # and MCTS_process swallows exceptions but cannot log a hang.
+        assert sim_batches > 0, f"sim_batches must be positive, got {sim_batches}"
         remaining = max(int(num_simulations), 1)
         while remaining > 0:
             batch_n = min(sim_batches, remaining)
@@ -2046,9 +2049,12 @@ class TrainingHelper:
         trajectories = list(replay_buffer)
         roots, priorities = [], []
         for traj in trajectories:
-            # The terminal record carried no search; MuZero samples only
-            # searched positions, so it is excluded as a window ROOT (it still
-            # appears inside earlier windows).
+            # The last record is excluded as a window ROOT (it still appears
+            # inside earlier windows and as the value bootstrap): for a
+            # terminated trajectory it carried no search; for a short
+            # truncated one it IS searched, but its stored action is a
+            # placeholder, so rooting a window there would unroll a fake
+            # action at full policy weight.
             limit = min(len(traj), max(1, len(traj) - 1))
             if traj[-1].get("truncated") and len(traj) > unroll_steps:
                 limit = len(traj) - unroll_steps
