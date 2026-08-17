@@ -254,6 +254,22 @@ def per_beta(training_steps):
 # planes and no bottleneck; the repro arm overrides both.
 PREFIX_HEAD_CHANNELS = 32
 PREFIX_FC_HIDDEN = None
+# The lineage's env stack (NoopReset(30) + MaxAndSkip flicker max-pool over a
+# raw no-skip env) instead of ALE's internal last-frame skip. Harness-applied.
+USE_ATARI_WRAPPERS = False
+# EfficientZero's reanalyze, value half: recompute the bootstrap value at
+# BATCH time with a lagged target model (their target_model_interval=200)
+# instead of the stored play-time root value (MuZero pseudocode behavior,
+# which USE_TARGET_MODEL=False preserves).
+USE_TARGET_MODEL = False
+TARGET_MODEL_INTERVAL = 200
+# EfficientZero's reanalyze, policy half -- approximated: their workers
+# re-search ~99% of sampled positions per batch (revisit_policy_search_rate),
+# which needs a CPU fleet; here the harness re-searches every position of the
+# POLICY_REFRESH_COUNT oldest trajectories every POLICY_REFRESH_EVERY
+# iterations with the current network, resetting their ages.
+POLICY_REFRESH_EVERY = 5
+POLICY_REFRESH_COUNT = 2
 
 
 def visit_softmax_temperature(training_steps):
@@ -292,12 +308,21 @@ def paper_value_target(traj, idx, horizon, discount):
     root_value 0, so the terminal case reduces to pure Monte Carlo without a
     special branch; a truncated tail bootstraps its stored value.
     """
+    reward_sum, g, tail = paper_value_parts(traj, idx, horizon, discount)
+    return reward_sum + g * traj[tail]["root_value"]
+
+
+def paper_value_parts(traj, idx, horizon, discount):
+    """The decomposition (reward_sum, g, tail): z = reward_sum + g * v(tail).
+
+    Separated so the target-model refresh can supply v(tail) from a lagged
+    network at batch time instead of the stored root value."""
     tail = min(idx + horizon, len(traj) - 1)
     value, g = 0.0, 1.0
     for k in range(1, tail - idx + 1):
         value += g * traj[idx + k]["reward"]
         g *= discount
-    return value + g * traj[tail]["root_value"]
+    return value, g, tail
 # Q is normalised to [0,1] by MinMaxStats before the exploration term is added,
 # so this is on the usual AlphaZero/MuZero scale. It is NOT comparable to the
 # values used before normalisation existed (61.8, then 32).
@@ -2040,6 +2065,27 @@ class TrainingHelper:
             self.logger.exception("training_process failed")
         self.logger.info("Training process exiting")
     
+    def _ensure_target_model(self):
+        """Lagged copies of representation+prediction for batch-time value
+        refreshing (EfficientZero's target model, interval 200). Lazy, so the
+        harness's object.__new__ construction and older tests need nothing."""
+        if getattr(self, "target_representation", None) is None:
+            self.target_representation = RepresentationNetwork(
+                input_channels=12, latent_channels=LATENT_CHANNELS).to(self.device)
+            self.target_prediction = PredictionNetwork(
+                latent_channels=LATENT_CHANNELS, action_space=self.action_space,
+                support_size=self.prediction.support_size,
+                num_bins=self.prediction.num_bins,
+                transform=self.prediction.transform).to(self.device)
+            self._target_synced_at = None
+        if (self._target_synced_at is None
+                or self.training_steps - self._target_synced_at >= TARGET_MODEL_INTERVAL):
+            self.target_representation.load_state_dict(self.representation.state_dict())
+            self.target_prediction.load_state_dict(self.prediction.state_dict())
+            self.target_representation.eval()
+            self.target_prediction.eval()
+            self._target_synced_at = self.training_steps
+
     def prepare_batch_paper(self, replay_buffer, batch_size, unroll_steps, action_space):
         """The papers' batch: PER-sampled window roots with importance
         weights, and value targets computed NOW from stored rewards + stored
@@ -2076,6 +2122,12 @@ class TrainingHelper:
         weights = (len(roots) * probs[chosen]) ** (-per_beta(self.training_steps))
         weights = weights / weights.max()
 
+        use_tm = USE_TARGET_MODEL
+        if use_tm:
+            self._ensure_target_model()
+        # (traj_id, tail) -> [tail_obs, [(row, step, g), ...]] for the
+        # batch-time bootstrap refresh; deduped since windows share tails.
+        pending = {}
         batch_obs, batch_actions, batch_rewards = [], [], []
         batch_policy, batch_value, batch_has, refs = [], [], [], []
         for flat in chosen:
@@ -2094,7 +2146,18 @@ class TrainingHelper:
                     obs.append(t["obs"])
                     rewards.append(t["reward"])
                     pols.append(t["target_policy"])
-                    vals.append(paper_value_target(traj, pos, horizon, DISCOUNT))
+                    if use_tm:
+                        rsum, g, tail = paper_value_parts(traj, pos, horizon, DISCOUNT)
+                        tail_t = traj[tail]
+                        terminal_tail = (tail == L - 1
+                                         and not tail_t.get("truncated"))
+                        vals.append(rsum)
+                        if not terminal_tail:
+                            entry = pending.setdefault(
+                                (id(traj), tail), [tail_t["obs"], []])
+                            entry[1].append((len(batch_value), step, g))
+                    else:
+                        vals.append(paper_value_target(traj, pos, horizon, DISCOUNT))
                     has.append(t.get("has_policy_target", True))
                     if step < unroll_steps:
                         actions.append(t["action"])
@@ -2116,6 +2179,25 @@ class TrainingHelper:
             batch_policy.append(pols)
             batch_value.append(vals)
             batch_has.append(has)
+
+        if pending:
+            # One (chunked) forward through the LAGGED target model supplies
+            # every bootstrap value; z = reward_sum + g * v_target(tail).
+            keys = list(pending)
+            obs_arr = np.stack([pending[k][0] for k in keys])
+            values = np.empty(len(keys), dtype=np.float64)
+            with torch.no_grad():
+                for lo in range(0, len(keys), 256):
+                    chunk = torch.tensor(obs_arr[lo:lo + 256],
+                                         dtype=torch.float32,
+                                         device=self.device) / 255.0
+                    _, v, _ = self.target_prediction(
+                        self.target_representation(chunk))
+                    values[lo:lo + 256] = v.squeeze(-1).cpu().numpy()
+            for k, val in zip(keys, values):
+                for row, step, g in pending[k][1]:
+                    batch_value[row][step] += g * float(val)
+
         return {
             "obs": np.array(batch_obs),
             "actions": np.array(batch_actions),

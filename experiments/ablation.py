@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import pathlib
 import random
 import sys
@@ -45,7 +46,12 @@ from muzero import (IMAGE_RESHAPE, LATENT_CHANNELS, MCTSHelper, TrainingHelper,
 from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
                       RepresentationNetwork, ValuePrefixNetwork)
 
-RESULTS = pathlib.Path(__file__).resolve().parent.parent / "benchmarks" / "results"
+# ABLATION_RESULTS overrides the output directory -- REQUIRED for smoke
+# tests, which have twice now appended to (and once clobbered the weights of)
+# live results by sharing the default directory.
+RESULTS = pathlib.Path(os.environ.get(
+    "ABLATION_RESULTS",
+    pathlib.Path(__file__).resolve().parent.parent / "benchmarks" / "results"))
 # Environment defaults. MsPacman keeps its historical 5-action restriction and
 # 600-step (single-life) episode cap; other games take the env's full action
 # space and their own cap via --env / --actions / --episode-cap. TAG suffixes
@@ -122,6 +128,9 @@ ARMS = {
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
+        "USE_ATARI_WRAPPERS": True,
+        "USE_TARGET_MODEL": True,
+        "TRAINING_BATCHES": 256,
         "_doc": "The paper-reproduction configuration, constants source-"
                 "verified against EfficientZero's released code: PUCT search "
                 "acting at 50 sims (Dirichlet 0.25/0.3, noiseless at eval) "
@@ -376,8 +385,15 @@ class Run:
 
         import gymnasium as gym
         from EpisodicLifeEnv import EpisodicLifeEnv
-        env_kwargs = {"frameskip": FRAMESKIP} if FRAMESKIP else {}
-        self.env = EpisodicLifeEnv(gym.make(ENV_NAME, **env_kwargs))
+        if muzero.USE_ATARI_WRAPPERS:
+            # The lineage's env stack: raw no-skip env -> NoopReset(30) ->
+            # MaxAndSkip flicker max-pool -> EpisodicLife.
+            from atari_wrappers import paper_atari_env
+            self.env = EpisodicLifeEnv(paper_atari_env(ENV_NAME,
+                                                       skip=FRAMESKIP or 4))
+        else:
+            env_kwargs = {"frameskip": FRAMESKIP} if FRAMESKIP else {}
+            self.env = EpisodicLifeEnv(gym.make(ENV_NAME, **env_kwargs))
         # Seed the env stream too. Without this the module docstring's
         # paired-seed claim was false: gymnasium draws np_random from OS
         # entropy on an unseeded reset, so no run was reproducible even
@@ -486,6 +502,37 @@ class Run:
                                            muzero.DISCOUNT)
             t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
         return out
+
+    def refresh_targets(self, count):
+        """EfficientZero's reanalyze, policy half (approximated): re-search
+        every position of the `count` OLDEST trajectories with the current
+        network -- noisy, as their reanalyze workers search -- replacing
+        policy targets and root values, recomputing priorities, and resetting
+        ages. Their revisit_policy_search_rate=0.99 re-searches sampled
+        positions per batch on a CPU fleet; this is the compute-bounded
+        analogue."""
+        if not self.replay:
+            return
+        oldest = sorted(range(len(self.replay)),
+                        key=lambda i: self.replay[i][0].get("born_step", 0))[:count]
+        now = self.trainer.training_steps
+        for ti in oldest:
+            traj = self.replay[ti]
+            for i, t in enumerate(traj):
+                terminal_record = i == len(traj) - 1
+                if terminal_record and not t.get("has_policy_target", True):
+                    # Terminated tail: carried no search then, gets none now.
+                    t["born_step"] = now
+                    continue
+                _, pol, val = asyncio.run(self.searcher.act_search(
+                    t["obs"], greedy=terminal_record))
+                t["target_policy"] = np.asarray(pol, dtype=np.float64)
+                t["root_value"] = float(val)
+                t["born_step"] = now
+            for idx, t in enumerate(traj):
+                z0 = muzero.paper_value_target(traj, idx, muzero.TD_STEPS,
+                                               muzero.DISCOUNT)
+                t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
 
     def reanalyse(self, traj, terminated=True):
         if muzero.PAPER_TARGETS:
@@ -596,6 +643,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 run.trainer.training_steps += 1
             run.set_train_mode(False)
 
+            if (muzero.PAPER_TARGETS and muzero.POLICY_REFRESH_EVERY
+                    and it % muzero.POLICY_REFRESH_EVERY == 0):
+                run.refresh_targets(muzero.POLICY_REFRESH_COUNT)
+
             if muzero.LR_DECAY_AT and it == max(1, int(iterations * muzero.LR_DECAY_AT)):
                 muzero.decay_optimizer_lr(
                     (run.trainer.rep_optimizer, run.trainer.dyn_optimizer,
@@ -624,6 +675,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 metrics = run.evaluate()
                 record = {"arm": arm, "seed": seed,
                           "env": ENV_NAME, "frameskip": FRAMESKIP,
+                          "wrappers": bool(muzero.USE_ATARI_WRAPPERS),
                           "iteration": it,
                           "train_steps": run.trainer.training_steps,
                           "elapsed_s": round(time.time() - started, 1), **metrics}
