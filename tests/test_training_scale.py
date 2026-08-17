@@ -140,6 +140,51 @@ def test_consistency_target_is_stop_gradient():
 
 
 # --------------------------------------------------------------------------
+# DrQ augmentation
+# --------------------------------------------------------------------------
+def test_augmentation_is_temporally_coherent():
+    """One draw per sample, shared across its unroll steps: the SimSiam target
+    must live in the same shifted frame as the online branch."""
+    torch.manual_seed(0)
+    obs = torch.rand(3, 1, 2, 10, 10).repeat(1, 4, 1, 1, 1)  # identical steps
+    out = muzero.augment_observations(obs, shift=2, intensity=0.0)
+    assert out.shape == obs.shape
+    for t in range(1, 4):
+        assert torch.equal(out[:, 0], out[:, t])
+
+
+def test_augmentation_actually_shifts():
+    torch.manual_seed(0)
+    obs = torch.zeros(8, 1, 1, 9, 9)
+    obs[:, :, :, 4, 4] = 1.0
+    out = muzero.augment_observations(obs, shift=3, intensity=0.0)
+    changed = (out != obs).reshape(8, -1).any(dim=1)
+    assert changed.any(), "no sample was shifted"
+
+
+def test_augmentation_stays_in_valid_range():
+    torch.manual_seed(0)
+    out = muzero.augment_observations(torch.rand(4, 2, 3, 8, 8))
+    assert out.min().item() >= 0.0
+    assert out.max().item() <= 1.0
+
+
+def test_augmentation_flag_is_read_at_call_time():
+    """Arms toggle muzero.USE_AUGMENTATION at runtime; train_step must honour
+    the override, like every other arm-controlled flag."""
+    from tests.test_reanalysis import build_trainer, fake_batch
+    saved = muzero.USE_AUGMENTATION
+    muzero.USE_AUGMENTATION = True
+    try:
+        mask = np.ones((2, muzero.UNROLL_STEPS + 1), dtype=bool)
+        loss = asyncio.run(build_trainer().train_step(
+            fake_batch(2, muzero.UNROLL_STEPS, mask)))
+        assert np.isfinite(loss)
+    finally:
+        muzero.USE_AUGMENTATION = saved
+
+
+# --------------------------------------------------------------------------
 # Reward clipping
 # --------------------------------------------------------------------------
 def test_clip_reward_uses_the_constant_and_is_symmetric():

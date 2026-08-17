@@ -145,7 +145,24 @@ ARMS = {
         "USE_GUMBEL_SEARCH": True,
         "ACTING_TEMPERATURE": 1.5,
         "LEARNING_RATE": 3e-4,
-        "_doc": "pong-100k at Adam lr 3e-4.",
+        "USE_AUGMENTATION": False,
+        "_doc": "pong-100k at Adam lr 3e-4, no augmentation -- the pre-kit "
+                "baseline (its corrected-build run predates augmentation, so "
+                "the flag is pinned off here to keep the arm meaning fixed).",
+    },
+    "pong-kit": {
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "DISCOUNT": 0.997,
+        "USE_GUMBEL_SEARCH": True,
+        "ACTING_TEMPERATURE": 1.5,
+        "LEARNING_RATE": 3e-4,
+        "MAX_REPLAY": 60,
+        "USE_AUGMENTATION": True,
+        "_doc": "pong-lr-3e-4 plus the data-efficiency kit's two biggest "
+                "levers: 60-trajectory replay (roughly the whole 100k-step "
+                "run stays in the buffer, ~9GB RAM of frame stacks) and DrQ "
+                "shift+intensity augmentation. Run with --env Pong-v4 "
+                "--frameskip 4 --episode-cap 3000 --episodes-per-iter 1.",
     },
     "pong-lr-1e-3": {
         "USE_VALUE_PREFIX_IN_TREE": True,

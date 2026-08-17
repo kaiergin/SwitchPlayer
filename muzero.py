@@ -119,6 +119,12 @@ POLICY_LOSS_WEIGHT = 1.0
 REWARD_LOSS_WEIGHT = 1.0
 PREFIX_LOSS_WEIGHT = 1.0
 CONSISTENCY_LOSS_WEIGHT = 2.0   # EfficientZero's setting for its SimSiam loss
+# DrQ-style augmentation on TRAINING observations only (EfficientZero ships it
+# on, and its ablation shows it matters; it synergizes with the SimSiam loss).
+# Acting, search, and evaluation never see augmented frames.
+USE_AUGMENTATION = True
+AUG_SHIFT = 4          # replicate-pad then random crop, DrQ's +/-4 pixels
+AUG_INTENSITY = 0.05   # multiplicative intensity jitter, clamped at 2 sigma
 # Gradient flowing back through each recurrent dynamics step is halved, so it
 # does not compound across the unroll.
 LATENT_GRADIENT_SCALE = 0.5
@@ -443,6 +449,34 @@ def discounted_prefix_targets(rewards, discount=None):
     weights = discount ** torch.arange(steps, device=rewards.device, dtype=rewards.dtype)
     prefix = torch.cumsum(rewards[:, 1:] * weights, dim=1)
     return torch.cat([torch.zeros_like(rewards[:, :1]), prefix], dim=1)
+
+
+def augment_observations(obs, shift=None, intensity=None):
+    """DrQ-style random shift + intensity jitter for training batches.
+
+    One draw per SAMPLE, shared by every unroll step within it: the SimSiam
+    target must live in the same shifted frame as the online branch, or the
+    consistency loss would be asked to predict the augmentation noise.
+    Independent draws across samples. obs: (B, T, C, H, W) float in [0, 1].
+    """
+    shift = AUG_SHIFT if shift is None else shift
+    intensity = AUG_INTENSITY if intensity is None else intensity
+    B, T, C, H, W = obs.shape
+    flat = obs.reshape(B * T, C, H, W)
+    padded = F.pad(flat, (shift, shift, shift, shift), mode="replicate")
+    out = torch.empty_like(flat)
+    dx = torch.randint(0, 2 * shift + 1, (B,))
+    dy = torch.randint(0, 2 * shift + 1, (B,))
+    for b in range(B):
+        rows = slice(int(dy[b]), int(dy[b]) + H)
+        cols = slice(int(dx[b]), int(dx[b]) + W)
+        out[b * T:(b + 1) * T] = padded[b * T:(b + 1) * T, :, rows, cols]
+    out = out.view(B, T, C, H, W)
+    if intensity:
+        scale = 1.0 + intensity * torch.randn(
+            B, 1, 1, 1, 1, device=obs.device).clamp_(-2.0, 2.0)
+        out = out * scale
+    return out.clamp_(0.0, 1.0)
 
 
 def consistency_loss(online, target):
@@ -1639,6 +1673,8 @@ class TrainingHelper:
         
         # Convert inputs to tensors and move them to the appropriate device.
         obs = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device) / 255.0
+        if USE_AUGMENTATION:
+            obs = augment_observations(obs)
         actions = torch.tensor(batch["actions"], dtype=torch.long, device=self.device)
         rewards = torch.tensor(batch["rewards"], dtype=torch.float32, device=self.device)
         target_policy = torch.tensor(batch["target_policy"], dtype=torch.float32, device=self.device)
