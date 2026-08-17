@@ -98,16 +98,29 @@ def test_train_step_still_finite_with_scaling():
 
 def test_train_step_reads_use_h_transform_at_call_time():
     """The ablation's no-transform arm overrides muzero.USE_H_TRANSFORM at
-    runtime; train_step has to pick that up, not a value captured at import."""
+    runtime; train_step has to pick that up, not a value captured at import.
+
+    Pinned by DISCRIMINATION, not liveness: identical seeds and batch, flag
+    on vs off, must give different losses. The first version of this test
+    asserted only isfinite and passed with the flag hardcoded -- the exact
+    regression it was written against (probe-verified by the test audit)."""
     from tests.test_reanalysis import build_trainer, fake_batch
+    mask = np.ones((2, muzero.UNROLL_STEPS + 1), dtype=bool)
+    np.random.seed(3)
+    batch = fake_batch(2, muzero.UNROLL_STEPS, mask)
     saved = muzero.USE_H_TRANSFORM
-    muzero.USE_H_TRANSFORM = False
     try:
-        mask = np.ones((2, muzero.UNROLL_STEPS + 1), dtype=bool)
-        loss = asyncio.run(build_trainer().train_step(fake_batch(2, muzero.UNROLL_STEPS, mask)))
-        assert np.isfinite(loss)
+        torch.manual_seed(0)
+        muzero.USE_H_TRANSFORM = True
+        loss_on = asyncio.run(build_trainer().train_step(batch))
+        torch.manual_seed(0)
+        muzero.USE_H_TRANSFORM = False
+        loss_off = asyncio.run(build_trainer().train_step(batch))
     finally:
         muzero.USE_H_TRANSFORM = saved
+    assert np.isfinite(loss_on) and np.isfinite(loss_off)
+    assert loss_on != pytest.approx(loss_off), (
+        "flag flip changed nothing: transform captured rather than read")
 
 
 # --------------------------------------------------------------------------
@@ -182,17 +195,47 @@ def test_augmentation_stays_in_valid_range():
 
 def test_augmentation_flag_is_read_at_call_time():
     """Arms toggle muzero.USE_AUGMENTATION at runtime; train_step must honour
-    the override, like every other arm-controlled flag."""
+    the override. Pinned by discrimination: same seeds, flag off vs on, the
+    losses must differ (augmentation perturbs the observations). The first
+    version set the flag to its own default and asserted isfinite -- it could
+    not fail under any behaviour short of a crash (probe-verified)."""
     from tests.test_reanalysis import build_trainer, fake_batch
+    mask = np.ones((2, muzero.UNROLL_STEPS + 1), dtype=bool)
+    np.random.seed(4)
+    batch = fake_batch(2, muzero.UNROLL_STEPS, mask)
     saved = muzero.USE_AUGMENTATION
-    muzero.USE_AUGMENTATION = True
     try:
-        mask = np.ones((2, muzero.UNROLL_STEPS + 1), dtype=bool)
-        loss = asyncio.run(build_trainer().train_step(
-            fake_batch(2, muzero.UNROLL_STEPS, mask)))
-        assert np.isfinite(loss)
+        torch.manual_seed(0)
+        muzero.USE_AUGMENTATION = False
+        loss_off = asyncio.run(build_trainer().train_step(batch))
+        torch.manual_seed(0)
+        muzero.USE_AUGMENTATION = True
+        loss_on = asyncio.run(build_trainer().train_step(batch))
     finally:
         muzero.USE_AUGMENTATION = saved
+    assert np.isfinite(loss_on) and np.isfinite(loss_off)
+    assert loss_on != pytest.approx(loss_off), (
+        "flag flip changed nothing: augmentation not applied or flag captured")
+
+
+def test_training_overfits_a_fixed_batch():
+    """The highest-value missing test per the suite audit: nothing anywhere
+    asserted that optimisation makes any error DECREASE. The prefix head once
+    collapsed to predict-zero across an entire 5-arm ablation while every
+    'trains the head' test stayed green. 40 steps on one fixed batch must cut
+    the loss substantially."""
+    from tests.test_reanalysis import build_trainer, fake_batch
+    np.random.seed(5)
+    torch.manual_seed(5)
+    trainer = build_trainer()
+    mask = np.ones((4, muzero.UNROLL_STEPS + 1), dtype=bool)
+    batch = fake_batch(4, muzero.UNROLL_STEPS, mask)
+    first = asyncio.run(trainer.train_step(batch))
+    for _ in range(39):
+        last = asyncio.run(trainer.train_step(batch))
+    assert np.isfinite(last)
+    assert last < 0.7 * first, (
+        f"40 steps on a fixed batch only moved the loss {first:.3f} -> {last:.3f}")
 
 
 # --------------------------------------------------------------------------

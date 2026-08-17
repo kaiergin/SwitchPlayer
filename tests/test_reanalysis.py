@@ -200,15 +200,20 @@ def build_trainer():
     t.device = CPU
     t.action_space = ACTIONS
     t.training_steps = 0
+    # PRODUCTION supports and bin counts: the suite audit found train_step was
+    # only ever tested under the old pre-h() linear configuration (400/2000 at
+    # 51 bins), so the real codec never ran in any train_step test.
     t.representation = RepresentationNetwork(input_channels=12, latent_channels=LATENT_CHANNELS)
     t.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                 support_size=400, num_bins=51)
+                                 support_size=muzero.REWARD_SUPPORT,
+                                 num_bins=muzero.REWARD_BINS)
     t.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                     support_size=2000, num_bins=51)
+                                     support_size=muzero.VALUE_SUPPORT,
+                                     num_bins=muzero.VALUE_BINS)
     t.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                         hidden_size=64,
                                         support_size=muzero.VALUE_PREFIX_SUPPORT,
-                                        num_bins=51)
+                                        num_bins=muzero.VALUE_PREFIX_BINS)
     t.projector = LatentProjector(LATENT_CHANNELS * muzero.LATENT_HW ** 2)
     t.prefix_optimizer = muzero.make_optimizer(t.value_prefix.parameters())
     t.rep_optimizer = muzero.make_optimizer(t.representation.parameters())

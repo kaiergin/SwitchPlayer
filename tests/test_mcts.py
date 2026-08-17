@@ -318,13 +318,24 @@ def test_normalisation_is_seeded_before_the_first_simulation(helper):
     """Regression: MinMaxStats started every search empty, normalize() was the
     identity, and round one compared the gameplay child's raw Monte Carlo
     return (order hundreds here) against exploration terms of order 0.3 --
-    flooding the entire first batch of simulations down the behaviour path."""
+    flooding the entire first batch of simulations down the behaviour path.
+
+    Pins the exact COMPOSITE seeded (r + discount * onward), not merely that
+    some range exists -- the suite audit showed the range-exists assertion
+    passed even when seeding used V alone."""
     helper.create_tree_from_game(fake_trajectory(6))
     root = helper.current_trajectory[0]
     helper.batch_expand_nodes([root])
+    for a, child in root.children.items():
+        child.visit_count, child.value_sum, child.virtual_loss = 0, 0.0, 0.0
+        child.done = False
+        child.reward = float(a)               # distinct edge rewards
+        child.expanded_value = 10.0 * (a + 1)  # distinct onward values
     helper.min_max_stats = muzero.MinMaxStats()
-    helper.seed_min_max_stats(root, discount=0.997)
-    assert helper.min_max_stats.maximum > helper.min_max_stats.minimum
+    helper.seed_min_max_stats(root, discount=0.5)
+    composites = [a + 0.5 * 10.0 * (a + 1) for a in root.children]
+    assert helper.min_max_stats.maximum == pytest.approx(max(composites))
+    assert helper.min_max_stats.minimum == pytest.approx(min(composites))
 
 
 def test_baseline_visits_are_subtracted_exactly(helper):
