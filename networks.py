@@ -302,15 +302,17 @@ class ValuePrefixNetwork(nn.Module):
         self.norm_out = nn.BatchNorm1d(hidden_size)
         if fc_hidden:
             # EfficientZero A.1's exact head: a bottleneck FC (their 32 units,
-            # BN + ReLU) between the LSTM and the categorical output.
-            self.fc = nn.Sequential(
-                nn.Linear(hidden_size, fc_hidden),
-                nn.BatchNorm1d(fc_hidden),
-                nn.ReLU(inplace=False),
-                nn.Linear(fc_hidden, num_bins),
-            )
-            final = self.fc[-1]
+            # BN + ReLU) between the LSTM and the categorical output. Split
+            # into named modules -- NOT a Sequential -- so forward can honour
+            # this class's single-row train-mode contract (the `batched`
+            # guard) for the bottleneck's BatchNorm too.
+            self.fc_hidden_layer = nn.Linear(hidden_size, fc_hidden)
+            self.fc_hidden_norm = nn.BatchNorm1d(fc_hidden)
+            self.fc = nn.Linear(fc_hidden, num_bins)
+            final = self.fc
         else:
+            self.fc_hidden_layer = None
+            self.fc_hidden_norm = None
             self.fc = nn.Linear(hidden_size, num_bins)
             final = self.fc
         # EfficientZero A.1 zero-init: the prefix decodes exactly 0 at init.
@@ -339,7 +341,13 @@ class ValuePrefixNetwork(nn.Module):
         out = out.squeeze(0)
         if batched:
             out = self.norm_out(out)
-        prefix_logits = self.fc(self.relu(out))
+        h = self.relu(out)
+        if self.fc_hidden_layer is not None:
+            h = self.fc_hidden_layer(h)
+            if batched:
+                h = self.fc_hidden_norm(h)
+            h = self.relu(h)
+        prefix_logits = self.fc(h)
 
         support = create_support(self.support_size, self.num_bins, latent.device)
         prefix = scalar_from_logits(prefix_logits, support, invert=self.transform)

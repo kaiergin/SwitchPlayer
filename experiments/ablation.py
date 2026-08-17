@@ -112,24 +112,31 @@ ARMS = {
         "PER_ENABLED": True,
         "USE_VALUE_PREFIX_IN_TREE": True,
         "REWARD_LOSS_WEIGHT": 0.0,
-        "DISCOUNT": 0.997,
+        "DISCOUNT": 0.997 ** 4,
         "TD_STEPS": 5,
         "LEARNING_RATE": 3e-4,
-        "MAX_REPLAY": 100,
+        "MAX_REPLAY": 60,
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
-        "_doc": "The paper-reproduction configuration: PUCT search acting at "
-                "50 sims (Dirichlet 0.25/0.3) with the staged visit "
-                "temperature, per-step search policies and root values "
-                "recorded as targets, batch-time value targets with "
-                "EfficientZero 4.3's age-shrunk horizon (td 5), PER with IS "
-                "weights, sign-scale reward clip, EfficientZero prefix head "
-                "dims, no per-step reward head. Run with --env Pong-v4 "
-                "--frameskip 4 --episode-cap 3000 --episodes-per-iter 1.",
+        "_doc": "The paper-reproduction configuration, constants source-"
+                "verified against EfficientZero's released code: PUCT search "
+                "acting at 50 sims (Dirichlet 0.25/0.3, noiseless at eval) "
+                "with the staged visit temperature; per-step search policies "
+                "and root values recorded; batch-time value targets with the "
+                "4.3 age-shrunk horizon (td 5, decay 0.3*run); PER alpha 0.6 "
+                "/ beta 0.4->1.0 / eps 1e-6 weighting the WHOLE per-sample "
+                "loss; discount 0.997^4; sign-scale reward clip; EfficientZero "
+                "prefix head dims; no per-step reward head. Remaining known "
+                "gap: the value bootstrap is the STORED play-time root value "
+                "(MuZero pseudocode) rather than EffZero's batch-time "
+                "target-model recomputation. Replay 60 trajectories (~9-15GB "
+                "of Pong frame stacks; raise on a bigger box). Run with "
+                "--env Pong-v4 --frameskip 4 --episode-cap 3000 "
+                "--episodes-per-iter 1 --eval-every 10.",
     },
     "gumbel": {
         "USE_VALUE_PREFIX_IN_TREE": True,
@@ -400,7 +407,11 @@ class Run:
                     action = int(np.random.choice(ACTIONS, p=policy))
             obs, reward, term, trunc, _ = self.env.step(action)
             done = term or trunc
-            if search_pol is None:
+            # 5-field records exist ONLY for the paper data path. Recording
+            # them for every search-acting arm broke the pre-existing
+            # pong-act-search arm, whose non-paper reanalysis unpacks 6-field
+            # eval_obs tuples (round-5 finding, reproduced ValueError).
+            if search_pol is None or not muzero.PAPER_TARGETS:
                 traj.append((stack, action, prev_reward))
             else:
                 traj.append((stack, action, prev_reward, search_pol, search_val))
@@ -416,7 +427,7 @@ class Run:
             # eval windows starting wherever self-play left off.
             self.env.was_real_done = True
         final_stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
-        if muzero.USE_SEARCH_ACTING:
+        if muzero.USE_SEARCH_ACTING and muzero.PAPER_TARGETS:
             # The terminal record needs a stored root value for the paper
             # value targets: 0 at a true terminal; a truncated tail gets one
             # greedy search on the final observation.
@@ -436,14 +447,23 @@ class Run:
         policy and root value. Store the target ingredients (values are
         computed at BATCH time under the age-adjusted horizon), the birth
         step for EfficientZero 4.3, and age-0 priorities |v - z|."""
+        if len(traj[0]) != 5:
+            raise ValueError(
+                "PAPER_TARGETS requires USE_SEARCH_ACTING: trajectories must "
+                "carry per-step search records (5 fields), got "
+                f"{len(traj[0])}")
         born = self.trainer.training_steps
         out = []
         for i, (obs, action, reward, pol, val) in enumerate(traj):
+            # The terminal record of a TERMINATED episode carried no search
+            # (uniform placeholder -> masked); a TRUNCATED tail's record is a
+            # genuine greedy search and keeps its policy target.
+            has_policy = (i < len(traj) - 1) or (not terminated)
             out.append({"obs": obs, "action": action, "reward": reward,
                         "target_policy": np.asarray(pol, dtype=np.float64),
                         "root_value": float(val),
                         "target_value": float(val),  # for non-paper readers
-                        "has_policy_target": i < len(traj) - 1,
+                        "has_policy_target": has_policy,
                         "born_step": born})
         out[-1]["truncated"] = not terminated
         for idx, t in enumerate(out):
@@ -541,8 +561,11 @@ class Run:
 
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out):
     with arm_config(arm) as spec:
-        # The staged acting-temperature schedule needs the planned run length.
+        # Run-length-dependent paper constants: the staged acting temperature
+        # and EfficientZero 4.3's horizon-decay denominator (their
+        # auto_td_steps = 0.3 * training_steps).
         muzero.TEMPERATURE_TOTAL_STEPS = iterations * train_steps
+        muzero.OFFPOLICY_DECAY_STEPS = max(1, int(0.3 * iterations * train_steps))
         run = Run(arm, seed, spec)
         started = time.time()
         for it in range(1, iterations + 1):
@@ -601,6 +624,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                       f"per-step {metrics['per_step']:>6.2f}  "
                       f"H(pi) {metrics.get('policy_entropy', 0.0):>5.2f}", flush=True)
         run.env.close()
+        # Run-length-dependent globals do not go through arm_config; reset
+        # them so nothing leaks into whatever runs next.
+        muzero.TEMPERATURE_TOTAL_STEPS = None
+        muzero.OFFPOLICY_DECAY_STEPS = None
 
 
 # ---------------------------------------------------------------------------

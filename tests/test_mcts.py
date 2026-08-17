@@ -126,6 +126,16 @@ def test_visit_count_tracks_budget_across_shapes(helper, sims, batches):
     assert root.visit_count == 1 + (sims // batches) * batches
 
 
+def test_puct_budget_is_exact_with_a_remainder(helper, puct):
+    """Round-5 finding: `sims // batches` rounds dropped the remainder --
+    '50 sims' at batch 8 silently ran 48. The budget must spend exactly."""
+    helper.create_tree_from_game(fake_trajectory(8))
+    root = helper.current_trajectory[0]
+    before = root.visit_count
+    run_search(helper, sims=10, batches=4)
+    assert root.visit_count == before + 10
+
+
 def test_virtual_loss_is_fully_released(helper):
     """Regression: backup_simulation is the only place virtual_loss is cleared,
     so every dropped simulation left a permanent penalty on the nodes it had

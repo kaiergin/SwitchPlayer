@@ -221,17 +221,34 @@ ACT_SEARCH_SIMS = 8            # measured ~40% of a 60fps frame at this budget
 # ---------------------------------------------------------------------------
 PAPER_TARGETS = False
 DIRICHLET_ALPHA = 0.25         # search-root noise; EfficientZero uses 0.3
-# EfficientZero 4.3: shrink the TD horizon by one real-reward step per this
-# many training steps of data age (l clipped to [1, TD_STEPS]).
-OFFPOLICY_DECAY_STEPS = 300
+# EfficientZero 4.3 (their code: auto_td_steps = 0.3 * training_steps): the
+# horizon loses one real-reward step per 0.3-of-the-run of data age, clipped
+# to [1, TD_STEPS]. Run-length dependent, so the harness sets it per run;
+# None disables. (A fixed 300 shipped first -- ~8x too aggressive on typical
+# runs; caught by the round-5 source verification.)
+OFFPOLICY_DECAY_STEPS = None
 # Staged acting temperature on visit counts (papers: 1.0 / 0.5 / 0.25 at
 # 50% / 75% of the run). Requires a planned run length; None (the unbounded
 # pipeline) stays at 1.0. The harness sets it per run.
 TEMPERATURE_TOTAL_STEPS = None
 PER_ENABLED = False
-PER_ALPHA = 1.0                # MuZero appendix G Atari values; EfficientZero
-PER_BETA = 1.0                 # inherits PER (audit: verify their alpha/beta)
-PER_EPS = 1e-2                 # priority floor so no position starves
+# EfficientZero's PER settings, from their released config: alpha 0.6, beta
+# annealed linearly 0.4 -> 1.0 over the run, epsilon 1e-6. (MuZero's Atari
+# values are alpha=beta=1.)
+PER_ALPHA = 0.6
+PER_BETA = 0.4
+PER_BETA_FINAL = 1.0
+PER_EPS = 1e-6
+
+
+def per_beta(training_steps):
+    """EfficientZero anneals the IS-correction exponent 0.4 -> 1.0 linearly
+    over the planned run; without a planned length, the base value holds."""
+    total = TEMPERATURE_TOTAL_STEPS
+    if not total:
+        return PER_BETA
+    frac = min(1.0, training_steps / total)
+    return PER_BETA + (PER_BETA_FINAL - PER_BETA) * frac
 # EfficientZero A.1 value-prefix head: 16 conv planes and a 32-unit FC
 # bottleneck before the categorical output. The historical head here used 32
 # planes and no bottleneck; the repro arm overrides both.
@@ -265,13 +282,15 @@ def paper_value_target(traj, idx, horizon, discount):
 
         z_t = sum_{k=1..l} g^{k-1} r_{t+k} + g^l * root_value_{t+l}
 
-    The bootstrap is the STORED (self-play-time) search root value -- stale by
-    construction, which is exactly the role the papers give their target
-    network. A terminal record stores root_value 0, so the terminal case
-    reduces to pure Monte Carlo without a special branch; a truncated tail
-    bootstraps its stored value (at idx == tail that is the position's own
-    stored value -- allowed here because it is the play-time value, the
-    papers' own choice, not a same-pass search result).
+    The bootstrap is the STORED (self-play-time) search root value -- exactly
+    MuZero's pseudocode make_target, which bootstraps game.root_values.
+    (EfficientZero goes further: it RECOMPUTES the bootstrap at batch time
+    with a target model refreshed every 200 steps, so its value is never more
+    than ~200 steps stale, while a stored value ages with its trajectory.
+    That batch-time recomputation is the one remaining fidelity gap of this
+    mode, documented in the effzero-repro arm.) A terminal record stores
+    root_value 0, so the terminal case reduces to pure Monte Carlo without a
+    special branch; a truncated tail bootstraps its stored value.
     """
     tail = min(idx + horizon, len(traj) - 1)
     value, g = 0.0, 1.0
@@ -560,15 +579,19 @@ def augment_observations(obs, shift=None, intensity=None):
     return out.clamp_(0.0, 1.0)
 
 
-def consistency_loss(online, target):
+def consistency_loss(online, target, weights=None):
     """The SimSiam objective: negative cosine similarity, -1 at a perfect match.
 
     target is detached here as well as at the call site. The stop-gradient is
     load-bearing -- it is half of what prevents the representation collapse
     this loss exists to avoid -- so it must not depend on the caller
-    remembering to no_grad the target branch.
+    remembering to no_grad the target branch. `weights` are the per-sample
+    PER importance weights (EfficientZero scales the ENTIRE per-sample loss).
     """
-    return -F.cosine_similarity(online, target.detach(), dim=1).mean()
+    per_sample = -F.cosine_similarity(online, target.detach(), dim=1)
+    if weights is not None:
+        per_sample = per_sample * weights
+    return per_sample.mean()
 
 
 def clip_reward(reward, ceiling=None):
@@ -585,7 +608,7 @@ def clip_reward(reward, ceiling=None):
     return float(np.clip(reward, -ceiling, ceiling))
 
 
-def masked_policy_loss(policy_logits, target_policy, mask):
+def masked_policy_loss(policy_logits, target_policy, mask, weights=None):
     """Cross-entropy averaged over the positions that carry a real target.
 
     Reanalysis searches a strided subset of timesteps, so most positions hold a
@@ -594,10 +617,15 @@ def masked_policy_loss(policy_logits, target_policy, mask):
     the harder the placeholders would pull against it.
 
     Returns 0 when nothing in the batch is masked in; clamping the denominator
-    keeps that branch-free so it does not force a device sync.
+    keeps that branch-free so it does not force a device sync. `weights` are
+    the per-sample PER importance weights (the papers scale the whole
+    per-sample loss).
     """
     per_position = -torch.sum(target_policy * F.log_softmax(policy_logits, dim=1), dim=1)
-    return (per_position * mask).sum() / mask.sum().clamp(min=1.0)
+    per_position = per_position * mask
+    if weights is not None:
+        per_position = per_position * weights
+    return per_position.sum() / mask.sum().clamp(min=1.0)
 
 
 def to_cpu(obj):
@@ -1424,7 +1452,7 @@ class MCTSHelper:
     # Full MCTS: Run multiple simulations, batch expand unexpanded leaves,
     # then backup their values.
     # -----------------------------
-    async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=None, max_depth=MAX_DEPTH):
+    async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=None, max_depth=MAX_DEPTH, root_noise=True):
         discount = DISCOUNT if discount is None else discount
         if USE_GUMBEL_SEARCH:
             return await self.run_gumbel_mcts(index, num_simulations=num_simulations,
@@ -1440,20 +1468,29 @@ class MCTSHelper:
         root.prefix_state = None
         if not root.is_expanded:
             self.batch_expand_nodes([root])
-        self.add_noise_to_node(index)
+        if root_noise:
+            # Exploration noise belongs to SELF-PLAY roots; the papers disable
+            # it at evaluation, and act_search(greedy=True) passes False so
+            # eval returns are not systematically noise-degraded.
+            self.add_noise_to_node(index)
         self.seed_min_max_stats(root, discount)
         # Visits the root's children carry INTO this search: the chain backup's
         # bookkeeping visit plus traffic from earlier searches through the
         # shared tree. Snapshotted so the improved policy can count only what
         # this search's own budget decides.
         baseline_visits = {a: child.visit_count for a, child in root.children.items()}
-        for x in range(max(int(num_simulations // sim_batches), 1)):
+        # Spend the budget EXACTLY: the old `sims // batches` rounds silently
+        # dropped the remainder (50 sims at batch 8 ran 48).
+        remaining = max(int(num_simulations), 1)
+        while remaining > 0:
+            batch_n = min(sim_batches, remaining)
             futures = [
                 self.selection_task_no_expand(index, c_puct, discount, max_depth)
-                for _ in range(sim_batches)
+                for _ in range(batch_n)
             ]
             await asyncio.gather(*futures)
             await self.expand_selected(discount)
+            remaining -= batch_n
         return self.drop_non_gameplay_children_and_compute_improvements(
             index, baseline=baseline_visits)
 
@@ -1550,7 +1587,8 @@ class MCTSHelper:
             policy, value, has_policy = await self.run_full_mcts(
                 0, num_simulations=num_simulations,
                 sim_batches=min(MCTS_BATCHES, num_simulations),
-                c_puct=C_PUCT, discount=discount)
+                c_puct=C_PUCT, discount=discount,
+                root_noise=not greedy)
             if not has_policy:
                 action = int(np.random.randint(self.action_space))
             elif USE_GUMBEL_SEARCH:
@@ -1827,12 +1865,20 @@ class TrainingHelper:
         # and trajectory padding is never a real target.
         policy_mask = torch.tensor(np.asarray(batch["has_policy_target"]),
                                    dtype=torch.float32, device=self.device)
-        # PER importance-sampling weights (paper mode); applied to the VALUE
-        # loss, whose errors define the priorities, as in EfficientZero.
+        # PER importance-sampling weights (paper mode). Applied to the ENTIRE
+        # per-sample loss -- EfficientZero's weighted_loss = (weights * loss)
+        # .mean(); a first version weighted only the value loss, which leaves
+        # the policy/prefix/consistency gradients biased by the non-uniform
+        # sampling with no correction.
         is_weights = None
         if "is_weights" in batch:
             is_weights = torch.tensor(batch["is_weights"], dtype=torch.float32,
                                       device=self.device)
+
+        def wmean(per_sample):
+            if is_weights is None:
+                return per_sample.mean()
+            return (per_sample * is_weights).mean()
         
         # Zero out the gradients for all optimizers.
         self.rep_optimizer.zero_grad()
@@ -1870,13 +1916,13 @@ class TrainingHelper:
         prefix_state = self.value_prefix.initial_state(obs.size(0), self.device)
 
         # Compute losses for the initial step (no reward loss here).
-        policy_loss_0 = masked_policy_loss(policy_logits, target_policy[:, 0, :], policy_mask[:, 0])
+        policy_loss_0 = masked_policy_loss(policy_logits, target_policy[:, 0, :],
+                                           policy_mask[:, 0], weights=is_weights)
         converted_target_values = scalar_categorical.scalar_to_categorical_batch(
             target_value, self.prediction.support_size, self.prediction.num_bins, self.device,
             transform=USE_H_TRANSFORM)
         value_ce_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1)
-        value_loss_0 = ((value_ce_0 * is_weights).mean() if is_weights is not None
-                        else value_ce_0.mean())
+        value_loss_0 = wmean(value_ce_0)
         total_loss += (POLICY_LOSS_WEIGHT * policy_loss_0
                        + VALUE_LOSS_WEIGHT * value_loss_0)
 
@@ -1896,17 +1942,18 @@ class TrainingHelper:
                 true_latent = self.representation(obs[:, i])
                 target_proj = self.projector(true_latent, with_prediction=False)
             online_proj = self.projector(latent, with_prediction=True)
-            latent_loss = consistency_loss(online_proj, target_proj)
+            latent_loss = consistency_loss(online_proj, target_proj,
+                                           weights=is_weights)
             
             # Loss for reward prediction. (reward[0] not used since it is reward for entering obs)
-            reward_loss = -torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1).mean()
+            reward_loss = wmean(-torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1))
 
             # Value prefix over the same unroll. Both heads are trained on the
             # same trunk for now so they can be compared directly on identical
             # representations; the per-step head goes away once the tree search
             # is migrated to consume prefixes.
             _, prefix_logits, prefix_state = self.value_prefix(latent, prefix_state)
-            prefix_loss = -torch.sum(converted_target_prefix[:, i, :] * F.log_softmax(prefix_logits, dim=1), dim=1).mean()
+            prefix_loss = wmean(-torch.sum(converted_target_prefix[:, i, :] * F.log_softmax(prefix_logits, dim=1), dim=1))
 
             policy_logits, _, value_logits = self.prediction(latent)
 
@@ -1916,10 +1963,10 @@ class TrainingHelper:
             # target_value of 0.0 and reward of 0.0 are TRUE -- padding repeats
             # the terminal observation, and a terminal state really is worth
             # nothing. Masking those would discard correct signal, not noise.
-            policy_loss = masked_policy_loss(policy_logits, target_policy[:, i, :], policy_mask[:, i])
+            policy_loss = masked_policy_loss(policy_logits, target_policy[:, i, :],
+                                             policy_mask[:, i], weights=is_weights)
             value_ce = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1)
-            value_loss = ((value_ce * is_weights).mean() if is_weights is not None
-                          else value_ce.mean())
+            value_loss = wmean(value_ce)
 
             step_loss = (REWARD_LOSS_WEIGHT * reward_loss
                          + PREFIX_LOSS_WEIGHT * prefix_loss
@@ -1999,7 +2046,10 @@ class TrainingHelper:
         trajectories = list(replay_buffer)
         roots, priorities = [], []
         for traj in trajectories:
-            limit = len(traj)
+            # The terminal record carried no search; MuZero samples only
+            # searched positions, so it is excluded as a window ROOT (it still
+            # appears inside earlier windows).
+            limit = min(len(traj), max(1, len(traj) - 1))
             if traj[-1].get("truncated") and len(traj) > unroll_steps:
                 limit = len(traj) - unroll_steps
             for idx in range(limit):
@@ -2011,9 +2061,13 @@ class TrainingHelper:
             probs = probs / probs.sum()
         else:
             probs = np.full(len(roots), 1.0 / len(roots))
-        chosen = np.random.choice(len(roots), size=batch_size, p=probs)
-        # w = (N * P)^-beta, normalized by the max as in the papers.
-        weights = (len(roots) * probs[chosen]) ** (-PER_BETA)
+        # Without replacement when the population allows, as EfficientZero's
+        # replay buffer samples.
+        replace = batch_size > len(roots)
+        chosen = np.random.choice(len(roots), size=batch_size, p=probs,
+                                  replace=replace)
+        # w = (N * P)^-beta with the annealed beta, normalized by the max.
+        weights = (len(roots) * probs[chosen]) ** (-per_beta(self.training_steps))
         weights = weights / weights.max()
 
         batch_obs, batch_actions, batch_rewards = [], [], []

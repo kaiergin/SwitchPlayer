@@ -104,7 +104,9 @@ def test_per_samples_proportionally_and_weights_correct(monkeypatch):
     starts = [next(i for i, t in enumerate(traj) if t is ref)
               for ref in batch["sample_refs"]]
     frac0 = np.mean(np.array(starts) == 0)
-    assert 0.62 < frac0 < 0.83, f"priority-8 root sampled {frac0:.0%}, expected ~8/11"
+    # The terminal record is excluded as a root, so 3 roots with priorities
+    # 8/1/1 -> expected share 0.8.
+    assert 0.70 < frac0 < 0.90, f"priority-8 root sampled {frac0:.0%}, expected ~8/10"
     # IS weights: rarer samples carry larger weights; max normalized to 1.
     w = batch["is_weights"]
     assert w.max() == pytest.approx(1.0)
@@ -145,6 +147,54 @@ def test_train_step_writes_back_priorities(monkeypatch):
     updated = [ref["priority"] for ref in batch["sample_refs"]]
     assert all(p != 123.0 for p in updated)
     assert all(p > 0 for p in updated)
+
+
+def test_per_beta_anneals_linearly(monkeypatch):
+    """EfficientZero's released config: beta 0.4 -> 1.0 over the run."""
+    monkeypatch.setattr(muzero, "TEMPERATURE_TOTAL_STEPS", 1000)
+    assert muzero.per_beta(0) == pytest.approx(0.4)
+    assert muzero.per_beta(500) == pytest.approx(0.7)
+    assert muzero.per_beta(1000) == pytest.approx(1.0)
+    monkeypatch.setattr(muzero, "TEMPERATURE_TOTAL_STEPS", None)
+    assert muzero.per_beta(10 ** 9) == pytest.approx(muzero.PER_BETA)
+
+
+def test_is_weights_scale_the_whole_sample_loss(monkeypatch):
+    """Round-5 finding: weights applied to the value loss only leaves policy/
+    prefix/consistency gradients biased by PER's non-uniform sampling. The
+    papers scale the ENTIRE per-sample loss; flipping the weights must change
+    the total loss even with the value target held fixed."""
+    monkeypatch.setattr(muzero, "PER_ENABLED", False)
+    trainer_a = make_trainer()
+    traj = fake_paper_traj([1.0] * 6, [5.0] * 6)
+    for t in traj:
+        t["obs"] = np.random.randint(0, 255, (12, *muzero.IMAGE_RESHAPE),
+                                     dtype=np.uint8)
+    np.random.seed(2)
+    batch = trainer_a.prepare_batch_paper([traj], 4, muzero.UNROLL_STEPS, ACTIONS)
+    skewed = dict(batch)
+    skewed["is_weights"] = np.array([1.0, 0.1, 0.1, 0.1], dtype=np.float32)
+    torch.manual_seed(0)
+    loss_uniform = asyncio.run(make_trainer().train_step(dict(batch)))
+    torch.manual_seed(0)
+    loss_skewed = asyncio.run(make_trainer().train_step(skewed))
+    assert np.isfinite(loss_uniform) and np.isfinite(loss_skewed)
+    assert loss_uniform != pytest.approx(loss_skewed)
+
+
+def test_greedy_act_search_applies_no_root_noise(monkeypatch):
+    """The papers run evaluation searches WITHOUT root Dirichlet noise
+    (EfficientZero's prepare_no_noise); self-play searches keep it."""
+    monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)
+    helper = MCTSHelper(action_space=ACTIONS, device=CPU,
+                        network_ref=None, storage_ref=None)
+    calls = []
+    helper.add_noise_to_node = lambda idx, **kw: calls.append(idx)
+    obs = np.random.randint(0, 255, (12, *muzero.IMAGE_RESHAPE), dtype=np.uint8)
+    asyncio.run(helper.act_search(obs, num_simulations=4, greedy=True))
+    assert calls == [], "evaluation search applied exploration noise"
+    asyncio.run(helper.act_search(obs, num_simulations=4))
+    assert calls, "self-play search lost its exploration noise"
 
 
 # --------------------------------------------------------------------------
@@ -190,3 +240,20 @@ def test_prefix_head_bottleneck_shapes_and_zero_init():
         prefix, logits, _ = net(latent, net.initial_state(4, CPU))
     assert logits.shape == (4, muzero.VALUE_PREFIX_BINS)
     assert torch.allclose(prefix, torch.zeros_like(prefix), atol=1e-3)
+
+
+def test_prefix_bottleneck_survives_a_single_row_in_train_mode():
+    """The class guards its BatchNorms for the single-row batches search
+    produces; the bottleneck's norm must honour the same contract instead of
+    raising 'Expected more than 1 value per channel'."""
+    from networks import ValuePrefixNetwork
+    net = ValuePrefixNetwork(latent_channels=muzero.LATENT_CHANNELS,
+                             hidden_size=64,
+                             support_size=muzero.VALUE_PREFIX_SUPPORT,
+                             num_bins=muzero.VALUE_PREFIX_BINS,
+                             head_channels=16, fc_hidden=32)
+    net.train()
+    latent = torch.rand(1, muzero.LATENT_CHANNELS,
+                        muzero.LATENT_HW, muzero.LATENT_HW)
+    prefix, logits, _ = net(latent, net.initial_state(1, CPU))  # must not raise
+    assert logits.shape == (1, muzero.VALUE_PREFIX_BINS)

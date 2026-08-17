@@ -82,6 +82,26 @@ def test_every_arm_override_targets_a_real_muzero_global(ablation):
                 f"arm {name!r} overrides {key!r}, which muzero does not define")
 
 
+def test_paper_targets_arms_also_search_act(ablation):
+    """PAPER_TARGETS consumes 5-field search records; an arm setting it
+    without USE_SEARCH_ACTING would crash at its first reanalyse."""
+    for name, spec in ablation.ARMS.items():
+        if spec.get("PAPER_TARGETS"):
+            assert spec.get("USE_SEARCH_ACTING"), name
+
+
+def test_paper_targets_rejects_recordless_trajectories(ablation):
+    """The guard for the flag-mix hazard: a clear error instead of a
+    five-way unpack ValueError deep in the loop."""
+    import types
+
+    import numpy as np
+    run = object.__new__(ablation.Run)
+    run.trainer = types.SimpleNamespace(training_steps=0)
+    with pytest.raises(ValueError, match="USE_SEARCH_ACTING"):
+        run.paper_targets([(np.zeros(1), 0, 0.0)], True)
+
+
 def test_arm_config_restores_after_an_exception(ablation):
     import muzero
     before = muzero.DISCOUNT
