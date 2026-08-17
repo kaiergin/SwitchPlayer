@@ -105,6 +105,32 @@ ARMS = {
                 "only if pong-kit floors -- completing the protocol, not "
                 "guessing. Same run flags as pong-kit.",
     },
+    "effzero-repro": {
+        "USE_SEARCH_ACTING": True,
+        "USE_GUMBEL_SEARCH": False,
+        "PAPER_TARGETS": True,
+        "PER_ENABLED": True,
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "REWARD_LOSS_WEIGHT": 0.0,
+        "DISCOUNT": 0.997,
+        "TD_STEPS": 5,
+        "LEARNING_RATE": 3e-4,
+        "MAX_REPLAY": 100,
+        "USE_AUGMENTATION": True,
+        "REWARD_CLIP": 1.0,
+        "ACT_SEARCH_SIMS": 50,
+        "DIRICHLET_ALPHA": 0.3,
+        "PREFIX_HEAD_CHANNELS": 16,
+        "PREFIX_FC_HIDDEN": 32,
+        "_doc": "The paper-reproduction configuration: PUCT search acting at "
+                "50 sims (Dirichlet 0.25/0.3) with the staged visit "
+                "temperature, per-step search policies and root values "
+                "recorded as targets, batch-time value targets with "
+                "EfficientZero 4.3's age-shrunk horizon (td 5), PER with IS "
+                "weights, sign-scale reward clip, EfficientZero prefix head "
+                "dims, no per-step reward head. Run with --env Pong-v4 "
+                "--frameskip 4 --episode-cap 3000 --episodes-per-iter 1.",
+    },
     "gumbel": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.9,
@@ -282,7 +308,9 @@ def build_networks(spec):
         value_prefix=ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                         hidden_size=muzero.VALUE_PREFIX_HIDDEN,
                                         support_size=prefix_sup, num_bins=prefix_bins,
-                                        transform=transform).to(DEVICE),
+                                        transform=transform,
+                                        head_channels=muzero.PREFIX_HEAD_CHANNELS,
+                                        fc_hidden=muzero.PREFIX_FC_HIDDEN).to(DEVICE),
         projector=LatentProjector(LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE),
     )
 
@@ -349,12 +377,15 @@ class Run:
         traj, prev_reward, total, done, steps = [], 0.0, 0.0, False, 0
         while not done and steps < cap:
             stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
-            if not greedy and muzero.USE_SEARCH_ACTING:
-                # TEST feature: paper-style act-time search during self-play.
-                # Greedy evaluation deliberately never takes this branch -- it
-                # must always measure the deployable raw-policy agent.
-                action = asyncio.run(self.searcher.act_search(stack))
+            if muzero.USE_SEARCH_ACTING:
+                # Paper acting mode: one search per step, self-play AND greedy
+                # eval (the papers evaluate with search too). The recorded
+                # policy/value are the paper data path's targets. The shipped
+                # product keeps this flag off; its eval never searches.
+                action, search_pol, search_val = asyncio.run(
+                    self.searcher.act_search(stack, greedy=greedy))
             else:
+                search_pol = search_val = None
                 with torch.no_grad():
                     policy, _ = self.searcher.network_manager.initial_inference(stack)
                 if greedy:
@@ -369,7 +400,10 @@ class Run:
                     action = int(np.random.choice(ACTIONS, p=policy))
             obs, reward, term, trunc, _ = self.env.step(action)
             done = term or trunc
-            traj.append((stack, action, prev_reward))
+            if search_pol is None:
+                traj.append((stack, action, prev_reward))
+            else:
+                traj.append((stack, action, prev_reward, search_pol, search_val))
             prev_reward = muzero.clip_reward(reward)
             total += float(reward)
             steps += 1
@@ -381,11 +415,46 @@ class Run:
             # "episode" becoming an overlapping window of one continuous game,
             # eval windows starting wherever self-play left off.
             self.env.was_real_done = True
-        traj.append((push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE)), 0, prev_reward))
+        final_stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
+        if muzero.USE_SEARCH_ACTING:
+            # The terminal record needs a stored root value for the paper
+            # value targets: 0 at a true terminal; a truncated tail gets one
+            # greedy search on the final observation.
+            if terminated:
+                tail_pol, tail_val = np.ones(ACTIONS) / ACTIONS, 0.0
+            else:
+                _, tail_pol, tail_val = asyncio.run(
+                    self.searcher.act_search(final_stack, greedy=True))
+            traj.append((final_stack, 0, prev_reward, tail_pol, tail_val))
+        else:
+            traj.append((final_stack, 0, prev_reward))
         return traj, total, steps, terminated
 
     # -- re-analysis -------------------------------------------------------
+    def paper_targets(self, traj, terminated):
+        """Paper data path: every step already carries its acting-search
+        policy and root value. Store the target ingredients (values are
+        computed at BATCH time under the age-adjusted horizon), the birth
+        step for EfficientZero 4.3, and age-0 priorities |v - z|."""
+        born = self.trainer.training_steps
+        out = []
+        for i, (obs, action, reward, pol, val) in enumerate(traj):
+            out.append({"obs": obs, "action": action, "reward": reward,
+                        "target_policy": np.asarray(pol, dtype=np.float64),
+                        "root_value": float(val),
+                        "target_value": float(val),  # for non-paper readers
+                        "has_policy_target": i < len(traj) - 1,
+                        "born_step": born})
+        out[-1]["truncated"] = not terminated
+        for idx, t in enumerate(out):
+            z0 = muzero.paper_value_target(out, idx, muzero.TD_STEPS,
+                                           muzero.DISCOUNT)
+            t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
+        return out
+
     def reanalyse(self, traj, terminated=True):
+        if muzero.PAPER_TARGETS:
+            return self.paper_targets(traj, terminated)
         evaluated = self.searcher.eval_obs(traj)
         self.searcher.create_tree_from_game(evaluated, terminated=terminated)
         searched = self.searcher.select_reanalysis_indices(len(evaluated))
@@ -472,9 +541,14 @@ class Run:
 
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out):
     with arm_config(arm) as spec:
+        # The staged acting-temperature schedule needs the planned run length.
+        muzero.TEMPERATURE_TOTAL_STEPS = iterations * train_steps
         run = Run(arm, seed, spec)
         started = time.time()
         for it in range(1, iterations + 1):
+            # Paper acting mode reads training progress for its temperature
+            # schedule from the searcher's manager; mirror the trainer's count.
+            run.searcher.network_manager.training_steps = run.trainer.training_steps
             for _ in range(episodes_per_iter):
                 traj, _, _, terminated = run.play_episode()
                 run.replay.append(run.reanalyse(traj, terminated=terminated))

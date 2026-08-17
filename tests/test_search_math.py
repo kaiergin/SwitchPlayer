@@ -66,7 +66,9 @@ def test_default_alpha_is_muzeros_atari_setting():
 
     import muzero
     assert inspect.signature(add_dirichlet_noise).parameters["alpha"].default == 0.25
-    assert inspect.signature(muzero.MCTSHelper.add_noise_to_node).parameters["alpha"].default == 0.25
+    # add_noise_to_node now defers to the arm-overridable module global.
+    assert inspect.signature(muzero.MCTSHelper.add_noise_to_node).parameters["alpha"].default is None
+    assert muzero.DIRICHLET_ALPHA == 0.25
 
     np.random.seed(0)
     concentration = {

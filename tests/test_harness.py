@@ -66,7 +66,7 @@ def test_legacy_arms_pin_augmentation_off(ablation):
     meaning: everything except the kit arms runs without augmentation."""
     for name, spec in ablation.ARMS.items():
         assert "USE_AUGMENTATION" in spec, f"{name} has no augmentation pin"
-        if name not in ("pong-kit", "pong-kit2"):
+        if name not in ("pong-kit", "pong-kit2", "effzero-repro"):
             assert spec["USE_AUGMENTATION"] is False, name
 
 

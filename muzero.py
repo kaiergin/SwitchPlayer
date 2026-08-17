@@ -208,6 +208,77 @@ GUMBEL_C_SCALE = 0.1
 # ---------------------------------------------------------------------------
 USE_SEARCH_ACTING = False
 ACT_SEARCH_SIMS = 8            # measured ~40% of a 60fps frame at this budget
+# ---------------------------------------------------------------------------
+# Paper-reproduction mode (EfficientZero/MuZero data path), flag-gated like
+# everything else; the shipped product keeps all of these OFF. When the
+# effzero-repro arm enables them: self-play acts through PUCT search
+# (USE_SEARCH_ACTING + USE_GUMBEL_SEARCH=False) recording each step's search
+# policy and root value; PAPER_TARGETS computes value targets at BATCH time
+# from stored root values (MuZero's make_target -- the stored play-time value
+# IS the papers' stale/target-network value) with EfficientZero 4.3's
+# age-shrunk horizon; PER samples positions by |v - z| priority with
+# importance-sampling correction.
+# ---------------------------------------------------------------------------
+PAPER_TARGETS = False
+DIRICHLET_ALPHA = 0.25         # search-root noise; EfficientZero uses 0.3
+# EfficientZero 4.3: shrink the TD horizon by one real-reward step per this
+# many training steps of data age (l clipped to [1, TD_STEPS]).
+OFFPOLICY_DECAY_STEPS = 300
+# Staged acting temperature on visit counts (papers: 1.0 / 0.5 / 0.25 at
+# 50% / 75% of the run). Requires a planned run length; None (the unbounded
+# pipeline) stays at 1.0. The harness sets it per run.
+TEMPERATURE_TOTAL_STEPS = None
+PER_ENABLED = False
+PER_ALPHA = 1.0                # MuZero appendix G Atari values; EfficientZero
+PER_BETA = 1.0                 # inherits PER (audit: verify their alpha/beta)
+PER_EPS = 1e-2                 # priority floor so no position starves
+# EfficientZero A.1 value-prefix head: 16 conv planes and a 32-unit FC
+# bottleneck before the categorical output. The historical head here used 32
+# planes and no bottleneck; the repro arm overrides both.
+PREFIX_HEAD_CHANNELS = 32
+PREFIX_FC_HIDDEN = None
+
+
+def visit_softmax_temperature(training_steps):
+    """The papers' staged acting temperature over visit counts."""
+    total = TEMPERATURE_TOTAL_STEPS
+    if not total:
+        return 1.0
+    frac = training_steps / total
+    if frac < 0.5:
+        return 1.0
+    if frac < 0.75:
+        return 0.5
+    return 0.25
+
+
+def paper_horizon(age_steps):
+    """EfficientZero 4.3: older data gets a shorter real-reward horizon."""
+    if not OFFPOLICY_DECAY_STEPS:
+        return TD_STEPS
+    return int(np.clip(TD_STEPS - age_steps // OFFPOLICY_DECAY_STEPS,
+                       1, TD_STEPS))
+
+
+def paper_value_target(traj, idx, horizon, discount):
+    """MuZero's make_target on stored dicts:
+
+        z_t = sum_{k=1..l} g^{k-1} r_{t+k} + g^l * root_value_{t+l}
+
+    The bootstrap is the STORED (self-play-time) search root value -- stale by
+    construction, which is exactly the role the papers give their target
+    network. A terminal record stores root_value 0, so the terminal case
+    reduces to pure Monte Carlo without a special branch; a truncated tail
+    bootstraps its stored value (at idx == tail that is the position's own
+    stored value -- allowed here because it is the play-time value, the
+    papers' own choice, not a same-pass search result).
+    """
+    tail = min(idx + horizon, len(traj) - 1)
+    value, g = 0.0, 1.0
+    for k in range(1, tail - idx + 1):
+        value += g * traj[idx + k]["reward"]
+        g *= discount
+    return value + g * traj[tail]["root_value"]
 # Q is normalised to [0,1] by MinMaxStats before the exploration term is added,
 # so this is on the usual AlphaZero/MuZero scale. It is NOT comparable to the
 # values used before normalisation existed (61.8, then 32).
@@ -706,7 +777,9 @@ class NetworkHelper:
         self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                                hidden_size=VALUE_PREFIX_HIDDEN,
                                                support_size=VALUE_PREFIX_SUPPORT,
-                                               num_bins=VALUE_PREFIX_BINS).to(device)
+                                               num_bins=VALUE_PREFIX_BINS,
+                                               head_channels=PREFIX_HEAD_CHANNELS,
+                                               fc_hidden=PREFIX_FC_HIDDEN).to(device)
         self.projector = LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW).to(device)
         self.rep_optimizer = make_optimizer(self.representation.parameters())
         self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
@@ -842,7 +915,9 @@ class NetworkManager:
             self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                                    hidden_size=VALUE_PREFIX_HIDDEN,
                                                    support_size=VALUE_PREFIX_SUPPORT,
-                                                   num_bins=VALUE_PREFIX_BINS).to(device)
+                                                   num_bins=VALUE_PREFIX_BINS,
+                                                   head_channels=PREFIX_HEAD_CHANNELS,
+                                                   fc_hidden=PREFIX_FC_HIDDEN).to(device)
         # Inference-only consumer: BatchNorm must read the running statistics
         # training accumulated, not the statistics of whatever batch -- or
         # single acting frame -- happens to pass through (which also polluted
@@ -1196,10 +1271,12 @@ class MCTSHelper:
         self.backup_simulation(path, leaf_value)
         self.current_trajectory = path
     
-    # alpha=0.25 is MuZero's Atari setting. The old 0.03 was AlphaGo's value,
-    # tuned for 361 moves: over 5 actions it made the Dirichlet sample
+    # DIRICHLET_ALPHA defaults 0.25, MuZero's Atari setting (EfficientZero
+    # uses 0.3; the repro arm overrides). The old hardcoded 0.03 was AlphaGo's
+    # value, tuned for 361 moves: over 5 actions it made the Dirichlet sample
     # effectively one-hot, ~92% of the noise mass on a single random action.
-    def add_noise_to_node(self, idx, epsilon = 0.25, alpha = 0.25):
+    def add_noise_to_node(self, idx, epsilon = 0.25, alpha = None):
+        alpha = DIRICHLET_ALPHA if alpha is None else alpha
         node = self.current_trajectory[idx]
         node.policy = add_dirichlet_noise(node.policy, epsilon=epsilon, alpha=alpha)
         for action, child in node.children.items():
@@ -1448,14 +1525,18 @@ class MCTSHelper:
         self.release_root(root)
         return improved_policy, root_value, True
 
-    async def act_search(self, obs_stack, num_simulations=None, discount=None):
-        """One tiny Gumbel search from a live observation; returns the action.
+    async def act_search(self, obs_stack, num_simulations=None, discount=None,
+                         greedy=False):
+        """One search from a live observation; returns (action, policy, value).
 
-        TEST feature (USE_SEARCH_ACTING): the papers bootstrap by searching at
-        act time, which is exactly what the raw-policy actor cannot do -- see
-        the Pong equivalence finding. Builds a fresh one-node tree, so it
-        neither reads nor disturbs any reanalysis state; the caller's
-        current_trajectory is saved and restored around the search.
+        The papers' acting mode (USE_SEARCH_ACTING; the shipped product keeps
+        it off): a fresh one-node tree per step, dispatching PUCT or Gumbel by
+        USE_GUMBEL_SEARCH. PUCT mode samples the action from the visit
+        distribution at the staged paper temperature (argmax when greedy);
+        Gumbel mode acts with the halving survivor (improved-policy argmax
+        when greedy). The returned policy/value are the search policy target
+        and root value the paper data path records per step. Neither reads nor
+        disturbs reanalysis state; current_trajectory is saved and restored.
         """
         num_simulations = ACT_SEARCH_SIMS if num_simulations is None else num_simulations
         latents, policies, values = self.network_manager.batch_inference(
@@ -1466,9 +1547,21 @@ class MCTSHelper:
         saved = getattr(self, "current_trajectory", None)
         self.current_trajectory = [root]
         try:
-            await self.run_gumbel_mcts(0, num_simulations=num_simulations,
-                                       discount=discount)
-            return int(self.last_search_action)
+            policy, value, has_policy = await self.run_full_mcts(
+                0, num_simulations=num_simulations,
+                sim_batches=min(MCTS_BATCHES, num_simulations),
+                c_puct=C_PUCT, discount=discount)
+            if not has_policy:
+                action = int(np.random.randint(self.action_space))
+            elif USE_GUMBEL_SEARCH:
+                action = (int(np.argmax(policy)) if greedy
+                          else int(self.last_search_action))
+            else:
+                temp = 1e-4 if greedy else visit_softmax_temperature(
+                    getattr(self.network_manager, "training_steps", 0))
+                action = int(np.random.choice(
+                    self.action_space, p=apply_temperature(policy, temp)))
+            return action, policy, float(value)
         finally:
             self.current_trajectory = saved
 
@@ -1657,7 +1750,9 @@ class TrainingHelper:
         self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                                hidden_size=VALUE_PREFIX_HIDDEN,
                                                support_size=VALUE_PREFIX_SUPPORT,
-                                               num_bins=VALUE_PREFIX_BINS).to(device)
+                                               num_bins=VALUE_PREFIX_BINS,
+                                               head_channels=PREFIX_HEAD_CHANNELS,
+                                               fc_hidden=PREFIX_FC_HIDDEN).to(device)
         self.projector = LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW).to(device)
         self.rep_optimizer = make_optimizer(self.representation.parameters())
         self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
@@ -1732,6 +1827,12 @@ class TrainingHelper:
         # and trajectory padding is never a real target.
         policy_mask = torch.tensor(np.asarray(batch["has_policy_target"]),
                                    dtype=torch.float32, device=self.device)
+        # PER importance-sampling weights (paper mode); applied to the VALUE
+        # loss, whose errors define the priorities, as in EfficientZero.
+        is_weights = None
+        if "is_weights" in batch:
+            is_weights = torch.tensor(batch["is_weights"], dtype=torch.float32,
+                                      device=self.device)
         
         # Zero out the gradients for all optimizers.
         self.rep_optimizer.zero_grad()
@@ -1747,7 +1848,7 @@ class TrainingHelper:
         # ---------------------
         init_obs = obs[:, 0]
         latent = self.representation(init_obs)
-        policy_logits, _, value_logits = self.prediction(latent)
+        policy_logits, decoded_v0, value_logits = self.prediction(latent)
         
         converted_target_rewards = scalar_categorical.scalar_to_categorical_batch(
             rewards, self.dynamics.support_size, self.dynamics.num_bins, self.device,
@@ -1773,7 +1874,9 @@ class TrainingHelper:
         converted_target_values = scalar_categorical.scalar_to_categorical_batch(
             target_value, self.prediction.support_size, self.prediction.num_bins, self.device,
             transform=USE_H_TRANSFORM)
-        value_loss_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
+        value_ce_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1)
+        value_loss_0 = ((value_ce_0 * is_weights).mean() if is_weights is not None
+                        else value_ce_0.mean())
         total_loss += (POLICY_LOSS_WEIGHT * policy_loss_0
                        + VALUE_LOSS_WEIGHT * value_loss_0)
 
@@ -1814,7 +1917,9 @@ class TrainingHelper:
             # the terminal observation, and a terminal state really is worth
             # nothing. Masking those would discard correct signal, not noise.
             policy_loss = masked_policy_loss(policy_logits, target_policy[:, i, :], policy_mask[:, i])
-            value_loss = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1).mean()
+            value_ce = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1)
+            value_loss = ((value_ce * is_weights).mean() if is_weights is not None
+                          else value_ce.mean())
 
             step_loss = (REWARD_LOSS_WEIGHT * reward_loss
                          + PREFIX_LOSS_WEIGHT * prefix_loss
@@ -1853,7 +1958,17 @@ class TrainingHelper:
         self.prefix_optimizer.step()
         self.pred_optimizer.step()
         self.proj_optimizer.step()
-        
+
+        # PER priority writeback: new priority = |v(s_0) - z_0| on the fresh
+        # forward, as in MuZero appendix G. sample_refs are the live
+        # transition dicts, so the buffer updates in place.
+        if batch.get("sample_refs"):
+            with torch.no_grad():
+                errs = (decoded_v0.detach().squeeze(-1)
+                        - target_value[:, 0]).abs().cpu().numpy()
+            for ref, e in zip(batch["sample_refs"], errs):
+                ref["priority"] = float(e) + PER_EPS
+
         return total_loss.item()
 
     async def training_process(self):
@@ -1875,6 +1990,83 @@ class TrainingHelper:
             self.logger.exception("training_process failed")
         self.logger.info("Training process exiting")
     
+    def prepare_batch_paper(self, replay_buffer, batch_size, unroll_steps, action_space):
+        """The papers' batch: PER-sampled window roots with importance
+        weights, and value targets computed NOW from stored rewards + stored
+        root values under the age-adjusted horizon (EfficientZero 4.3).
+        Policy targets are the recorded acting-search policies -- every real
+        position carries one."""
+        trajectories = list(replay_buffer)
+        roots, priorities = [], []
+        for traj in trajectories:
+            limit = len(traj)
+            if traj[-1].get("truncated") and len(traj) > unroll_steps:
+                limit = len(traj) - unroll_steps
+            for idx in range(limit):
+                roots.append((traj, idx))
+                priorities.append(traj[idx].get("priority", PER_EPS))
+        priorities = np.asarray(priorities, dtype=np.float64)
+        if PER_ENABLED:
+            probs = priorities ** PER_ALPHA
+            probs = probs / probs.sum()
+        else:
+            probs = np.full(len(roots), 1.0 / len(roots))
+        chosen = np.random.choice(len(roots), size=batch_size, p=probs)
+        # w = (N * P)^-beta, normalized by the max as in the papers.
+        weights = (len(roots) * probs[chosen]) ** (-PER_BETA)
+        weights = weights / weights.max()
+
+        batch_obs, batch_actions, batch_rewards = [], [], []
+        batch_policy, batch_value, batch_has, refs = [], [], [], []
+        for flat in chosen:
+            traj, start = roots[flat]
+            refs.append(traj[start])
+            age = max(0, self.training_steps
+                      - traj[start].get("born_step", self.training_steps))
+            horizon = paper_horizon(age)
+            L = len(traj)
+            obs, actions, rewards = [], [], []
+            pols, vals, has = [], [], []
+            for step in range(unroll_steps + 1):
+                pos = start + step
+                if pos < L:
+                    t = traj[pos]
+                    obs.append(t["obs"])
+                    rewards.append(t["reward"])
+                    pols.append(t["target_policy"])
+                    vals.append(paper_value_target(traj, pos, horizon, DISCOUNT))
+                    has.append(t.get("has_policy_target", True))
+                    if step < unroll_steps:
+                        actions.append(t["action"])
+                else:
+                    t = traj[-1]
+                    obs.append(t["obs"])
+                    rewards.append(0.0)
+                    pols.append(np.ones(action_space) / action_space)
+                    # Absorbing padding: 0 is true past a terminal; truncated
+                    # windows only reach here on short trajectories, where the
+                    # tail's stored value stands in.
+                    vals.append(t["root_value"] if t.get("truncated") else 0.0)
+                    has.append(False)
+                    if step < unroll_steps:
+                        actions.append(0)
+            batch_obs.append(obs)
+            batch_actions.append(actions)
+            batch_rewards.append(rewards)
+            batch_policy.append(pols)
+            batch_value.append(vals)
+            batch_has.append(has)
+        return {
+            "obs": np.array(batch_obs),
+            "actions": np.array(batch_actions),
+            "rewards": np.array(batch_rewards),
+            "target_policy": np.array(batch_policy),
+            "target_value": np.array(batch_value),
+            "has_policy_target": np.array(batch_has),
+            "is_weights": weights.astype(np.float32),
+            "sample_refs": refs,
+        }
+
     async def prepare_batch(self, replay_buffer, batch_size, unroll_steps, action_space):
         """
         Prepares a training batch for multi-step unrolling.
@@ -1899,13 +2091,16 @@ class TrainingHelper:
                 skipped and for padding past the end of a trajectory; the
                 policy loss is masked there.
         """
+        if PAPER_TARGETS:
+            return self.prepare_batch_paper(replay_buffer, batch_size,
+                                            unroll_steps, action_space)
         batch_obs = []
         batch_actions = []
         batch_rewards = []
         batch_target_policy = []
         batch_target_value = []
         batch_has_policy = []
-        
+
         # Sample uniformly over TRANSITIONS, not trajectories: weighting each
         # trajectory by its length. Picking a trajectory uniformly first
         # oversamples the transitions of short episodes in proportion to how

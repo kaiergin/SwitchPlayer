@@ -447,8 +447,10 @@ def test_act_search_returns_a_valid_action_and_restores_state(helper):
     helper.create_tree_from_game(fake_trajectory(6))
     chain = helper.current_trajectory
     obs = np.random.randint(0, 255, (12, *muzero.IMAGE_RESHAPE), dtype=np.uint8)
-    action = asyncio.run(helper.act_search(obs, num_simulations=8))
+    action, policy, value = asyncio.run(helper.act_search(obs, num_simulations=8))
     assert 0 <= action < ACTIONS
+    assert policy.sum() == pytest.approx(1.0)
+    assert isinstance(value, float)
     assert helper.current_trajectory is chain
 
 

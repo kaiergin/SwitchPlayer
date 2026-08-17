@@ -284,7 +284,8 @@ class ValuePrefixNetwork(nn.Module):
     """
 
     def __init__(self, latent_channels=64, hidden_size=512, support_size=2000,
-                 num_bins=51, head_channels=32, pool=(6, 6), transform=True):
+                 num_bins=51, head_channels=32, pool=(6, 6), transform=True,
+                 fc_hidden=None):
         super(ValuePrefixNetwork, self).__init__()
         # See PredictionNetwork: must match the encode side's transform flag.
         self.transform = transform
@@ -299,10 +300,22 @@ class ValuePrefixNetwork(nn.Module):
         features = head_channels * pool[0] * pool[1]
         self.lstm = nn.LSTM(input_size=features, hidden_size=hidden_size)
         self.norm_out = nn.BatchNorm1d(hidden_size)
-        self.fc = nn.Linear(hidden_size, num_bins)
+        if fc_hidden:
+            # EfficientZero A.1's exact head: a bottleneck FC (their 32 units,
+            # BN + ReLU) between the LSTM and the categorical output.
+            self.fc = nn.Sequential(
+                nn.Linear(hidden_size, fc_hidden),
+                nn.BatchNorm1d(fc_hidden),
+                nn.ReLU(inplace=False),
+                nn.Linear(fc_hidden, num_bins),
+            )
+            final = self.fc[-1]
+        else:
+            self.fc = nn.Linear(hidden_size, num_bins)
+            final = self.fc
         # EfficientZero A.1 zero-init: the prefix decodes exactly 0 at init.
-        nn.init.zeros_(self.fc.weight)
-        nn.init.zeros_(self.fc.bias)
+        nn.init.zeros_(final.weight)
+        nn.init.zeros_(final.bias)
 
     def initial_state(self, batch_size, device):
         """Zeroed hidden state: no reward accumulated yet."""
