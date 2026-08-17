@@ -513,26 +513,47 @@ class Run:
         analogue."""
         if not self.replay:
             return
-        oldest = sorted(range(len(self.replay)),
-                        key=lambda i: self.replay[i][0].get("born_step", 0))[:count]
+        # Rotation stamp is refreshed_step, NOT born_step: fresh policy
+        # targets do not make the stored ACTION SEQUENCE on-policy, so the
+        # 4.3 age-shrunk value horizon (keyed on born_step) must keep
+        # shrinking (their delta_td keys on buffer position and is never
+        # restored by a re-search).
+        def freshness(i):
+            head = self.replay[i][0]
+            return head.get("refreshed_step", head.get("born_step", 0))
+
+        oldest = sorted(range(len(self.replay)), key=freshness)[:count]
         now = self.trainer.training_steps
-        for ti in oldest:
-            traj = self.replay[ti]
-            for i, t in enumerate(traj):
-                terminal_record = i == len(traj) - 1
-                if terminal_record and not t.get("has_policy_target", True):
-                    # Terminated tail: carried no search then, gets none now.
-                    t["born_step"] = now
-                    continue
-                _, pol, val = asyncio.run(self.searcher.act_search(
-                    t["obs"], greedy=terminal_record))
-                t["target_policy"] = np.asarray(pol, dtype=np.float64)
-                t["root_value"] = float(val)
-                t["born_step"] = now
-            for idx, t in enumerate(traj):
-                z0 = muzero.paper_value_target(traj, idx, muzero.TD_STEPS,
-                                               muzero.DISCOUNT)
-                t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
+        # Their reanalyze re-searches with the LAGGED TARGET MODEL, not the
+        # current weights: swap the searcher's networks for the duration.
+        self.trainer._ensure_target_model()
+        nm = self.searcher.network_manager
+        saved = (nm.representation, nm.prediction, nm.dynamics, nm.value_prefix)
+        nm.representation = self.trainer.target_representation
+        nm.prediction = self.trainer.target_prediction
+        nm.dynamics = self.trainer.target_dynamics
+        nm.value_prefix = self.trainer.target_value_prefix
+        try:
+            for ti in oldest:
+                traj = self.replay[ti]
+                for i, t in enumerate(traj):
+                    terminal_record = i == len(traj) - 1
+                    if terminal_record and not t.get("has_policy_target", True):
+                        # Terminated tail: carried no search then, none now.
+                        t["refreshed_step"] = now
+                        continue
+                    _, pol, val = asyncio.run(self.searcher.act_search(
+                        t["obs"], greedy=terminal_record))
+                    t["target_policy"] = np.asarray(pol, dtype=np.float64)
+                    t["root_value"] = float(val)
+                    t["refreshed_step"] = now
+                for idx, t in enumerate(traj):
+                    z0 = muzero.paper_value_target(traj, idx, muzero.TD_STEPS,
+                                                   muzero.DISCOUNT)
+                    t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
+        finally:
+            (nm.representation, nm.prediction,
+             nm.dynamics, nm.value_prefix) = saved
 
     def reanalyse(self, traj, terminated=True):
         if muzero.PAPER_TARGETS:

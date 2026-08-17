@@ -2066,9 +2066,16 @@ class TrainingHelper:
         self.logger.info("Training process exiting")
     
     def _ensure_target_model(self):
-        """Lagged copies of representation+prediction for batch-time value
-        refreshing (EfficientZero's target model, interval 200). Lazy, so the
-        harness's object.__new__ construction and older tests need nothing."""
+        """The FULL lagged target model (EfficientZero's, interval 200): all
+        four function networks, because their reanalyze both bootstraps values
+        AND re-searches policies with it. Lazy, so the harness's
+        object.__new__ construction and older tests need nothing.
+
+        DOUBLE-BUFFERED as in their train.py ("the interval of the current
+        model and the target model is between x and 2x"): each sync loads the
+        snapshot taken at the PREVIOUS sync, so target staleness is one-to-two
+        intervals (200-400 steps), not the 0-200 a direct copy would give.
+        """
         if getattr(self, "target_representation", None) is None:
             self.target_representation = RepresentationNetwork(
                 input_channels=12, latent_channels=LATENT_CHANNELS).to(self.device)
@@ -2077,13 +2084,38 @@ class TrainingHelper:
                 support_size=self.prediction.support_size,
                 num_bins=self.prediction.num_bins,
                 transform=self.prediction.transform).to(self.device)
+            self.target_dynamics = DynamicsNetwork(
+                latent_channels=LATENT_CHANNELS,
+                action_space=self.action_space,
+                support_size=self.dynamics.support_size,
+                num_bins=self.dynamics.num_bins,
+                transform=self.dynamics.transform).to(self.device)
+            self.target_value_prefix = ValuePrefixNetwork(
+                latent_channels=LATENT_CHANNELS,
+                hidden_size=self.value_prefix.hidden_size,
+                support_size=self.value_prefix.support_size,
+                num_bins=self.value_prefix.num_bins,
+                transform=self.value_prefix.transform,
+                head_channels=PREFIX_HEAD_CHANNELS,
+                fc_hidden=PREFIX_FC_HIDDEN).to(self.device)
             self._target_synced_at = None
+            self._target_snapshot = None
         if (self._target_synced_at is None
                 or self.training_steps - self._target_synced_at >= TARGET_MODEL_INTERVAL):
-            self.target_representation.load_state_dict(self.representation.state_dict())
-            self.target_prediction.load_state_dict(self.prediction.state_dict())
-            self.target_representation.eval()
-            self.target_prediction.eval()
+            online = ((self.representation, self.target_representation),
+                      (self.prediction, self.target_prediction),
+                      (self.dynamics, self.target_dynamics),
+                      (self.value_prefix, self.target_value_prefix))
+            if self._target_snapshot is None:
+                self._target_snapshot = [
+                    {k: v.detach().clone() for k, v in net.state_dict().items()}
+                    for net, _ in online]
+            for (net, target), snap in zip(online, self._target_snapshot):
+                target.load_state_dict(snap)
+                target.eval()
+            self._target_snapshot = [
+                {k: v.detach().clone() for k, v in net.state_dict().items()}
+                for net, _ in online]
             self._target_synced_at = self.training_steps
 
     def prepare_batch_paper(self, replay_buffer, batch_size, unroll_steps, action_space):

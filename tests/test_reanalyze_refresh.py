@@ -127,9 +127,11 @@ def test_bootstrap_comes_from_the_lagged_target_model(monkeypatch):
         assert batch["target_value"][b, 0] == pytest.approx(expected, rel=1e-4)
 
 
-def test_target_model_lags_the_online_network(monkeypatch):
-    """The whole point: mutating the online nets must NOT move the bootstrap
-    until the sync interval elapses."""
+def test_target_model_is_double_buffered(monkeypatch):
+    """EfficientZero's train.py: 'the interval of the current model and the
+    target model is between x and 2x' -- each sync loads the snapshot taken
+    at the PREVIOUS sync. So a mutation of the online nets must survive ONE
+    sync (which loads the pre-mutation snapshot) and land only after TWO."""
     monkeypatch.setattr(muzero, "USE_TARGET_MODEL", True)
     monkeypatch.setattr(muzero, "PER_ENABLED", False)
     monkeypatch.setattr(muzero, "TARGET_MODEL_INTERVAL", 200)
@@ -137,7 +139,7 @@ def test_target_model_lags_the_online_network(monkeypatch):
     trainer.training_steps = 0
     np.random.seed(8)
     traj = obs_traj([1.0] * 6, [0.0] * 6, truncated=True)
-    trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)   # creates + syncs
+    trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)   # creates + first sync
     frozen = target_value_of(trainer, traj[3]["obs"])
     with torch.no_grad():
         # Non-uniform noise: a constant shift on zero-init value weights
@@ -148,7 +150,10 @@ def test_target_model_lags_the_online_network(monkeypatch):
     trainer.training_steps = 100     # inside the interval: no re-sync
     trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)
     assert target_value_of(trainer, traj[3]["obs"]) == pytest.approx(frozen)
-    trainer.training_steps = 250     # past the interval: re-sync happens
+    trainer.training_steps = 250     # sync 2 loads the PRE-mutation snapshot
+    trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)
+    assert target_value_of(trainer, traj[3]["obs"]) == pytest.approx(frozen)
+    trainer.training_steps = 500     # sync 3 loads the post-mutation snapshot
     trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)
     assert target_value_of(trainer, traj[3]["obs"]) != pytest.approx(frozen)
 
@@ -162,7 +167,8 @@ def test_refresh_targets_researches_the_oldest_trajectories(monkeypatch):
     import ablation
     monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)
     run = object.__new__(ablation.Run)
-    run.trainer = types.SimpleNamespace(training_steps=500)
+    run.trainer = make_trainer()     # real nets: the refresh searches with the
+    run.trainer.training_steps = 500  # trainer's lagged TARGET model
     run.searcher = muzero.MCTSHelper(action_space=ACTIONS, device=CPU,
                                      network_ref=None, storage_ref=None)
     np.random.seed(9)
@@ -174,13 +180,21 @@ def test_refresh_targets_researches_the_oldest_trajectories(monkeypatch):
         t["born_step"] = 400
     old_policies = [t["target_policy"].copy() for t in old]
     new_policies = [t["target_policy"].copy() for t in new]
+    saved_nets = (run.searcher.network_manager.representation,
+                  run.searcher.network_manager.dynamics)
     run.replay = [new, old]          # order must not matter; age does
     run.refresh_targets(1)
-    assert all(t["born_step"] == 500 for t in old), "oldest not refreshed"
-    assert all(t["born_step"] == 400 for t in new), "newest wrongly refreshed"
+    # The rotation stamp is refreshed_step; born_step (the 4.3 horizon input)
+    # must NOT be touched -- fresh policies do not make old actions on-policy.
+    assert all(t.get("refreshed_step") == 500 for t in old), "oldest not refreshed"
+    assert all(t["born_step"] == 0 for t in old), "refresh restored the horizon"
+    assert all("refreshed_step" not in t for t in new), "newest wrongly refreshed"
     changed = any(not np.allclose(a, t["target_policy"])
                   for a, t in zip(old_policies, old))
     assert changed, "refresh did not replace any policy target"
     assert all(np.allclose(a, t["target_policy"])
                for a, t in zip(new_policies, new))
     assert all(t["priority"] > 0 for t in old)
+    # The searcher's own networks are restored after the target-model swap.
+    assert run.searcher.network_manager.representation is saved_nets[0]
+    assert run.searcher.network_manager.dynamics is saved_nets[1]
