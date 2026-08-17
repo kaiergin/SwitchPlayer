@@ -249,6 +249,30 @@ def test_batch_sampling_is_uniform_over_transitions():
         "of samples came from it")
 
 
+def test_padding_past_a_truncated_tail_uses_the_tails_value_target():
+    """Regression: padding asserted V=0 past every trajectory end. True for a
+    terminated tail (absorbing terminal); false past a TRUNCATED (capped)
+    tail, where the game goes on -- there padding now repeats the tail's own
+    value target."""
+    trainer = build_trainer()
+
+    def make_traj(truncated):
+        traj = [{"obs": np.zeros(1, dtype=np.uint8), "action": 0, "reward": 0.0,
+                 "target_policy": np.ones(ACTIONS) / ACTIONS, "target_value": 7.5,
+                 "has_policy_target": True} for _ in range(3)]
+        if truncated:
+            traj[-1]["truncated"] = True
+        return traj
+
+    np.random.seed(0)
+    batch = asyncio.run(trainer.prepare_batch([make_traj(True)], 4, 5, ACTIONS))
+    # Step 5 crosses the tail for every start index in a 3-long trajectory.
+    assert np.all(batch["target_value"][:, -1] == 7.5)
+
+    batch = asyncio.run(trainer.prepare_batch([make_traj(False)], 4, 5, ACTIONS))
+    assert np.all(batch["target_value"][:, -1] == 0.0)
+
+
 def test_train_step_runs_with_a_partial_mask():
     trainer = build_trainer()
     mask = np.zeros((2, 3), dtype=bool)

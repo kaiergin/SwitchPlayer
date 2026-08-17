@@ -543,6 +543,31 @@ def test_nstep_value_falls_back_to_the_network_when_no_search_lies_ahead(helper)
     assert with_behind == pytest.approx(without)
 
 
+def test_truncated_tail_bootstraps_even_when_the_horizon_overruns(helper):
+    """Regression: the horizon-overrun branch returned partial MC with an
+    implicit V=0 without ever consulting node.done -- so a TRUNCATED (capped)
+    tail still taught V=0 at a mid-game state, the exact bug the truncation
+    plumbing removed one consumer upstream. The horizon now clamps to the
+    trajectory and the tail's done flag decides."""
+    helper.create_tree_from_game(fake_trajectory(5), terminated=False)
+    traj = helper.current_trajectory
+    expected = sum(0.997 ** (k - 1) * traj[k].reward for k in range(1, 5))
+    expected += 0.997 ** 4 * traj[4].expanded_value
+    assert helper.nstep_value(0, n=10, discount=0.997) == pytest.approx(expected)
+    # The truncated tail itself gets an identity target, not zero.
+    assert helper.nstep_value(4, n=10, discount=0.997) == pytest.approx(
+        traj[4].expanded_value)
+
+
+def test_terminated_overrun_is_still_pure_monte_carlo(helper):
+    """The clamp must not change terminated semantics: a horizon crossing a
+    TRUE terminal consumes the remaining rewards and bootstraps nothing."""
+    helper.create_tree_from_game(fake_trajectory(5))
+    expected = sum(0.997 ** (k - 1) * helper.current_trajectory[k].reward
+                   for k in range(1, 5))
+    assert helper.nstep_value(0, n=10, discount=0.997) == pytest.approx(expected)
+
+
 def test_nstep_value_ignores_a_search_value_on_a_terminal_node(helper):
     """A terminal node's onward value is 0 by definition, even if a search ran
     there and recorded something else."""

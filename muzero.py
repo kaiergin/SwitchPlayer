@@ -390,8 +390,8 @@ def real_time_step_period(env, game_fps=GAME_FPS):
     """Seconds per agent decision corresponding to real-time play.
 
     Reads the env's frameskip rather than assuming one: MsPacman-v4 samples it
-    from (2, 5), so a decision covers 3.5 raw frames on average and real time is
-    ~17 decisions/second, not 60.
+    from ALE's integers(2, 5) -- {2,3,4}, mean 3.0 -- so a decision covers 3
+    raw frames on average and real time is 20 decisions/second, not 60.
     """
     skip = getattr(env.unwrapped, "_frameskip", None) or 1
     if isinstance(skip, (tuple, list)):
@@ -743,6 +743,14 @@ class NetworkHelper:
             self.rep_optimizer.load_state_dict(checkpoint['rep_optimizer_state_dict'])
             self.dyn_optimizer.load_state_dict(checkpoint['dyn_optimizer_state_dict'])
             self.pred_optimizer.load_state_dict(checkpoint['pred_optimizer_state_dict'])
+            # The prefix head was SAVED but never LOADED: every restart resumed
+            # with a fresh value-prefix head and optimizer while training_steps
+            # claimed otherwise. Guarded like the projector for old files.
+            if 'value_prefix_state_dict' in checkpoint:
+                self.value_prefix.load_state_dict(checkpoint['value_prefix_state_dict'])
+                self.prefix_optimizer.load_state_dict(checkpoint['prefix_optimizer_state_dict'])
+            else:
+                self.logger.info("Checkpoint predates the prefix head; keeping fresh init")
             # Checkpoints written before the SimSiam projector existed have no
             # entry for it; a fresh projector is fine (it is training-only and
             # carries no policy), so old checkpoints must keep loading.
@@ -1589,6 +1597,15 @@ class MCTSHelper:
             ahead = [j for j in search_values if j >= tail]
             if ahead:
                 tail = min(ahead)
+        # Clamp the horizon to the trajectory: the tail node's own done flag
+        # then decides terminal-vs-truncated. The unclamped early return below
+        # skipped that check entirely, so a TRUNCATED (capped) tail still got
+        # the implicit V=0 of a pure-MC cutoff -- the very bug the truncation
+        # plumbing was built to remove, resurfacing one consumer downstream.
+        # For idx at the tail itself this bootstraps the node's own network
+        # value (an identity target), which is the standard truncation
+        # boundary treatment.
+        tail = min(tail, len(traj) - 1)
         value, g = 0.0, 1.0
         for k in range(1, tail - idx + 1):
             if idx + k >= len(traj):
@@ -1883,6 +1900,12 @@ class TrainingHelper:
             traj = trajectories[np.random.choice(len(trajectories), p=traj_probs)]
             traj_length = len(traj)
             start_index = np.random.randint(0, traj_length)
+            # Padding past a TERMINATED tail asserts V=0 truthfully (absorbing
+            # terminal state). Past a TRUNCATED (capped) tail the game goes on,
+            # so padding repeats a mid-game frame: assert the tail's own value
+            # target there instead of a fabricated zero.
+            pad_value = (traj[-1]["target_value"]
+                         if traj[-1].get("truncated") else 0.0)
             
             # Prepare lists for unroll data.
             obs = []
@@ -1910,9 +1933,9 @@ class TrainingHelper:
                         actions.append(node["action"])
                 else:
                     obs.append(traj[traj_length - 1]["obs"])
-                    # If the trajectory doesn't have enough transitions, pad with zeros.
+                    # If the trajectory doesn't have enough transitions, pad.
                     target_policy.append(np.ones(action_space) / action_space)
-                    target_value.append(0.0)
+                    target_value.append(pad_value)
                     rewards.append(0.0)
                     has_policy.append(False)   # padding is not a real target
                     if step < unroll_steps:

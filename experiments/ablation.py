@@ -230,6 +230,15 @@ ARMS = {
 }
 
 
+# Arms defined before augmentation existed keep their archived meaning: any
+# arm that does not opt in explicitly runs WITHOUT augmentation, regardless of
+# the muzero module default. Only pong-kit/pong-kit2 opt in. Without this, the
+# USE_AUGMENTATION=True default retroactively changed every legacy arm --
+# most sharply breaking the pong-act-search vs pong-lr-3e-4 controlled pair.
+for _spec in ARMS.values():
+    _spec.setdefault("USE_AUGMENTATION", False)
+
+
 @contextlib.contextmanager
 def arm_config(arm):
     """Apply an arm's overrides to the muzero module, then restore."""
@@ -384,9 +393,12 @@ class Run:
         # position is never trained on its own search value.
         results = {}
         for idx in sorted(searched):
+            # muzero.-qualified, not the from-imports: these must stay
+            # arm-overridable at call time like every other knob.
             results[idx] = asyncio.run(self.searcher.run_full_mcts(
-                idx, num_simulations=TOTAL_MCTS_SIMS, sim_batches=MCTS_BATCHES,
-                c_puct=C_PUCT, discount=muzero.DISCOUNT))
+                idx, num_simulations=muzero.TOTAL_MCTS_SIMS,
+                sim_batches=muzero.MCTS_BATCHES,
+                c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT))
         search_values = {i: r[1] for i, r in results.items()}
         out = []
         for idx, (obs, action, reward, *_ ) in enumerate(evaluated):
@@ -399,6 +411,11 @@ class Run:
             out.append({"obs": obs, "action": action, "reward": reward,
                         "target_policy": policy, "target_value": value,
                         "has_policy_target": has_target})
+        if out:
+            # prepare_batch reads this to pad unroll windows that cross a
+            # capped tail with the tail's own value target instead of a
+            # fabricated terminal V=0.
+            out[-1]["truncated"] = not terminated
         return out
 
     # -- evaluation --------------------------------------------------------
@@ -564,7 +581,11 @@ def plot(path, out_dir):
 
 
 def main():
-    global ENV_NAME, ACTIONS, EPISODE_CAP, TAG
+    # FRAMESKIP was missing from this list: --frameskip set a main()-LOCAL,
+    # the banner printed the local ("skip 4"), and Run.__init__ read the module
+    # global -- still None -- so the env silently kept the stochastic skip the
+    # flag exists to remove. Every name assigned below MUST be declared here.
+    global ENV_NAME, ACTIONS, EPISODE_CAP, TAG, FRAMESKIP
     ap = argparse.ArgumentParser()
     ap.add_argument("--arms", nargs="+", default=["per-step", "value-prefix"],
                     choices=sorted(ARMS))

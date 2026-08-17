@@ -220,6 +220,21 @@ def test_checkpoint_roundtrips_the_projector(tmp_path):
     assert all(torch.equal(a[k], b[k]) for k in a)
 
 
+def test_checkpoint_roundtrips_the_prefix_head(tmp_path):
+    """Regression: value_prefix_state_dict was SAVED but never LOADED, so
+    every restart resumed with a fresh prefix head and optimizer while
+    training_steps claimed otherwise."""
+    from muzero import NetworkHelper
+    path = str(tmp_path / "ck.pth")
+    helper = NetworkHelper(action_space=ACTIONS, device=CPU, checkpoint_path=path)
+    helper.save_checkpoint(5, checkpoint_path=path)
+
+    reloaded = NetworkHelper(action_space=ACTIONS, device=CPU, checkpoint_path=path)
+    a = helper.value_prefix.state_dict()
+    b = reloaded.value_prefix.state_dict()
+    assert all(torch.equal(a[k], b[k]) for k in a)
+
+
 def test_pre_projector_checkpoint_still_loads(tmp_path):
     """Checkpoints written before SimSiam landed have no projector entry; they
     must load with a fresh projector rather than raising KeyError -- the
