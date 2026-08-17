@@ -212,6 +212,8 @@ ACT_SEARCH_SIMS = 8            # measured ~40% of a 60fps frame at this budget
 # so this is on the usual AlphaZero/MuZero scale. It is NOT comparable to the
 # values used before normalisation existed (61.8, then 32).
 C_PUCT = 1.25
+# EfficientZero's epsilon for the min-max normalizer's range (their 0.01).
+MINMAX_RANGE_FLOOR = 0.01
 
 # ---------------------------------------------------------------------------
 # Ray resource budget
@@ -296,7 +298,15 @@ class MinMaxStats:
 
     def normalize(self, value):
         if self.maximum > self.minimum:
-            return (value - self.minimum) / (self.maximum - self.minimum)
+            # EfficientZero Eq 10 (and mctx): floor the range, "when the data
+            # is limited, the small difference between the minimum and maximum
+            # values will result in overconfidence" -- without the floor, a
+            # hair-thin early-search Q spread is stretched across the full
+            # [0,1], amplifying noise into large normalized advantages that
+            # feed straight into the Gumbel sigma policy targets. Same failure
+            # family as the fixed c_scale bug, at smaller magnitude.
+            return (value - self.minimum) / max(
+                self.maximum - self.minimum, MINMAX_RANGE_FLOOR)
         return value
 
 # -----------------------------
@@ -932,14 +942,15 @@ class MCTSHelper:
                     await asyncio.sleep(1)
                     continue
                 else:
-                    game_trajectory, _ = game_trajectory_tuple
+                    game_trajectory, _, terminated = game_trajectory_tuple
                 if not game_trajectory:
                     self.logger.warning("Skipping empty game trajectory")
                     continue
                 self.logger.debug("Running MCTS_process")
                 trajectory = []
                 game_trajectory = self.eval_obs(game_trajectory=game_trajectory)
-                self.create_tree_from_game(game_trajectory=game_trajectory)
+                self.create_tree_from_game(game_trajectory=game_trajectory,
+                                           terminated=terminated)
                 if self.network_manager.training_steps < STEPS_UNTIL_MCTS:
                     self.logger.info("%s steps until MCTS", STEPS_UNTIL_MCTS - self.network_manager.training_steps)
                     for idx, (obs_sample, action_taken, reward, _, _, _) in enumerate(game_trajectory):
@@ -1005,6 +1016,8 @@ class MCTSHelper:
                             "has_policy_target": has_policy_target,
                         })
                 
+                if trajectory:
+                    trajectory[-1]["truncated"] = not terminated
                 await self.storage_manager.append_replay_buffer(trajectory)
         except Exception:
             # exception() rather than error(): this is the only record of why
@@ -1615,7 +1628,12 @@ class MCTSHelper:
         node = traj[tail]
         if node.done:
             return value
-        if search_values and tail in search_values:
+        # tail != idx guards the invariant three comments in this repo exist
+        # to protect: a position is NEVER trained on its own search value.
+        # The horizon clamp made tail == idx reachable (a truncated tail), and
+        # if that index was searched, the un-guarded lookup handed the
+        # position its own root value at full weight with zero reward anchor.
+        if search_values and tail in search_values and tail != idx:
             return value + g * search_values[tail]
         return value + g * node.expanded_value
 
@@ -1899,13 +1917,21 @@ class TrainingHelper:
         for _ in range(batch_size):
             traj = trajectories[np.random.choice(len(trajectories), p=traj_probs)]
             traj_length = len(traj)
-            start_index = np.random.randint(0, traj_length)
-            # Padding past a TERMINATED tail asserts V=0 truthfully (absorbing
-            # terminal state). Past a TRUNCATED (capped) tail the game goes on,
-            # so padding repeats a mid-game frame: assert the tail's own value
-            # target there instead of a fabricated zero.
-            pad_value = (traj[-1]["target_value"]
-                         if traj[-1].get("truncated") else 0.0)
+            truncated = bool(traj[-1].get("truncated"))
+            if truncated and traj_length > unroll_steps:
+                # Keep unroll windows off a TRUNCATED tail entirely: padding
+                # there fabricates rewards and teaches the dynamics a frozen
+                # mid-game frame the game never produced. (Terminated tails
+                # keep full-range starts -- their absorbing-state padding is
+                # true.) Tail positions still train as interior steps of
+                # earlier windows.
+                start_index = np.random.randint(0, traj_length - unroll_steps)
+            else:
+                start_index = np.random.randint(0, traj_length)
+            # Fallback for truncated trajectories too short to avoid padding:
+            # pad with the tail's frozen value target rather than a fabricated
+            # terminal V=0.
+            pad_value = traj[-1]["target_value"] if truncated else 0.0
             
             # Prepare lists for unroll data.
             obs = []
@@ -2038,7 +2064,10 @@ class MuZeroAgent:
                 frame_stack = push_frame(frame_stack, preprocessed_obs)
                 game_trajectory.append((frame_stack, 0, prev_reward))
 
-                await self.storage_manager.append_gameplay_buffer((game_trajectory, episode_reward))
+                # Carry the terminal/truncated distinction to reanalysis: ALE's
+                # TimeLimit truncation must not fabricate a terminal V=0.
+                await self.storage_manager.append_gameplay_buffer(
+                    (game_trajectory, episode_reward, terminated))
         except Exception:
             self.logger.exception("gameplay_process failed")
         self.logger.info("Gameplay process exiting")

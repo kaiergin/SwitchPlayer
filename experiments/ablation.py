@@ -38,9 +38,10 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import muzero
-from muzero import (C_PUCT, IMAGE_RESHAPE, LATENT_CHANNELS, MCTS_BATCHES, MCTSHelper,
-                    TOTAL_MCTS_SIMS, TrainingHelper, initial_frame_stack,
-                    preprocess_frame, push_frame)
+# Constants that arms may override are NEVER from-imported here -- they are
+# read muzero.-qualified at call time so overrides genuinely apply.
+from muzero import (IMAGE_RESHAPE, LATENT_CHANNELS, MCTSHelper, TrainingHelper,
+                    initial_frame_stack, preprocess_frame, push_frame)
 from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
                       RepresentationNetwork, ValuePrefixNetwork)
 
@@ -514,7 +515,9 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
 
             if it % eval_every == 0 or it == iterations:
                 metrics = run.evaluate()
-                record = {"arm": arm, "seed": seed, "iteration": it,
+                record = {"arm": arm, "seed": seed,
+                          "env": ENV_NAME, "frameskip": FRAMESKIP,
+                          "iteration": it,
                           "train_steps": run.trainer.training_steps,
                           "elapsed_s": round(time.time() - started, 1), **metrics}
                 with open(out, "a") as fh:
@@ -615,8 +618,14 @@ def main():
         EPISODE_CAP = args.episode_cap
     if args.frameskip:
         FRAMESKIP = args.frameskip
+        # A frameskip override is a DIFFERENT MDP: suffix every output file so
+        # fixed-skip rows can never mix into a stochastic-skip history (the
+        # per-row env/frameskip fields in the jsonl are the second line of
+        # defense).
+        TAG += f"-skip{args.frameskip}"
     if args.actions:
         ACTIONS = args.actions
+        TAG += f"-act{args.actions}"
     elif args.env != "MsPacman-v4":
         import gymnasium as gym
         probe = gym.make(args.env)

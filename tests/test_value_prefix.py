@@ -166,6 +166,10 @@ def test_prediction_depends_on_history_not_just_the_latest_latent(prefix_net):
     """The whole point of the LSTM. Feed the same latent from two different
     histories; identical outputs would mean the recurrence is doing nothing."""
     prefix_net.eval()
+    with torch.no_grad():
+        # The final layer is zero-initialized (decodes 0 for any history);
+        # give it weights so the recurrence is visible at the output.
+        torch.nn.init.normal_(prefix_net.fc.weight, std=0.1)
     same = latents(1)
     with torch.no_grad():
         a = prefix_net(same, prefix_net.initial_state(1, CPU))[0]
@@ -193,6 +197,11 @@ def test_scalar_decodes_inside_the_support(prefix_net):
 
 def test_gradients_reach_the_lstm(prefix_net):
     prefix_net.train()
+    with torch.no_grad():
+        # Through a zero-initialized final layer no gradient reaches the LSTM
+        # on the very first backward; give the layer weights, as one optimizer
+        # step would.
+        torch.nn.init.normal_(prefix_net.fc.weight, std=0.1)
     state = prefix_net.initial_state(4, CPU)
     _, logits, _ = prefix_net(latents(4), state)
     logits.sum().backward()

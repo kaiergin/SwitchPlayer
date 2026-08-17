@@ -109,13 +109,23 @@ def test_train_step_reads_use_h_transform_at_call_time():
     np.random.seed(3)
     batch = fake_batch(2, muzero.UNROLL_STEPS, mask)
     saved = muzero.USE_H_TRANSFORM
+
+    def second_step_loss():
+        # TWO steps: with zero-initialized heads the FIRST loss is the flat
+        # cross-entropy against uniform logits, identical wherever the target
+        # mass sits -- only after one update do the heads move toward
+        # transform-dependent targets and the losses separate.
+        trainer = build_trainer()
+        asyncio.run(trainer.train_step(batch))
+        return asyncio.run(trainer.train_step(batch))
+
     try:
         torch.manual_seed(0)
         muzero.USE_H_TRANSFORM = True
-        loss_on = asyncio.run(build_trainer().train_step(batch))
+        loss_on = second_step_loss()
         torch.manual_seed(0)
         muzero.USE_H_TRANSFORM = False
-        loss_off = asyncio.run(build_trainer().train_step(batch))
+        loss_off = second_step_loss()
     finally:
         muzero.USE_H_TRANSFORM = saved
     assert np.isfinite(loss_on) and np.isfinite(loss_off)

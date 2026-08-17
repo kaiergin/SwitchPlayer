@@ -128,7 +128,15 @@ class PredictionNetwork(nn.Module):
         # Value head now outputs categorical logits instead of a single scalar.
         self.value_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
         self.value_fc = nn.Linear(32 * pool[0] * pool[1], num_bins)
-        
+
+        # EfficientZero A.1: zero the final head layers, so at init the
+        # categorical heads decode to exactly 0 (uniform logits over a
+        # symmetric support) and the policy is exactly uniform -- warmup
+        # searches and bootstraps start neutral instead of from init noise.
+        for fc in (self.value_fc, self.policy_fc):
+            nn.init.zeros_(fc.weight)
+            nn.init.zeros_(fc.bias)
+
         self.support_size = support_size
         self.num_bins = num_bins
         
@@ -173,6 +181,9 @@ class DynamicsNetwork(nn.Module):
         # Reward head now outputs categorical logits.
         self.reward_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
         self.reward_fc = nn.Linear(32 * pool[0] * pool[1], num_bins)
+        # EfficientZero A.1 zero-init: reward decodes exactly 0 at init.
+        nn.init.zeros_(self.reward_fc.weight)
+        nn.init.zeros_(self.reward_fc.bias)
         
     def forward(self, latent, action):
         batch_size = latent.size(0)
@@ -289,6 +300,9 @@ class ValuePrefixNetwork(nn.Module):
         self.lstm = nn.LSTM(input_size=features, hidden_size=hidden_size)
         self.norm_out = nn.BatchNorm1d(hidden_size)
         self.fc = nn.Linear(hidden_size, num_bins)
+        # EfficientZero A.1 zero-init: the prefix decodes exactly 0 at init.
+        nn.init.zeros_(self.fc.weight)
+        nn.init.zeros_(self.fc.bias)
 
     def initial_state(self, batch_size, device):
         """Zeroed hidden state: no reward accumulated yet."""

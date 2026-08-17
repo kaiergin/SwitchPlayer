@@ -278,6 +278,24 @@ def test_padding_past_a_truncated_tail_uses_the_tails_value_target():
     assert np.all(batch["target_value"][:, -1] == 0.0)
 
 
+def test_unroll_windows_avoid_a_truncated_tail():
+    """When a truncated trajectory is longer than the unroll, no window may
+    cross its tail: padding there fabricates rewards and teaches the dynamics
+    a frozen mid-game frame."""
+    trainer = build_trainer()
+
+    def make_traj(length):
+        traj = [{"obs": np.zeros(1, dtype=np.uint8), "action": 0, "reward": 1.0,
+                 "target_policy": np.ones(ACTIONS) / ACTIONS, "target_value": 7.5,
+                 "has_policy_target": True} for _ in range(length)]
+        traj[-1]["truncated"] = True
+        return traj
+
+    np.random.seed(0)
+    batch = asyncio.run(trainer.prepare_batch([make_traj(9)], 16, 5, ACTIONS))
+    assert np.all(batch["rewards"] == 1.0), "a window crossed the truncated tail"
+
+
 def test_train_step_runs_with_a_partial_mask():
     trainer = build_trainer()
     mask = np.zeros((2, 3), dtype=bool)

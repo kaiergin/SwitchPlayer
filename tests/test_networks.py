@@ -176,6 +176,27 @@ def test_training_copies_stay_in_train_mode():
 
 
 # --------------------------------------------------------------------------
+# Zero-initialized heads (EfficientZero A.1)
+# --------------------------------------------------------------------------
+def test_heads_decode_to_exactly_zero_at_init(latent):
+    """Zeroed final layers: uniform logits over a symmetric support decode to
+    exactly 0, and the policy starts exactly uniform -- warmup searches and
+    bootstraps begin neutral rather than from init noise."""
+    pred = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
+                             support_size=2000, num_bins=BINS)
+    dyn = DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
+                          support_size=400, num_bins=BINS)
+    with torch.no_grad():
+        policy_logits, value, _ = pred(latent)
+        _, reward, _ = dyn(latent, torch.zeros(2, dtype=torch.long))
+    assert torch.allclose(policy_logits, torch.zeros_like(policy_logits))
+    # Exactly-uniform logits decode to ~0 up to float32 expectation rounding
+    # over the support (a few 1e-5 at the +/-2000 value support).
+    assert torch.allclose(value, torch.zeros_like(value), atol=1e-3)
+    assert torch.allclose(reward, torch.zeros_like(reward), atol=1e-3)
+
+
+# --------------------------------------------------------------------------
 # Hidden-state min-max scaling (MuZero appendix G)
 # --------------------------------------------------------------------------
 def test_representation_latent_is_scaled_to_unit_range(latent):
@@ -262,6 +283,9 @@ def test_decode_honours_the_transform_flag(latent):
     dyn = DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
                           support_size=400, num_bins=BINS, transform=False)
     with torch.no_grad():
+        # The reward head is zero-initialized (decodes exactly 0 either way),
+        # so give it weights for the transform flag to discriminate on.
+        torch.nn.init.normal_(dyn.reward_fc.weight, std=0.5)
         _, linear, _ = dyn(latent, torch.zeros(2, dtype=torch.long))
         dyn.transform = True
         _, transformed, _ = dyn(latent, torch.zeros(2, dtype=torch.long))

@@ -23,3 +23,5 @@ venv/
 
 # Benchmark output
 benchmarks/results/
+
+checkpoint-2025-04-17-pre-resize.pth.bak

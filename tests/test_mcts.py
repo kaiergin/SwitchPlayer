@@ -570,6 +570,17 @@ def test_truncated_tail_bootstraps_even_when_the_horizon_overruns(helper):
         traj[4].expanded_value)
 
 
+def test_truncated_tail_never_bootstraps_its_own_search_value(helper):
+    """Round-3 regression: the horizon clamp made tail == idx reachable, and
+    a SEARCHED truncated tail then received its own root value as its own
+    target at full weight -- violating the never-your-own-search-value
+    invariant. It must fall back to the network's expanded_value."""
+    helper.create_tree_from_game(fake_trajectory(5), terminated=False)
+    tail = helper.current_trajectory[4]
+    got = helper.nstep_value(4, n=10, discount=0.997, search_values={4: 999.0})
+    assert got == pytest.approx(tail.expanded_value)
+
+
 def test_terminated_overrun_is_still_pure_monte_carlo(helper):
     """The clamp must not change terminated semantics: a horizon crossing a
     TRUE terminal consumes the remaining rewards and bootstraps nothing."""

@@ -87,6 +87,17 @@ def test_normalize_is_identity_before_a_range_exists():
     assert stats.normalize(7.0) == 7.0  # max == min, still no range
 
 
+def test_a_hair_thin_range_is_floored_not_stretched():
+    """EfficientZero Eq 10's epsilon: without the floor, a tiny early-search
+    Q spread is stretched across the whole [0,1], amplifying noise into large
+    normalized advantages -- which feed the Gumbel sigma policy targets."""
+    stats = MinMaxStats()
+    stats.update(100.0)
+    stats.update(100.0001)
+    assert stats.normalize(100.0001) == pytest.approx(1e-4 / 0.01)
+    assert stats.normalize(100.0001) < 0.02
+
+
 def test_normalize_maps_observed_range_onto_unit_interval():
     stats = MinMaxStats()
     for v in (100.0, 900.0, 500.0):
