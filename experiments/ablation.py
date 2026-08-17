@@ -542,7 +542,9 @@ def plot(path, out_dir):
         print("no results to plot")
         return
     arms = sorted({r["arm"] for r in rows})
-    colours = dict(zip(arms, ["#0D6E75", "#B4531A", "#5A6472", "#7A3E8F", "#2E7D32"]))
+    palette = ["#0D6E75", "#B4531A", "#5A6472", "#7A3E8F", "#2E7D32"]
+    # Cycle rather than zip: a sixth arm in one file used to KeyError here.
+    colours = {arm: palette[i % len(palette)] for i, arm in enumerate(arms)}
 
     def series(arm, key):
         by_iter = {}

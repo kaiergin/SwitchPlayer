@@ -1912,7 +1912,16 @@ class TrainingHelper:
         # short they are -- a 100-step death was sampled 6x as often per
         # transition as a 600-step run.
         trajectories = list(replay_buffer)
-        lengths = np.array([len(t) for t in trajectories], dtype=np.float64)
+
+        def legal_roots(t):
+            # A truncated trajectory long enough for window avoidance offers
+            # only len - unroll legal window roots; weighting it by its full
+            # length would oversample every legal root by len/(len - unroll).
+            if t and t[-1].get("truncated") and len(t) > unroll_steps:
+                return len(t) - unroll_steps
+            return len(t)
+
+        lengths = np.array([legal_roots(t) for t in trajectories], dtype=np.float64)
         traj_probs = lengths / lengths.sum()
         for _ in range(batch_size):
             traj = trajectories[np.random.choice(len(trajectories), p=traj_probs)]

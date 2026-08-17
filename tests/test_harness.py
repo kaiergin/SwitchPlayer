@@ -16,19 +16,39 @@ EXPERIMENTS = pathlib.Path(__file__).resolve().parent.parent / "experiments"
 ABLATION = EXPERIMENTS / "ablation.py"
 
 
+def _assigned_names(node):
+    """Every Name that `node` (a statement or function body) assigns,
+    including tuple/starred unpacking, augmented, and annotated assignments
+    -- the round-4 audit showed the plain-Assign-only version let
+    `A, B = ...` shadow module globals invisibly."""
+    names = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Assign):
+            targets = n.targets
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+            targets = [n.target]
+        else:
+            continue
+        for t in targets:
+            for sub in ast.walk(t):
+                if isinstance(sub, ast.Name):
+                    names.add(sub.id)
+    return names
+
+
 def test_every_module_global_assigned_in_main_is_declared():
     """Any module-level name that main() assigns MUST be in its global
     declaration, or the assignment creates a silent local shadow."""
     tree = ast.parse(ABLATION.read_text(encoding="utf-8"))
-    module_names = {t.id for node in tree.body if isinstance(node, ast.Assign)
-                    for t in node.targets if isinstance(t, ast.Name)}
+    module_names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            module_names |= _assigned_names(node)
     main = next(n for n in tree.body
                 if isinstance(n, ast.FunctionDef) and n.name == "main")
     declared = {name for n in ast.walk(main)
                 if isinstance(n, ast.Global) for name in n.names}
-    assigned = {t.id for n in ast.walk(main) if isinstance(n, ast.Assign)
-                for t in n.targets if isinstance(t, ast.Name)}
-    shadowed = (assigned & module_names) - declared
+    shadowed = (_assigned_names(main) & module_names) - declared
     assert not shadowed, (
         f"main() assigns module-level names without declaring them global: "
         f"{sorted(shadowed)} -- the --frameskip silent-no-op bug class")

@@ -278,6 +278,30 @@ def test_padding_past_a_truncated_tail_uses_the_tails_value_target():
     assert np.all(batch["target_value"][:, -1] == 0.0)
 
 
+def test_truncated_trajectories_are_weighted_by_their_legal_roots():
+    """Round-4 finding: weighting a truncated trajectory by its FULL length
+    oversampled each of its legal window roots by len/(len - unroll). A
+    truncated trajectory with 10 legal roots must be sampled like a
+    terminated one with 10 positions."""
+    trainer = build_trainer()
+
+    def make_traj(length, tag, truncated):
+        traj = [{"obs": np.zeros(1, dtype=np.uint8), "action": 0, "reward": tag,
+                 "target_policy": np.ones(ACTIONS) / ACTIONS, "target_value": 0.0,
+                 "has_policy_target": True} for _ in range(length)]
+        if truncated:
+            traj[-1]["truncated"] = True
+        return traj
+
+    replay = [make_traj(15, 1.0, truncated=True),   # 15 - 5 = 10 legal roots
+              make_traj(10, 0.0, truncated=False)]  # 10 legal roots
+    np.random.seed(0)
+    batch = asyncio.run(trainer.prepare_batch(replay, 400, 5, ACTIONS))
+    truncated_fraction = (batch["rewards"][:, 1] == 1.0).mean()
+    assert 0.40 < truncated_fraction < 0.60, (
+        f"equal legal roots should sample ~50/50, got {truncated_fraction:.0%}")
+
+
 def test_unroll_windows_avoid_a_truncated_tail():
     """When a truncated trajectory is longer than the unroll, no window may
     cross its tail: padding there fabricates rewards and teaches the dynamics
