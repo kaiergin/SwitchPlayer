@@ -108,14 +108,37 @@ def target_value_of(trainer, obs):
     return float(v.squeeze())
 
 
+def online_value_of(trainer, obs):
+    trainer.representation.eval(), trainer.prediction.eval()
+    with torch.no_grad():
+        latent = trainer.representation(
+            torch.tensor(obs[None], dtype=torch.float32) / 255.0)
+        _, v, _ = trainer.prediction(latent)
+    return float(v.squeeze())
+
+
 def test_bootstrap_comes_from_the_lagged_target_model(monkeypatch):
+    """Round-9 finding closed twice over: the trajectory is LONGER than
+    TD_STEPS (so non-terminal tails populate the pending forward -- with a
+    5-record trajectory that branch was dead code), and the online nets are
+    mutated AFTER the sync (with zero-init heads every net agreed on v=0, so
+    rerouting the bootstrap through the online nets was invisible)."""
     monkeypatch.setattr(muzero, "USE_TARGET_MODEL", True)
     monkeypatch.setattr(muzero, "PER_ENABLED", False)
     trainer = make_trainer()
     trainer.training_steps = 0
     np.random.seed(7)
-    traj = obs_traj([1.0] * 5, [50.0] * 5)   # stored values are 50: must be ignored
-    batch = trainer.prepare_batch_paper([traj], 6, 2, ACTIONS)
+    traj = obs_traj([1.0] * 16, [50.0] * 16)   # stored values are 50: must be ignored
+    trainer.prepare_batch_paper([traj], 4, 2, ACTIONS)   # creates + first sync
+    with torch.no_grad():
+        torch.manual_seed(2)
+        for net in (trainer.representation, trainer.prediction):
+            for p in net.parameters():
+                p.add_(torch.randn_like(p))
+    # Batch 12 of 15 legal roots without replacement: at least 2 windows MUST
+    # have a non-terminal tail (starts 0..4), so the pending path is exercised.
+    batch = trainer.prepare_batch_paper([traj], 12, 2, ACTIONS)
+    pending_tails = 0
     for b, ref in enumerate(batch["sample_refs"]):
         start = next(i for i, t in enumerate(traj) if t is ref)
         rsum, g, tail = muzero.paper_value_parts(traj, start, muzero.TD_STEPS,
@@ -123,8 +146,14 @@ def test_bootstrap_comes_from_the_lagged_target_model(monkeypatch):
         if tail == len(traj) - 1 and not traj[tail].get("truncated"):
             expected = rsum
         else:
-            expected = rsum + g * target_value_of(trainer, traj[tail]["obs"])
+            pending_tails += 1
+            tv = target_value_of(trainer, traj[tail]["obs"])
+            # Potency guard: the mutated ONLINE net must disagree with the
+            # lagged target net here, or this test cannot see a reroute.
+            assert abs(online_value_of(trainer, traj[tail]["obs"]) - tv) > 0.5
+            expected = rsum + g * tv
         assert batch["target_value"][b, 0] == pytest.approx(expected, rel=1e-4)
+    assert pending_tails >= 2, "no window exercised the target-model forward"
 
 
 def probe_all_four_targets(trainer, obs):
@@ -243,6 +272,43 @@ def test_refresh_targets_researches_the_oldest_trajectories(monkeypatch):
     assert run.searcher.network_manager.dynamics is saved_nets[1]
 
 
+def test_refresh_priorities_use_the_age_shrunk_horizon(monkeypatch):
+    """Round-9 finding: every refresh test ran with OFFPOLICY_DECAY_STEPS
+    None, where paper_horizon(age) == TD_STEPS -- the changed line was only
+    exercised in the regime where it equals the old code. Here the horizon
+    genuinely shrinks (age 500, decay 100 -> horizon 5 of 10) and the
+    trajectory is longer than TD_STEPS so the two horizons give different z."""
+    sys.path.insert(0, str(__import__("pathlib").Path(
+        __file__).resolve().parent.parent / "experiments"))
+    import ablation
+    monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)
+    monkeypatch.setattr(muzero, "OFFPOLICY_DECAY_STEPS", 100)
+    run = object.__new__(ablation.Run)
+    run.trainer = make_trainer()
+    run.trainer.training_steps = 500
+    run.searcher = muzero.MCTSHelper(action_space=ACTIONS, device=CPU,
+                                     network_ref=None, storage_ref=None)
+    np.random.seed(17)
+    traj = obs_traj([1.0] * 12, [5.0] * 12)
+    for t in traj:
+        t["born_step"] = 0
+    run.replay = [traj]
+    run.refresh_targets(1)
+    shrunk = muzero.paper_horizon(500)
+    assert shrunk == 5
+    for idx, t in enumerate(traj):
+        z_shrunk = muzero.paper_value_target(traj, idx, shrunk, muzero.DISCOUNT)
+        assert t["priority"] == pytest.approx(
+            abs(t["root_value"] - z_shrunk) + muzero.PER_EPS)
+    # Potency: at the head, the full-horizon z differs, so a regression to
+    # TD_STEPS (or to keying on born_step instead of age) is visible.
+    z_full = muzero.paper_value_target(traj, 0, muzero.TD_STEPS, muzero.DISCOUNT)
+    z_head = muzero.paper_value_target(traj, 0, shrunk, muzero.DISCOUNT)
+    assert abs(z_full - z_head) > 0.5
+    assert traj[0]["priority"] != pytest.approx(
+        abs(traj[0]["root_value"] - z_full) + muzero.PER_EPS)
+
+
 def test_refresh_searches_through_the_lagged_target_model(monkeypatch):
     """Counterfactual-proof routing test (round-8 finding: the plain refresh
     test passes even when refresh searches the ONLINE nets, because target and
@@ -253,6 +319,10 @@ def test_refresh_searches_through_the_lagged_target_model(monkeypatch):
         __file__).resolve().parent.parent / "experiments"))
     import ablation
     monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)
+    # The repro arm searches WITH the prefix net in the tree; without this the
+    # search never reads nm.value_prefix and the test is blind to that leg of
+    # the swap (round-9 finding: deleting the value_prefix swap stayed green).
+    monkeypatch.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", True)
     run = object.__new__(ablation.Run)
     run.trainer = make_trainer()
     run.trainer.training_steps = 500

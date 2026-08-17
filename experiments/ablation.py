@@ -549,14 +549,18 @@ class Run:
                     # Priority against the z the trainer will actually compute
                     # for this position: the 4.3 age-shrunk horizon, not the
                     # full TD_STEPS (refresh candidates are the oldest, where
-                    # it shrinks most).
+                    # it shrinks most). The bootstrap is the just-refreshed
+                    # stored search value -- MuZero's canonical priority --
+                    # which tracks, without exactly equaling, the trainer's
+                    # target-net value-head bootstrap.
                     age = max(0, now - t.get("born_step", now))
                     z0 = muzero.paper_value_target(
                         traj, idx, muzero.paper_horizon(age), muzero.DISCOUNT)
                     t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
-                    # Stamped only after every search in the trajectory
-                    # completed: a mid-refresh failure must not leave a
-                    # half-refreshed trajectory looking fresh to the rotation.
+                for t in traj:
+                    # Stamped last, in its own pass: freshness() reads the head
+                    # record, which must only carry a stamp once the whole
+                    # trajectory -- searches AND priorities -- completed.
                     t["refreshed_step"] = now
         finally:
             (nm.representation, nm.prediction,
