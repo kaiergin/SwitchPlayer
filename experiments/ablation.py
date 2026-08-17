@@ -694,8 +694,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
 
             if it % eval_every == 0 or it == iterations:
                 metrics = run.evaluate()
+                # The EFFECTIVE skip: the wrapper stack defaults to 4 when
+                # --frameskip is omitted; recording the raw flag (None) there
+                # would misdescribe the env actually run.
+                eff_skip = (FRAMESKIP or 4) if muzero.USE_ATARI_WRAPPERS else FRAMESKIP
                 record = {"arm": arm, "seed": seed,
-                          "env": ENV_NAME, "frameskip": FRAMESKIP,
+                          "env": ENV_NAME, "frameskip": eff_skip,
                           "wrappers": bool(muzero.USE_ATARI_WRAPPERS),
                           "iteration": it,
                           "train_steps": run.trainer.training_steps,

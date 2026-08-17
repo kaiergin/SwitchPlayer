@@ -158,6 +158,24 @@ def test_target_model_is_double_buffered(monkeypatch):
     assert target_value_of(trainer, traj[3]["obs"]) != pytest.approx(frozen)
 
 
+def test_truncated_padding_bootstraps_through_the_target_model(monkeypatch):
+    """Padded positions past a truncated tail must use the target model's
+    value of the tail obs, not the aging stored root value."""
+    monkeypatch.setattr(muzero, "USE_TARGET_MODEL", True)
+    monkeypatch.setattr(muzero, "PER_ENABLED", False)
+    trainer = make_trainer()
+    trainer.training_steps = 0
+    np.random.seed(11)
+    # Short truncated trajectory: unroll 4 overruns it, forcing padding.
+    traj = obs_traj([1.0] * 2, [50.0] * 2, truncated=True)   # stored 50s must be ignored
+    batch = trainer.prepare_batch_paper([traj], 4, 4, ACTIONS)
+    tail_v = target_value_of(trainer, traj[-1]["obs"])
+    assert abs(tail_v) < 1.0         # fresh zero-init heads: nowhere near 50
+    for b in range(4):               # every row roots at idx 0 (only legal root)
+        for step in (2, 3, 4):       # positions past the truncated tail
+            assert batch["target_value"][b, step] == pytest.approx(tail_v, rel=1e-4)
+
+
 # --------------------------------------------------------------------------
 # Policy re-searching
 # --------------------------------------------------------------------------

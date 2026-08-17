@@ -2200,8 +2200,16 @@ class TrainingHelper:
                     pols.append(np.ones(action_space) / action_space)
                     # Absorbing padding: 0 is true past a terminal; truncated
                     # windows only reach here on short trajectories, where the
-                    # tail's stored value stands in.
-                    vals.append(t["root_value"] if t.get("truncated") else 0.0)
+                    # tail's value stands in -- refreshed through the target
+                    # model like every other bootstrap, not the aging stored
+                    # one.
+                    if t.get("truncated") and use_tm:
+                        vals.append(0.0)
+                        entry = pending.setdefault(
+                            (id(traj), L - 1), [t["obs"], []])
+                        entry[1].append((len(batch_value), step, 1.0))
+                    else:
+                        vals.append(t["root_value"] if t.get("truncated") else 0.0)
                     has.append(False)
                     if step < unroll_steps:
                         actions.append(0)
