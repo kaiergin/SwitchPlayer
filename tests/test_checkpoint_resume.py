@@ -151,16 +151,84 @@ def test_resume_prunes_stale_timeline_rows(tmp_path):
     assert ablation.prune_stale_rows(out, "effzero-repro", 0, start_it=20) == 0
 
 
+def write_rows(out, rows):
+    import json
+    with open(out, "w") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+
 def test_fresh_start_refuses_an_existing_checkpoint(tmp_path):
     """Audit finding: a fresh run at the same path clobbered a killed run's
     resumable state at its first save; its completion marker then satisfied
     the original run's later --resume silently."""
-    ck = tmp_path / "resume.ckpt"
-    ablation.refuse_unresumed_checkpoint(ck, resume=False)   # missing: fine
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    ablation.refuse_conflicting_state(ck, out, "a", 0, False, False)  # clean: fine
     ck.write_bytes(b"x")
-    ablation.refuse_unresumed_checkpoint(ck, resume=True)    # resuming: fine
+    ablation.refuse_conflicting_state(ck, out, "a", 0, True, False)   # resuming: fine
     with pytest.raises(SystemExit, match="--resume"):
-        ablation.refuse_unresumed_checkpoint(ck, resume=False)
+        ablation.refuse_conflicting_state(ck, out, "a", 0, False, False)
+
+
+def test_fresh_start_refuses_when_rows_exist_without_a_checkpoint(tmp_path):
+    """Audit round-2 HIGH: every no-checkpoint path (pre-checkpointing runs,
+    kills before the first save, --checkpoint-every 0) could append a second
+    timeline over existing rows. Protection must key on the ROWS, not just
+    the checkpoint."""
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
+    with pytest.raises(SystemExit, match="--overwrite"):        # fresh
+        ablation.refuse_conflicting_state(ck, out, "a", 0, False, False)
+    with pytest.raises(SystemExit, match="--overwrite"):        # resume, no ck
+        ablation.refuse_conflicting_state(ck, out, "a", 0, True, False)
+    # Other (arm, seed) pairs are unaffected.
+    ablation.refuse_conflicting_state(ck, out, "a", 1, False, False)
+    ablation.refuse_conflicting_state(ck, out, "b", 0, False, False)
+
+
+def test_overwrite_drops_rows_and_checkpoint_and_proceeds(tmp_path):
+    import json
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    ck.write_bytes(b"x")
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10},
+                     {"arm": "a", "seed": 1, "iteration": 10}])
+    ablation.refuse_conflicting_state(ck, out, "a", 0, False, True)
+    assert not ck.exists()
+    kept = [json.loads(l) for l in open(out)]
+    assert kept == [{"arm": "a", "seed": 1, "iteration": 10}]
+
+
+def test_torn_final_line_is_dropped_but_midfile_corruption_raises(tmp_path):
+    """Audit round-2 MEDIUM: a kill mid-append leaves a partial final line;
+    prune (and plot) must drop it rather than crash -- but corruption
+    mid-file is not a kill artifact and must still raise."""
+    import json
+    out = tmp_path / "ablation.jsonl"
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
+    with open(out, "a") as fh:
+        fh.write('{"arm": "a", "se')          # torn append
+    assert ablation.prune_stale_rows(out, "a", 0, start_it=99) == 1
+    assert [json.loads(l) for l in open(out)] == [
+        {"arm": "a", "seed": 0, "iteration": 10}]
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
+    with open(out, "r+") as fh:
+        content = fh.read()
+    with open(out, "w") as fh:
+        fh.write('{"torn": tr\n' + content)   # corrupt FIRST line
+    with pytest.raises(Exception):
+        ablation.prune_stale_rows(out, "a", 0, start_it=99)
+
+
+def test_run_expect_covers_the_full_protocol(monkeypatch):
+    """Audit round-2 LOW: episode_cap/eval_every joined the validated recipe
+    but nothing pinned it -- reverting that hunk left the suite green."""
+    monkeypatch.setattr(ablation, "EPISODE_CAP", 3000)
+    e = ablation.run_expect("effzero-repro", 0, 90, 2000, 1, 10)
+    assert e["episode_cap"] == 3000
+    assert e["eval_every"] == 10
+    assert set(e) == {"arm", "seed", "env", "iterations",
+                      "train_steps_per_iter", "episodes_per_iter",
+                      "episode_cap", "eval_every"}
 
 
 def test_failed_save_preserves_the_previous_checkpoint(tmp_path, monkeypatch):

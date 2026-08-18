@@ -722,8 +722,12 @@ def load_run_checkpoint(run, path, expect):
     # the error, not a skip.
     for key, want in expect.items():
         if state.get(key) != want:
-            raise ValueError(f"resume mismatch: checkpoint {key}={state.get(key)!r}"
-                             f" but this invocation has {want!r}")
+            have = (repr(state[key]) if key in state
+                    else "absent (checkpoint predates this field)")
+            raise ValueError(
+                f"resume mismatch: checkpoint {key}={have} but this "
+                f"invocation has {want!r}. Rerun with the original recipe, "
+                f"or --overwrite to discard the old state.")
     if state.get("completed"):
         return None
     for n in NET_NAMES:
@@ -757,54 +761,128 @@ def mark_run_completed(path, meta):
     os.replace(tmp, path)
 
 
+def read_rows_tolerant(path):
+    """jsonl rows, tolerating ONE torn final line (a kill mid-append is not
+    atomic; the torn tail is by definition stale for the dead writer) --
+    returned as (rows, torn) with torn=True when a final partial line was
+    dropped. Corruption anywhere else still raises: that is not a kill
+    artifact, and silently skipping it would hide real damage.
+
+    NOTE: one TAG's jsonl has ONE writer at a time. The harness is a
+    single-process design; a second same-TAG run appending concurrently can
+    race prune's read-rewrite and lose rows."""
+    lines = [l for l in open(path) if l.strip()]
+    rows = []
+    for i, l in enumerate(lines):
+        try:
+            rows.append(json.loads(l))
+        except json.JSONDecodeError:
+            if i == len(lines) - 1:
+                return rows, True
+            raise
+    return rows, False
+
+
 def prune_stale_rows(out, arm, seed, start_it):
     """A kill between an eval row and the next checkpoint leaves jsonl rows
     from the abandoned timeline; the resumed run re-runs those iterations
     and appends its own rows, and plot() would average both timelines as if
     they were extra seeds. Drop this (arm, seed)'s rows beyond the
-    checkpoint before continuing. Returns the number pruned."""
+    checkpoint (start_it=0 drops them all), plus any torn final line the
+    kill left. Returns the number of lines dropped."""
     out = pathlib.Path(out)
     if not out.exists():
         return 0
-    rows = [json.loads(l) for l in open(out) if l.strip()]
+    rows, torn = read_rows_tolerant(out)
     keep = [r for r in rows
             if not (r.get("arm") == arm and r.get("seed") == seed
                     and r.get("iteration", 0) > start_it)]
-    if len(keep) == len(rows):
+    if len(keep) == len(rows) and not torn:
         return 0
     tmp = pathlib.Path(str(out) + ".tmp")
     with open(tmp, "w") as fh:
         for r in keep:
             fh.write(json.dumps(r) + "\n")
     os.replace(tmp, out)
-    return len(rows) - len(keep)
+    return len(rows) - len(keep) + (1 if torn else 0)
 
 
-def refuse_unresumed_checkpoint(ck, resume):
-    """A checkpoint on disk is a killed run's resumable state (or a
-    completed run's marker). A fresh run at the same path would clobber it
-    at its first save and append mixed-timeline rows to the same jsonl --
-    the class of accident that has twice contaminated live results. Refuse
-    loudly; deleting the file is the explicit opt-out."""
-    if ck.exists() and not resume:
+def rows_for_pair(out, arm, seed):
+    """How many jsonl rows this (arm, seed) already has; undecodable lines
+    are ignored here (existence check, not a parse)."""
+    out = pathlib.Path(out)
+    if not out.exists():
+        return 0
+    n = 0
+    for l in open(out):
+        if not l.strip():
+            continue
+        try:
+            r = json.loads(l)
+        except json.JSONDecodeError:
+            continue
+        if r.get("arm") == arm and r.get("seed") == seed:
+            n += 1
+    return n
+
+
+def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
+    """The jsonl rows are the experiment record and a checkpoint is a killed
+    run's resumable state; a fresh run over EITHER appends a second timeline
+    that plot() would average as extra seeds -- the accident class that has
+    twice contaminated live results. All refusal happens here, before the
+    env or nets are built. --overwrite is the mechanized opt-out: it drops
+    this (arm, seed)'s rows and checkpoint and starts clean, so no advice
+    ever funnels through hand-deleting files into a mixed timeline."""
+    if overwrite:
+        dropped = prune_stale_rows(out, arm, seed, 0)
+        if ck.exists():
+            ck.unlink()
+        if dropped:
+            print(f"  [{arm} s{seed}] --overwrite dropped {dropped} old "
+                  f"line(s)", flush=True)
+        return
+    if resume:
+        if not ck.exists() and rows_for_pair(out, arm, seed):
+            raise SystemExit(
+                f"--resume for ({arm}, s{seed}) found no checkpoint at "
+                f"{ck.name}, but {pathlib.Path(out).name} already has rows "
+                f"for it (a run from before checkpointing, or a deleted "
+                f"checkpoint). Starting fresh would append a second "
+                f"timeline. Rerun with --overwrite to replace those rows, "
+                f"or point ABLATION_RESULTS somewhere fresh.")
+        return
+    if ck.exists():
         raise SystemExit(
             f"{ck} exists: a previous run of this (arm, seed) was killed "
             f"mid-flight or completed here. Pass --resume to continue/skip "
-            f"it, or delete the file to start fresh.")
+            f"it, or --overwrite to discard it and start fresh.")
+    if rows_for_pair(out, arm, seed):
+        raise SystemExit(
+            f"{pathlib.Path(out).name} already has rows for ({arm}, "
+            f"s{seed}): a fresh run would append a second timeline over "
+            f"them. Pass --overwrite to replace them, or point "
+            f"ABLATION_RESULTS somewhere fresh.")
+
+
+def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every):
+    """The validated recipe. EPISODE_CAP and eval_every are part of the
+    experiment too: a resume that forgot --episode-cap would silently
+    continue with truncated episodes stitched onto the first half's
+    replay."""
+    return {"arm": arm, "seed": seed, "env": ENV_NAME,
+            "iterations": iterations, "train_steps_per_iter": train_steps,
+            "episodes_per_iter": episodes_per_iter,
+            "episode_cap": EPISODE_CAP, "eval_every": eval_every}
 
 
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
-            checkpoint_every=10, resume=False):
+            checkpoint_every=10, resume=False, overwrite=False):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         ck = resume_path(arm, seed)
-        # EPISODE_CAP and eval_every are part of the experiment too: a
-        # resume that forgot --episode-cap would silently continue with
-        # truncated episodes stitched onto the first half's replay.
-        expect = {"arm": arm, "seed": seed, "env": ENV_NAME,
-                  "iterations": iterations, "train_steps_per_iter": train_steps,
-                  "episodes_per_iter": episodes_per_iter,
-                  "episode_cap": EPISODE_CAP, "eval_every": eval_every}
-        refuse_unresumed_checkpoint(ck, resume)
+        expect = run_expect(arm, seed, iterations, train_steps,
+                            episodes_per_iter, eval_every)
+        refuse_conflicting_state(ck, out, arm, seed, resume, overwrite)
         run = Run(arm, seed, spec)
         started = time.time()
         start_it = 0
@@ -828,6 +906,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"({run.env_steps} env steps, "
                   f"{run.trainer.training_steps} train steps)", flush=True)
         elif resume:
+            # refuse_conflicting_state guarantees no rows exist for this
+            # pair on this path, so a fresh start cannot mix timelines.
             print(f"  [{arm} s{seed}] --resume but no checkpoint at {ck.name}; "
                   f"starting fresh", flush=True)
         for it in range(start_it + 1, iterations + 1):
@@ -921,7 +1001,9 @@ def plot(path, out_dir):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    rows = [json.loads(l) for l in open(path) if l.strip()]
+    # Tolerant of a torn final line: --plot-only runs against live files
+    # whose writer may have been killed mid-append.
+    rows, _ = read_rows_tolerant(path)
     if not rows:
         print("no results to plot")
         return
@@ -1003,6 +1085,10 @@ def main():
                     help="continue each (arm, seed) from its checkpoint if "
                          "one exists; the recipe must match the original "
                          "invocation")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="discard each (arm, seed)'s previous jsonl rows and "
+                         "checkpoint and start it fresh -- the mechanized "
+                         "alternative to hand-deleting files")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
 
@@ -1042,7 +1128,7 @@ def main():
                 run_one(arm, seed, args.iterations, args.episodes_per_iter,
                         args.train_steps, args.eval_every, out,
                         checkpoint_every=args.checkpoint_every,
-                        resume=args.resume)
+                        resume=args.resume, overwrite=args.overwrite)
     plot(out, RESULTS)
 
 
