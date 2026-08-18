@@ -277,7 +277,7 @@ ARMS = {
 
 # Arms defined before augmentation existed keep their archived meaning: any
 # arm that does not opt in explicitly runs WITHOUT augmentation, regardless of
-# the muzero module default. Only pong-kit/pong-kit2 opt in. Without this, the
+# the muzero module default. pong-kit/pong-kit2/effzero-repro opt in. Without this, the
 # USE_AUGMENTATION=True default retroactively changed every legacy arm --
 # most sharply breaking the pong-act-search vs pong-lr-3e-4 controlled pair.
 for _spec in ARMS.values():
@@ -420,11 +420,14 @@ class Run:
         traj, prev_reward, total, done, steps = [], 0.0, 0.0, False, 0
         while not done and steps < cap:
             stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
-            if muzero.USE_SEARCH_ACTING:
-                # Paper acting mode: one search per step, self-play AND greedy
-                # eval (the papers evaluate with search too). The recorded
-                # policy/value are the paper data path's targets. The shipped
-                # product keeps this flag off; its eval never searches.
+            if muzero.USE_SEARCH_ACTING and (not greedy or muzero.PAPER_TARGETS):
+                # Search acting: one search per step during self-play. Greedy
+                # EVAL searches only in paper mode (the papers evaluate with
+                # search); non-paper search-acting arms keep their documented
+                # meaning -- eval measures the deployable RAW-POLICY agent.
+                # Round-9 finding: the paper-mode commit had made eval search
+                # unconditional, silently inverting pong-act-search's _doc
+                # against its own archived rows.
                 action, search_pol, search_val = asyncio.run(
                     self.searcher.act_search(stack, greedy=greedy))
             else:
@@ -901,8 +904,9 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
             raise SystemExit(
                 f"--resume for ({arm}, s{seed}) found no checkpoint at "
                 f"{ck.name}, but {pathlib.Path(out).name} already has rows "
-                f"for it (a run from before checkpointing, or a deleted "
-                f"checkpoint). There is nothing to resume, and starting "
+                f"for it (a run from before checkpointing, a deleted "
+                f"checkpoint, or a FINISHED --checkpoint-every 0 run, which "
+                f"writes no marker). There is nothing to resume, and starting "
                 f"fresh would append a second timeline. To replace those "
                 f"rows, rerun THIS command without --resume, adding: "
                 f"--arms {arm} --seed {seed} --overwrite (this command's "
@@ -969,6 +973,16 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         ck = resume_path(arm, seed)
         expect = run_expect(arm, seed, iterations, train_steps,
                             episodes_per_iter, eval_every)
+        if muzero.USE_ATARI_WRAPPERS and FRAMESKIP is None:
+            # The wrapper stack forces fixed skip 4 regardless; without the
+            # flag the TAG lacks "-skip4" and rows would land in the
+            # UNTAGGED (stochastic-skip) history -- the banner would also
+            # print "skip registered" while running fixed 4.
+            raise SystemExit(
+                f"arm '{arm}' uses the Atari wrapper stack, which forces "
+                f"fixed skip 4 -- pass --frameskip 4 so the output files "
+                f"carry the -skip4 tag instead of mixing into the "
+                f"stochastic-skip history.")
         refuse_conflicting_state(ck, out, arm, seed, resume, overwrite)
         run = Run(arm, seed, spec)
         started = time.time()
@@ -1118,7 +1132,8 @@ def plot(path, out_dir):
     # appear as (None, None) -- a DISTINCT combo, so a legacy/modern
     # straddle warns too. Guarding them out blinded the warning to exactly
     # the rows it was retrofitted for (round-8 finding).
-    mixed = {(r.get("env"), r.get("frameskip")) for r in rows}
+    mixed = {(r.get("env"), r.get("frameskip"), r.get("wrappers"))
+             for r in rows}
     if len(mixed) > 1:
         print(f"WARNING: {pathlib.Path(path).name} mixes runs from "
               f"{sorted(mixed, key=str)} -- these are averaged together; "
@@ -1200,7 +1215,9 @@ def main():
                          "single-life scale)")
     ap.add_argument("--frameskip", type=int, default=None,
                     help="fixed frameskip override (benchmark protocol: 4); "
-                         "default keeps the env registration's skip")
+                         "default keeps the env registration's skip -- "
+                         "except wrapper arms, which force skip 4 and "
+                         "REQUIRE this flag for tagging")
     ap.add_argument("--checkpoint-every", type=int, default=10,
                     help="save a resumable full-state checkpoint every N "
                          "iterations (replay buffer included -- can be many "

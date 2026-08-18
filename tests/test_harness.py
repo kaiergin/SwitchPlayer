@@ -110,3 +110,46 @@ def test_arm_config_restores_after_an_exception(ablation):
             assert muzero.DISCOUNT == 0.9
             raise RuntimeError("mid-run failure")
     assert muzero.DISCOUNT == before
+
+
+def test_greedy_eval_searches_only_in_paper_mode(ablation, monkeypatch):
+    """Round-9 finding: the paper-mode commit made eval search unconditional
+    for every search-acting arm, silently inverting pong-act-search's _doc
+    ("greedy eval still never searches") against its own archived rows.
+    Greedy eval searches ONLY under PAPER_TARGETS (the papers evaluate with
+    search); non-paper search-acting arms measure the deployable raw-policy
+    agent."""
+    import types
+
+    import numpy as np
+    import muzero
+    calls = []
+
+    async def fake_search(obs, greedy=False, **kw):
+        calls.append(greedy)
+        return 0, np.ones(5) / 5, 0.0
+
+    class OneStepEnv:
+        def reset(self, **kw):
+            return np.zeros((210, 160, 3), dtype=np.uint8), {}
+
+        def step(self, action):
+            return (np.zeros((210, 160, 3), dtype=np.uint8),
+                    0.0, True, False, {})
+
+    run = object.__new__(ablation.Run)
+    run.env = OneStepEnv()
+    run.env_steps = 0
+    run.searcher = types.SimpleNamespace(
+        act_search=fake_search,
+        network_manager=types.SimpleNamespace(
+            initial_inference=lambda s: (np.ones(5) / 5, 0.0)))
+    monkeypatch.setattr(muzero, "USE_SEARCH_ACTING", True)
+    monkeypatch.setattr(muzero, "PAPER_TARGETS", False)
+    run.play_episode(greedy=True)
+    assert calls == [], "non-paper greedy eval ran a search"
+    run.play_episode(greedy=False)
+    assert calls == [False], "self-play must still search"
+    monkeypatch.setattr(muzero, "PAPER_TARGETS", True)
+    run.play_episode(greedy=True)
+    assert True in calls, "paper-mode greedy eval must search"

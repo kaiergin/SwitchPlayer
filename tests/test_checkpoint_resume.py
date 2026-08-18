@@ -108,8 +108,11 @@ def test_resume_refuses_a_mismatched_recipe(tmp_path):
     path = tmp_path / "resume.ckpt"
     ablation.save_run_checkpoint(a, path, META)
     b = make_run()
-    with pytest.raises(ValueError, match="iterations"):
+    # match covers the advice too (round-9: the mismatch site was the one
+    # advice string with no wording pin -- reverting it stayed green).
+    with pytest.raises(ValueError, match="iterations") as e:
         ablation.load_run_checkpoint(b, path, {**EXPECT, "iterations": 90})
+    assert "THIS command" in str(e.value)
 
 
 def test_completed_marker_skips_the_run(tmp_path):
@@ -440,6 +443,13 @@ def test_eval_every_zero_does_not_divide(tmp_path, monkeypatch, capsys):
     with no pinning test -- reverting it left the suite green. This drives
     one real loop iteration through the guard (stubbed Run)."""
     import types
+
+    # Structural pin FIRST (before Run is monkeypatched away): the stub
+    # assumes this signature; drift must trip loudly here rather than
+    # leave the stub permanently green.
+    import inspect
+    assert list(inspect.signature(ablation.Run.play_episode).parameters) \
+        == ["self", "greedy", "cap"]
 
     def stub_run(arm, seed, spec):
         net = lambda: types.SimpleNamespace(state_dict=lambda: {})
