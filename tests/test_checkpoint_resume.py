@@ -120,6 +120,49 @@ def test_completed_marker_skips_the_run(tmp_path):
     assert ablation.load_run_checkpoint(b, path, EXPECT) is None
 
 
+def test_completed_marker_with_wrong_recipe_raises(tmp_path):
+    """Audit finding: the completed check ran BEFORE recipe validation, so a
+    finished 60-iter marker silently skipped a NEW 90-iter --resume
+    invocation instead of erroring."""
+    path = tmp_path / "resume.ckpt"
+    ablation.mark_run_completed(path, EXPECT)
+    b = make_run()
+    with pytest.raises(ValueError, match="iterations"):
+        ablation.load_run_checkpoint(b, path, {**EXPECT, "iterations": 90})
+
+
+def test_resume_prunes_stale_timeline_rows(tmp_path):
+    """Audit finding (HIGH): rows written after the last checkpoint belong
+    to the abandoned timeline; resume must drop them or plot() averages
+    both timelines as if they were extra seeds."""
+    out = tmp_path / "ablation.jsonl"
+    rows = [{"arm": "effzero-repro", "seed": 0, "iteration": it, "return_mean": it}
+            for it in (10, 20, 30)]
+    rows.append({"arm": "effzero-repro", "seed": 1, "iteration": 30,
+                 "return_mean": 99})   # other seed: must survive
+    with open(out, "w") as fh:
+        for r in rows:
+            fh.write(__import__("json").dumps(r) + "\n")
+    pruned = ablation.prune_stale_rows(out, "effzero-repro", 0, start_it=20)
+    assert pruned == 1
+    kept = [__import__("json").loads(l) for l in open(out)]
+    assert [(r["seed"], r["iteration"]) for r in kept] == [(0, 10), (0, 20), (1, 30)]
+    # Idempotent when nothing is stale.
+    assert ablation.prune_stale_rows(out, "effzero-repro", 0, start_it=20) == 0
+
+
+def test_fresh_start_refuses_an_existing_checkpoint(tmp_path):
+    """Audit finding: a fresh run at the same path clobbered a killed run's
+    resumable state at its first save; its completion marker then satisfied
+    the original run's later --resume silently."""
+    ck = tmp_path / "resume.ckpt"
+    ablation.refuse_unresumed_checkpoint(ck, resume=False)   # missing: fine
+    ck.write_bytes(b"x")
+    ablation.refuse_unresumed_checkpoint(ck, resume=True)    # resuming: fine
+    with pytest.raises(SystemExit, match="--resume"):
+        ablation.refuse_unresumed_checkpoint(ck, resume=False)
+
+
 def test_failed_save_preserves_the_previous_checkpoint(tmp_path, monkeypatch):
     np.random.seed(6)
     a = make_run()

@@ -675,7 +675,14 @@ def save_run_checkpoint(run, path, meta):
     """Everything a resume needs, written atomically (tmp + replace) so a
     kill mid-write leaves the previous checkpoint intact. The replay buffer
     dominates the size (~150KB per Atari step); completed runs shrink the
-    file to a marker via mark_run_completed."""
+    file to a marker via mark_run_completed.
+
+    Mid-episode env state is NOT captured: checkpoints land at iteration
+    boundaries, where the next play_episode resets. On life-count games the
+    uninterrupted timeline may resume a game mid-life where a resumed run
+    full-resets (EpisodicLifeEnv.was_real_done is not saved); inert on
+    Pong, a documented divergence elsewhere -- like the env np_random
+    stream, which a resume replays from its seed."""
     state = dict(meta)
     state["nets"] = {n: getattr(run.trainer, n).state_dict() for n in NET_NAMES}
     state["optims"] = {n: getattr(run.trainer, n).state_dict() for n in OPT_NAMES}
@@ -709,12 +716,16 @@ def load_run_checkpoint(run, path, expect):
     # anyway, and the saved RNG states are CPU ByteTensors that
     # torch.set_rng_state rejects if a cuda map_location relocates them.
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if state.get("completed"):
-        return None
+    # Recipe validation FIRST, completed-marker check second: a completed
+    # 60-iter marker must not silently satisfy a NEW 90-iter --resume
+    # invocation -- that is a different experiment, and the caller needs
+    # the error, not a skip.
     for key, want in expect.items():
         if state.get(key) != want:
             raise ValueError(f"resume mismatch: checkpoint {key}={state.get(key)!r}"
                              f" but this invocation has {want!r}")
+    if state.get("completed"):
+        return None
     for n in NET_NAMES:
         getattr(run.trainer, n).load_state_dict(state["nets"][n])
     for n in OPT_NAMES:
@@ -746,27 +757,79 @@ def mark_run_completed(path, meta):
     os.replace(tmp, path)
 
 
+def prune_stale_rows(out, arm, seed, start_it):
+    """A kill between an eval row and the next checkpoint leaves jsonl rows
+    from the abandoned timeline; the resumed run re-runs those iterations
+    and appends its own rows, and plot() would average both timelines as if
+    they were extra seeds. Drop this (arm, seed)'s rows beyond the
+    checkpoint before continuing. Returns the number pruned."""
+    out = pathlib.Path(out)
+    if not out.exists():
+        return 0
+    rows = [json.loads(l) for l in open(out) if l.strip()]
+    keep = [r for r in rows
+            if not (r.get("arm") == arm and r.get("seed") == seed
+                    and r.get("iteration", 0) > start_it)]
+    if len(keep) == len(rows):
+        return 0
+    tmp = pathlib.Path(str(out) + ".tmp")
+    with open(tmp, "w") as fh:
+        for r in keep:
+            fh.write(json.dumps(r) + "\n")
+    os.replace(tmp, out)
+    return len(rows) - len(keep)
+
+
+def refuse_unresumed_checkpoint(ck, resume):
+    """A checkpoint on disk is a killed run's resumable state (or a
+    completed run's marker). A fresh run at the same path would clobber it
+    at its first save and append mixed-timeline rows to the same jsonl --
+    the class of accident that has twice contaminated live results. Refuse
+    loudly; deleting the file is the explicit opt-out."""
+    if ck.exists() and not resume:
+        raise SystemExit(
+            f"{ck} exists: a previous run of this (arm, seed) was killed "
+            f"mid-flight or completed here. Pass --resume to continue/skip "
+            f"it, or delete the file to start fresh.")
+
+
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
             checkpoint_every=10, resume=False):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
+        ck = resume_path(arm, seed)
+        # EPISODE_CAP and eval_every are part of the experiment too: a
+        # resume that forgot --episode-cap would silently continue with
+        # truncated episodes stitched onto the first half's replay.
+        expect = {"arm": arm, "seed": seed, "env": ENV_NAME,
+                  "iterations": iterations, "train_steps_per_iter": train_steps,
+                  "episodes_per_iter": episodes_per_iter,
+                  "episode_cap": EPISODE_CAP, "eval_every": eval_every}
+        refuse_unresumed_checkpoint(ck, resume)
         run = Run(arm, seed, spec)
         started = time.time()
         start_it = 0
-        ck = resume_path(arm, seed)
-        expect = {"arm": arm, "seed": seed, "env": ENV_NAME,
-                  "iterations": iterations, "train_steps_per_iter": train_steps,
-                  "episodes_per_iter": episodes_per_iter}
         if resume and ck.exists():
-            loaded = load_run_checkpoint(run, ck, expect)
+            try:
+                loaded = load_run_checkpoint(run, ck, expect)
+            except Exception:
+                run.env.close()
+                raise
             if loaded is None:
                 print(f"  [{arm} s{seed}] already completed, skipping", flush=True)
                 run.env.close()
                 return
             start_it = loaded["iteration"]
             started = time.time() - loaded["elapsed_s"]
+            pruned = prune_stale_rows(out, arm, seed, start_it)
+            if pruned:
+                print(f"  [{arm} s{seed}] pruned {pruned} stale row(s) from "
+                      f"the abandoned timeline", flush=True)
             print(f"  [{arm} s{seed}] resumed after iter {start_it} "
                   f"({run.env_steps} env steps, "
                   f"{run.trainer.training_steps} train steps)", flush=True)
+        elif resume:
+            print(f"  [{arm} s{seed}] --resume but no checkpoint at {ck.name}; "
+                  f"starting fresh", flush=True)
         for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
@@ -842,7 +905,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     "elapsed_s": round(time.time() - started, 1)})
                 print(f"  [{arm} s{seed}] checkpoint at iter {it} "
                       f"({ck.stat().st_size / 1e9:.1f} GB)", flush=True)
-        if checkpoint_every:
+        # Also under --resume with checkpointing off: otherwise the loaded
+        # checkpoint survives completion and every later --resume replays
+        # the same tail.
+        if checkpoint_every or resume:
             mark_run_completed(ck, expect)
         run.env.close()
 
