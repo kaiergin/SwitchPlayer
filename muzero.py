@@ -216,10 +216,11 @@ ACT_SEARCH_SIMS = 8            # measured ~40% of a 60fps frame at this budget
 # effzero-repro arm enables them: self-play acts through PUCT search
 # (USE_SEARCH_ACTING + USE_GUMBEL_SEARCH=False) recording each step's search
 # policy and root value; PAPER_TARGETS computes value targets at BATCH time
-# from stored root values (MuZero's make_target -- the stored play-time value
-# IS the papers' stale/target-network value) with EfficientZero 4.3's
-# age-shrunk horizon; PER samples positions by |v - z| priority with
-# importance-sampling correction.
+# with EfficientZero 4.3's age-shrunk horizon -- bootstrapping from stored
+# root values by default (MuZero's make_target), or through the
+# double-buffered lagged target model when USE_TARGET_MODEL is on (below;
+# the repro arm enables it -- part 3 closed that gap); PER samples
+# positions by |v - z| priority with importance-sampling correction.
 # ---------------------------------------------------------------------------
 PAPER_TARGETS = False
 DIRICHLET_ALPHA = 0.25         # search-root noise; EfficientZero uses 0.3
@@ -270,8 +271,9 @@ TARGET_MODEL_INTERVAL = 200
 # which needs a CPU fleet; here the harness re-searches every position of the
 # POLICY_REFRESH_COUNT oldest trajectories every POLICY_REFRESH_EVERY
 # iterations THROUGH THE LAGGED TARGET MODEL (as their reanalyze workers
-# search), stamping a refresh rotation while PRESERVING born ages -- fresh
-# policy targets never restore the 4.3 age-shrunk value horizon.
+# search; the terminal record of a terminated trajectory carried no search
+# and is skipped), stamping a refresh rotation while PRESERVING born ages
+# -- fresh policy targets never restore the 4.3 age-shrunk value horizon.
 POLICY_REFRESH_EVERY = 5
 POLICY_REFRESH_COUNT = 2
 

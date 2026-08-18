@@ -370,8 +370,11 @@ class Run:
         self.trainer.prefix_optimizer = muzero.make_optimizer(nets["value_prefix"].parameters())
         self.trainer.proj_optimizer = muzero.make_optimizer(nets["projector"].parameters())
 
-        # The searcher shares the trainer's networks, so re-analysis always uses
-        # current weights -- the equivalent of NetworkManager.update_if_needed.
+        # The searcher shares the trainer's networks, so non-paper re-analysis
+        # uses current weights -- the equivalent of
+        # NetworkManager.update_if_needed. (refresh_targets, the paper arms'
+        # reanalyze policy half, deliberately swaps to the lagged target nets
+        # for its duration.)
         self.searcher = MCTSHelper(action_space=ACTIONS, device=DEVICE,
                                    network_ref=None, storage_ref=None,
                                    name=f"ablation-{arm}-{seed}")
@@ -1254,7 +1257,7 @@ def main():
         # (into the UNTAGGED history) before the first wrapper arm killed
         # the sweep mid-way (round-10 finding).
         ap.error(f"arms using the Atari wrapper stack "
-                 f"({[a for a in args.arms if ARMS[a].get('USE_ATARI_WRAPPERS')]}) "
+                 f"({[a for a in args.arms if ARMS[a].get('USE_ATARI_WRAPPERS', muzero.USE_ATARI_WRAPPERS)]}) "
                  f"force fixed skip 4 -- pass --frameskip 4 so output files "
                  f"carry the -skip4 tag")
 
