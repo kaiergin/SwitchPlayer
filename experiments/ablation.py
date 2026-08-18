@@ -795,7 +795,8 @@ def prune_stale_rows(out, arm, seed, start_it):
         return 0
     rows, torn = read_rows_tolerant(out)
     keep = [r for r in rows
-            if not (r.get("arm") == arm and r.get("seed") == seed
+            if not (isinstance(r, dict)
+                    and r.get("arm") == arm and r.get("seed") == seed
                     and r.get("iteration", 0) > start_it)]
     if len(keep) == len(rows) and not torn:
         return 0
@@ -808,8 +809,8 @@ def prune_stale_rows(out, arm, seed, start_it):
 
 
 def rows_for_pair(out, arm, seed):
-    """How many jsonl rows this (arm, seed) already has; undecodable lines
-    are ignored here (existence check, not a parse)."""
+    """How many jsonl rows this (arm, seed) already has; undecodable and
+    non-dict lines are ignored here (existence check, not a parse)."""
     out = pathlib.Path(out)
     if not out.exists():
         return 0
@@ -821,9 +822,32 @@ def rows_for_pair(out, arm, seed):
             r = json.loads(l)
         except json.JSONDecodeError:
             continue
-        if r.get("arm") == arm and r.get("seed") == seed:
+        if isinstance(r, dict) and r.get("arm") == arm and r.get("seed") == seed:
             n += 1
     return n
+
+
+def heal_torn_tail(out):
+    """A kill mid-append leaves a partial final line WITHOUT a newline. The
+    readers tolerate that torn tail, but an APPEND would concatenate the
+    next row onto the fragment -- converting a benign torn tail into
+    mid-file corruption that every reader then raises on (round-3 HIGH:
+    the advertised --overwrite recovery crashed on it too). Rewrite without
+    the fragment before anything appends. Returns True if healed."""
+    out = pathlib.Path(out)
+    if not out.exists() or out.stat().st_size == 0:
+        return False
+    with open(out, "rb") as fh:
+        fh.seek(-1, 2)
+        if fh.read(1) == b"\n":
+            return False
+    rows, _ = read_rows_tolerant(out)
+    tmp = pathlib.Path(str(out) + ".tmp")
+    with open(tmp, "w") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    os.replace(tmp, out)
+    return True
 
 
 def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
@@ -834,10 +858,16 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
     env or nets are built. --overwrite is the mechanized opt-out: it drops
     this (arm, seed)'s rows and checkpoint and starts clean, so no advice
     ever funnels through hand-deleting files into a mixed timeline."""
+    if heal_torn_tail(out):
+        print(f"  [{arm} s{seed}] healed a torn jsonl tail (kill mid-append)",
+              flush=True)
     if overwrite:
         dropped = prune_stale_rows(out, arm, seed, 0)
-        if ck.exists():
-            ck.unlink()
+        for stale in (ck, RESULTS / f"weights{TAG}-{arm}-seed{seed}.pth"):
+            # The pair's weights go too: a redo dying mid-run must not leave
+            # the OLD run's completed weights beside the NEW run's rows.
+            if stale.exists():
+                stale.unlink()
         if dropped:
             print(f"  [{arm} s{seed}] --overwrite dropped {dropped} old "
                   f"line(s)", flush=True)
@@ -889,22 +919,34 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         if resume and ck.exists():
             try:
                 loaded = load_run_checkpoint(run, ck, expect)
+                if loaded is not None:
+                    start_it = loaded["iteration"]
+                    started = time.time() - loaded["elapsed_s"]
+                    pruned = prune_stale_rows(out, arm, seed, start_it)
             except Exception:
                 run.env.close()
                 raise
             if loaded is None:
-                print(f"  [{arm} s{seed}] already completed, skipping", flush=True)
-                run.env.close()
-                return
-            start_it = loaded["iteration"]
-            started = time.time() - loaded["elapsed_s"]
-            pruned = prune_stale_rows(out, arm, seed, start_it)
-            if pruned:
-                print(f"  [{arm} s{seed}] pruned {pruned} stale row(s) from "
-                      f"the abandoned timeline", flush=True)
-            print(f"  [{arm} s{seed}] resumed after iter {start_it} "
-                  f"({run.env_steps} env steps, "
-                  f"{run.trainer.training_steps} train steps)", flush=True)
+                if rows_for_pair(out, arm, seed) == 0:
+                    # A completion marker whose rows are gone points at an
+                    # ARCHIVED era (the workflow moves jsonl/weights into an
+                    # era folder; markers were being left behind). This
+                    # invocation is a new era: drop the stale marker and run.
+                    ck.unlink()
+                    print(f"  [{arm} s{seed}] completion marker refers to an "
+                          f"archived era; removed, starting fresh", flush=True)
+                else:
+                    print(f"  [{arm} s{seed}] already completed, skipping",
+                          flush=True)
+                    run.env.close()
+                    return
+            else:
+                if pruned:
+                    print(f"  [{arm} s{seed}] pruned {pruned} stale line(s) "
+                          f"from the abandoned timeline", flush=True)
+                print(f"  [{arm} s{seed}] resumed after iter {start_it} "
+                      f"({run.env_steps} env steps, "
+                      f"{run.trainer.training_steps} train steps)", flush=True)
         elif resume:
             # refuse_conflicting_state guarantees no rows exist for this
             # pair on this path, so a fresh start cannot mix timelines.
@@ -1002,8 +1044,10 @@ def plot(path, out_dir):
     import matplotlib.pyplot as plt
 
     # Tolerant of a torn final line: --plot-only runs against live files
-    # whose writer may have been killed mid-append.
+    # whose writer may have been killed mid-append. Non-dict JSON lines are
+    # external corruption; skip rather than crash.
     rows, _ = read_rows_tolerant(path)
+    rows = [r for r in rows if isinstance(r, dict)]
     if not rows:
         print("no results to plot")
         return
@@ -1091,6 +1135,12 @@ def main():
                          "alternative to hand-deleting files")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
+    if args.resume and args.overwrite:
+        # A hedging "--resume --overwrite" must not silently destroy a
+        # resumable checkpoint (round-3 MEDIUM: overwrite won, wiping a
+        # 45-iteration checkpoint with zero warning).
+        ap.error("--resume and --overwrite are mutually exclusive: "
+                 "resume continues saved state, overwrite destroys it")
 
     ENV_NAME = args.env
     if args.env != "MsPacman-v4":

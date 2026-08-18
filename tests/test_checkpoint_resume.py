@@ -219,6 +219,57 @@ def test_torn_final_line_is_dropped_but_midfile_corruption_raises(tmp_path):
         ablation.prune_stale_rows(out, "a", 0, start_it=99)
 
 
+def test_completed_pair_with_rows_is_not_refused_on_resume(tmp_path):
+    """Round-3 flagship ordering pin: (marker exists AND rows exist AND
+    --resume) must proceed to the marker skip, NOT refuse on the rows. A
+    'simplification' checking rows before ck.exists() would refuse every
+    completed pair in a multi-seed sweep."""
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    ablation.mark_run_completed(ck, EXPECT)
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
+    ablation.refuse_conflicting_state(ck, out, "a", 0, True, False)  # no raise
+    b = make_run()
+    assert ablation.load_run_checkpoint(b, ck, EXPECT) is None       # skip
+
+
+def test_torn_tail_is_healed_before_any_append(tmp_path):
+    """Round-3 HIGH: read-side tolerance without write-side healing let the
+    next append concatenate onto the torn fragment, creating MID-FILE
+    corruption that crashed every reader -- including --overwrite, the
+    advertised recovery."""
+    import json
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
+    with open(out, "a") as fh:
+        fh.write('{"arm": "a", "se')                    # torn, no newline
+    # Any run path heals before appending: pair (b, 0) starts fresh here.
+    ablation.refuse_conflicting_state(ck, out, "b", 0, False, False)
+    content = open(out).read()
+    assert content.endswith("\n")
+    assert [json.loads(l) for l in open(out)] == [
+        {"arm": "a", "seed": 0, "iteration": 10}]
+    # And --overwrite on a torn file must not crash (it prunes tolerantly).
+    with open(out, "a") as fh:
+        fh.write('{"arm": "a", "se')
+    ablation.refuse_conflicting_state(ck, out, "a", 0, False, True)
+    assert open(out).read() == ""
+
+
+def test_overwrite_unlinks_the_pair_weights(tmp_path, monkeypatch):
+    """Round-3 LOW: a redo dying mid-run must not leave the OLD run's
+    completed weights beside the NEW run's partial rows."""
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path)
+    monkeypatch.setattr(ablation, "TAG", "-pong-skip4")
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    w = tmp_path / "weights-pong-skip4-a-seed0.pth"
+    w.write_bytes(b"old")
+    other = tmp_path / "weights-pong-skip4-a-seed1.pth"
+    other.write_bytes(b"keep")
+    ablation.refuse_conflicting_state(ck, out, "a", 0, False, True)
+    assert not w.exists()
+    assert other.exists()
+
+
 def test_run_expect_covers_the_full_protocol(monkeypatch):
     """Audit round-2 LOW: episode_cap/eval_every joined the validated recipe
     but nothing pinned it -- reverting that hunk left the suite green."""
