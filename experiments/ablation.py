@@ -661,11 +661,113 @@ class Run:
                 "return_max": float(np.max(returns)), **errs}
 
 
-def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out):
+NET_NAMES = ("representation", "dynamics", "prediction", "value_prefix",
+             "projector")
+OPT_NAMES = ("rep_optimizer", "dyn_optimizer", "pred_optimizer",
+             "prefix_optimizer", "proj_optimizer")
+
+
+def resume_path(arm, seed):
+    return RESULTS / f"resume{TAG}-{arm}-seed{seed}.ckpt"
+
+
+def save_run_checkpoint(run, path, meta):
+    """Everything a resume needs, written atomically (tmp + replace) so a
+    kill mid-write leaves the previous checkpoint intact. The replay buffer
+    dominates the size (~150KB per Atari step); completed runs shrink the
+    file to a marker via mark_run_completed."""
+    state = dict(meta)
+    state["nets"] = {n: getattr(run.trainer, n).state_dict() for n in NET_NAMES}
+    state["optims"] = {n: getattr(run.trainer, n).state_dict() for n in OPT_NAMES}
+    if getattr(run.trainer, "target_representation", None) is not None:
+        state["target"] = {
+            "nets": {n: getattr(run.trainer, f"target_{n}").state_dict()
+                     for n in NET_NAMES[:4]},
+            "snapshot": run.trainer._target_snapshot,
+            "synced_at": run.trainer._target_synced_at,
+        }
+    state["replay"] = run.replay
+    state["env_steps"] = run.env_steps
+    state["rng"] = {
+        "np": np.random.get_state(),
+        "py": random.getstate(),
+        "torch": torch.get_rng_state(),
+        "cuda": (torch.cuda.get_rng_state_all()
+                 if torch.cuda.is_available() else None),
+    }
+    tmp = path.with_suffix(".tmp")
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
+def load_run_checkpoint(run, path, expect):
+    """Restore a run in place; returns the last COMPLETED iteration. Raises
+    on a recipe mismatch: the temperature and off-policy schedules key on
+    total run length, so resuming under a different recipe would silently
+    train a different experiment."""
+    # map_location cpu, NOT DEVICE: load_state_dict copies across devices
+    # anyway, and the saved RNG states are CPU ByteTensors that
+    # torch.set_rng_state rejects if a cuda map_location relocates them.
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    if state.get("completed"):
+        return None
+    for key, want in expect.items():
+        if state.get(key) != want:
+            raise ValueError(f"resume mismatch: checkpoint {key}={state.get(key)!r}"
+                             f" but this invocation has {want!r}")
+    for n in NET_NAMES:
+        getattr(run.trainer, n).load_state_dict(state["nets"][n])
+    for n in OPT_NAMES:
+        getattr(run.trainer, n).load_state_dict(state["optims"][n])
+    if "target" in state:
+        run.trainer._ensure_target_model()
+        for n in NET_NAMES[:4]:
+            getattr(run.trainer, f"target_{n}").load_state_dict(
+                state["target"]["nets"][n])
+        run.trainer._target_snapshot = state["target"]["snapshot"]
+        run.trainer._target_synced_at = state["target"]["synced_at"]
+    run.replay = state["replay"]
+    run.env_steps = state["env_steps"]
+    run.trainer.training_steps = state["training_steps"]
+    np.random.set_state(state["rng"]["np"])
+    random.setstate(state["rng"]["py"])
+    torch.set_rng_state(state["rng"]["torch"])
+    if state["rng"]["cuda"] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["rng"]["cuda"])
+    return {"iteration": state["iteration"], "elapsed_s": state["elapsed_s"]}
+
+
+def mark_run_completed(path, meta):
+    """Replace the bulky checkpoint with a small completion marker, so a
+    multi-seed --resume sweep skips finished (arm, seed) pairs instead of
+    re-running them from scratch."""
+    tmp = path.with_suffix(".tmp")
+    torch.save({**meta, "completed": True}, tmp)
+    os.replace(tmp, path)
+
+
+def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
+            checkpoint_every=10, resume=False):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         run = Run(arm, seed, spec)
         started = time.time()
-        for it in range(1, iterations + 1):
+        start_it = 0
+        ck = resume_path(arm, seed)
+        expect = {"arm": arm, "seed": seed, "env": ENV_NAME,
+                  "iterations": iterations, "train_steps_per_iter": train_steps,
+                  "episodes_per_iter": episodes_per_iter}
+        if resume and ck.exists():
+            loaded = load_run_checkpoint(run, ck, expect)
+            if loaded is None:
+                print(f"  [{arm} s{seed}] already completed, skipping", flush=True)
+                run.env.close()
+                return
+            start_it = loaded["iteration"]
+            started = time.time() - loaded["elapsed_s"]
+            print(f"  [{arm} s{seed}] resumed after iter {start_it} "
+                  f"({run.env_steps} env steps, "
+                  f"{run.trainer.training_steps} train steps)", flush=True)
+        for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
             run.searcher.network_manager.training_steps = run.trainer.training_steps
@@ -730,6 +832,18 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                       f"prefix {metrics['prefix']:>6.2f} / control {metrics['control']:>6.2f}  "
                       f"per-step {metrics['per_step']:>6.2f}  "
                       f"H(pi) {metrics.get('policy_entropy', 0.0):>5.2f}", flush=True)
+
+            # After the eval/record block, so a resumed run never repeats or
+            # skips a jsonl row: it continues at it+1 with row `it` written.
+            if checkpoint_every and it % checkpoint_every == 0 and it != iterations:
+                save_run_checkpoint(run, ck, {
+                    **expect, "iteration": it,
+                    "training_steps": run.trainer.training_steps,
+                    "elapsed_s": round(time.time() - started, 1)})
+                print(f"  [{arm} s{seed}] checkpoint at iter {it} "
+                      f"({ck.stat().st_size / 1e9:.1f} GB)", flush=True)
+        if checkpoint_every:
+            mark_run_completed(ck, expect)
         run.env.close()
 
 
@@ -814,6 +928,15 @@ def main():
     ap.add_argument("--frameskip", type=int, default=None,
                     help="fixed frameskip override (benchmark protocol: 4); "
                          "default keeps the env registration's skip")
+    ap.add_argument("--checkpoint-every", type=int, default=10,
+                    help="save a resumable full-state checkpoint every N "
+                         "iterations (replay buffer included -- can be many "
+                         "GB); 0 disables. Completed runs shrink theirs to a "
+                         "marker.")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue each (arm, seed) from its checkpoint if "
+                         "one exists; the recipe must match the original "
+                         "invocation")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
 
@@ -851,7 +974,9 @@ def main():
             print(f"\n=== {arm}: {ARMS[arm]['_doc']}")
             for seed in range(args.seeds):
                 run_one(arm, seed, args.iterations, args.episodes_per_iter,
-                        args.train_steps, args.eval_every, out)
+                        args.train_steps, args.eval_every, out,
+                        checkpoint_every=args.checkpoint_every,
+                        resume=args.resume)
     plot(out, RESULTS)
 
 
