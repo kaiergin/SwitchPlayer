@@ -902,11 +902,12 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
                 f"--resume for ({arm}, s{seed}) found no checkpoint at "
                 f"{ck.name}, but {pathlib.Path(out).name} already has rows "
                 f"for it (a run from before checkpointing, or a deleted "
-                f"checkpoint). Starting fresh would append a second "
-                f"timeline. To replace those rows, rerun your ORIGINAL "
-                f"command (keeping --env/--frameskip/every recipe flag), "
-                f"dropping --resume and adding: --arms {arm} --seed {seed} "
-                f"--overwrite. Or point ABLATION_RESULTS somewhere fresh.")
+                f"checkpoint). There is nothing to resume, and starting "
+                f"fresh would append a second timeline. To replace those "
+                f"rows, rerun THIS command without --resume, adding: "
+                f"--arms {arm} --seed {seed} --overwrite (this command's "
+                f"--env/--frameskip already target these files). Or point "
+                f"ABLATION_RESULTS somewhere fresh.")
         return
     if ck.exists():
         raise SystemExit(
@@ -1113,13 +1114,16 @@ def plot(path, out_dir):
     # against mixed histories -- READ them: same-TAG recipe variants
     # (Pong-v4 vs Pong-v5 share "-pong") would otherwise average into one
     # curve silently.
-    mixed = {(r.get("env"), r.get("frameskip")) for r in rows
-             if "env" in r or "frameskip" in r}
+    # No provenance guard here: pre-2026-08-17 rows have neither field and
+    # appear as (None, None) -- a DISTINCT combo, so a legacy/modern
+    # straddle warns too. Guarding them out blinded the warning to exactly
+    # the rows it was retrofitted for (round-8 finding).
+    mixed = {(r.get("env"), r.get("frameskip")) for r in rows}
     if len(mixed) > 1:
         print(f"WARNING: {pathlib.Path(path).name} mixes runs from "
               f"{sorted(mixed, key=str)} -- these are averaged together; "
               f"separate them before drawing conclusions.")
-    arms = sorted({r["arm"] for r in rows})
+    arms = sorted({r["arm"] for r in rows if "arm" in r})
     palette = ["#0D6E75", "#B4531A", "#5A6472", "#7A3E8F", "#2E7D32"]
     # Cycle rather than zip: a sixth arm in one file used to KeyError here.
     colours = {arm: palette[i % len(palette)] for i, arm in enumerate(arms)}
@@ -1157,7 +1161,8 @@ def plot(path, out_dir):
         ax.set_title(f"{title}   ({note})", fontsize=11)
         ax.set_xlabel("iteration")
         ax.grid(alpha=0.25, linewidth=0.6)
-        ax.legend(fontsize=9)
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(fontsize=9)
     fig.suptitle("SwitchPlayer ablation — shaded band is +/- 1 sd across seeds.\n"
                  "A predictor that does not beat its dashed control has learned nothing.",
                  fontsize=12)

@@ -407,6 +407,10 @@ def test_fresh_start_advice_names_this_command(tmp_path):
     write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
     with pytest.raises(SystemExit, match="THIS command"):
         ablation.refuse_conflicting_state(ck, out, "a", 0, False, False)
+    # Round-8 finding: the resume-with-rows-but-no-checkpoint branch was
+    # the fourth sibling, still advising the ORIGINAL command.
+    with pytest.raises(SystemExit, match="THIS command"):
+        ablation.refuse_conflicting_state(ck, out, "a", 0, True, False)
 
 
 def test_plot_warns_on_mixed_env_histories(tmp_path, capsys):
@@ -419,6 +423,49 @@ def test_plot_warns_on_mixed_env_histories(tmp_path, capsys):
     ])
     ablation.plot(out, tmp_path)
     assert "mixes runs from" in capsys.readouterr().out
+    # Round-8 finding: pre-provenance rows (no env/frameskip fields) were
+    # guarded OUT of the mixed set, so a legacy/modern straddle -- exactly
+    # the rows the warning was retrofitted for -- stayed silent.
+    write_rows(out, [
+        {"arm": "a", "seed": 0, "iteration": 1, "return_mean": 1.0,
+         "env": "Pong-v4", "frameskip": 4},
+        {"arm": "a", "seed": 1, "iteration": 1, "return_mean": 2.0},
+    ])
+    ablation.plot(out, tmp_path)
+    assert "mixes runs from" in capsys.readouterr().out
+
+
+def test_eval_every_zero_does_not_divide(tmp_path, monkeypatch, capsys):
+    """Round-8 finding: the --eval-every 0 guard was the one round-7 fix
+    with no pinning test -- reverting it left the suite green. This drives
+    one real loop iteration through the guard (stubbed Run)."""
+    import types
+
+    def stub_run(arm, seed, spec):
+        net = lambda: types.SimpleNamespace(state_dict=lambda: {})
+        return types.SimpleNamespace(
+            env=types.SimpleNamespace(close=lambda: None),
+            searcher=types.SimpleNamespace(
+                network_manager=types.SimpleNamespace(training_steps=0)),
+            trainer=types.SimpleNamespace(
+                training_steps=0, representation=net(), dynamics=net(),
+                prediction=net(), value_prefix=net()),
+            replay=[], env_steps=0,
+            play_episode=lambda greedy=False, cap=None: ([], 0.0, 0.0, True),
+            reanalyse=lambda traj, terminated=True: traj,
+            set_train_mode=lambda t: None,
+            evaluate=lambda: {"return_mean": 0.0, "return_max": 0.0,
+                              "prefix": 0.0, "control": 0.0, "per_step": 0.0})
+
+    monkeypatch.setattr(ablation, "Run", stub_run)
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path)
+    monkeypatch.setattr(ablation, "TAG", "")
+    monkeypatch.setattr(ablation, "ENV_NAME", "Pong-v4")
+    monkeypatch.setattr(ablation, "EPISODE_CAP", 600)
+    out = tmp_path / "ablation.jsonl"
+    ablation.run_one("per-step", 0, 1, 1, 0, 0, out,
+                     checkpoint_every=0, resume=False)
+    assert "iter   1" in capsys.readouterr().out
 
 
 def test_run_expect_covers_the_full_protocol(monkeypatch):
