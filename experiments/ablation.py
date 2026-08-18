@@ -912,16 +912,16 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
         raise SystemExit(
             f"{ck} exists: a previous run of this (arm, seed) was killed "
             f"mid-flight or completed here. Pass --resume to continue/skip "
-            f"it, or discard it by rerunning your ORIGINAL command (keeping "
-            f"--env/--frameskip/every recipe flag) with: --arms {arm} "
-            f"--seed {seed} --overwrite.")
+            f"it, or discard it by rerunning THIS command with: --arms "
+            f"{arm} --seed {seed} --overwrite (this command's "
+            f"--env/--frameskip already target these files).")
     if rows_for_pair(out, arm, seed):
         raise SystemExit(
             f"{pathlib.Path(out).name} already has rows for ({arm}, "
             f"s{seed}): a fresh run would append a second timeline over "
-            f"them. Replace them by rerunning your ORIGINAL command "
-            f"(keeping --env/--frameskip/every recipe flag) with: "
-            f"--arms {arm} --seed {seed} --overwrite, or point "
+            f"them. Replace them by rerunning THIS command with: "
+            f"--arms {arm} --seed {seed} --overwrite (this command's "
+            f"--env/--frameskip already target these files), or point "
             f"ABLATION_RESULTS somewhere fresh.")
 
 
@@ -939,6 +939,16 @@ def handle_completed_marker(ck, out, arm, seed):
 def seed_list(seed, seeds):
     """--seed N runs exactly one seed; otherwise 0..seeds-1."""
     return [seed] if seed is not None else list(range(seeds))
+
+
+def env_tag_fragment(env):
+    """Filename-safe TAG fragment from an env id. ALE-namespaced ids
+    ('ALE/Pong-v5') carry a path separator: unsanitized, every output
+    resolved into a nonexistent ablation-ale/ subdirectory and the run
+    died at its FIRST write -- after training for eval_every iterations
+    with nothing persisted (round-7 finding, reproduced)."""
+    import re
+    return re.sub(r"[^a-z0-9]+", "", env.split("-")[0].lower())
 
 
 def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every):
@@ -1039,7 +1049,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 }, ckpt)
                 print(f"  saved {ckpt.name}", flush=True)
 
-            if it % eval_every == 0 or it == iterations:
+            if (eval_every and it % eval_every == 0) or it == iterations:
                 metrics = run.evaluate()
                 # The EFFECTIVE skip: the wrapper stack defaults to 4 when
                 # --frameskip is omitted; recording the raw flag (None) there
@@ -1089,6 +1099,9 @@ def plot(path, out_dir):
     # external corruption; skip rather than crash.
     try:
         rows, _ = read_rows_tolerant(path)
+    except FileNotFoundError:
+        print("no results to plot")
+        return
     except json.JSONDecodeError as e:
         raise SystemExit(f"{path}: undecodable JSON mid-file ({e}) -- "
                          f"inspect the file by hand.")
@@ -1096,6 +1109,16 @@ def plot(path, out_dir):
     if not rows:
         print("no results to plot")
         return
+    # The per-row env/frameskip fields are the second line of defense
+    # against mixed histories -- READ them: same-TAG recipe variants
+    # (Pong-v4 vs Pong-v5 share "-pong") would otherwise average into one
+    # curve silently.
+    mixed = {(r.get("env"), r.get("frameskip")) for r in rows
+             if "env" in r or "frameskip" in r}
+    if len(mixed) > 1:
+        print(f"WARNING: {pathlib.Path(path).name} mixes runs from "
+              f"{sorted(mixed, key=str)} -- these are averaged together; "
+              f"separate them before drawing conclusions.")
     arms = sorted({r["arm"] for r in rows})
     palette = ["#0D6E75", "#B4531A", "#5A6472", "#7A3E8F", "#2E7D32"]
     # Cycle rather than zip: a sixth arm in one file used to KeyError here.
@@ -1104,7 +1127,9 @@ def plot(path, out_dir):
     def series(arm, key):
         by_iter = {}
         for r in rows:
-            if r["arm"] == arm:
+            # Rows from older eras may lack newer metric fields; skip
+            # rather than crash the whole plot.
+            if r.get("arm") == arm and "iteration" in r and key in r:
                 by_iter.setdefault(r["iteration"], []).append(r[key])
         xs = sorted(by_iter)
         return xs, [float(np.mean(by_iter[x])) for x in xs], [float(np.std(by_iter[x])) for x in xs]
@@ -1125,8 +1150,10 @@ def plot(path, out_dir):
             ax.fill_between(xs, np.array(mean) - np.array(sd), np.array(mean) + np.array(sd),
                             color=colours[arm], alpha=0.15)
             if key in controls:
-                _, cmean, _ = series(arm, controls[key])
-                ax.plot(xs, cmean, color=colours[arm], linewidth=1, linestyle="--", alpha=0.6)
+                cxs, cmean, _ = series(arm, controls[key])
+                if cxs == xs:   # partial rows can leave the control sparser
+                    ax.plot(xs, cmean, color=colours[arm], linewidth=1,
+                            linestyle="--", alpha=0.6)
         ax.set_title(f"{title}   ({note})", fontsize=11)
         ax.set_xlabel("iteration")
         ax.grid(alpha=0.25, linewidth=0.6)
@@ -1193,7 +1220,7 @@ def main():
 
     ENV_NAME = args.env
     if args.env != "MsPacman-v4":
-        TAG = "-" + args.env.split("-")[0].lower()
+        TAG = "-" + env_tag_fragment(args.env)
     if args.episode_cap:
         EPISODE_CAP = args.episode_cap
     if args.frameskip:

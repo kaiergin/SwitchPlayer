@@ -370,6 +370,57 @@ def test_stale_marker_call_site_reruns_fresh(tmp_path, monkeypatch, capsys):
     assert ck.exists(), "fresh rerun never reached completion"
 
 
+def test_env_tag_fragment_is_filename_safe():
+    """Round-7 finding: ALE/Pong-v5 put a path separator in TAG, so every
+    output resolved into a nonexistent subdirectory and the run died at
+    its first write after eval_every iterations of training."""
+    assert ablation.env_tag_fragment("ALE/Pong-v5") == "alepong"
+    assert ablation.env_tag_fragment("Pong-v4") == "pong"
+    assert "/" not in ablation.env_tag_fragment("ALE/MsPacman-v5")
+    assert "\\" not in ablation.env_tag_fragment("ALE\\Weird-v0")
+
+
+def test_ale_namespaced_env_wires_a_safe_tag_through_main(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ablation, "run_one", lambda *a, **k: None)
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path)
+    for g in ("ENV_NAME", "ACTIONS", "EPISODE_CAP", "TAG", "FRAMESKIP"):
+        monkeypatch.setattr(ablation, g, getattr(ablation, g))
+    monkeypatch.setattr(sys, "argv",
+                        ["ablation.py", "--env", "ALE/Pong-v5", "--actions",
+                         "6", "--plot-only"])
+    ablation.main()                      # must not raise
+    assert "/" not in ablation.TAG and "\\" not in ablation.TAG
+    # plot() on the (missing) tagged file degrades politely (round-7 LOW).
+    assert "no results to plot" in capsys.readouterr().out
+
+
+def test_fresh_start_advice_names_this_command(tmp_path):
+    """Round-7 finding: round 6 fixed the mismatch site's advice but left
+    both fresh-start refusals telling the user to rerun their ORIGINAL
+    command -- burning hours retraining an abandoned experiment. All
+    conflict state was found under THIS command's flags by construction."""
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    ck.write_bytes(b"x")
+    with pytest.raises(SystemExit, match="THIS command"):
+        ablation.refuse_conflicting_state(ck, out, "a", 0, False, False)
+    ck.unlink()
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
+    with pytest.raises(SystemExit, match="THIS command"):
+        ablation.refuse_conflicting_state(ck, out, "a", 0, False, False)
+
+
+def test_plot_warns_on_mixed_env_histories(tmp_path, capsys):
+    out = tmp_path / "ablation.jsonl"
+    write_rows(out, [
+        {"arm": "a", "seed": 0, "iteration": 1, "return_mean": 1.0,
+         "env": "Pong-v4", "frameskip": 4},
+        {"arm": "a", "seed": 1, "iteration": 1, "return_mean": 2.0,
+         "env": "Pong-v5", "frameskip": 4},
+    ])
+    ablation.plot(out, tmp_path)
+    assert "mixes runs from" in capsys.readouterr().out
+
+
 def test_run_expect_covers_the_full_protocol(monkeypatch):
     """Audit round-2 LOW: episode_cap/eval_every joined the validated recipe
     but nothing pinned it -- reverting that hunk left the suite green."""
