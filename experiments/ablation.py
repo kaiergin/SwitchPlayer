@@ -726,8 +726,11 @@ def load_run_checkpoint(run, path, expect):
                     else "absent (checkpoint predates this field)")
             raise ValueError(
                 f"resume mismatch: checkpoint {key}={have} but this "
-                f"invocation has {want!r}. Rerun with the original recipe, "
-                f"or --overwrite to discard the old state.")
+                f"invocation has {want!r}. Rerun with the original recipe; "
+                f"to discard the old state instead, rerun WITHOUT --resume "
+                f"as: --arms {expect['arm']} --seed {expect['seed']} "
+                f"--overwrite (overwrite hits every pair in its "
+                f"invocation, so restrict it to this one).")
     if state.get("completed"):
         return None
     for n in NET_NAMES:
@@ -828,20 +831,25 @@ def rows_for_pair(out, arm, seed):
 
 
 def heal_torn_tail(out):
-    """A kill mid-append leaves a partial final line WITHOUT a newline. The
-    readers tolerate that torn tail, but an APPEND would concatenate the
-    next row onto the fragment -- converting a benign torn tail into
-    mid-file corruption that every reader then raises on (round-3 HIGH:
-    the advertised --overwrite recovery crashed on it too). Rewrite without
-    the fragment before anything appends. Returns True if healed."""
+    """A torn final line -- from a kill mid-append, or any external damage
+    -- is tolerated by the readers but MUST NOT be appended after: the next
+    row would concatenate onto (or follow) the fragment, converting a
+    benign torn tail into mid-file corruption that every reader raises on
+    (round-3 HIGH; --overwrite, the advertised recovery, crashed on it
+    too). Heal keys on the READERS' OWN verdict, not just a missing final
+    newline: round 4 showed a newline-TERMINATED undecodable final line
+    was tolerated by reads yet skipped by a byte-only heal, re-arming the
+    same landmine. Rewrite without the fragment before anything appends.
+    Returns True if healed."""
     out = pathlib.Path(out)
     if not out.exists() or out.stat().st_size == 0:
         return False
+    rows, torn = read_rows_tolerant(out)
     with open(out, "rb") as fh:
         fh.seek(-1, 2)
-        if fh.read(1) == b"\n":
-            return False
-    rows, _ = read_rows_tolerant(out)
+        ends_nl = fh.read(1) == b"\n"
+    if not torn and ends_nl:
+        return False
     tmp = pathlib.Path(str(out) + ".tmp")
     with open(tmp, "w") as fh:
         for r in rows:
@@ -879,20 +887,41 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
                 f"{ck.name}, but {pathlib.Path(out).name} already has rows "
                 f"for it (a run from before checkpointing, or a deleted "
                 f"checkpoint). Starting fresh would append a second "
-                f"timeline. Rerun with --overwrite to replace those rows, "
-                f"or point ABLATION_RESULTS somewhere fresh.")
+                f"timeline. To replace those rows, rerun WITHOUT --resume "
+                f"as: --arms {arm} --seed {seed} --overwrite (overwrite "
+                f"hits every pair in its invocation, so restrict it to "
+                f"this one). Or point ABLATION_RESULTS somewhere fresh.")
         return
     if ck.exists():
         raise SystemExit(
             f"{ck} exists: a previous run of this (arm, seed) was killed "
             f"mid-flight or completed here. Pass --resume to continue/skip "
-            f"it, or --overwrite to discard it and start fresh.")
+            f"it, or discard it with: --arms {arm} --seed {seed} "
+            f"--overwrite (restricted, since overwrite hits every pair in "
+            f"its invocation).")
     if rows_for_pair(out, arm, seed):
         raise SystemExit(
             f"{pathlib.Path(out).name} already has rows for ({arm}, "
             f"s{seed}): a fresh run would append a second timeline over "
-            f"them. Pass --overwrite to replace them, or point "
-            f"ABLATION_RESULTS somewhere fresh.")
+            f"them. Replace them with: --arms {arm} --seed {seed} "
+            f"--overwrite (restricted, since overwrite hits every pair in "
+            f"its invocation), or point ABLATION_RESULTS somewhere fresh.")
+
+
+def handle_completed_marker(ck, out, arm, seed):
+    """A completed marker with live rows is a genuinely finished pair:
+    'skip'. With ZERO live rows it is an ARCHIVED era's leftover (a
+    current-era completion always writes at least one row) -- drop it and
+    run 'fresh'. The redo is announced by the caller, never silent."""
+    if rows_for_pair(out, arm, seed):
+        return "skip"
+    ck.unlink()
+    return "fresh"
+
+
+def seed_list(seed, seeds):
+    """--seed N runs exactly one seed; otherwise 0..seeds-1."""
+    return [seed] if seed is not None else list(range(seeds))
 
 
 def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every):
@@ -927,12 +956,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 run.env.close()
                 raise
             if loaded is None:
-                if rows_for_pair(out, arm, seed) == 0:
-                    # A completion marker whose rows are gone points at an
-                    # ARCHIVED era (the workflow moves jsonl/weights into an
-                    # era folder; markers were being left behind). This
-                    # invocation is a new era: drop the stale marker and run.
-                    ck.unlink()
+                if handle_completed_marker(ck, out, arm, seed) == "fresh":
                     print(f"  [{arm} s{seed}] completion marker refers to an "
                           f"archived era; removed, starting fresh", flush=True)
                 else:
@@ -1105,6 +1129,10 @@ def main():
     ap.add_argument("--arms", nargs="+", default=["per-step", "value-prefix"],
                     choices=sorted(ARMS))
     ap.add_argument("--seeds", type=int, default=2)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="run ONLY this seed (overrides --seeds) -- the way "
+                         "to point --overwrite or --resume at a single "
+                         "(arm, seed) pair")
     ap.add_argument("--iterations", type=int, default=40)
     ap.add_argument("--episodes-per-iter", type=int, default=2)
     ap.add_argument("--train-steps", type=int, default=200)
@@ -1174,7 +1202,7 @@ def main():
               f"{args.train_steps} train steps)")
         for arm in args.arms:
             print(f"\n=== {arm}: {ARMS[arm]['_doc']}")
-            for seed in range(args.seeds):
+            for seed in seed_list(args.seed, args.seeds):
                 run_one(arm, seed, args.iterations, args.episodes_per_iter,
                         args.train_steps, args.eval_every, out,
                         checkpoint_every=args.checkpoint_every,

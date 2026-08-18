@@ -270,6 +270,55 @@ def test_overwrite_unlinks_the_pair_weights(tmp_path, monkeypatch):
     assert other.exists()
 
 
+def test_newline_terminated_torn_line_is_also_healed(tmp_path):
+    """Round-4 finding: heal keyed on a missing final newline, but readers
+    tolerate any undecodable FINAL line -- so '{"torn\\n' passed heal,
+    passed refusal, and the next append created mid-file corruption."""
+    import json
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
+    with open(out, "a") as fh:
+        fh.write('{"torn\n')                  # undecodable, newline-terminated
+    ablation.refuse_conflicting_state(ck, out, "b", 0, False, False)
+    with open(out, "a") as fh:                # the append heal must protect
+        fh.write(json.dumps({"arm": "b", "seed": 0, "iteration": 1}) + "\n")
+    rows, torn = ablation.read_rows_tolerant(out)   # must NOT raise
+    assert not torn
+    assert [r["arm"] for r in rows] == ["a", "b"]
+
+
+def test_completed_marker_semantics(tmp_path):
+    """Marker + live rows = finished pair, skip; marker + zero rows = an
+    archived era's leftover, drop it and run fresh."""
+    ck, out = tmp_path / "resume.ckpt", tmp_path / "ablation.jsonl"
+    ablation.mark_run_completed(ck, EXPECT)
+    write_rows(out, [{"arm": "a", "seed": 0, "iteration": 10}])
+    assert ablation.handle_completed_marker(ck, out, "a", 0) == "skip"
+    assert ck.exists()
+    write_rows(out, [])                       # rows archived away
+    assert ablation.handle_completed_marker(ck, out, "a", 0) == "fresh"
+    assert not ck.exists()
+
+
+def test_resume_and_overwrite_together_is_a_parser_error(monkeypatch, capsys):
+    """Round-4 finding companion: a hedged '--resume --overwrite' must die
+    at the parser, not silently destroy resumable state."""
+    monkeypatch.setattr(sys, "argv",
+                        ["ablation.py", "--resume", "--overwrite"])
+    with pytest.raises(SystemExit) as e:
+        ablation.main()
+    assert e.value.code == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_seed_list_selects_a_single_pair():
+    """Round-4 finding: there was NO invocation that overwrote seed 3
+    without destroying seeds 0-2; --seed provides one."""
+    assert ablation.seed_list(None, 3) == [0, 1, 2]
+    assert ablation.seed_list(3, 5) == [3]
+    assert ablation.seed_list(0, 5) == [0]
+
+
 def test_run_expect_covers_the_full_protocol(monkeypatch):
     """Audit round-2 LOW: episode_cap/eval_every joined the validated recipe
     but nothing pinned it -- reverting that hunk left the suite green."""
