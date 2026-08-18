@@ -402,6 +402,9 @@ class Run:
         # against itself.
         self.env.reset(seed=seed)
         self.replay = []
+        # Cumulative TRAINING env interaction (the Atari-100k x-axis); greedy
+        # eval episodes are protocol-exempt and not counted.
+        self.env_steps = 0
 
     def set_train_mode(self, training):
         for net in (self.trainer.representation, self.trainer.dynamics,
@@ -452,6 +455,8 @@ class Run:
             total += float(reward)
             steps += 1
         terminated = done
+        if not greedy:
+            self.env_steps += steps
         if not terminated:
             # The cap truncated the episode mid-game. EpisodicLifeEnv only
             # truly resets on real game over, so without forcing it the next
@@ -717,6 +722,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                           "wrappers": bool(muzero.USE_ATARI_WRAPPERS),
                           "iteration": it,
                           "train_steps": run.trainer.training_steps,
+                          "env_steps": run.env_steps,
                           "elapsed_s": round(time.time() - started, 1), **metrics}
                 with open(out, "a") as fh:
                     fh.write(json.dumps(record) + "\n")
