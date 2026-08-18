@@ -362,6 +362,12 @@ def test_stale_marker_call_site_reruns_fresh(tmp_path, monkeypatch, capsys):
     ablation.run_one("per-step", 0, 0, 1, 1, 1, out,
                      checkpoint_every=1, resume=True)
     assert "archived era; removed, starting fresh" in capsys.readouterr().out
+    # Round-6 finding: capsys asserts alone were regression-blind -- an
+    # early return AFTER the print passed them. The fall-through is pinned
+    # by the completion marker the run must RECREATE at its end
+    # (handle_completed_marker unlinked it; only mark_run_completed at the
+    # loop's end brings it back).
+    assert ck.exists(), "fresh rerun never reached completion"
 
 
 def test_run_expect_covers_the_full_protocol(monkeypatch):

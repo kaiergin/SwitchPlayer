@@ -726,13 +726,13 @@ def load_run_checkpoint(run, path, expect):
                     else "absent (checkpoint predates this field)")
             raise ValueError(
                 f"resume mismatch: checkpoint {key}={have} but this "
-                f"invocation has {want!r}. Rerun with the original recipe; "
-                f"to discard the old state instead, rerun your ORIGINAL "
-                f"command (keeping --env/--frameskip/every recipe flag), "
+                f"invocation has {want!r}. If you meant to continue the old "
+                f"experiment, rerun with its original recipe. To discard it "
+                f"and run the experiment you just typed, rerun THIS command, "
                 f"dropping --resume and adding: --arms {expect['arm']} "
-                f"--seed {expect['seed']} --overwrite. Overwrite hits every "
-                f"pair in its invocation, and without the original flags it "
-                f"targets the WRONG files entirely.")
+                f"--seed {expect['seed']} --overwrite (this command's "
+                f"--env/--frameskip already target these files -- the "
+                f"checkpoint was found under them).")
     if state.get("completed"):
         return None
     for n in NET_NAMES:
@@ -875,13 +875,16 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
     """The jsonl rows are the experiment record and a checkpoint is a killed
     run's resumable state; a fresh run over EITHER appends a second timeline
     that plot() would average as extra seeds -- the accident class that has
-    twice contaminated live results. All refusal happens here, before the
-    env or nets are built. --overwrite is the mechanized opt-out: it drops
-    this (arm, seed)'s rows and checkpoint and starts clean, so no advice
-    ever funnels through hand-deleting files into a mixed timeline."""
+    twice contaminated live results. Refusal happens here, before the env
+    or nets are built -- except the recipe MISMATCH, which surfaces from
+    load_run_checkpoint after Run construction (it needs the checkpoint's
+    contents, not read here). --overwrite is the mechanized opt-out: it
+    drops this (arm, seed)'s rows and checkpoint and starts clean, so no
+    advice ever funnels through hand-deleting files into a mixed
+    timeline."""
     if heal_torn_tail(out):
-        print(f"  [{arm} s{seed}] healed a torn jsonl tail (kill mid-append)",
-              flush=True)
+        print(f"  [{arm} s{seed}] healed a torn jsonl tail (kill mid-append "
+              f"or external damage)", flush=True)
     if overwrite:
         dropped = prune_stale_rows(out, arm, seed, 0)
         for stale in (ck, RESULTS / f"weights{TAG}-{arm}-seed{seed}.pth"):
@@ -1084,7 +1087,11 @@ def plot(path, out_dir):
     # Tolerant of a torn final line: --plot-only runs against live files
     # whose writer may have been killed mid-append. Non-dict JSON lines are
     # external corruption; skip rather than crash.
-    rows, _ = read_rows_tolerant(path)
+    try:
+        rows, _ = read_rows_tolerant(path)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{path}: undecodable JSON mid-file ({e}) -- "
+                         f"inspect the file by hand.")
     rows = [r for r in rows if isinstance(r, dict)]
     if not rows:
         print("no results to plot")
