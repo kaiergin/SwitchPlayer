@@ -155,3 +155,17 @@ def test_greedy_eval_searches_only_in_paper_mode(ablation, monkeypatch):
     # Exact sequence, not membership: a gate that searched greedy eval but
     # dropped self-play search would also show True in a looser assert.
     assert calls == [False, True]
+
+    # Truncated GREEDY episodes must not burn a tail search either --
+    # evaluate() discards the trajectory (round-10 finding, unpinned until
+    # round 11). A never-terminating env + cap=1 forces truncation; exactly
+    # one per-step search, no second (tail) call.
+    class NeverEndsEnv(OneStepEnv):
+        def step(self, action):
+            return (np.zeros((210, 160, 3), dtype=np.uint8),
+                    0.0, False, False, {})
+
+    calls.clear()
+    run.env = NeverEndsEnv()
+    run.play_episode(greedy=True, cap=1)
+    assert calls == [True], "truncated greedy eval burned a tail search"

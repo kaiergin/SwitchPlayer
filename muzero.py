@@ -269,7 +269,9 @@ TARGET_MODEL_INTERVAL = 200
 # re-search ~99% of sampled positions per batch (revisit_policy_search_rate),
 # which needs a CPU fleet; here the harness re-searches every position of the
 # POLICY_REFRESH_COUNT oldest trajectories every POLICY_REFRESH_EVERY
-# iterations with the current network, resetting their ages.
+# iterations THROUGH THE LAGGED TARGET MODEL (as their reanalyze workers
+# search), stamping a refresh rotation while PRESERVING born ages -- fresh
+# policy targets never restore the 4.3 age-shrunk value horizon.
 POLICY_REFRESH_EVERY = 5
 POLICY_REFRESH_COUNT = 2
 
@@ -303,10 +305,11 @@ def paper_value_target(traj, idx, horizon, discount):
     The bootstrap is the STORED (self-play-time) search root value -- exactly
     MuZero's pseudocode make_target, which bootstraps game.root_values.
     (EfficientZero goes further: it RECOMPUTES the bootstrap at batch time
-    with a target model refreshed every 200 steps, so its value is never more
-    than ~200 steps stale, while a stored value ages with its trajectory.
-    That batch-time recomputation is the one remaining fidelity gap of this
-    mode, documented in the effzero-repro arm.) A terminal record stores
+    through a lagged target model, so its value never ages with the
+    trajectory. That is the USE_TARGET_MODEL=False behavior gap ONLY:
+    prepare_batch_paper recomputes exactly so when the flag is on, and the
+    effzero-repro arm enables it -- part 3 closed the gap.) A terminal
+    record stores
     root_value 0, so the terminal case reduces to pure Monte Carlo without a
     special branch; a truncated tail bootstraps its stored value.
     """

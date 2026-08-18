@@ -1246,7 +1246,8 @@ def main():
         # 45-iteration checkpoint with zero warning).
         ap.error("--resume and --overwrite are mutually exclusive: "
                  "resume continues saved state, overwrite destroys it")
-    if (any(ARMS[a].get("USE_ATARI_WRAPPERS") for a in args.arms)
+    if (any(ARMS[a].get("USE_ATARI_WRAPPERS", muzero.USE_ATARI_WRAPPERS)
+            for a in args.arms)
             and not args.frameskip and not args.plot_only):
         # Pre-flight, not just the per-pair check inside run_one: in a
         # mixed sweep the non-wrapper arms would otherwise run for hours
