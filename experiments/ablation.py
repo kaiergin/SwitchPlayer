@@ -727,10 +727,12 @@ def load_run_checkpoint(run, path, expect):
             raise ValueError(
                 f"resume mismatch: checkpoint {key}={have} but this "
                 f"invocation has {want!r}. Rerun with the original recipe; "
-                f"to discard the old state instead, rerun WITHOUT --resume "
-                f"as: --arms {expect['arm']} --seed {expect['seed']} "
-                f"--overwrite (overwrite hits every pair in its "
-                f"invocation, so restrict it to this one).")
+                f"to discard the old state instead, rerun your ORIGINAL "
+                f"command (keeping --env/--frameskip/every recipe flag), "
+                f"dropping --resume and adding: --arms {expect['arm']} "
+                f"--seed {expect['seed']} --overwrite. Overwrite hits every "
+                f"pair in its invocation, and without the original flags it "
+                f"targets the WRONG files entirely.")
     if state.get("completed"):
         return None
     for n in NET_NAMES:
@@ -844,7 +846,18 @@ def heal_torn_tail(out):
     out = pathlib.Path(out)
     if not out.exists() or out.stat().st_size == 0:
         return False
-    rows, torn = read_rows_tolerant(out)
+    try:
+        rows, torn = read_rows_tolerant(out)
+    except json.JSONDecodeError as e:
+        # Mid-file corruption is NOT a kill artifact (heal runs before
+        # every append era) and --overwrite must not "fix" it -- overwrite
+        # is pair-scoped, and the damaged line may belong to another
+        # pair's row. This needs a human, so fail with the path and say so.
+        raise SystemExit(
+            f"{out}: undecodable JSON mid-file ({e}). Not a kill artifact "
+            f"and not repairable by --overwrite (which only prunes one "
+            f"pair's rows) -- inspect the file by hand, or point "
+            f"ABLATION_RESULTS elsewhere.")
     with open(out, "rb") as fh:
         fh.seek(-1, 2)
         ends_nl = fh.read(1) == b"\n"
@@ -887,25 +900,26 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
                 f"{ck.name}, but {pathlib.Path(out).name} already has rows "
                 f"for it (a run from before checkpointing, or a deleted "
                 f"checkpoint). Starting fresh would append a second "
-                f"timeline. To replace those rows, rerun WITHOUT --resume "
-                f"as: --arms {arm} --seed {seed} --overwrite (overwrite "
-                f"hits every pair in its invocation, so restrict it to "
-                f"this one). Or point ABLATION_RESULTS somewhere fresh.")
+                f"timeline. To replace those rows, rerun your ORIGINAL "
+                f"command (keeping --env/--frameskip/every recipe flag), "
+                f"dropping --resume and adding: --arms {arm} --seed {seed} "
+                f"--overwrite. Or point ABLATION_RESULTS somewhere fresh.")
         return
     if ck.exists():
         raise SystemExit(
             f"{ck} exists: a previous run of this (arm, seed) was killed "
             f"mid-flight or completed here. Pass --resume to continue/skip "
-            f"it, or discard it with: --arms {arm} --seed {seed} "
-            f"--overwrite (restricted, since overwrite hits every pair in "
-            f"its invocation).")
+            f"it, or discard it by rerunning your ORIGINAL command (keeping "
+            f"--env/--frameskip/every recipe flag) with: --arms {arm} "
+            f"--seed {seed} --overwrite.")
     if rows_for_pair(out, arm, seed):
         raise SystemExit(
             f"{pathlib.Path(out).name} already has rows for ({arm}, "
             f"s{seed}): a fresh run would append a second timeline over "
-            f"them. Replace them with: --arms {arm} --seed {seed} "
-            f"--overwrite (restricted, since overwrite hits every pair in "
-            f"its invocation), or point ABLATION_RESULTS somewhere fresh.")
+            f"them. Replace them by rerunning your ORIGINAL command "
+            f"(keeping --env/--frameskip/every recipe flag) with: "
+            f"--arms {arm} --seed {seed} --overwrite, or point "
+            f"ABLATION_RESULTS somewhere fresh.")
 
 
 def handle_completed_marker(ck, out, arm, seed):
@@ -1197,7 +1211,7 @@ def main():
     if not args.plot_only:
         print(f"device {DEVICE} | env {ENV_NAME} ({ACTIONS} actions, cap {EPISODE_CAP}, "
               f"skip {FRAMESKIP or 'registered'}) | "
-              f"arms {args.arms} | seeds {args.seeds} | "
+              f"arms {args.arms} | seeds {seed_list(args.seed, args.seeds)} | "
               f"{args.iterations} iterations x ({args.episodes_per_iter} episodes + "
               f"{args.train_steps} train steps)")
         for arm in args.arms:

@@ -319,6 +319,51 @@ def test_seed_list_selects_a_single_pair():
     assert ablation.seed_list(0, 5) == [0]
 
 
+def test_seed_flag_wires_through_main(tmp_path, monkeypatch, capsys):
+    """Round-5 finding: seed_list was pinned but main()'s use of it was not
+    -- reverting the loop to range(args.seeds) left all tests green while
+    --seed silently did nothing (and the advice strings claimed otherwise).
+    Also pins the banner printing the EFFECTIVE seed list."""
+    calls = []
+    monkeypatch.setattr(ablation, "run_one",
+                        lambda arm, seed, *a, **k: calls.append((arm, seed)))
+    monkeypatch.setattr(ablation, "plot", lambda *a, **k: None)
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path)
+    for g in ("ENV_NAME", "ACTIONS", "EPISODE_CAP", "TAG", "FRAMESKIP"):
+        monkeypatch.setattr(ablation, g, getattr(ablation, g))
+    monkeypatch.setattr(sys, "argv",
+                        ["ablation.py", "--arms", "per-step", "--seed", "3"])
+    ablation.main()
+    assert calls == [("per-step", 3)]
+    assert "seeds [3]" in capsys.readouterr().out
+
+
+def test_stale_marker_call_site_reruns_fresh(tmp_path, monkeypatch, capsys):
+    """Round-5 finding companion: handle_completed_marker was pinned but its
+    run_one call site was not -- an unconditional skip-on-marker regression
+    stayed green. iterations=0 keeps the rerun's loop empty."""
+    import types
+    monkeypatch.setattr(ablation, "Run", lambda arm, seed, spec:
+                        types.SimpleNamespace(env=types.SimpleNamespace(
+                            close=lambda: None)))
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path)
+    monkeypatch.setattr(ablation, "TAG", "")
+    monkeypatch.setattr(ablation, "ENV_NAME", "Pong-v4")
+    monkeypatch.setattr(ablation, "EPISODE_CAP", 600)
+    out = tmp_path / "ablation.jsonl"
+    ck = ablation.resume_path("per-step", 0)
+    ablation.mark_run_completed(
+        ck, ablation.run_expect("per-step", 0, 0, 1, 1, 1))
+    write_rows(out, [{"arm": "per-step", "seed": 0, "iteration": 1}])
+    ablation.run_one("per-step", 0, 0, 1, 1, 1, out,
+                     checkpoint_every=1, resume=True)
+    assert "already completed, skipping" in capsys.readouterr().out
+    write_rows(out, [])                       # rows archived away
+    ablation.run_one("per-step", 0, 0, 1, 1, 1, out,
+                     checkpoint_every=1, resume=True)
+    assert "archived era; removed, starting fresh" in capsys.readouterr().out
+
+
 def test_run_expect_covers_the_full_protocol(monkeypatch):
     """Audit round-2 LOW: episode_cap/eval_every joined the validated recipe
     but nothing pinned it -- reverting that hunk left the suite green."""
