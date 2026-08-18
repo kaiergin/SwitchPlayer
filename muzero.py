@@ -200,11 +200,13 @@ GUMBEL_C_SCALE = 0.1
 # contributes: the Pong equivalence runs isolated the missing piece as
 # bootstrapping -- a raw-prior actor never collects the successes the value
 # function needs to differentiate actions. When True, harness SELF-PLAY acts
-# via a fresh ACT_SEARCH_SIMS-simulation Gumbel search per step, taking the
-# sequential-halving survivor (the Gumbel draw is the exploration). Greedy
-# EVALUATION never searches regardless, so every eval still measures the
-# deployable raw-policy agent; the real-time pipeline agent cannot search at
-# all (it does not load the dynamics network).
+# via a fresh ACT_SEARCH_SIMS-simulation search per step (Gumbel or PUCT by
+# USE_GUMBEL_SEARCH; for Gumbel, the sequential-halving survivor, and the
+# Gumbel draw is the exploration). Greedy EVALUATION searches ONLY under
+# PAPER_TARGETS -- the papers' evaluate-with-search protocol, which the
+# effzero-repro numbers use; every non-paper eval measures the deployable
+# raw-policy agent. The real-time pipeline agent cannot search at all (it
+# does not load the dynamics network).
 # ---------------------------------------------------------------------------
 USE_SEARCH_ACTING = False
 ACT_SEARCH_SIMS = 8            # measured ~40% of a 60fps frame at this budget

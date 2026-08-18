@@ -152,4 +152,6 @@ def test_greedy_eval_searches_only_in_paper_mode(ablation, monkeypatch):
     assert calls == [False], "self-play must still search"
     monkeypatch.setattr(muzero, "PAPER_TARGETS", True)
     run.play_episode(greedy=True)
-    assert True in calls, "paper-mode greedy eval must search"
+    # Exact sequence, not membership: a gate that searched greedy eval but
+    # dropped self-play search would also show True in a looser assert.
+    assert calls == [False, True]

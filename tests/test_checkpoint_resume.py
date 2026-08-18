@@ -478,6 +478,29 @@ def test_eval_every_zero_does_not_divide(tmp_path, monkeypatch, capsys):
     assert "iter   1" in capsys.readouterr().out
 
 
+def test_wrapper_arm_refuses_without_frameskip(tmp_path, monkeypatch):
+    """Round-10 finding: the wrapper-arm refusal had no pinning test. Both
+    layers: run_one's per-pair check, and main()'s pre-flight (which stops
+    a mixed sweep BEFORE non-wrapper arms burn hours into the untagged
+    history)."""
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path)
+    monkeypatch.setattr(ablation, "TAG", "")
+    monkeypatch.setattr(ablation, "ENV_NAME", "Pong-v4")
+    monkeypatch.setattr(ablation, "EPISODE_CAP", 3000)
+    monkeypatch.setattr(ablation, "FRAMESKIP", None)
+    with pytest.raises(SystemExit, match="skip4"):
+        ablation.run_one("effzero-repro", 0, 1, 1, 0, 1,
+                         tmp_path / "ablation.jsonl",
+                         checkpoint_every=0, resume=False)
+    # main()'s pre-flight dies at the parser, before anything runs.
+    monkeypatch.setattr(sys, "argv",
+                        ["ablation.py", "--arms", "effzero-repro",
+                         "--env", "Pong-v4"])
+    with pytest.raises(SystemExit) as e:
+        ablation.main()
+    assert e.value.code == 2
+
+
 def test_run_expect_covers_the_full_protocol(monkeypatch):
     """Audit round-2 LOW: episode_cap/eval_every joined the validated recipe
     but nothing pinned it -- reverting that hunk left the suite green."""

@@ -474,6 +474,11 @@ class Run:
             # greedy search on the final observation.
             if terminated:
                 tail_pol, tail_val = np.ones(ACTIONS) / ACTIONS, 0.0
+            elif greedy:
+                # Eval trajectories are discarded by evaluate(); a truncated
+                # greedy episode must not burn a 50-sim tail search whose
+                # result nothing reads (round-10 finding).
+                tail_pol, tail_val = np.ones(ACTIONS) / ACTIONS, 0.0
             else:
                 _, tail_pol, tail_val = asyncio.run(
                     self.searcher.act_search(final_stack, greedy=True))
@@ -1066,9 +1071,11 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
 
             if (eval_every and it % eval_every == 0) or it == iterations:
                 metrics = run.evaluate()
-                # The EFFECTIVE skip: the wrapper stack defaults to 4 when
-                # --frameskip is omitted; recording the raw flag (None) there
-                # would misdescribe the env actually run.
+                # The EFFECTIVE skip. The wrapper stack's skip-4 default is
+                # unreachable now that wrapper arms REFUSE to run without
+                # --frameskip, but this stays belt-and-braces: recording the
+                # raw flag (None) would misdescribe the env if the refusal
+                # ever regressed.
                 eff_skip = (FRAMESKIP or 4) if muzero.USE_ATARI_WRAPPERS else FRAMESKIP
                 record = {"arm": arm, "seed": seed,
                           "env": ENV_NAME, "frameskip": eff_skip,
@@ -1239,6 +1246,16 @@ def main():
         # 45-iteration checkpoint with zero warning).
         ap.error("--resume and --overwrite are mutually exclusive: "
                  "resume continues saved state, overwrite destroys it")
+    if (any(ARMS[a].get("USE_ATARI_WRAPPERS") for a in args.arms)
+            and not args.frameskip and not args.plot_only):
+        # Pre-flight, not just the per-pair check inside run_one: in a
+        # mixed sweep the non-wrapper arms would otherwise run for hours
+        # (into the UNTAGGED history) before the first wrapper arm killed
+        # the sweep mid-way (round-10 finding).
+        ap.error(f"arms using the Atari wrapper stack "
+                 f"({[a for a in args.arms if ARMS[a].get('USE_ATARI_WRAPPERS')]}) "
+                 f"force fixed skip 4 -- pass --frameskip 4 so output files "
+                 f"carry the -skip4 tag")
 
     ENV_NAME = args.env
     if args.env != "MsPacman-v4":
