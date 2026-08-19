@@ -149,6 +149,49 @@ ARMS = {
                 "--env Pong-v4 --frameskip 4 --episode-cap 3000 "
                 "--episodes-per-iter 1 --eval-every 10.",
     },
+    "effzero-repro-refresh5x": {
+        # effzero-repro with the refresh-throughput knobs raised -- the
+        # mechanism test the extension run pointed at: at the paper's true
+        # 100k-env-step position (measured via env_steps) with MORE gradient
+        # steps than the paper spends, the value function kept improving
+        # (value_control 1.33->0.54) while policy return plateaued at ~-16.5
+        # -- the stale-policy-target signature. 5x refresh coverage
+        # (POLICY_REFRESH_EVERY 5->2, COUNT 2->4; still ~0.5% of EffZero's
+        # 0.99 batch revisit rate, so this tests direction, not parity) and
+        # a full-history replay window (85 trajectories ~= the 100k budget;
+        # 60 was silently DROPPING the oldest data past ~iter 60, where
+        # EffZero's buffer keeps everything). A separate arm so
+        # effzero-repro's archived meaning stays fixed.
+        "USE_SEARCH_ACTING": True,
+        "USE_GUMBEL_SEARCH": False,
+        "PAPER_TARGETS": True,
+        "PER_ENABLED": True,
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "REWARD_LOSS_WEIGHT": 0.0,
+        "DISCOUNT": 0.997 ** 4,
+        "TD_STEPS": 5,
+        "LEARNING_RATE": 3e-4,
+        "MAX_REPLAY": 85,
+        "USE_AUGMENTATION": True,
+        "REWARD_CLIP": 1.0,
+        "ACT_SEARCH_SIMS": 50,
+        "DIRICHLET_ALPHA": 0.3,
+        "PREFIX_HEAD_CHANNELS": 16,
+        "PREFIX_FC_HIDDEN": 32,
+        "USE_ATARI_WRAPPERS": True,
+        "USE_TARGET_MODEL": True,
+        "TRAINING_BATCHES": 256,
+        "POLICY_REFRESH_EVERY": 2,
+        "POLICY_REFRESH_COUNT": 4,
+        "_doc": "effzero-repro + 5x reanalyze-refresh throughput (every 2 "
+                "iters, 4 oldest trajectories) + full-history replay (85 "
+                "trajectories, ~the 100k-step budget; ~12GB RAM). The "
+                "extension run isolated stale policy targets as the binding "
+                "gap; if 5x fresher targets steepen the curve, batch-time "
+                "refresh is the next build. Run with --env Pong-v4 "
+                "--frameskip 4 --episode-cap 3000 --episodes-per-iter 1 "
+                "--eval-every 10 --checkpoint-every 10.",
+    },
     "gumbel": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.9,
