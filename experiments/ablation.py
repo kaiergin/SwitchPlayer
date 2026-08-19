@@ -525,7 +525,8 @@ class Run:
         """EfficientZero's reanalyze, policy half (approximated): re-search
         every position of the `count` OLDEST trajectories through the LAGGED
         TARGET MODEL -- noisy, as their reanalyze workers search -- replacing
-        policy targets and root values, recomputing priorities, and stamping
+        policy targets and root values (the terminated tail's record carried
+        no search and is skipped), recomputing priorities, and stamping
         the refresh rotation (ages are preserved). Their
         revisit_policy_search_rate=0.99 re-searches sampled positions per
         batch on a CPU fleet; this is the compute-bounded analogue."""
