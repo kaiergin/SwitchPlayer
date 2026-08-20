@@ -460,7 +460,7 @@ def test_eval_every_zero_does_not_divide(tmp_path, monkeypatch, capsys):
                 network_manager=types.SimpleNamespace(training_steps=0)),
             trainer=types.SimpleNamespace(
                 training_steps=0, representation=net(), dynamics=net(),
-                prediction=net(), value_prefix=net()),
+                prediction=net(), value_prefix=net(), projector=net()),
             replay=[], env_steps=0,
             play_episode=lambda greedy=False, cap=None: ([], 0.0, 0.0, True),
             reanalyse=lambda traj, terminated=True: traj,
@@ -575,6 +575,99 @@ def test_plot_warns_on_mixed_lineages(tmp_path, capsys):
     ])
     ablation.plot(out, tmp_path)
     assert "mixes runs from" in capsys.readouterr().out
+
+
+def test_apply_warmstart_lr_ramps_then_leaves_alone():
+    import muzero
+    opt = __import__("types").SimpleNamespace(param_groups=[{"lr": 123.0}])
+    ablation.apply_warmstart_lr([opt], 0)
+    assert opt.param_groups[0]["lr"] == pytest.approx(
+        muzero.LEARNING_RATE / ablation.WARMSTART_LR_WARMUP_STEPS)
+    ablation.apply_warmstart_lr([opt], ablation.WARMSTART_LR_WARMUP_STEPS - 1)
+    assert opt.param_groups[0]["lr"] == pytest.approx(muzero.LEARNING_RATE)
+    opt.param_groups[0]["lr"] = 123.0          # past the boundary: no-op
+    ablation.apply_warmstart_lr([opt], ablation.WARMSTART_LR_WARMUP_STEPS)
+    assert opt.param_groups[0]["lr"] == 123.0
+
+
+def make_loop_stub(counters):
+    import types
+
+    def stub_run(arm, seed, spec):
+        def net():
+            return types.SimpleNamespace(state_dict=lambda: {},
+                                         load_state_dict=lambda sd: None)
+
+        async def pb(*a, **k):
+            return {}
+
+        async def ts(*a, **k):
+            counters["train"] += 1
+
+        def play(greedy=False, cap=None):
+            counters["play"] += 1
+            return ([], 0.0, 0.0, True)
+
+        opt = lambda: types.SimpleNamespace(param_groups=[{"lr": 123.0}])
+        trainer = types.SimpleNamespace(
+            training_steps=0, representation=net(), dynamics=net(),
+            prediction=net(), value_prefix=net(), projector=net(),
+            rep_optimizer=opt(), dyn_optimizer=opt(), pred_optimizer=opt(),
+            prefix_optimizer=opt(), proj_optimizer=opt(),
+            prepare_batch=pb, train_step=ts)
+        stub = types.SimpleNamespace(
+            env=types.SimpleNamespace(close=lambda: None),
+            searcher=types.SimpleNamespace(
+                network_manager=types.SimpleNamespace(training_steps=0)),
+            trainer=trainer, replay=[], env_steps=0,
+            play_episode=play,
+            reanalyse=lambda traj, terminated=True: traj,
+            set_train_mode=lambda t: None,
+            evaluate=lambda: {"return_mean": 0.0, "return_max": 0.0,
+                              "prefix": 0.0, "control": 0.0, "per_step": 0.0})
+        counters["last"] = stub
+        return stub
+
+    return stub_run
+
+
+def test_warmstart_prefills_and_ramps_but_fresh_runs_are_untouched(
+        tmp_path, monkeypatch):
+    """Continuation attempt 1 scrambled the loaded nets (19-32% drift in 20k
+    steps on 10 episodes). The gentle protocol: pre-fill the replay, ramp
+    train steps, warm the lr -- ALL gated on init-weights lineage so
+    from-scratch arms keep their archived semantics (the discriminating
+    second half)."""
+    import muzero
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path)
+    monkeypatch.setattr(ablation, "TAG", "")
+    monkeypatch.setattr(ablation, "ENV_NAME", "Pong-v4")
+    monkeypatch.setattr(ablation, "EPISODE_CAP", 600)
+    w = tmp_path / "w.pth"
+    torch.save({n: {} for n in ("representation", "dynamics", "prediction",
+                                "value_prefix")} | {"training_steps": 7},
+               w)
+    counters = {"train": 0, "play": 0}
+    monkeypatch.setattr(ablation, "Run", make_loop_stub(counters))
+    ablation.run_one("per-step", 0, 2, 1, 1000, 0,
+                     tmp_path / "a.jsonl", checkpoint_every=0,
+                     resume=False, init_weights=str(w))
+    # Prefill 10 + one self-play episode per iteration.
+    assert counters["play"] == ablation.WARMSTART_PREFILL_EPISODES + 2
+    # Ramp: 1000*1//10 + 1000*2//10 = 300, not 2000.
+    assert counters["train"] == 300
+    # LR warmup applied through the wiring (last applied step = 299).
+    lr = counters["last"].trainer.rep_optimizer.param_groups[0]["lr"]
+    assert lr == pytest.approx(muzero.LEARNING_RATE * 300
+                               / ablation.WARMSTART_LR_WARMUP_STEPS)
+    # From-scratch control: no prefill, no ramp, lr untouched.
+    counters2 = {"train": 0, "play": 0}
+    monkeypatch.setattr(ablation, "Run", make_loop_stub(counters2))
+    ablation.run_one("per-step", 1, 1, 1, 50, 0,
+                     tmp_path / "a.jsonl", checkpoint_every=0, resume=False)
+    assert counters2["play"] == 1
+    assert counters2["train"] == 50
+    assert counters2["last"].trainer.rep_optimizer.param_groups[0]["lr"] == 123.0
 
 
 def test_resume_and_init_weights_is_a_parser_error(monkeypatch, capsys):

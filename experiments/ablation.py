@@ -983,6 +983,30 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
             f"ABLATION_RESULTS somewhere fresh.")
 
 
+# Gentle warm start -- all three gated on init-weights lineage ONLY, so
+# from-scratch arms keep their archived semantics. The first continuation
+# attempt ran the loaded nets at full blast (fresh Adam, fresh projector at
+# consistency weight 2.0, 2000 train steps per episode on a 10-episode
+# buffer) and scrambled them: 19-32% relative parameter drift in 20k steps,
+# iter-10 eval back at the cold-start floor.
+WARMSTART_PREFILL_EPISODES = 10   # buffer diversity before the first gradient
+WARMSTART_RAMP_ITERS = 10         # train steps/iter scale linearly over these
+WARMSTART_LR_WARMUP_STEPS = 1000  # fresh-Adam lr ramps 0 -> LEARNING_RATE
+
+
+def apply_warmstart_lr(optimizers, training_steps):
+    """Linear lr ramp for a warm start's FRESH optimizers: Adam's early
+    bias-corrected steps are large exactly when the replay is tiny. A no-op
+    at and past the boundary (the final applied value is exactly
+    muzero.LEARNING_RATE, so the steady state matches a from-scratch run)."""
+    if training_steps >= WARMSTART_LR_WARMUP_STEPS:
+        return
+    frac = (training_steps + 1) / WARMSTART_LR_WARMUP_STEPS
+    for opt in optimizers:
+        for g in opt.param_groups:
+            g["lr"] = muzero.LEARNING_RATE * frac
+
+
 def load_init_weights(trainer, path, arm=None):
     """Warm-start the four function networks from a run_one weights file
     (the completed-run artifact: representation/dynamics/prediction/
@@ -998,6 +1022,11 @@ def load_init_weights(trainer, path, arm=None):
             raise SystemExit(f"{path}: not a run_one weights file "
                              f"(missing '{name}')")
         getattr(trainer, name).load_state_dict(state[name])
+    # Files saved since the gentle-warm-start era carry the projector too
+    # (a fresh projector's consistency gradients were part of the
+    # scrambling); older files simply lack the key.
+    if "projector" in state:
+        trainer.projector.load_state_dict(state["projector"])
     if arm and state.get("arm") and state["arm"] != arm:
         # A cross-arm warm start may be intentional research; warn, don't
         # refuse -- but never silently.
@@ -1121,6 +1150,13 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"{pathlib.Path(init_weights).name}"
                   f"{f' ({prior} prior train steps)' if prior else ''}; "
                   f"replay/optimizers/schedules start fresh", flush=True)
+            for _ in range(WARMSTART_PREFILL_EPISODES):
+                traj, _, _, terminated = run.play_episode()
+                run.replay.append(run.reanalyse(traj, terminated=terminated))
+            print(f"  [{arm} s{seed}] pre-filled replay with "
+                  f"{WARMSTART_PREFILL_EPISODES} episodes "
+                  f"({run.env_steps} env steps) before the first gradient",
+                  flush=True)
         for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
@@ -1131,8 +1167,18 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 if len(run.replay) > muzero.MAX_REPLAY:
                     run.replay.pop(0)
 
+            steps_this_iter = train_steps
+            if init_name and it <= WARMSTART_RAMP_ITERS:
+                steps_this_iter = max(1, train_steps * it // WARMSTART_RAMP_ITERS)
             run.set_train_mode(True)
-            for _ in range(train_steps):
+            for _ in range(steps_this_iter):
+                if init_name:
+                    apply_warmstart_lr(
+                        (run.trainer.rep_optimizer, run.trainer.dyn_optimizer,
+                         run.trainer.pred_optimizer,
+                         run.trainer.prefix_optimizer,
+                         run.trainer.proj_optimizer),
+                        run.trainer.training_steps)
                 batch = asyncio.run(run.trainer.prepare_batch(
                     run.replay, muzero.TRAINING_BATCHES, muzero.UNROLL_STEPS, ACTIONS))
                 asyncio.run(run.trainer.train_step(batch))
@@ -1164,6 +1210,9 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     "dynamics": run.trainer.dynamics.state_dict(),
                     "prediction": run.trainer.prediction.state_dict(),
                     "value_prefix": run.trainer.value_prefix.state_dict(),
+                    # For future warm starts: a FRESH projector's consistency
+                    # gradients helped scramble continuation attempt 1.
+                    "projector": run.trainer.projector.state_dict(),
                 }, ckpt)
                 print(f"  saved {ckpt.name}", flush=True)
 
