@@ -982,6 +982,24 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
             f"ABLATION_RESULTS somewhere fresh.")
 
 
+def load_init_weights(trainer, path):
+    """Warm-start the four function networks from a run_one weights file
+    (the completed-run artifact: representation/dynamics/prediction/
+    value_prefix state_dicts -- no optimizers, no replay, no projector).
+    A continuation run keeps the learned networks and rebuilds everything
+    else fresh; the SimSiam projector restarts (auxiliary head, retrains
+    quickly). Strict loads: an architecture mismatch must fail loudly, not
+    silently skip tensors. Returns the file's recorded training_steps."""
+    state = torch.load(pathlib.Path(path), map_location="cpu",
+                       weights_only=False)
+    for name in ("representation", "dynamics", "prediction", "value_prefix"):
+        if name not in state:
+            raise SystemExit(f"{path}: not a run_one weights file "
+                             f"(missing '{name}')")
+        getattr(trainer, name).load_state_dict(state[name])
+    return state.get("training_steps")
+
+
 def handle_completed_marker(ck, out, arm, seed):
     """A completed marker with live rows is a genuinely finished pair:
     'skip'. With ZERO live rows it is an ARCHIVED era's leftover (a
@@ -1020,7 +1038,8 @@ def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every
 
 
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
-            checkpoint_every=10, resume=False, overwrite=False):
+            checkpoint_every=10, resume=False, overwrite=False,
+            init_weights=None):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         ck = resume_path(arm, seed)
         expect = run_expect(arm, seed, iterations, train_steps,
@@ -1070,6 +1089,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             # pair on this path, so a fresh start cannot mix timelines.
             print(f"  [{arm} s{seed}] --resume but no checkpoint at {ck.name}; "
                   f"starting fresh", flush=True)
+        if init_weights and start_it == 0:
+            prior = load_init_weights(run.trainer, init_weights)
+            print(f"  [{arm} s{seed}] warm-started from "
+                  f"{pathlib.Path(init_weights).name}"
+                  f"{f' ({prior} prior train steps)' if prior else ''}; "
+                  f"replay/optimizers/schedules start fresh", flush=True)
         for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
@@ -1127,6 +1152,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 record = {"arm": arm, "seed": seed,
                           "env": ENV_NAME, "frameskip": eff_skip,
                           "wrappers": bool(muzero.USE_ATARI_WRAPPERS),
+                          # A warm-started row is a DIFFERENT lineage from a
+                          # from-scratch row; the field keeps them separable.
+                          **({"init_weights": pathlib.Path(init_weights).name}
+                             if init_weights else {}),
                           "iteration": it,
                           "train_steps": run.trainer.training_steps,
                           "env_steps": run.env_steps,
@@ -1285,6 +1314,11 @@ def main():
                     help="discard each (arm, seed)'s previous jsonl rows and "
                          "checkpoint and start it fresh -- the mechanized "
                          "alternative to hand-deleting files")
+    ap.add_argument("--init-weights", default=None, metavar="PATH",
+                    help="warm-start the four function networks from a "
+                         "run_one weights .pth (a continuation run: learned "
+                         "nets carry over; replay, optimizers, and schedules "
+                         "start fresh)")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
     if args.resume and args.overwrite:
@@ -1293,6 +1327,10 @@ def main():
         # 45-iteration checkpoint with zero warning).
         ap.error("--resume and --overwrite are mutually exclusive: "
                  "resume continues saved state, overwrite destroys it")
+    if args.resume and args.init_weights:
+        ap.error("--resume and --init-weights are mutually exclusive: "
+                 "a resumed run already has its weights; loading over them "
+                 "would corrupt the continuation")
     if (any(ARMS[a].get("USE_ATARI_WRAPPERS", muzero.USE_ATARI_WRAPPERS)
             for a in args.arms)
             and not args.frameskip and not args.plot_only):
@@ -1341,7 +1379,8 @@ def main():
                 run_one(arm, seed, args.iterations, args.episodes_per_iter,
                         args.train_steps, args.eval_every, out,
                         checkpoint_every=args.checkpoint_every,
-                        resume=args.resume, overwrite=args.overwrite)
+                        resume=args.resume, overwrite=args.overwrite,
+                        init_weights=args.init_weights)
     plot(out, RESULTS)
 
 

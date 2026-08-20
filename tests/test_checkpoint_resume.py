@@ -501,6 +501,45 @@ def test_wrapper_arm_refuses_without_frameskip(tmp_path, monkeypatch):
     assert e.value.code == 2
 
 
+def test_init_weights_warm_start_round_trips(tmp_path):
+    """--init-weights loads the four function nets from a completed run's
+    weights file (strict), returns its training_steps, and leaves
+    everything else fresh."""
+    a = make_run()
+    with torch.no_grad():
+        torch.manual_seed(9)
+        for net_name in ("representation", "dynamics", "prediction",
+                         "value_prefix"):
+            for p in getattr(a.trainer, net_name).parameters():
+                p.add_(torch.randn_like(p))
+    w = tmp_path / "weights.pth"
+    torch.save({"arm": "x", "seed": 0, "training_steps": 12345,
+                **{n: getattr(a.trainer, n).state_dict()
+                   for n in ("representation", "dynamics", "prediction",
+                             "value_prefix")}}, w)
+    b = make_run()
+    assert not state_dicts_equal(a.trainer.prediction, b.trainer.prediction)
+    assert ablation.load_init_weights(b.trainer, w) == 12345
+    for net_name in ("representation", "dynamics", "prediction",
+                     "value_prefix"):
+        assert state_dicts_equal(getattr(a.trainer, net_name),
+                                 getattr(b.trainer, net_name)), net_name
+    # A non-weights file fails loudly, naming the missing net.
+    bad = tmp_path / "bad.pth"
+    torch.save({"representation": a.trainer.representation.state_dict()}, bad)
+    with pytest.raises(SystemExit, match="dynamics"):
+        ablation.load_init_weights(b.trainer, bad)
+
+
+def test_resume_and_init_weights_is_a_parser_error(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv",
+                        ["ablation.py", "--resume", "--init-weights", "x.pth"])
+    with pytest.raises(SystemExit) as e:
+        ablation.main()
+    assert e.value.code == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
 def test_run_expect_covers_the_full_protocol(monkeypatch):
     """Audit round-2 LOW: episode_cap/eval_every joined the validated recipe
     but nothing pinned it -- reverting that hunk left the suite green."""
