@@ -577,6 +577,22 @@ def test_plot_warns_on_mixed_lineages(tmp_path, capsys):
     assert "mixes runs from" in capsys.readouterr().out
 
 
+def test_apply_warmstart_consistency_ramps_and_parks(monkeypatch):
+    import muzero
+    monkeypatch.setattr(muzero, "CONSISTENCY_LOSS_WEIGHT",
+                        muzero.CONSISTENCY_LOSS_WEIGHT)   # register restore
+    ablation.apply_warmstart_consistency(2.0, 0)
+    assert muzero.CONSISTENCY_LOSS_WEIGHT == pytest.approx(
+        2.0 / ablation.WARMSTART_LR_WARMUP_STEPS)
+    ablation.apply_warmstart_consistency(
+        2.0, ablation.WARMSTART_LR_WARMUP_STEPS - 1)
+    assert muzero.CONSISTENCY_LOSS_WEIGHT == pytest.approx(2.0)
+    muzero.CONSISTENCY_LOSS_WEIGHT = 999.0    # past boundary: re-asserts base
+    ablation.apply_warmstart_consistency(
+        2.0, ablation.WARMSTART_LR_WARMUP_STEPS)
+    assert muzero.CONSISTENCY_LOSS_WEIGHT == 2.0
+
+
 def test_apply_warmstart_lr_ramps_then_leaves_alone():
     import muzero
     opt = __import__("types").SimpleNamespace(param_groups=[{"lr": 123.0}])
@@ -639,6 +655,8 @@ def test_warmstart_prefills_and_ramps_but_fresh_runs_are_untouched(
     from-scratch arms keep their archived semantics (the discriminating
     second half)."""
     import muzero
+    monkeypatch.setattr(muzero, "CONSISTENCY_LOSS_WEIGHT",
+                        muzero.CONSISTENCY_LOSS_WEIGHT)   # register restore
     monkeypatch.setattr(ablation, "RESULTS", tmp_path)
     monkeypatch.setattr(ablation, "TAG", "")
     monkeypatch.setattr(ablation, "ENV_NAME", "Pong-v4")
@@ -649,17 +667,21 @@ def test_warmstart_prefills_and_ramps_but_fresh_runs_are_untouched(
                w)
     counters = {"train": 0, "play": 0}
     monkeypatch.setattr(ablation, "Run", make_loop_stub(counters))
-    ablation.run_one("per-step", 0, 2, 1, 1000, 0,
+    ablation.run_one("per-step", 0, 2, 1, 100, 0,
                      tmp_path / "a.jsonl", checkpoint_every=0,
                      resume=False, init_weights=str(w))
     # Prefill 10 + one self-play episode per iteration.
     assert counters["play"] == ablation.WARMSTART_PREFILL_EPISODES + 2
-    # Ramp: 1000*1//10 + 1000*2//10 = 300, not 2000.
-    assert counters["train"] == 300
-    # LR warmup applied through the wiring (last applied step = 299).
+    # Ramp (short-run guard: ramp spans min(10, iterations)=2 iters):
+    # 100*1//2 + 100*2//2 = 150, not 200.
+    assert counters["train"] == 150
+    # LR warmup applied through the wiring (last applied step = 149).
     lr = counters["last"].trainer.rep_optimizer.param_groups[0]["lr"]
-    assert lr == pytest.approx(muzero.LEARNING_RATE * 300
+    assert lr == pytest.approx(muzero.LEARNING_RATE * 150
                                / ablation.WARMSTART_LR_WARMUP_STEPS)
+    # Consistency ramp wired too (same window, same last applied step).
+    assert muzero.CONSISTENCY_LOSS_WEIGHT == pytest.approx(
+        2.0 * 150 / ablation.WARMSTART_LR_WARMUP_STEPS)
     # From-scratch control: no prefill, no ramp, lr untouched.
     counters2 = {"train": 0, "play": 0}
     monkeypatch.setattr(ablation, "Run", make_loop_stub(counters2))

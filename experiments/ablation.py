@@ -994,6 +994,22 @@ WARMSTART_RAMP_ITERS = 10         # train steps/iter scale linearly over these
 WARMSTART_LR_WARMUP_STEPS = 1000  # fresh-Adam lr ramps 0 -> LEARNING_RATE
 
 
+def apply_warmstart_consistency(base, training_steps):
+    """Warm-start-gated ramp of the SimSiam consistency weight 0 -> base
+    over the lr-warmup window. The audit's point: Adam is loss-scale
+    invariant for the projector (consistency is its ONLY loss), so the
+    weight ramp attenuates the fresh projector's gradient pollution in the
+    shared trunks WITHOUT slowing the projector's own convergence -- the
+    lr warmup alone throttled cure and disease at the same rate. Parks
+    exactly at base; at/past the boundary it re-asserts base, so the
+    module global is always correct for whatever runs next."""
+    if training_steps >= WARMSTART_LR_WARMUP_STEPS:
+        muzero.CONSISTENCY_LOSS_WEIGHT = base
+        return
+    muzero.CONSISTENCY_LOSS_WEIGHT = (
+        base * (training_steps + 1) / WARMSTART_LR_WARMUP_STEPS)
+
+
 def apply_warmstart_lr(optimizers, training_steps):
     """Linear lr ramp for a warm start's FRESH optimizers: Adam's early
     bias-corrected steps are large exactly when the replay is tiny. A no-op
@@ -1108,6 +1124,9 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         # Lineage survives a pause/resume via the checkpoint (audit finding:
         # the CLI arg alone stamped rows 1..pause and stranded the rest).
         init_name = pathlib.Path(init_weights).name if init_weights else None
+        # Captured under arm_config so the consistency ramp parks at THIS
+        # arm's weight and cannot leak across arms in a sweep.
+        consistency_base = muzero.CONSISTENCY_LOSS_WEIGHT
         if resume and ck.exists():
             try:
                 loaded = load_run_checkpoint(run, ck, expect)
@@ -1168,8 +1187,9 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     run.replay.pop(0)
 
             steps_this_iter = train_steps
-            if init_name and it <= WARMSTART_RAMP_ITERS:
-                steps_this_iter = max(1, train_steps * it // WARMSTART_RAMP_ITERS)
+            ramp_iters = min(WARMSTART_RAMP_ITERS, iterations)
+            if init_name and it <= ramp_iters:
+                steps_this_iter = max(1, train_steps * it // ramp_iters)
             run.set_train_mode(True)
             for _ in range(steps_this_iter):
                 if init_name:
@@ -1179,6 +1199,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                          run.trainer.prefix_optimizer,
                          run.trainer.proj_optimizer),
                         run.trainer.training_steps)
+                    apply_warmstart_consistency(
+                        consistency_base, run.trainer.training_steps)
                 batch = asyncio.run(run.trainer.prepare_batch(
                     run.replay, muzero.TRAINING_BATCHES, muzero.UNROLL_STEPS, ACTIONS))
                 asyncio.run(run.trainer.train_step(batch))
