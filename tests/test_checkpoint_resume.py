@@ -65,7 +65,8 @@ def test_checkpoint_round_trips_every_piece_of_state(tmp_path):
 
     b = make_run()
     loaded = ablation.load_run_checkpoint(b, path, EXPECT)
-    assert loaded == {"iteration": 20, "elapsed_s": 1234.5}
+    assert loaded == {"iteration": 20, "elapsed_s": 1234.5,
+                      "init_weights": None}
     assert b.trainer.training_steps == META["training_steps"]
     assert b.env_steps == 12345
     for net_name in ablation.NET_NAMES:
@@ -529,6 +530,51 @@ def test_init_weights_warm_start_round_trips(tmp_path):
     torch.save({"representation": a.trainer.representation.state_dict()}, bad)
     with pytest.raises(SystemExit, match="dynamics"):
         ablation.load_init_weights(b.trainer, bad)
+
+
+def test_lineage_flows_through_the_checkpoint(tmp_path):
+    """Audit finding: a paused warm-started run resumed WITHOUT
+    --init-weights (the parser forbids it) stamped its later rows as
+    from-scratch. The checkpoint meta carries the lineage instead."""
+    np.random.seed(21)
+    a = make_run()
+    path = tmp_path / "resume.ckpt"
+    ablation.save_run_checkpoint(a, path, {**META, "init_weights": "w.pth"})
+    b = make_run()
+    loaded = ablation.load_run_checkpoint(b, path, EXPECT)
+    assert loaded["init_weights"] == "w.pth"
+
+
+def test_overwrite_refuses_the_pairs_own_weights_as_init(tmp_path, monkeypatch):
+    """Audit finding: --overwrite unlinks the pair's weights BEFORE the init
+    load reads them -- the natural continue-in-place command destroyed the
+    only copy of the trained nets."""
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path)
+    monkeypatch.setattr(ablation, "TAG", "-pong-skip4")
+    monkeypatch.setattr(ablation, "ENV_NAME", "Pong-v4")
+    monkeypatch.setattr(ablation, "EPISODE_CAP", 3000)
+    monkeypatch.setattr(ablation, "FRAMESKIP", 4)
+    w = tmp_path / "weights-pong-skip4-effzero-repro-refresh5x-seed0.pth"
+    w.write_bytes(b"x")
+    with pytest.raises(SystemExit, match="Copy"):
+        ablation.run_one("effzero-repro-refresh5x", 0, 1, 1, 0, 1,
+                         tmp_path / "ablation.jsonl", checkpoint_every=0,
+                         resume=False, overwrite=True, init_weights=str(w))
+    assert w.exists(), "refusal must happen BEFORE the unlink"
+
+
+def test_plot_warns_on_mixed_lineages(tmp_path, capsys):
+    """Audit finding: warm-started and from-scratch rows of the same env
+    averaged into one curve with no warning."""
+    out = tmp_path / "ablation.jsonl"
+    write_rows(out, [
+        {"arm": "a", "seed": 0, "iteration": 1, "return_mean": 1.0,
+         "env": "Pong-v4", "frameskip": 4, "init_weights": "w.pth"},
+        {"arm": "a", "seed": 1, "iteration": 1, "return_mean": 2.0,
+         "env": "Pong-v4", "frameskip": 4},
+    ])
+    ablation.plot(out, tmp_path)
+    assert "mixes runs from" in capsys.readouterr().out
 
 
 def test_resume_and_init_weights_is_a_parser_error(monkeypatch, capsys):

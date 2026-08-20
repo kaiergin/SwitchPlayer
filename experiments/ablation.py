@@ -809,7 +809,8 @@ def load_run_checkpoint(run, path, expect):
     torch.set_rng_state(state["rng"]["torch"])
     if state["rng"]["cuda"] is not None and torch.cuda.is_available():
         torch.cuda.set_rng_state_all(state["rng"]["cuda"])
-    return {"iteration": state["iteration"], "elapsed_s": state["elapsed_s"]}
+    return {"iteration": state["iteration"], "elapsed_s": state["elapsed_s"],
+            "init_weights": state.get("init_weights")}
 
 
 def mark_run_completed(path, meta):
@@ -982,7 +983,7 @@ def refuse_conflicting_state(ck, out, arm, seed, resume, overwrite):
             f"ABLATION_RESULTS somewhere fresh.")
 
 
-def load_init_weights(trainer, path):
+def load_init_weights(trainer, path, arm=None):
     """Warm-start the four function networks from a run_one weights file
     (the completed-run artifact: representation/dynamics/prediction/
     value_prefix state_dicts -- no optimizers, no replay, no projector).
@@ -997,6 +998,11 @@ def load_init_weights(trainer, path):
             raise SystemExit(f"{path}: not a run_one weights file "
                              f"(missing '{name}')")
         getattr(trainer, name).load_state_dict(state[name])
+    if arm and state.get("arm") and state["arm"] != arm:
+        # A cross-arm warm start may be intentional research; warn, don't
+        # refuse -- but never silently.
+        print(f"  WARNING: init weights were trained by arm "
+              f"'{state['arm']}', loading into '{arm}'", flush=True)
     return state.get("training_steps")
 
 
@@ -1054,16 +1060,32 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 f"fixed skip 4 -- pass --frameskip 4 so the output files "
                 f"carry the -skip4 tag instead of mixing into the "
                 f"stochastic-skip history.")
+        if init_weights and overwrite:
+            # --overwrite unlinks the pair's own weights file BEFORE the
+            # init load would read it: the natural continue-in-place command
+            # would destroy the only copy of the trained nets (audit
+            # finding). Refuse identity; copying the file out is the fix.
+            pair_w = RESULTS / f"weights{TAG}-{arm}-seed{seed}.pth"
+            if pathlib.Path(init_weights).resolve() == pair_w.resolve():
+                raise SystemExit(
+                    f"--init-weights points at the pair's own live weights "
+                    f"file, which --overwrite is about to delete. Copy "
+                    f"{pair_w.name} somewhere else (an archive folder) and "
+                    f"point --init-weights there.")
         refuse_conflicting_state(ck, out, arm, seed, resume, overwrite)
         run = Run(arm, seed, spec)
         started = time.time()
         start_it = 0
+        # Lineage survives a pause/resume via the checkpoint (audit finding:
+        # the CLI arg alone stamped rows 1..pause and stranded the rest).
+        init_name = pathlib.Path(init_weights).name if init_weights else None
         if resume and ck.exists():
             try:
                 loaded = load_run_checkpoint(run, ck, expect)
                 if loaded is not None:
                     start_it = loaded["iteration"]
                     started = time.time() - loaded["elapsed_s"]
+                    init_name = loaded.get("init_weights") or init_name
                     pruned = prune_stale_rows(out, arm, seed, start_it)
             except Exception:
                 run.env.close()
@@ -1090,7 +1112,11 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             print(f"  [{arm} s{seed}] --resume but no checkpoint at {ck.name}; "
                   f"starting fresh", flush=True)
         if init_weights and start_it == 0:
-            prior = load_init_weights(run.trainer, init_weights)
+            try:
+                prior = load_init_weights(run.trainer, init_weights, arm=arm)
+            except BaseException:
+                run.env.close()
+                raise
             print(f"  [{arm} s{seed}] warm-started from "
                   f"{pathlib.Path(init_weights).name}"
                   f"{f' ({prior} prior train steps)' if prior else ''}; "
@@ -1153,9 +1179,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                           "env": ENV_NAME, "frameskip": eff_skip,
                           "wrappers": bool(muzero.USE_ATARI_WRAPPERS),
                           # A warm-started row is a DIFFERENT lineage from a
-                          # from-scratch row; the field keeps them separable.
-                          **({"init_weights": pathlib.Path(init_weights).name}
-                             if init_weights else {}),
+                          # from-scratch row; the field keeps them separable
+                          # (init_name flows through the checkpoint on
+                          # resume, where the CLI arg is forbidden).
+                          **({"init_weights": init_name} if init_name else {}),
                           "iteration": it,
                           "train_steps": run.trainer.training_steps,
                           "env_steps": run.env_steps,
@@ -1173,7 +1200,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 save_run_checkpoint(run, ck, {
                     **expect, "iteration": it,
                     "training_steps": run.trainer.training_steps,
-                    "elapsed_s": round(time.time() - started, 1)})
+                    "elapsed_s": round(time.time() - started, 1),
+                    "init_weights": init_name})
                 print(f"  [{arm} s{seed}] checkpoint at iter {it} "
                       f"({ck.stat().st_size / 1e9:.1f} GB)", flush=True)
         # Also under --resume with checkpointing off: otherwise the loaded
@@ -1215,7 +1243,8 @@ def plot(path, out_dir):
     # appear as (None, None) -- a DISTINCT combo, so a legacy/modern
     # straddle warns too. Guarding them out blinded the warning to exactly
     # the rows it was retrofitted for (round-8 finding).
-    mixed = {(r.get("env"), r.get("frameskip"), r.get("wrappers"))
+    mixed = {(r.get("env"), r.get("frameskip"), r.get("wrappers"),
+              r.get("init_weights"))
              for r in rows}
     if len(mixed) > 1:
         print(f"WARNING: {pathlib.Path(path).name} mixes runs from "
