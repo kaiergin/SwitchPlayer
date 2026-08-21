@@ -192,6 +192,51 @@ ARMS = {
                 "--frameskip 4 --episode-cap 3000 --episodes-per-iter 1 "
                 "--eval-every 10 --checkpoint-every 10.",
     },
+    "effzero-repro-smallbuf20": {
+        # refresh5x with the replay window cut to 20 trajectories --
+        # "reanalyze by deletion". Old trajectories carry the search policy
+        # recorded when they were played; instead of refreshing those targets,
+        # evict them. Combined with the 5x refresh (4 oldest every 2 iters) a
+        # 20-traj buffer gets a full re-search cycle every ~10 iterations.
+        # NOTE: at 1 episode/iter a from-scratch 20-iteration run never
+        # exceeds 20 trajectories, so the cap NEVER BINDS -- this arm is meant
+        # to be WARM-STARTED (--init-weights; the 10-episode prefill makes the
+        # cap bind from ~iter 11). Paired control: the refresh5x continuation
+        # at matched iterations (same init weights, cap 85). A separate arm so
+        # refresh5x's archived meaning stays fixed.
+        "USE_SEARCH_ACTING": True,
+        "USE_GUMBEL_SEARCH": False,
+        "PAPER_TARGETS": True,
+        "PER_ENABLED": True,
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "REWARD_LOSS_WEIGHT": 0.0,
+        "DISCOUNT": 0.997 ** 4,
+        "TD_STEPS": 5,
+        "LEARNING_RATE": 3e-4,
+        "MAX_REPLAY": 20,
+        "USE_AUGMENTATION": True,
+        "REWARD_CLIP": 1.0,
+        "ACT_SEARCH_SIMS": 50,
+        "DIRICHLET_ALPHA": 0.3,
+        "PREFIX_HEAD_CHANNELS": 16,
+        "PREFIX_FC_HIDDEN": 32,
+        "USE_ATARI_WRAPPERS": True,
+        "USE_TARGET_MODEL": True,
+        "TRAINING_BATCHES": 256,
+        "POLICY_REFRESH_EVERY": 2,
+        "POLICY_REFRESH_COUNT": 4,
+        "_doc": "refresh5x with MAX_REPLAY 20: evict stale policy targets "
+                "instead of refreshing them. Warm-start only (cap never "
+                "binds from scratch in short runs). For a paired comparison "
+                "run the CONTROL'S EXACT command (only --arms differs) -- "
+                "the temperature/off-policy schedules key on --iterations "
+                "via _run_length_globals, so a shorter --iterations anneals "
+                "faster and confounds the pair; stop at the paired horizon "
+                "instead. E.g. --env Pong-v4 --frameskip 4 --iterations 90 "
+                "--episode-cap 3000 --episodes-per-iter 1 --eval-every 10 "
+                "--checkpoint-every 2 --init-weights <parent>, kill after "
+                "the iter-20 checkpoint.",
+    },
     "gumbel": {
         "USE_VALUE_PREFIX_IN_TREE": True,
         "DISCOUNT": 0.9,
