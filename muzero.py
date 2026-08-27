@@ -137,6 +137,14 @@ VALUE_PREFIX_HIDDEN = 512
 # default stays False only until a controlled prefix-vs-per-step pair on the
 # post-search-fix build settles it; do not cite the old collapse as the reason.
 USE_VALUE_PREFIX_IN_TREE = False
+# How many LSTM steps the in-tree prefix accumulates before its state is
+# reset to zeros -- EfficientZero's lstm_horizon_len (5 on Atari), matching
+# the horizon the head is TRAINED over (one UNROLL_STEPS window, state reset
+# per unroll in train_step). Without the reset, tree depths past the horizon
+# queried the LSTM outside its trained regime and every edge reward there
+# was extrapolation. At a reset boundary the edge reward is the fresh
+# prefix itself, not a difference (EffZero's is_reset semantics).
+PREFIX_LSTM_HORIZON = UNROLL_STEPS
 
 # ---------------------------------------------------------------------------
 # Loss weighting and gradient scaling (MuZero appendix G)
@@ -468,19 +476,25 @@ class MinMaxStats:
 # -----------------------------
 class MCTSNode:
     def __init__(self, latent, prior, reward=0.0, policy = None, expanded_value = None,
-                 is_gameplay = False, prefix = 0.0, prefix_state = None):
+                 is_gameplay = False, prefix = 0.0, prefix_state = None,
+                 prefix_len = 0):
         self.latent = latent            # torch.Tensor (latent state)
         self.prior = prior              # float value
         self.reward = reward            # immediate reward
-        # Cumulative UNDISCOUNTED reward from the search root to this node, and
-        # the LSTM state that produced it. Undiscounted so that an edge reward is
-        # exactly the difference between a child's prefix and its parent's --
+        # Cumulative UNDISCOUNTED reward since the last LSTM reset (the search
+        # root, a gameplay-chain restart, or a PREFIX_LSTM_HORIZON boundary),
+        # and the LSTM state that produced it. Undiscounted so that an edge
+        # reward is exactly the difference between a child's prefix and its
+        # parent's within a segment (and the fresh prefix itself at a reset) --
         # discounting stays in backup_simulation, where it always was, rather
         # than being baked into the model's own prediction and then divided back
         # out by depth. The paper writes the prefix discounted; this keeps the
         # arithmetic in one place.
         self.prefix = prefix
         self.prefix_state = prefix_state
+        # LSTM steps accumulated in prefix_state since the last reset; at
+        # PREFIX_LSTM_HORIZON the next expansion feeds a fresh state.
+        self.prefix_len = prefix_len
         self.children = {}              # dict: action -> child node
         self.visit_count = 0
         self.value_sum = 0.0
@@ -1250,7 +1264,8 @@ class MCTSHelper:
                 batch_policy_logits, estimated_values, _ = self.network_manager.prediction(next_latents)
                 next_policy = F.softmax(batch_policy_logits, dim=1).cpu().numpy()
 
-                child_prefixes, child_states = self.expand_prefixes(chunk, next_latents, A)
+                child_prefixes, child_states, prefix_resets = self.expand_prefixes(
+                    chunk, next_latents, A)
             
             # Update each node in the chunk.
             for j, node in enumerate(chunk):
@@ -1262,20 +1277,25 @@ class MCTSHelper:
                     if a in node.children and node.children[a].is_gameplay:
                         continue
                     idx = start + a
-                    # Create the child node with latent state
                     if child_prefixes is None:
                         edge_reward = (rewards[idx].item() if rewards[idx].ndim == 0
                                        else rewards[idx].squeeze().item())
-                        child_prefix, child_state = 0.0, None
+                        child_prefix, child_state, child_len = 0.0, None, 0
                     else:
-                        # The prefix accumulates from the search root, so the
-                        # reward on this edge alone is the increment over the
-                        # parent. Undiscounted, so backup_simulation applies the
-                        # discount exactly as it does for real gameplay rewards.
+                        # Within a segment the edge reward is the increment
+                        # over the parent's accumulation; at a reset boundary
+                        # (fresh LSTM state) the child's prefix IS the edge
+                        # reward -- EfficientZero's is_reset backup, where
+                        # true_reward = value_prefix rather than the
+                        # difference. Undiscounted either way;
+                        # backup_simulation applies the discount.
                         child_prefix = float(child_prefixes[idx])
-                        edge_reward = child_prefix - node.prefix
+                        edge_reward = (child_prefix if prefix_resets[j]
+                                       else child_prefix - node.prefix)
                         child_state = (child_states[0][:, idx:idx + 1].clone(),
                                        child_states[1][:, idx:idx + 1].clone())
+                        child_len = (1 if prefix_resets[j]
+                                     else node.prefix_len + 1)
                     # Create the child node with latent state
                     child = MCTSNode(
                         latent=next_latents[idx].unsqueeze(0),
@@ -1285,6 +1305,7 @@ class MCTSHelper:
                         expanded_value=estimated_values[idx].item(),
                         prefix=child_prefix,
                         prefix_state=child_state,
+                        prefix_len=child_len,
                     )
                     node.children[a] = child
                 node.is_expanded = True
@@ -1292,19 +1313,26 @@ class MCTSHelper:
     def expand_prefixes(self, chunk, next_latents, action_space):
         """Step the value-prefix LSTM from each parent's state, once per child.
 
-        Returns (prefixes, state) aligned with next_latents, or (None, None) when
-        the tree is configured to use the per-step reward head instead.
+        Returns (prefixes, state, resets) aligned with next_latents, where
+        resets[j] says parent j's children start a FRESH accumulation --
+        either the parent had no state (search root, gameplay-chain restart)
+        or it had run PREFIX_LSTM_HORIZON steps, EfficientZero's
+        lstm_horizon_len reset "every horizon steps in search". Returns
+        (None, None, None) when the tree uses the per-step reward head.
         """
         if not USE_VALUE_PREFIX_IN_TREE or not hasattr(self.network_manager, "value_prefix"):
-            return None, None
+            return None, None, None
 
         prefix_net = self.network_manager.value_prefix
         parent_states = []
+        resets = []
         for node in chunk:
             state = node.prefix_state
-            if state is None:
+            reset = state is None or node.prefix_len >= PREFIX_LSTM_HORIZON
+            if reset:
                 state = prefix_net.initial_state(1, self.device)
             parent_states.append(state)
+            resets.append(reset)
 
         # (1, num_chunk, H) -> one copy per action -> (1, num_chunk*A, H)
         h = torch.cat([s[0] for s in parent_states], dim=1).repeat_interleave(action_space, dim=1)
@@ -1316,7 +1344,7 @@ class MCTSHelper:
             prefixes, _, state = prefix_net(next_latents, (h.contiguous(), c.contiguous()))
         finally:
             prefix_net.train(was_training)
-        return prefixes.squeeze(-1).cpu().numpy(), state
+        return prefixes.squeeze(-1).cpu().numpy(), state, resets
 
     # -----------------------------
     # Backup Phase: Propagate the leaf value up the simulation path.
@@ -1344,7 +1372,20 @@ class MCTSHelper:
                 # big reward events.
                 min_max_stats.update(n.reward + discount * n.q_value())
 
-    def create_tree_from_game(self, game_trajectory, terminated=True):
+    def create_tree_from_game(self, game_trajectory, terminated=True,
+                              seed_values=True):
+        """Link a played trajectory into the chain tree.
+
+        seed_values=False builds the chain NEUTRALLY: structure, priors,
+        real edge rewards and the terminal flag, but no Monte-Carlo value
+        backup -- every chain node starts at zero visits like an imagined
+        sibling. The MC backup seeds the behaviour child with a realized
+        return while its siblings carry network estimates, which biases
+        selection toward (early training) or away from (calibrated value
+        head) the action already taken; neutral seeding removes that
+        asymmetry. The communal refresh uses it; the product pipeline keeps
+        seeded values, whose MC returns the warmup targets read.
+        """
         prev_node = None
         prev_action_taken = None
         path = []
@@ -1369,8 +1410,9 @@ class MCTSHelper:
         # harness episode cap) is not terminal -- backing up 0 there taught
         # V=0 at a mid-game state on every capped trajectory -- so it
         # bootstraps the network's value instead.
-        leaf_value = 0.0 if terminated else (path[-1].expanded_value or 0.0)
-        self.backup_simulation(path, leaf_value)
+        if seed_values:
+            leaf_value = 0.0 if terminated else (path[-1].expanded_value or 0.0)
+            self.backup_simulation(path, leaf_value)
         self.current_trajectory = path
     
     # DIRICHLET_ALPHA defaults 0.25, MuZero's Atari setting (EfficientZero
@@ -1384,7 +1426,7 @@ class MCTSHelper:
         for action, child in node.children.items():
             child.prior = node.policy[action]
 
-    async def selection_task_no_expand(self, index, c_puct, discount, max_depth=MAX_DEPTH,
+    async def selection_task_no_expand(self, index, c_puct, discount, max_depth=None,
                                        min_max_stats=None):
         """
         Traverse the tree from the given root until a leaf is reached.
@@ -1394,6 +1436,10 @@ class MCTSHelper:
         several searches with different normalisation ranges run concurrently
         over the shared chain tree.
         """
+        # None -> module global at CALL time: a def-time default froze the
+        # import-time MAX_DEPTH and silently ignored arm overrides (the
+        # backup_simulation-discount bug class).
+        max_depth = MAX_DEPTH if max_depth is None else max_depth
         stats = self.min_max_stats if min_max_stats is None else min_max_stats
         node = self.current_trajectory[index]
         path = []
@@ -1578,8 +1624,9 @@ class MCTSHelper:
     # Full MCTS: Run multiple simulations, batch expand unexpanded leaves,
     # then backup their values.
     # -----------------------------
-    async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=None, max_depth=MAX_DEPTH, root_noise=True):
+    async def run_full_mcts(self, index, num_simulations=128, sim_batches=8, c_puct=1.0, discount=None, max_depth=None, root_noise=True):
         discount = DISCOUNT if discount is None else discount
+        max_depth = MAX_DEPTH if max_depth is None else max_depth
         if USE_GUMBEL_SEARCH:
             return await self.run_gumbel_mcts(index, num_simulations=num_simulations,
                                               discount=discount, max_depth=max_depth)
@@ -1592,6 +1639,7 @@ class MCTSHelper:
         # The prefix accumulates from the root, so it restarts at every search.
         root.prefix = 0.0
         root.prefix_state = None
+        root.prefix_len = 0
         if not root.is_expanded:
             self.batch_expand_nodes([root])
         if root_noise:
@@ -1623,7 +1671,8 @@ class MCTSHelper:
         return self.drop_non_gameplay_children_and_compute_improvements(
             index, baseline=baseline_visits)
 
-    async def run_communal_mcts(self, indices, num_simulations, c_puct, discount):
+    async def run_communal_mcts(self, indices, num_simulations, c_puct, discount,
+                                chain_seeded=True):
         """One communal window: concurrent lockstep searches over `indices`.
 
         Each root runs the papers' sequential schedule -- one simulation per
@@ -1652,6 +1701,7 @@ class MCTSHelper:
             # The prefix accumulates from each search's own root.
             root.prefix = 0.0
             root.prefix_state = None
+            root.prefix_len = 0
             self.add_noise_to_node(idx)
             stats = MinMaxStats()
             self.seed_min_max_stats(root, discount, stats=stats)
@@ -1668,8 +1718,12 @@ class MCTSHelper:
         results = {}
         for idx in indices:
             root = self.current_trajectory[idx]
-            bookkeeping = {a: 1 for a, child in root.children.items()
-                           if child.is_gameplay}
+            # Chains built with seed_values=True carry the MC backup's one
+            # bookkeeping visit on each gameplay child; subtract exactly
+            # that. A neutrally-seeded chain (chain_seeded=False) has no
+            # such visit -- subtracting would undercount real traffic.
+            bookkeeping = ({a: 1 for a, child in root.children.items()
+                            if child.is_gameplay} if chain_seeded else {})
             results[idx] = self.drop_non_gameplay_children_and_compute_improvements(
                 idx, baseline=bookkeeping, release=False)
         return results
@@ -1679,8 +1733,9 @@ class MCTSHelper:
     # deterministic visit-matching below it, and a policy target built from
     # completed Q-values instead of visit fractions.
     # -----------------------------
-    async def run_gumbel_mcts(self, index, num_simulations=32, discount=None, max_depth=MAX_DEPTH):
+    async def run_gumbel_mcts(self, index, num_simulations=32, discount=None, max_depth=None):
         discount = DISCOUNT if discount is None else discount
+        max_depth = MAX_DEPTH if max_depth is None else max_depth
         root = self.current_trajectory[index]
         self.min_max_stats = MinMaxStats()
         root.prefix = 0.0
@@ -1783,10 +1838,11 @@ class MCTSHelper:
         finally:
             self.current_trajectory = saved
 
-    async def gumbel_selection_task(self, index, root_action, discount, max_depth=MAX_DEPTH):
+    async def gumbel_selection_task(self, index, root_action, discount, max_depth=None):
         """One simulation with the root action forced by the halving schedule;
         below the root, selection is the paper's deterministic visit-matching
         rule (no Gumbel, no PUCT)."""
+        max_depth = MAX_DEPTH if max_depth is None else max_depth
         node = self.current_trajectory[index]
         path = []
         forced = root_action

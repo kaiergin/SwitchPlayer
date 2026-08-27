@@ -360,6 +360,29 @@ def test_search_resets_the_prefix_at_the_root(prefix_tree):
     assert nodes[2].prefix == 0.0
 
 
+def test_prefix_lstm_resets_at_the_horizon(prefix_tree, monkeypatch):
+    """EfficientZero resets the in-tree LSTM every lstm_horizon_len levels.
+    At the boundary the edge reward is the FRESH prefix (is_reset backup),
+    not a parent-difference, and the accumulation length restarts at 1;
+    within a segment the difference rule holds unchanged."""
+    monkeypatch.setattr(muzero, "PREFIX_LSTM_HORIZON", 2)
+    helper = prefix_tree
+    root = chain(helper)[0]
+    root.prefix, root.prefix_state, root.prefix_len = 0.0, None, 0
+    helper.batch_expand_nodes([root])
+    c1 = next(c for c in root.children.values() if not c.is_gameplay)
+    assert c1.prefix_len == 1
+    helper.batch_expand_nodes([c1])
+    c2 = next(c for c in c1.children.values() if not c.is_gameplay)
+    assert c2.prefix_len == 2
+    assert c2.reward == pytest.approx(c2.prefix - c1.prefix, abs=1e-4)
+    # c2 sits AT the horizon: its children start a fresh accumulation.
+    helper.batch_expand_nodes([c2])
+    c3 = next(c for c in c2.children.values() if not c.is_gameplay)
+    assert c3.prefix_len == 1
+    assert c3.reward == pytest.approx(c3.prefix, abs=1e-4)
+
+
 def test_per_step_head_feeds_the_tree_when_the_flag_is_off(monkeypatch):
     monkeypatch.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", False)
     from muzero import MCTSHelper
