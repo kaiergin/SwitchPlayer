@@ -272,14 +272,14 @@ ARMS = {
         "POLICY_REFRESH_COUNT": 4,
         "USE_COMMUNAL_REANALYSIS": True,
         # Added 2026-08-26 (Kai): cap the buffer in TRANSITIONS -- the unit
-        # EfficientZero's own config uses -- not just trajectories. Halved
-        # 125k -> 62.5k on 2026-08-27 (Kai, mid-lineage at the iter-70
-        # reboot of the pong-communal run): a step toward the
-        # tiny-buffer/live-refresh direction -- fresher data, ~5 GB
-        # resident, checkpoints ~6 GB. On the first post-resume episode the
-        # eviction drops the loaded buffer's older half in one pass.
-        # MAX_REPLAY 85 stays as an (inert) secondary ceiling.
-        "MAX_REPLAY_TRANSITIONS": 62_500,
+        # EfficientZero's own config uses -- not just trajectories. Kai's
+        # stepwise march toward the tiny-buffer/live-refresh design:
+        # 125k -> 62.5k (2026-08-27, mid-lineage at the pong-communal
+        # iter-70 reboot) -> 31.25k (2026-08-27, for the warm-started
+        # +100k continuation): ~2.6 GB resident, ~10-13 fresh episodes at
+        # late-stage lengths, checkpoints ~3 GB in seconds. MAX_REPLAY 85
+        # stays as an (inert) secondary ceiling.
+        "MAX_REPLAY_TRANSITIONS": 31_250,
         "_doc": "refresh5x + communal windowed refresh through the shared "
                 "chain tree (statistics accumulate across roots; bookkeeping "
                 "visit subtracted). Everything else matches "
