@@ -68,8 +68,84 @@ def test_legacy_arms_pin_augmentation_off(ablation):
         assert "USE_AUGMENTATION" in spec, f"{name} has no augmentation pin"
         if name not in ("pong-kit", "pong-kit2", "effzero-repro",
                         "effzero-repro-refresh5x",
+                        "effzero-repro-refresh5x-communal",
                         "effzero-repro-smallbuf20"):
             assert spec["USE_AUGMENTATION"] is False, name
+
+
+def test_checkpoint_reader_handles_both_formats(ablation, tmp_path):
+    """_read_checkpoint must load the SPCHKPT2 streamed container AND every
+    torch.save file (old checkpoints, completion markers, --init-weights)."""
+    import pickle
+    import torch
+
+    old = tmp_path / "old.ckpt"
+    torch.save({"completed": True, "arm": "x"}, old)
+    assert ablation._read_checkpoint(old)["completed"] is True
+
+    new = tmp_path / "new.ckpt"
+    with open(new, "wb") as f:
+        f.write(ablation.CKPT_STREAM_MAGIC)
+        pickle.dump({"arm": "x", "replay_trajs": 2}, f, protocol=5)
+        pickle.dump([{"obs": 1}], f, protocol=5)
+        pickle.dump([{"obs": 2}], f, protocol=5)
+    state = ablation._read_checkpoint(new)
+    assert state["arm"] == "x"
+    assert [t[0]["obs"] for t in state["replay"]] == [1, 2]
+    assert "replay_trajs" not in state
+
+
+def test_cpu_state_moves_cuda_tensors(ablation):
+    """The streamed checkpoint has no torch.load map_location, so _cpu_state
+    must strip devices; the rest of the suite runs CPU-only where it is an
+    identity, making this the one real exercise of the CUDA branch."""
+    import torch
+    if not torch.cuda.is_available():
+        import pytest as _pytest
+        _pytest.skip("no CUDA device")
+    src = {"w": torch.ones(3, device="cuda"),
+           "nested": [{"b": torch.zeros(2, device="cuda")}, 7],
+           "t": (torch.full((2,), 5.0, device="cuda"),)}
+    out = ablation._cpu_state(src)
+    assert out["w"].device.type == "cpu" and out["w"].sum().item() == 3.0
+    assert out["nested"][0]["b"].device.type == "cpu"
+    assert out["nested"][1] == 7
+    assert out["t"][0].device.type == "cpu" and out["t"][0][0].item() == 5.0
+    # Originals untouched: the live nets must stay on their device.
+    assert src["w"].device.type == "cuda"
+
+
+def test_replay_eviction_caps_trajectories_and_transitions(ablation, monkeypatch):
+    """evict_replay enforces both caps FIFO on whole trajectories, keeping
+    the newest even when it alone exceeds the transition cap."""
+    import muzero
+
+    def traj(n):
+        return [{"obs": None}] * n
+
+    # Trajectory cap alone.
+    monkeypatch.setattr(muzero, "MAX_REPLAY", 3)
+    monkeypatch.setattr(muzero, "MAX_REPLAY_TRANSITIONS", 0)
+    replay = [traj(10), traj(10), traj(10), traj(10)]
+    ablation.evict_replay(replay)
+    assert len(replay) == 3
+    # Transition cap binds before the trajectory cap.
+    monkeypatch.setattr(muzero, "MAX_REPLAY", 85)
+    monkeypatch.setattr(muzero, "MAX_REPLAY_TRANSITIONS", 25)
+    first, rest = traj(10), [traj(10), traj(10)]
+    replay = [first] + rest
+    ablation.evict_replay(replay)
+    assert replay == rest, "oldest trajectory must be evicted first"
+    # The newest survives even when it alone exceeds the cap.
+    big = traj(100)
+    replay = [traj(10), big]
+    ablation.evict_replay(replay)
+    assert replay == [big]
+    # 0 disables the transition cap.
+    monkeypatch.setattr(muzero, "MAX_REPLAY_TRANSITIONS", 0)
+    replay = [traj(50), traj(50)]
+    ablation.evict_replay(replay)
+    assert len(replay) == 2
 
 
 def test_every_arm_override_targets_a_real_muzero_global(ablation):

@@ -284,6 +284,57 @@ def test_unvisited_children_score_their_network_value_not_zero(helper):
     assert select_once(helper) is root.children[1]
 
 
+def test_virtual_loss_repels_on_negative_values(helper):
+    """Regression (the Pong finding): an in-flight, not-yet-backed-up child
+    used to read q_value() = 0 -- with every real value negative, the most
+    optimistic number in the tree, normalising far ABOVE the seeded range --
+    so every concurrent simulation in a batch descended the same root action
+    and the policy target degenerated toward uniform. In-flight children now
+    read their network value discounted by visits at the normalized minimum,
+    so the second selection of a batch must diversify."""
+    root = make_uniform_children(helper)
+    for child in root.children.values():
+        child.expanded_value = -10.0
+    helper.min_max_stats = muzero.MinMaxStats()
+    helper.min_max_stats.update(-11.0)
+    helper.min_max_stats.update(-9.0)
+    first = select_once(helper)
+    assert first.virtual_loss == 1  # in flight: selected, no backup yet
+    second = select_once(helper)
+    assert second is not first
+
+
+def test_communal_window_targets_and_release(helper):
+    """Communal windows: every root gets a readout, the chain backup's
+    bookkeeping visit -- and ONLY that visit -- is subtracted from the
+    policy target, and release_span frees the span's imagined subtrees and
+    latents while nodes past the window keep theirs for the next window."""
+    helper.create_tree_from_game(fake_trajectory(20))
+    results = asyncio.run(helper.run_communal_mcts(
+        [0, 4, 8], num_simulations=8, c_puct=1.25, discount=0.997))
+    assert set(results) == {0, 4, 8}
+    for idx in (0, 4, 8):
+        policy, value, has_policy = results[idx]
+        assert has_policy
+        assert policy.sum() == pytest.approx(1.0)
+        root = helper.current_trajectory[idx]
+        counts = np.array([
+            root.children[a].visit_count
+            - (1 if root.children[a].is_gameplay else 0)
+            if a in root.children else 0
+            for a in range(ACTIONS)], dtype=np.float64)
+        assert policy == pytest.approx(counts / counts.sum())
+    helper.release_span(0, 8)
+    for i in range(9):
+        node = helper.current_trajectory[i]
+        assert node.latent is None
+        assert all(c.is_gameplay for c in node.children.values())
+    # Chain nodes past the span keep their latents: they are the next
+    # window's reuse, and release only ever advances forward.
+    assert all(helper.current_trajectory[i].latent is not None
+               for i in range(9, 20))
+
+
 def test_backup_records_the_composite_q_for_normalisation(helper):
     """MinMaxStats must track the same quantity selection normalises:
     r + discount * V(node), not V(node) alone."""

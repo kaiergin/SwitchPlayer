@@ -141,6 +141,17 @@ overhead is a larger share. Absolute throughput is far higher regardless.
 
 ## Value encoding and the value prefix
 
+> **VOID — 2026-08-23 audit.** Every number in this section was measured
+> through `bench.py`'s `_local_trainer`, which at the time built the heads
+> with raw-unit supports (400/2000) applied as h-space half-widths: bin
+> widths 16 and 80 against targets that never exceed ~46, so nearly every
+> target landed in the centre bin. That is the same mis-scaling the
+> `no-transform` arm was later corrected for. The builder was also dead
+> (no projector/proj_optimizer) from 2026-08-13 until repaired on
+> 2026-08-23. Treat this section's tables as void, not merely superseded;
+> the collapse conclusion is contradicted by the archived `effzero-repro`
+> eval rows (prefix at 0.003x–0.09x control).
+
 `python benchmarks/bench.py prefix` trains a per-step reward head and an LSTM
 value-prefix head on the same trunk, same batches, same steps, then compares
 prefix prediction error at each unroll depth on held-out trajectories.
@@ -236,6 +247,13 @@ since been threaded end to end, so a re-run of this arm now tests what its
 label says.
 
 ### The value prefix does not learn. Anywhere.
+
+> **SUPERSEDED — 2026-08-23 audit.** This ablation ran 2026-08-13, before
+> the SimSiam projector (488567d3), the appendix-G/AdamW/grad-clip batch
+> (eaf3bd57), and the zero-init heads (1e08d948). On every archived
+> `effzero-repro` run since, the prefix head reads 0.003x–0.09x control
+> across all eval rows. "Collapsed to predicting zero" is no longer a true
+> description of this code; see ROADMAP priority 1 for the current status.
 
 `prefix / control` is **1.000 in every single arm**, including the arm where the
 prefix is driving the tree. The head is collapsed to predicting zero, so in that

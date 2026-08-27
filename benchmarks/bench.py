@@ -25,8 +25,8 @@ import muzero
 from muzero import (C_PUCT, IMAGE_RESHAPE, LATENT_CHANNELS, MCTS_BATCHES,
                     MCTSHelper, NetworkManager, TOTAL_MCTS_SIMS, TRAINING_BATCHES,
                     initial_frame_stack, preprocess_frame, push_frame)
-from networks import (DynamicsNetwork, PredictionNetwork, RepresentationNetwork,
-                      ValuePrefixNetwork)
+from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
+                      RepresentationNetwork, ValuePrefixNetwork)
 
 ACTIONS = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -384,7 +384,16 @@ def bench_prefix(train_steps=400, eval_batches=24, batch_size=32, discount=None,
 
 
 def _local_trainer(prefix_support=None):
-    """A TrainingHelper without Ray or a storage handle."""
+    """A TrainingHelper without Ray or a storage handle.
+
+    Audit fix 2026-08-23: this builder was dead since the SimSiam projector
+    landed (train_step requires projector/proj_optimizer), and it still
+    carried pre-h()-fix supports -- 400/2000 raw-unit half-widths applied in
+    TRANSFORMED space, bin widths 16/80 against targets that never exceed
+    ~46, so nearly every target landed in the centre bin. That mis-scaling
+    produced RESULTS.md's "neither head beats the trivial predictor" table,
+    which is void. Supports and bins now come from muzero's own constants.
+    """
     from muzero import TrainingHelper
     trainer = object.__new__(TrainingHelper)
     trainer.device = DEVICE
@@ -393,19 +402,23 @@ def _local_trainer(prefix_support=None):
     trainer.representation = RepresentationNetwork(input_channels=12,
                                                    latent_channels=LATENT_CHANNELS).to(DEVICE)
     trainer.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                       support_size=400, num_bins=51).to(DEVICE)
+                                       support_size=muzero.REWARD_SUPPORT,
+                                       num_bins=muzero.REWARD_BINS).to(DEVICE)
     trainer.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                           support_size=2000, num_bins=51).to(DEVICE)
+                                           support_size=muzero.VALUE_SUPPORT,
+                                           num_bins=muzero.VALUE_BINS).to(DEVICE)
+    support = muzero.VALUE_PREFIX_SUPPORT if prefix_support is None else prefix_support
     trainer.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                               hidden_size=muzero.VALUE_PREFIX_HIDDEN,
-                                              support_size=(muzero.VALUE_PREFIX_SUPPORT
-                                                            if prefix_support is None else prefix_support),
-                                              num_bins=51).to(DEVICE)
-    import torch.optim as optim
+                                              support_size=support,
+                                              num_bins=muzero.bins_for(support)).to(DEVICE)
+    trainer.projector = LatentProjector(
+        LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE)
     trainer.prefix_optimizer = muzero.make_optimizer(trainer.value_prefix.parameters())
     trainer.rep_optimizer = muzero.make_optimizer(trainer.representation.parameters())
     trainer.dyn_optimizer = muzero.make_optimizer(trainer.dynamics.parameters())
     trainer.pred_optimizer = muzero.make_optimizer(trainer.prediction.parameters())
+    trainer.proj_optimizer = muzero.make_optimizer(trainer.projector.parameters())
     return trainer
 
 

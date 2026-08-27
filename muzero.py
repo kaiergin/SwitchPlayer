@@ -33,8 +33,35 @@ TRAINING_BATCHES  = 64
 MCTS_BATCHES = 8
 TOTAL_MCTS_SIMS = 32
 MAX_DEPTH = 8
+# Reanalysis topology. False: one search per root, in ascending order, each
+# spending TOTAL_MCTS_SIMS in MCTS_BATCHES-wide waves WITHIN its tree (the
+# shipped shape). True: windowed COMMUNAL search -- COMMUNAL_WINDOW_ROOTS
+# roots run concurrently in lockstep, ONE simulation per root per round (the
+# papers' sequential schedule inside each tree), with the GPU batch formed
+# ACROSS roots, so throughput matches the batched shape without seven of
+# eight selections running on stale statistics. Statistics on the shared
+# chain tree are communal: traffic that earlier or concurrent searches sent
+# through a node stays in its counts and is read out rather than
+# baseline-subtracted (AlphaZero's self-play tree reuse reads out inherited
+# visits the same way). The chain backup's bookkeeping visit is still
+# subtracted -- it is a value-warming device, not search traffic, and
+# unsubtracted it nudges every policy target toward the behaviour action.
+# PUCT only; with USE_GUMBEL_SEARCH on, reanalysis falls back to sequential.
+USE_COMMUNAL_REANALYSIS = False
+COMMUNAL_WINDOW_ROOTS = 8
 MAX_GAMEPLAY = 20
 MAX_REPLAY = 20
+# Optional TRANSITION-count cap on the replay buffer (0 = off). MAX_REPLAY
+# caps trajectories, which makes the resident window GROW as the agent
+# improves: 85 early-training Pong episodes ~= 100k transitions, but
+# episodes lengthen with skill -- same cap, double the memory (the 13.7 GB
+# checkpoint wedge of 2026-08-26). EfficientZero's own buffer capacity is
+# measured in transitions (core/config.py transition_num), so this is the
+# faithful unit. Eviction drops oldest WHOLE trajectories while the total
+# exceeds the cap -- never partial ones, so unroll windows and n-step
+# targets never cross an eviction seam -- and always keeps the newest.
+# Both caps apply; whichever binds first evicts.
+MAX_REPLAY_TRANSITIONS = 0
 IMAGE_RESHAPE = (84,84)
 STEPS_UNTIL_MCTS = 500
 # 128 channels at 6x6 = 4,608 values (18 KB/node), against 64 at 21x21 = 28,224
@@ -98,12 +125,17 @@ VALUE_PREFIX_HIDDEN = 512
 # the per-step reward head. Both heads are always trained; this selects which
 # one the search actually consumes, so the two can be compared end to end.
 #
-# Default False on measured evidence. Over a 5-arm, 2-seed, 60-iteration
-# ablation (~15k training steps each, benchmarks/RESULTS.md) the per-step head
-# reached 0.24x the error of a predict-zero control while the prefix head sat at
-# exactly 1.000x in every arm -- collapsed to predicting zero, i.e. feeding the
-# search edge rewards of ~0. Feeding the tree a signal that demonstrably learns
-# beats feeding it one that demonstrably does not.
+# Default False on the 2026-08-13 ablation (5 arms x 2 seeds, ~15k steps each,
+# benchmarks/RESULTS.md), where the prefix head sat at exactly 1.000x a
+# predict-zero control -- collapsed -- while the per-step head reached 0.24x.
+#
+# THAT VERDICT IS STALE (fidelity audit, 2026-08-23). It predates the SimSiam
+# projector, appendix-G latent renormalisation, AdamW + grad clipping, and the
+# zero-init heads. On every archived effzero-repro run since, the prefix head
+# reads 0.003x-0.09x control across all eval rows -- the best-learned head in
+# the system -- and the repro arms drive the tree with it (flag True). The
+# default stays False only until a controlled prefix-vs-per-step pair on the
+# post-search-fix build settles it; do not cite the old collapse as the reason.
 USE_VALUE_PREFIX_IN_TREE = False
 
 # ---------------------------------------------------------------------------
@@ -144,10 +176,10 @@ LATENT_GRADIENT_SCALE = 0.5
 GAME_FPS = 60.0
 SELF_PLAY_REAL_TIME = True      # False lets self-play run as fast as the hardware allows
 # Acting samples the policy head at this temperature. With no search on the
-# acting path, this IS the exploration mechanism, so it stays at 1.0 while the
-# get_temperature schedule sharpens the TARGETS instead. Lower it deliberately
-# and one knob at a time -- decaying acting entropy and target temperature
-# together is how exploration collapses.
+# acting path, this IS the exploration mechanism, so it stays at 1.0. (Policy
+# TARGETS are never temperature-sharpened -- the paper's targets are raw visit
+# fractions; the schedule that once sharpened them here was removed. Search
+# acting has its own staged schedule, visit_softmax_temperature.)
 ACTING_TEMPERATURE = 1.0
 # Reanalysis searches every REANALYSE_STRIDE-th timestep instead of all of
 # them. Measured on an RTX 4070, searching every step makes reanalysis ~2.5x
@@ -463,13 +495,16 @@ class MCTSNode:
         self.is_gameplay = is_gameplay
 
     def q_value(self):
-        # Virtual loss counts as a visit contributing zero value -- the standard
-        # "assume the in-flight simulation lost" trick that makes concurrent
-        # simulations diversify. Applying it here rather than subtracting a raw
-        # count from the selection score keeps the penalty on the same scale as
-        # the normalised Q.
-        visits = self.visit_count + self.virtual_loss
-        return self.value_sum / visits if visits > 0 else 0.0
+        # Mean over COMPLETED backups only. Virtual loss must NOT sit in this
+        # average: dividing by (visits + virtual_loss) pulls Q toward zero,
+        # which repels only where zero is pessimistic -- true for non-negative
+        # returns, inverted on a losing sign-clipped game like Pong, where the
+        # in-flight "zero" outscored every honestly-evaluated sibling by the
+        # full width of the normalisation range and entire simulation batches
+        # piled onto one action. The in-flight penalty lives in NORMALIZED
+        # space at selection instead, where the worst value seen this search
+        # is 0 by construction regardless of reward sign.
+        return self.value_sum / self.visit_count if self.visit_count > 0 else 0.0
 
 def apply_temperature(visit_counts, temperature):
     """
@@ -494,20 +529,6 @@ def apply_temperature(visit_counts, temperature):
     adjusted_counts = visit_counts ** (1.0 / temperature)
     policy = adjusted_counts / np.sum(adjusted_counts)
     return policy
-
-def get_temperature(epoch, initial_temp=1.0, final_temp=0.1, decay_train_steps=100000):
-    """
-    Linearly decays temperature from initial_temp to final_temp over decay_train_steps.
-    If train steps exceeds decay_train_steps, return final_temp.
-
-    Reserved for the ACTING side (apply_temperature on a sampled policy).
-    It used to sharpen the reanalysis policy targets, which deviates from the
-    paper: MuZero's targets are always raw visit fractions, and temperature
-    applies only to action selection during self-play.
-    """
-    if epoch >= decay_train_steps:
-        return final_temp
-    return initial_temp - (initial_temp - final_temp) * (epoch / decay_train_steps)
 
 def scale_gradient(tensor, scale):
     """Identity on the forward pass; multiplies the gradient by `scale`.
@@ -1121,13 +1142,34 @@ class MCTSHelper:
                     # through the target. Ascending order preserves the shared
                     # chain-tree's forward-only reuse.
                     search_results = {}
-                    for idx in sorted(searched):
-                        self.logger.debug("Running MCTS index %s out of %s", idx, len(game_trajectory))
-                        search_results[idx] = await self.run_full_mcts(idx,
-                                                                       sim_batches=MCTS_BATCHES,
-                                                                       num_simulations=TOTAL_MCTS_SIMS,
-                                                                       c_puct=C_PUCT,
-                                                                       discount=DISCOUNT)
+                    order = sorted(searched)
+                    communal = USE_COMMUNAL_REANALYSIS and not USE_GUMBEL_SEARCH
+                    if USE_COMMUNAL_REANALYSIS and USE_GUMBEL_SEARCH:
+                        self.logger.warning(
+                            "USE_COMMUNAL_REANALYSIS supports only the PUCT "
+                            "search; USE_GUMBEL_SEARCH is on, falling back "
+                            "to sequential per-root searches.")
+                    if communal:
+                        # Windows advance in ascending order, so release_span
+                        # can free everything up to each window's last root:
+                        # no later search descends backward along the chain.
+                        released_up_to = -1
+                        for w0 in range(0, len(order), COMMUNAL_WINDOW_ROOTS):
+                            window = order[w0:w0 + COMMUNAL_WINDOW_ROOTS]
+                            self.logger.debug("Communal window %s..%s", window[0], window[-1])
+                            search_results.update(await self.run_communal_mcts(
+                                window, num_simulations=TOTAL_MCTS_SIMS,
+                                c_puct=C_PUCT, discount=DISCOUNT))
+                            self.release_span(released_up_to + 1, window[-1])
+                            released_up_to = window[-1]
+                    else:
+                        for idx in order:
+                            self.logger.debug("Running MCTS index %s out of %s", idx, len(game_trajectory))
+                            search_results[idx] = await self.run_full_mcts(idx,
+                                                                           sim_batches=MCTS_BATCHES,
+                                                                           num_simulations=TOTAL_MCTS_SIMS,
+                                                                           c_puct=C_PUCT,
+                                                                           discount=DISCOUNT)
                     search_values = {i: r[1] for i, r in search_results.items()}
                     # Pass 2: every position gets the paper's n-step target --
                     # TD_STEPS real rewards, then the nearest search root value
@@ -1342,10 +1384,17 @@ class MCTSHelper:
         for action, child in node.children.items():
             child.prior = node.policy[action]
 
-    async def selection_task_no_expand(self, index, c_puct, discount, max_depth=MAX_DEPTH):
+    async def selection_task_no_expand(self, index, c_puct, discount, max_depth=MAX_DEPTH,
+                                       min_max_stats=None):
         """
         Traverse the tree from the given root until a leaf is reached.
+
+        min_max_stats defaults to the helper's per-search instance; the
+        communal window driver passes each root's own stats explicitly, since
+        several searches with different normalisation ranges run concurrently
+        over the shared chain tree.
         """
+        stats = self.min_max_stats if min_max_stats is None else min_max_stats
         node = self.current_trajectory[index]
         path = []
         while len(path) < max_depth:
@@ -1361,19 +1410,32 @@ class MCTSHelper:
                 # Q(s,a). q_value() alone is the value from the child ONWARD:
                 # backup folds the edge reward into the parent's statistics, so
                 # scoring on it left selection blind to immediate reward
-                # differences between actions. Virtual loss is already folded
-                # into q_value() via the visit count; subtracting it again here
-                # would swamp a [0,1] Q. An unvisited child reads its network
-                # value estimate rather than 0, which on this tree's raw-return
-                # scale would rank every imagined child beneath the gameplay
-                # child before a single simulation had judged them.
-                if child.visit_count + child.virtual_loss > 0:
+                # differences between actions. An unvisited child -- in-flight
+                # or not -- reads its network value estimate rather than 0,
+                # which on this tree's raw-return scale would rank every
+                # imagined child beneath the gameplay child before a single
+                # simulation had judged them (and on a negative-value game
+                # would rank an in-flight child ABOVE every evaluated one).
+                if child.visit_count > 0:
                     onward = child.q_value()
                 elif child.done:
                     onward = 0.0
                 else:
                     onward = child.expanded_value
-                score = self.min_max_stats.normalize(child.reward + discount * onward) + u
+                score = stats.normalize(child.reward + discount * onward)
+                if child.virtual_loss > 0:
+                    # Virtual loss: each in-flight simulation counts as a
+                    # completed visit at the normalized MINIMUM, which is 0 by
+                    # construction -- pessimistic under any reward sign.
+                    # Algebraically identical to raw-space visits pinned at
+                    # min_max_stats.minimum (normalize is affine), and it
+                    # fades as real visits accumulate, so a genuinely
+                    # dominant action can still take several simulations of
+                    # one batch. An unvisited child's network estimate counts
+                    # as its single pseudo-visit.
+                    n = max(child.visit_count, 1)
+                    score = score * n / (n + child.virtual_loss)
+                score += u
                 if score > best_score:
                     best_score = score
                     best_candidates = [child]
@@ -1387,7 +1449,7 @@ class MCTSHelper:
         path.append(node)
         await self.selection_results.put((node, path))
 
-    async def expand_selected(self, discount):
+    async def expand_selected(self, discount, stats_by_root=None):
         simulations = []
         while not self.selection_results.empty():
             simulations.append(await self.selection_results.get())
@@ -1412,10 +1474,16 @@ class MCTSHelper:
         # simulation budget was well under num_simulations.
         for leaf, path in simulations:
             leaf_value = 0.0 if leaf.done else leaf.expanded_value
+            # Each simulation's range update goes to ITS search's stats: in a
+            # communal window the paths in one drain belong to different
+            # roots, keyed here by the root that heads the path.
+            stats = self.min_max_stats
+            if stats_by_root is not None:
+                stats = stats_by_root.get(path[0].id, self.min_max_stats)
             self.backup_simulation(path, leaf_value, discount=discount,
-                                   min_max_stats=self.min_max_stats)
+                                   min_max_stats=stats)
 
-    def seed_min_max_stats(self, root, discount):
+    def seed_min_max_stats(self, root, discount, stats=None):
         """Prime the per-search normalisation range from values already in the tree.
 
         MinMaxStats starts empty and normalize() is the identity until it has
@@ -1426,6 +1494,7 @@ class MCTSHelper:
         root's children puts round one on the same [0,1] footing as every
         later round.
         """
+        stats = self.min_max_stats if stats is None else stats
         for child in root.children.values():
             if child.visit_count > 0:
                 onward = child.q_value()
@@ -1433,7 +1502,7 @@ class MCTSHelper:
                 onward = 0.0
             else:
                 onward = child.expanded_value
-            self.min_max_stats.update(child.reward + discount * onward)
+            stats.update(child.reward + discount * onward)
 
     def release_root(self, node):
         """Prune imagined children and release the latent once a search is done.
@@ -1447,7 +1516,31 @@ class MCTSHelper:
             del node.children[action]
         node.latent = None
 
-    def drop_non_gameplay_children_and_compute_improvements(self, idx, baseline=None):
+    def release_span(self, start_idx, end_idx):
+        """Communal-window teardown: free chain nodes start_idx..end_idx.
+
+        Traffic only flows FORWARD along the chain (a search from root i
+        reaches at most i + MAX_DEPTH), so once every root <= end_idx has
+        finished, nothing can descend into this span again and its imagined
+        subtrees and latents can all go -- including those hanging off
+        interior, never-searched chain nodes, which per-root release_root
+        never visited and which previously lingered for the trajectory's
+        whole lifetime. Nodes PAST end_idx keep their expansions: they are
+        the next window's reuse. Visit statistics are kept everywhere (they
+        are communal by design, and q_value readouts may still want them).
+        """
+        for i in range(max(start_idx, 0), min(end_idx + 1, len(self.current_trajectory))):
+            node = self.current_trajectory[i]
+            for action in [a for a, child in node.children.items()
+                           if not child.is_gameplay]:
+                del node.children[action]
+            node.latent = None
+
+    def drop_non_gameplay_children_and_compute_improvements(self, idx, baseline=None,
+                                                            release=True):
+        # release=False: the communal window keeps every root's subtree alive
+        # until the whole window has finished (concurrent neighbours may still
+        # descend through it); release_span then frees the window in one pass.
         baseline = baseline or {}
         node = self.current_trajectory[idx]
         # Improved policy from the visits THIS search allocated. Raw counts also
@@ -1466,7 +1559,7 @@ class MCTSHelper:
             # RAW visit fractions, per the paper. MuZero's policy target is
             # always the untempered visit distribution; temperature exists only
             # for action SELECTION during self-play. Sharpening targets on a
-            # schedule -- what get_temperature used to do here -- trains the
+            # schedule -- what a decaying temperature once did here -- trains the
             # head toward the argmax of a 32-simulation count vector, i.e.
             # toward search noise, increasingly confidently as training runs.
             improved_policy = visit_counts / visit_counts.sum()
@@ -1477,7 +1570,8 @@ class MCTSHelper:
             # toward uniform on terminal observations.
             improved_policy = np.ones(self.action_space) / self.action_space
         root_value = node.q_value()
-        self.release_root(node)
+        if release:
+            self.release_root(node)
         return improved_policy, root_value, has_policy
 
     # -----------------------------
@@ -1528,6 +1622,57 @@ class MCTSHelper:
             remaining -= batch_n
         return self.drop_non_gameplay_children_and_compute_improvements(
             index, baseline=baseline_visits)
+
+    async def run_communal_mcts(self, indices, num_simulations, c_puct, discount):
+        """One communal window: concurrent lockstep searches over `indices`.
+
+        Each root runs the papers' sequential schedule -- one simulation per
+        round, statistics updated before its next selection -- while the GPU
+        batch is formed ACROSS the window's roots, so throughput matches the
+        old within-tree sim_batches shape without any selection running on
+        stale statistics. The shared chain tree's statistics are COMMUNAL:
+        traffic from earlier or concurrent searches stays in the counts and
+        is read out rather than baseline-subtracted; only the chain backup's
+        bookkeeping visit (one per gameplay child, from
+        create_tree_from_game, allocated by no search) is removed from the
+        policy target. Roots are NOT released here -- concurrent neighbours
+        may still descend through them; the caller frees the whole span with
+        release_span once the window is done.
+
+        Returns {index: (improved_policy, root_value, has_policy)}.
+        """
+        indices = sorted(indices)
+        to_expand = [self.current_trajectory[idx] for idx in indices
+                     if not self.current_trajectory[idx].is_expanded]
+        self.batch_expand_nodes(to_expand)
+        stats_by_index = {}
+        stats_by_root = {}
+        for idx in indices:
+            root = self.current_trajectory[idx]
+            # The prefix accumulates from each search's own root.
+            root.prefix = 0.0
+            root.prefix_state = None
+            self.add_noise_to_node(idx)
+            stats = MinMaxStats()
+            self.seed_min_max_stats(root, discount, stats=stats)
+            stats_by_index[idx] = stats
+            stats_by_root[root.id] = stats
+        for _ in range(max(int(num_simulations), 1)):
+            futures = [
+                self.selection_task_no_expand(idx, c_puct, discount,
+                                              min_max_stats=stats_by_index[idx])
+                for idx in indices
+            ]
+            await asyncio.gather(*futures)
+            await self.expand_selected(discount, stats_by_root=stats_by_root)
+        results = {}
+        for idx in indices:
+            root = self.current_trajectory[idx]
+            bookkeeping = {a: 1 for a, child in root.children.items()
+                           if child.is_gameplay}
+            results[idx] = self.drop_non_gameplay_children_and_compute_improvements(
+                idx, baseline=bookkeeping, release=False)
+        return results
 
     # -----------------------------
     # Gumbel search (Danihelka et al. 2022): sequential halving at the root,
@@ -1662,14 +1807,20 @@ class MCTSHelper:
 
     def _normalized_q(self, child, discount):
         """The same composite selection scores: r + discount * V, normalized.
-        Unvisited children read their network value, as in PUCT selection."""
-        if child.visit_count + child.virtual_loss > 0:
+        Unvisited children read their network value, as in PUCT selection;
+        in-flight simulations count as completed visits at the normalized
+        minimum (see selection_task_no_expand), not as zero-value visits."""
+        if child.visit_count > 0:
             onward = child.q_value()
         elif child.done:
             onward = 0.0
         else:
             onward = child.expanded_value
-        return self.min_max_stats.normalize(child.reward + discount * onward)
+        qn = self.min_max_stats.normalize(child.reward + discount * onward)
+        if child.virtual_loss > 0:
+            n = max(child.visit_count, 1)
+            qn = qn * n / (n + child.virtual_loss)
+        return qn
 
     def _sigma_scale(self, node, baseline=None):
         baseline = baseline or {}
@@ -2061,7 +2212,7 @@ class TrainingHelper:
                     self.logger.debug("Training sleeping")
                     await asyncio.sleep(1)
                     continue
-                batch = await self.prepare_batch(self.storage_manager.replay_buffer, TRAINING_BATCHES, 5, self.action_space)
+                batch = await self.prepare_batch(self.storage_manager.replay_buffer, TRAINING_BATCHES, UNROLL_STEPS, self.action_space)
                 loss = await self.train_step(batch)
                 self.training_steps += 1
                 self.logger.info(f"Step: {self.training_steps} Training loss: {loss}")

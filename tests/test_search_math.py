@@ -2,8 +2,7 @@
 import numpy as np
 import pytest
 
-from muzero import (MCTSNode, MinMaxStats, add_dirichlet_noise, apply_temperature,
-                    get_temperature)
+from muzero import (MCTSNode, MinMaxStats, add_dirichlet_noise, apply_temperature)
 
 
 # --------------------------------------------------------------------------
@@ -31,16 +30,6 @@ def test_always_a_distribution(temp):
     policy = apply_temperature([5, 0, 3, 1, 7], temp)
     assert policy.sum() == pytest.approx(1.0)
     assert (policy >= 0).all()
-
-
-# --------------------------------------------------------------------------
-# get_temperature
-# --------------------------------------------------------------------------
-def test_temperature_decays_monotonically_then_floors():
-    schedule = [get_temperature(s) for s in (0, 25_000, 50_000, 99_999, 100_000, 500_000)]
-    assert schedule[0] == pytest.approx(1.0)
-    assert schedule[-1] == pytest.approx(0.1)
-    assert all(a >= b for a, b in zip(schedule, schedule[1:]))
 
 
 # --------------------------------------------------------------------------
@@ -133,17 +122,26 @@ def test_q_is_mean_value():
     assert node.q_value() == pytest.approx(2.5)
 
 
-def test_virtual_loss_dilutes_q_toward_zero():
-    """Virtual loss is a visit contributing no value, so an in-flight simulation
-    makes a node look worse and pushes concurrent simulations elsewhere."""
+def test_q_value_ignores_virtual_loss():
+    """Regression (Pong): q_value() used to divide by visits + virtual_loss,
+    pulling Q toward ZERO -- pessimistic only when returns are non-negative.
+    On a losing sign-clipped game every real Q is negative, zero is the most
+    optimistic value in the tree, and an in-flight child outscored every
+    honestly-evaluated sibling: whole simulation batches piled onto one
+    action. Q is now the mean of completed backups only; the in-flight
+    penalty is applied in normalized space at selection."""
     node = MCTSNode(latent=None, prior=1.0)
     node.visit_count, node.value_sum = 2, 10.0
     before = node.q_value()
     node.virtual_loss = 2
-    after = node.q_value()
-    assert before == pytest.approx(5.0)
-    assert after == pytest.approx(2.5)
-    assert after < before
+    assert node.q_value() == pytest.approx(before) == pytest.approx(5.0)
+
+    losing = MCTSNode(latent=None, prior=1.0)
+    losing.visit_count, losing.value_sum = 2, -3.0
+    losing.virtual_loss = 2
+    # The old division would have reported -0.75 -- an IMPROVEMENT over the
+    # honest -1.5 -- for a node that is merely being explored.
+    assert losing.q_value() == pytest.approx(-1.5)
 
 
 def test_virtual_loss_alone_does_not_divide_by_zero():

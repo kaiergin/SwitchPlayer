@@ -281,6 +281,48 @@ def test_refresh_targets_researches_the_oldest_trajectories(monkeypatch):
     assert run.searcher.network_manager.dynamics is saved_nets[1]
 
 
+def test_refresh_communal_researches_through_the_chain_tree(monkeypatch):
+    """USE_COMMUNAL_REANALYSIS routes the refresh through the shared chain
+    tree (windowed lockstep, communal statistics) instead of per-position
+    act_search. Counterfactual-proof: act_search is booby-trapped, so the
+    test fails if the old path runs despite the flag."""
+    sys.path.insert(0, str(__import__("pathlib").Path(
+        __file__).resolve().parent.parent / "experiments"))
+    import ablation
+    monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)
+    monkeypatch.setattr(muzero, "USE_COMMUNAL_REANALYSIS", True)
+    monkeypatch.setattr(muzero, "COMMUNAL_WINDOW_ROOTS", 2)  # force 3 windows
+    run = object.__new__(ablation.Run)
+    run.trainer = make_trainer()
+    run.trainer.training_steps = 500
+    run.searcher = muzero.MCTSHelper(action_space=ACTIONS, device=CPU,
+                                     network_ref=None, storage_ref=None)
+    np.random.seed(9)
+    traj = obs_traj([1.0] * 6, [5.0] * 6)
+    for t in traj:
+        t["born_step"] = 0
+    old_policies = [t["target_policy"].copy() for t in traj]
+
+    def boom(*a, **k):
+        raise AssertionError("act_search ran despite USE_COMMUNAL_REANALYSIS")
+    monkeypatch.setattr(run.searcher, "act_search", boom)
+    run.replay = [traj]
+    run.refresh_targets(1)
+    assert all(t.get("refreshed_step") == 500 for t in traj)
+    # Searched positions get fresh, well-formed targets...
+    changed = any(not np.allclose(a, t["target_policy"])
+                  for a, t in zip(old_policies[:-1], traj[:-1]))
+    assert changed, "communal refresh did not replace any policy target"
+    for t in traj[:-1]:
+        assert t["target_policy"].sum() == pytest.approx(1.0)
+        assert np.isfinite(t["root_value"])
+        assert t["priority"] > 0
+    # ...while the terminated tail (no search then) keeps its old target.
+    assert np.allclose(old_policies[-1], traj[-1]["target_policy"])
+    # The searcher's acting state is restored, not left on the refresh chain.
+    assert run.searcher.current_trajectory is None
+
+
 def test_refresh_priorities_use_the_age_shrunk_horizon(monkeypatch):
     """Round-9 finding: every refresh test ran with OFFPOLICY_DECAY_STEPS
     None, where paper_horizon(age) == TD_STEPS -- the changed line was only

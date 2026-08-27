@@ -29,6 +29,7 @@ import contextlib
 import json
 import os
 import pathlib
+import pickle
 import random
 import sys
 import time
@@ -118,6 +119,11 @@ ARMS = {
         "PER_ENABLED": True,
         "USE_VALUE_PREFIX_IN_TREE": True,
         "REWARD_LOSS_WEIGHT": 0.0,
+        # NOT a bug -- do not "fix" to 0.997. EffZero's released
+        # config/atari/__init__.py passes discount=0.997 and then applies
+        # self.discount **= self.frame_skip, so its Atari results were
+        # produced at 0.997^4 = 0.98807 per decision. Challenged and
+        # re-verified against the source twice (2026-08-22, 2026-08-26).
         "DISCOUNT": 0.997 ** 4,
         "TD_STEPS": 5,
         "LEARNING_RATE": 3e-4,
@@ -125,6 +131,11 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
+        # The papers' strictly sequential search: every simulation selects on
+        # statistics the previous one updated. Added 2026-08-23 with the
+        # virtual-loss sign fix; earlier archived runs of this arm searched in
+        # stale-statistics waves of 8 (see the fidelity audit).
+        "MCTS_BATCHES": 1,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
@@ -168,6 +179,11 @@ ARMS = {
         "PER_ENABLED": True,
         "USE_VALUE_PREFIX_IN_TREE": True,
         "REWARD_LOSS_WEIGHT": 0.0,
+        # NOT a bug -- do not "fix" to 0.997. EffZero's released
+        # config/atari/__init__.py passes discount=0.997 and then applies
+        # self.discount **= self.frame_skip, so its Atari results were
+        # produced at 0.997^4 = 0.98807 per decision. Challenged and
+        # re-verified against the source twice (2026-08-22, 2026-08-26).
         "DISCOUNT": 0.997 ** 4,
         "TD_STEPS": 5,
         "LEARNING_RATE": 3e-4,
@@ -175,6 +191,11 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
+        # The papers' strictly sequential search: every simulation selects on
+        # statistics the previous one updated. Added 2026-08-23 with the
+        # virtual-loss sign fix; earlier archived runs of this arm searched in
+        # stale-statistics waves of 8 (see the fidelity audit).
+        "MCTS_BATCHES": 1,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
@@ -191,6 +212,64 @@ ARMS = {
                 "refresh is the next build. Run with --env Pong-v4 "
                 "--frameskip 4 --episode-cap 3000 --episodes-per-iter 1 "
                 "--eval-every 10 --checkpoint-every 10.",
+    },
+    "effzero-repro-refresh5x-communal": {
+        # refresh5x with the COMMUNAL refresh topology (Kai's design,
+        # 2026-08-24): the oldest trajectories are re-searched through the
+        # SHARED chain tree -- COMMUNAL_WINDOW_ROOTS roots in lockstep, one
+        # simulation per root per round, GPU batch formed across roots,
+        # statistics accumulating across searches (only the chain backup's
+        # bookkeeping visit subtracted) -- instead of one independent
+        # act_search per position. Acting is identical to refresh5x
+        # (sequential 50-sim PUCT), so a matched pair isolates the refresh
+        # topology + statistics-sharing question. Paired control: the
+        # post-search-fix refresh5x run (pong-searchfix-2026-08-23). Run
+        # with the control's exact command, only --arms differing.
+        "USE_SEARCH_ACTING": True,
+        "USE_GUMBEL_SEARCH": False,
+        "PAPER_TARGETS": True,
+        "PER_ENABLED": True,
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "REWARD_LOSS_WEIGHT": 0.0,
+        # NOT a bug -- do not "fix" to 0.997. EffZero's released
+        # config/atari/__init__.py passes discount=0.997 and then applies
+        # self.discount **= self.frame_skip, so its Atari results were
+        # produced at 0.997^4 = 0.98807 per decision. Challenged and
+        # re-verified against the source twice (2026-08-22, 2026-08-26).
+        "DISCOUNT": 0.997 ** 4,
+        "TD_STEPS": 5,
+        "LEARNING_RATE": 3e-4,
+        "MAX_REPLAY": 85,
+        "USE_AUGMENTATION": True,
+        "REWARD_CLIP": 1.0,
+        "ACT_SEARCH_SIMS": 50,
+        "MCTS_BATCHES": 1,
+        "DIRICHLET_ALPHA": 0.3,
+        "PREFIX_HEAD_CHANNELS": 16,
+        "PREFIX_FC_HIDDEN": 32,
+        "USE_ATARI_WRAPPERS": True,
+        "USE_TARGET_MODEL": True,
+        "TRAINING_BATCHES": 256,
+        "POLICY_REFRESH_EVERY": 2,
+        "POLICY_REFRESH_COUNT": 4,
+        "USE_COMMUNAL_REANALYSIS": True,
+        # Added 2026-08-26 (Kai): cap the buffer in TRANSITIONS -- the unit
+        # EfficientZero's own config uses -- not just trajectories. Halved
+        # 125k -> 62.5k on 2026-08-27 (Kai, mid-lineage at the iter-70
+        # reboot of the pong-communal run): a step toward the
+        # tiny-buffer/live-refresh direction -- fresher data, ~5 GB
+        # resident, checkpoints ~6 GB. On the first post-resume episode the
+        # eviction drops the loaded buffer's older half in one pass.
+        # MAX_REPLAY 85 stays as an (inert) secondary ceiling.
+        "MAX_REPLAY_TRANSITIONS": 62_500,
+        "_doc": "refresh5x + communal windowed refresh through the shared "
+                "chain tree (statistics accumulate across roots; bookkeeping "
+                "visit subtracted). Everything else matches "
+                "effzero-repro-refresh5x, including sequential 50-sim "
+                "acting. Run with --env Pong-v4 --frameskip 4 --iterations "
+                "90 --train-steps 2000 --episode-cap 3000 "
+                "--episodes-per-iter 1 --eval-every 5 --checkpoint-every 10, "
+                "stopped at the paired horizon.",
     },
     "effzero-repro-smallbuf20": {
         # refresh5x with the replay window cut to 20 trajectories --
@@ -210,6 +289,11 @@ ARMS = {
         "PER_ENABLED": True,
         "USE_VALUE_PREFIX_IN_TREE": True,
         "REWARD_LOSS_WEIGHT": 0.0,
+        # NOT a bug -- do not "fix" to 0.997. EffZero's released
+        # config/atari/__init__.py passes discount=0.997 and then applies
+        # self.discount **= self.frame_skip, so its Atari results were
+        # produced at 0.997^4 = 0.98807 per decision. Challenged and
+        # re-verified against the source twice (2026-08-22, 2026-08-26).
         "DISCOUNT": 0.997 ** 4,
         "TD_STEPS": 5,
         "LEARNING_RATE": 3e-4,
@@ -217,6 +301,11 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
+        # The papers' strictly sequential search: every simulation selects on
+        # statistics the previous one updated. Added 2026-08-23 with the
+        # virtual-loss sign fix; earlier archived runs of this arm searched in
+        # stale-statistics waves of 8 (see the fidelity audit).
+        "MCTS_BATCHES": 1,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
@@ -609,6 +698,57 @@ class Run:
             t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
         return out
 
+    def _refresh_traj_communal(self, traj):
+        """Communal refresh (USE_COMMUNAL_REANALYSIS): re-search a stored
+        trajectory's policies through the SHARED chain tree instead of one
+        independent act_search per position. COMMUNAL_WINDOW_ROOTS roots run
+        in lockstep -- one simulation per root per round, the papers'
+        sequential schedule inside each tree, the GPU batch formed ACROSS
+        roots -- and statistics accumulate communally across the searches
+        (only the chain backup's bookkeeping visit is subtracted from each
+        readout; see muzero.run_communal_mcts). Expansions along the chain
+        are shared between neighbouring roots, which is the design's point.
+
+        Runs under the same target-model swap as the act_search path it
+        replaces (the caller swapped the searcher's networks already). One
+        behavioural difference besides topology: a truncated tail's search
+        takes root noise like every other position, where the act_search
+        path searched it greedily.
+        """
+        searcher = self.searcher
+        saved = getattr(searcher, "current_trajectory", None)
+        try:
+            evaluated = searcher.eval_obs(
+                [(t["obs"], t["action"], t["reward"]) for t in traj])
+            searcher.create_tree_from_game(
+                evaluated, terminated=not traj[-1].get("truncated", False))
+            indices = list(range(len(traj)))
+            if not traj[-1].get("has_policy_target", True):
+                # Terminated tail: carried no search then, none now.
+                indices = indices[:-1]
+            window = max(1, muzero.COMMUNAL_WINDOW_ROOTS)
+            released = -1
+            for w0 in range(0, len(indices), window):
+                widx = indices[w0:w0 + window]
+                results = asyncio.run(searcher.run_communal_mcts(
+                    widx, num_simulations=muzero.ACT_SEARCH_SIMS,
+                    c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT))
+                for idx, (pol, val, has_policy) in results.items():
+                    if not has_policy:
+                        continue
+                    traj[idx]["target_policy"] = np.asarray(pol, dtype=np.float64)
+                    traj[idx]["root_value"] = float(val)
+                # Windows advance in ascending order, so everything up to
+                # this window's last root is unreachable from any later
+                # search and can be freed.
+                searcher.release_span(released + 1, widx[-1])
+                released = widx[-1]
+            # Free the tail past the last root too: searches descend up to
+            # MAX_DEPTH beyond their root and leave expansions there.
+            searcher.release_span(released + 1, len(traj) - 1)
+        finally:
+            searcher.current_trajectory = saved
+
     def refresh_targets(self, count):
         """EfficientZero's reanalyze, policy half (approximated): re-search
         every position of the `count` OLDEST trajectories through the LAGGED
@@ -644,15 +784,20 @@ class Run:
             nm.value_prefix = self.trainer.target_value_prefix
             for ti in oldest:
                 traj = self.replay[ti]
-                for i, t in enumerate(traj):
-                    terminal_record = i == len(traj) - 1
-                    if terminal_record and not t.get("has_policy_target", True):
-                        # Terminated tail: carried no search then, none now.
-                        continue
-                    _, pol, val = asyncio.run(self.searcher.act_search(
-                        t["obs"], greedy=terminal_record))
-                    t["target_policy"] = np.asarray(pol, dtype=np.float64)
-                    t["root_value"] = float(val)
+                if muzero.USE_COMMUNAL_REANALYSIS and not muzero.USE_GUMBEL_SEARCH:
+                    # Kai's communal topology: shared chain tree, lockstep
+                    # windows across roots, statistics accumulating.
+                    self._refresh_traj_communal(traj)
+                else:
+                    for i, t in enumerate(traj):
+                        terminal_record = i == len(traj) - 1
+                        if terminal_record and not t.get("has_policy_target", True):
+                            # Terminated tail: carried no search then, none now.
+                            continue
+                        _, pol, val = asyncio.run(self.searcher.act_search(
+                            t["obs"], greedy=terminal_record))
+                        t["target_policy"] = np.asarray(pol, dtype=np.float64)
+                        t["root_value"] = float(val)
                 for idx, t in enumerate(traj):
                     # Priority against the z the trainer will actually compute
                     # for this position: the 4.3 age-shrunk horizon, not the
@@ -771,6 +916,38 @@ def resume_path(arm, seed):
     return RESULTS / f"resume{TAG}-{arm}-seed{seed}.ckpt"
 
 
+CKPT_STREAM_MAGIC = b"SPCHKPT2\n"
+
+
+def _cpu_state(obj):
+    """Recursively detach+CPU every tensor: the streamed checkpoint pickles
+    without torch.load's map_location, so tensors must be device-neutral on
+    disk (load_state_dict re-places them on load)."""
+    if torch.is_tensor(obj):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: _cpu_state(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_cpu_state(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_cpu_state(v) for v in obj)
+    return obj
+
+
+def _read_checkpoint(path):
+    """State dict from either checkpoint format: the SPCHKPT2 streamed
+    container (head pickle + one frame per replay trajectory), or any
+    torch.save file -- older checkpoints, completion markers, and
+    --init-weights sources all load unchanged."""
+    with open(path, "rb") as f:
+        if f.read(len(CKPT_STREAM_MAGIC)) == CKPT_STREAM_MAGIC:
+            state = pickle.load(f)
+            state["replay"] = [pickle.load(f)
+                               for _ in range(state.pop("replay_trajs", 0))]
+            return state
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def save_run_checkpoint(run, path, meta):
     """Everything a resume needs, written atomically (tmp + replace) so a
     kill mid-write leaves the previous checkpoint intact. The replay buffer
@@ -784,16 +961,17 @@ def save_run_checkpoint(run, path, meta):
     Pong, a documented divergence elsewhere -- like the env np_random
     stream, which a resume replays from its seed."""
     state = dict(meta)
-    state["nets"] = {n: getattr(run.trainer, n).state_dict() for n in NET_NAMES}
-    state["optims"] = {n: getattr(run.trainer, n).state_dict() for n in OPT_NAMES}
+    state["nets"] = _cpu_state({n: getattr(run.trainer, n).state_dict()
+                                for n in NET_NAMES})
+    state["optims"] = _cpu_state({n: getattr(run.trainer, n).state_dict()
+                                  for n in OPT_NAMES})
     if getattr(run.trainer, "target_representation", None) is not None:
-        state["target"] = {
+        state["target"] = _cpu_state({
             "nets": {n: getattr(run.trainer, f"target_{n}").state_dict()
                      for n in NET_NAMES[:4]},
             "snapshot": run.trainer._target_snapshot,
             "synced_at": run.trainer._target_synced_at,
-        }
-    state["replay"] = run.replay
+        })
     state["env_steps"] = run.env_steps
     state["rng"] = {
         "np": np.random.get_state(),
@@ -802,9 +980,30 @@ def save_run_checkpoint(run, path, meta):
         "cuda": (torch.cuda.get_rng_state_all()
                  if torch.cuda.is_available() else None),
     }
+    # The replay buffer is NOT in the head pickle: it is streamed after it,
+    # one pickle frame per trajectory. History of this function: a single
+    # torch.save wedged a 32 GB box twice (2026-08-26 -- the default zipfile
+    # format buffers the whole ~14 GB pickle in memory) and the legacy
+    # format, though streaming, took 56 minutes: torch pickles at protocol
+    # 2, and one monolithic dump grows a memo table with millions of
+    # entries. Per-trajectory frames at protocol 5 give every frame a fresh
+    # memo and modern framing; peak memory stays near the live state and
+    # the write runs at disk speed. Single file, single atomic rename;
+    # _read_checkpoint sniffs the magic and still torch.loads every older
+    # checkpoint, completion marker, and --init-weights source.
+    state["replay_trajs"] = len(run.replay)
     tmp = path.with_suffix(".tmp")
-    torch.save(state, tmp)
+    import gc
+    gc.collect()
+    t0 = time.perf_counter()
+    with open(tmp, "wb", buffering=16 * 1024 * 1024) as f:
+        f.write(CKPT_STREAM_MAGIC)
+        pickle.dump(state, f, protocol=5)
+        for traj in run.replay:
+            pickle.dump(traj, f, protocol=5)
     os.replace(tmp, path)
+    print(f"  [checkpoint] wrote {path.stat().st_size / 1e9:.1f} GB "
+          f"in {time.perf_counter() - t0:.0f}s", flush=True)
 
 
 def load_run_checkpoint(run, path, expect):
@@ -812,10 +1011,12 @@ def load_run_checkpoint(run, path, expect):
     on a recipe mismatch: the temperature and off-policy schedules key on
     total run length, so resuming under a different recipe would silently
     train a different experiment."""
-    # map_location cpu, NOT DEVICE: load_state_dict copies across devices
-    # anyway, and the saved RNG states are CPU ByteTensors that
-    # torch.set_rng_state rejects if a cuda map_location relocates them.
-    state = torch.load(path, map_location="cpu", weights_only=False)
+    # Tensors arrive CPU-side from either format (the streamed container
+    # stores them CPU-neutral; torch.load gets map_location="cpu"):
+    # load_state_dict copies across devices anyway, and the saved RNG
+    # states are CPU ByteTensors that torch.set_rng_state rejects if a
+    # cuda map_location relocates them.
+    state = _read_checkpoint(path)
     # Recipe validation FIRST, completed-marker check second: a completed
     # 60-iter marker must not silently satisfy a NEW 90-iter --resume
     # invocation -- that is a different experiment, and the caller needs
@@ -1076,8 +1277,7 @@ def load_init_weights(trainer, path, arm=None):
     else fresh; the SimSiam projector restarts (auxiliary head, retrains
     quickly). Strict loads: an architecture mismatch must fail loudly, not
     silently skip tensors. Returns the file's recorded training_steps."""
-    state = torch.load(pathlib.Path(path), map_location="cpu",
-                       weights_only=False)
+    state = _read_checkpoint(pathlib.Path(path))
     for name in ("representation", "dynamics", "prediction", "value_prefix"):
         if name not in state:
             raise SystemExit(f"{path}: not a run_one weights file "
@@ -1105,6 +1305,22 @@ def handle_completed_marker(ck, out, arm, seed):
         return "skip"
     ck.unlink()
     return "fresh"
+
+
+def evict_replay(replay):
+    """FIFO eviction under BOTH caps: muzero.MAX_REPLAY (trajectories) and
+    muzero.MAX_REPLAY_TRANSITIONS (transitions; 0 = off). Whole trajectories
+    only -- an unroll window or n-step target must never cross an eviction
+    seam -- oldest first, always keeping the newest even if it alone
+    exceeds the transition cap. PER sampling is untouched: priorities live
+    on the surviving records; eviction just decides which records survive."""
+    while len(replay) > muzero.MAX_REPLAY:
+        replay.pop(0)
+    cap = muzero.MAX_REPLAY_TRANSITIONS
+    if cap:
+        total = sum(len(t) for t in replay)
+        while total > cap and len(replay) > 1:
+            total -= len(replay.pop(0))
 
 
 def seed_list(seed, seeds):
@@ -1228,8 +1444,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             for _ in range(episodes_per_iter):
                 traj, _, _, terminated = run.play_episode()
                 run.replay.append(run.reanalyse(traj, terminated=terminated))
-                if len(run.replay) > muzero.MAX_REPLAY:
-                    run.replay.pop(0)
+                evict_replay(run.replay)
 
             steps_this_iter = train_steps
             ramp_iters = min(WARMSTART_RAMP_ITERS, iterations)

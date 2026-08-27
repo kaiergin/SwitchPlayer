@@ -17,23 +17,28 @@ assumed. Formulas are quoted from the papers; implementation details marked
 
 ## Priority 1 — End-to-end value prefix
 
-**Status: BUILT, MEASURED, AND TURNED OFF.** `ValuePrefixNetwork` is
-implemented, matches LightZero's architecture, is trained alongside the per-step
-head and can drive the tree via `USE_VALUE_PREFIX_IN_TREE`.
+**Status: BUILT; COLLAPSE VERDICT SUPERSEDED, DEFAULT UNDER RE-REVIEW.**
+`ValuePrefixNetwork` is implemented, matches LightZero's architecture, is
+trained alongside the per-step head and can drive the tree via
+`USE_VALUE_PREFIX_IN_TREE`.
 
-It does not learn. Across four independent measurements — culminating in a
-5-arm, 2-seed, 60-iteration ablation with search in the loop — the head sits at
-exactly **1.000x a predict-zero control** in every arm, i.e. collapsed to
-predicting zero, while the per-step head reaches 0.24x. The flag therefore
-defaults to `False`: the tree reads the signal that demonstrably learns.
+**The 2026-08-13 "does not learn" verdict is stale** (fidelity audit,
+2026-08-23). That ablation predated the SimSiam projector (488567d3), the
+appendix-G latent renormalisation + AdamW + gradient clipping batch
+(eaf3bd57), and the EfficientZero A.1 zero-init heads (1e08d948). On every
+archived `effzero-repro` run since (2026-08-17..20), the prefix head reads
+**0.003x–0.09x a predict-zero control** across all 25 eval rows — the
+best-learned head in the system — and the repro arms drive the tree with it
+(`USE_VALUE_PREFIX_IN_TREE: True`). The per-step column reads ~1.0x control
+in those same rows only because those arms set `REWARD_LOSS_WEIGHT = 0`:
+untrained by design, not collapsed.
 
-This says nothing about EfficientZero or LightZero, neither of which was run.
-It says *this* implementation fails *here*. Leading untested suspect: the prefix
-target is a 5-step undiscounted sum, mostly zero with rare spikes, over 183
-bins — the centre bin is a strong local optimum. Priority 4 (now done) may
-change this; it has not been re-measured since.
+The module default stays `False` until a controlled prefix-vs-per-step pair
+on the post-search-fix build (2026-08-23) settles it. Do not cite the old
+collapse as the reason for the default.
 
-The description below is kept as the design record.
+The description below is kept as the design record; its measurement claims
+describe a build that no longer exists.
 
 ### What it is
 
