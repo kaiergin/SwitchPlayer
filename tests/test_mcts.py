@@ -284,6 +284,39 @@ def test_unvisited_children_score_their_network_value_not_zero(helper):
     assert select_once(helper) is root.children[1]
 
 
+def test_neutral_chain_seeding_leaves_values_empty(helper):
+    """seed_values=False builds the chain's structure, priors, rewards, and
+    terminal flag with NO Monte-Carlo backup: the behaviour child starts
+    symmetric with imagined siblings (2026-08-27 audit: a seeded chain's
+    realized return vs the siblings' network estimates pulled policy
+    targets toward the behaviour action early and away from it once the
+    value head calibrated)."""
+    helper.create_tree_from_game(fake_trajectory(5), seed_values=False)
+    neutral = helper.current_trajectory
+    assert all(n.visit_count == 0 and n.value_sum == 0.0 for n in neutral)
+    assert neutral[-1].done
+    assert neutral[0].children, "forward chain links must survive"
+    # The default stays the seeded chain the product path's warmup reads.
+    helper.create_tree_from_game(fake_trajectory(5))
+    assert all(n.visit_count == 1 for n in helper.current_trajectory)
+
+
+def test_max_depth_override_applies_at_call_time(helper, monkeypatch):
+    """Regression: max_depth=MAX_DEPTH as a def-time default froze the
+    import-time value, so an arm's MAX_DEPTH override was silently ignored
+    (the backup_simulation-discount bug class)."""
+    monkeypatch.setattr(muzero, "MAX_DEPTH", 2)
+    helper.create_tree_from_game(fake_trajectory(12))
+    for node in helper.current_trajectory[:-1]:
+        node.is_expanded = True   # selection walks the chain until the cap
+    helper.min_max_stats = muzero.MinMaxStats()
+    asyncio.run(helper.selection_task_no_expand(0, 1.25, 0.997))
+    _, path = helper.selection_results.get_nowait()
+    # Walks max_depth nodes then appends the leaf; the frozen default (8)
+    # would have produced a 9-node path.
+    assert len(path) == 3
+
+
 def test_virtual_loss_repels_on_negative_values(helper):
     """Regression (the Pong finding): an in-flight, not-yet-backed-up child
     used to read q_value() = 0 -- with every real value negative, the most

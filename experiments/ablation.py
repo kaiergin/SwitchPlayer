@@ -136,6 +136,12 @@ ARMS = {
         # virtual-loss sign fix; earlier archived runs of this arm searched in
         # stale-statistics waves of 8 (see the fidelity audit).
         "MCTS_BATCHES": 1,
+        # The papers have no depth cap; 50 effectively uncaps a 50-sim
+        # search (MAX_DEPTH 8 made capped leaves re-back their static
+        # network value each visit). Requires the in-tree prefix LSTM
+        # reset (PREFIX_LSTM_HORIZON), which keeps deep edges in the
+        # head's trained regime. Added 2026-08-27.
+        "MAX_DEPTH": 50,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
@@ -196,6 +202,12 @@ ARMS = {
         # virtual-loss sign fix; earlier archived runs of this arm searched in
         # stale-statistics waves of 8 (see the fidelity audit).
         "MCTS_BATCHES": 1,
+        # The papers have no depth cap; 50 effectively uncaps a 50-sim
+        # search (MAX_DEPTH 8 made capped leaves re-back their static
+        # network value each visit). Requires the in-tree prefix LSTM
+        # reset (PREFIX_LSTM_HORIZON), which keeps deep edges in the
+        # head's trained regime. Added 2026-08-27.
+        "MAX_DEPTH": 50,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
@@ -244,6 +256,12 @@ ARMS = {
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
         "MCTS_BATCHES": 1,
+        # The papers have no depth cap; 50 effectively uncaps a 50-sim
+        # search (MAX_DEPTH 8 made capped leaves re-back their static
+        # network value each visit). Requires the in-tree prefix LSTM
+        # reset (PREFIX_LSTM_HORIZON), which keeps deep edges in the
+        # head's trained regime. Added 2026-08-27.
+        "MAX_DEPTH": 50,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
@@ -306,6 +324,12 @@ ARMS = {
         # virtual-loss sign fix; earlier archived runs of this arm searched in
         # stale-statistics waves of 8 (see the fidelity audit).
         "MCTS_BATCHES": 1,
+        # The papers have no depth cap; 50 effectively uncaps a 50-sim
+        # search (MAX_DEPTH 8 made capped leaves re-back their static
+        # network value each visit). Requires the in-tree prefix LSTM
+        # reset (PREFIX_LSTM_HORIZON), which keeps deep edges in the
+        # head's trained regime. Added 2026-08-27.
+        "MAX_DEPTH": 50,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
         "PREFIX_FC_HIDDEN": 32,
@@ -704,10 +728,12 @@ class Run:
         independent act_search per position. COMMUNAL_WINDOW_ROOTS roots run
         in lockstep -- one simulation per root per round, the papers'
         sequential schedule inside each tree, the GPU batch formed ACROSS
-        roots -- and statistics accumulate communally across the searches
-        (only the chain backup's bookkeeping visit is subtracted from each
-        readout; see muzero.run_communal_mcts). Expansions along the chain
-        are shared between neighbouring roots, which is the design's point.
+        roots -- and statistics accumulate communally across the searches.
+        The chain is seeded NEUTRALLY (create_tree_from_game with
+        seed_values=False): no Monte-Carlo value backup, so the behaviour
+        child starts symmetric with its imagined siblings and there is no
+        bookkeeping visit to subtract. Expansions along the chain are
+        shared between neighbouring roots, which is the design's point.
 
         Runs under the same target-model swap as the act_search path it
         replaces (the caller swapped the searcher's networks already). One
@@ -720,8 +746,16 @@ class Run:
         try:
             evaluated = searcher.eval_obs(
                 [(t["obs"], t["action"], t["reward"]) for t in traj])
+            # NEUTRAL chain (2026-08-27 audit finding): no Monte-Carlo value
+            # backup, so the behaviour child starts symmetric with its
+            # imagined siblings -- a seeded chain gives it a realized return
+            # against network estimates, pulling policy targets toward the
+            # behaviour action early and away from it once the value head
+            # calibrates. The chain still supplies structure, priors, and
+            # real edge rewards (the reuse communal wants).
             searcher.create_tree_from_game(
-                evaluated, terminated=not traj[-1].get("truncated", False))
+                evaluated, terminated=not traj[-1].get("truncated", False),
+                seed_values=False)
             indices = list(range(len(traj)))
             if not traj[-1].get("has_policy_target", True):
                 # Terminated tail: carried no search then, none now.
@@ -732,7 +766,8 @@ class Run:
                 widx = indices[w0:w0 + window]
                 results = asyncio.run(searcher.run_communal_mcts(
                     widx, num_simulations=muzero.ACT_SEARCH_SIMS,
-                    c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT))
+                    c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                    chain_seeded=False))
                 for idx, (pol, val, has_policy) in results.items():
                     if not has_policy:
                         continue
