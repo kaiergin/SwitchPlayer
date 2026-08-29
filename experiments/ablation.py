@@ -1458,9 +1458,82 @@ def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every
             "episode_cap": EPISODE_CAP, "eval_every": eval_every}
 
 
+class RayPipeline:
+    """One-deep concurrent acting for run_one (--ray).
+
+    Episode k is requested immediately after the weight sync that closes
+    iteration k-1 and collected after iteration k's gradient steps, so it
+    plays on a Ray actor WHILE the driver trains. Acting-policy staleness
+    is IDENTICAL to the sequential harness (episode k plays on
+    end-of-(k-1) weights); the one semantic delta is data incorporation,
+    which lags one iteration (episode k first trains in k+1). Refresh,
+    eval, LR events, and checkpoints all run AFTER collect, so they see
+    exactly the buffer state the sequential harness would at that point.
+
+    Cancellation semantics preserved by construction: the checkpoint blob
+    is unchanged and never contains the in-flight episode, so a kill at
+    any moment resumes from the last checkpoint and merely replays the
+    lost episode -- the sequential harness's exact cost. The first
+    iteration after any resume (or from scratch) runs sequential-ordered,
+    since nothing is in flight. Paired-seed parity with sequential runs
+    is NOT preserved (actor RNG is process-local); ray-mode runs compare
+    to ray-mode runs.
+    """
+
+    def __init__(self, run, spec, seed, iterations, train_steps,
+                 episodes_per_iter):
+        import ray
+        self.ray = ray
+        if not ray.is_initialized():
+            here = pathlib.Path(__file__).resolve().parent
+            ray.init(include_dashboard=False, ignore_reinit_error=True,
+                     logging_level="ERROR", log_to_driver=False,
+                     runtime_env={"env_vars": {
+                         "PYTHONPATH": f"{here.parent};{here}"}})
+        import ray_actors
+        overrides = {k: v for k, v in spec.items() if not k.startswith("_")}
+        gpu = muzero.mcts_gpu_share(1) if torch.cuda.is_available() else 0
+        actor_cls = ray.remote(num_gpus=gpu)(ray_actors.SelfPlayActor)
+        self.actor = actor_cls.remote(overrides, ACTIONS, seed,
+                                      iterations * train_steps, ENV_NAME,
+                                      FRAMESKIP, EPISODE_CAP)
+        self.run = run
+        self.seed = seed
+        self.episodes_per_iter = episodes_per_iter
+        self.pending = None
+        self.sync()
+
+    def sync(self):
+        states = {n: _cpu_state(getattr(self.run.trainer, n).state_dict())
+                  for n in ("representation", "dynamics", "prediction",
+                            "value_prefix")}
+        self.ray.get(self.actor.set_weights.remote(
+            states, self.run.trainer.training_steps))
+
+    def request(self, it):
+        self.pending = [
+            self.actor.play.remote(self.seed * 100003 + it * 1009 + e)
+            for e in range(self.episodes_per_iter)]
+
+    def collect(self):
+        results = self.ray.get(self.pending)
+        self.pending = None
+        for traj, terminated, steps in results:
+            self.run.env_steps += steps
+            self.run.replay.append(
+                self.run.reanalyse(traj, terminated=terminated))
+            evict_replay(self.run.replay)
+
+    def shutdown(self):
+        try:
+            self.ray.kill(self.actor)
+        except Exception:
+            pass
+
+
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
             checkpoint_every=10, resume=False, overwrite=False,
-            init_weights=None):
+            init_weights=None, use_ray=False):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         ck = resume_path(arm, seed)
         expect = run_expect(arm, seed, iterations, train_steps,
@@ -1546,14 +1619,25 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"{WARMSTART_PREFILL_EPISODES} episodes "
                   f"({run.env_steps} env steps) before the first gradient",
                   flush=True)
+        pipeline = (RayPipeline(run, spec, seed, iterations, train_steps,
+                                episodes_per_iter) if use_ray else None)
         for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
             run.searcher.network_manager.training_steps = run.trainer.training_steps
-            for _ in range(episodes_per_iter):
-                traj, _, _, terminated = run.play_episode()
-                run.replay.append(run.reanalyse(traj, terminated=terminated))
-                evict_replay(run.replay)
+            if pipeline:
+                primed_sequential = pipeline.pending is None
+                if primed_sequential:
+                    # From scratch or first iteration after a resume:
+                    # nothing in flight, so play NOW (sequential ordering
+                    # for this one iteration), then the pipeline primes.
+                    pipeline.request(it)
+                    pipeline.collect()
+            else:
+                for _ in range(episodes_per_iter):
+                    traj, _, _, terminated = run.play_episode()
+                    run.replay.append(run.reanalyse(traj, terminated=terminated))
+                    evict_replay(run.replay)
 
             steps_this_iter = train_steps
             ramp_iters = min(WARMSTART_RAMP_ITERS, iterations)
@@ -1575,6 +1659,16 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 asyncio.run(run.trainer.train_step(batch))
                 run.trainer.training_steps += 1
             run.set_train_mode(False)
+
+            if pipeline:
+                if not primed_sequential:
+                    # Episode `it`, played on the actor during the gradient
+                    # steps above, joins the buffer BEFORE refresh/eval/
+                    # checkpoint -- those see the sequential harness's state.
+                    pipeline.collect()
+                pipeline.sync()
+                if it < iterations:
+                    pipeline.request(it + 1)
 
             if (muzero.PAPER_TARGETS and muzero.POLICY_REFRESH_EVERY
                     and it % muzero.POLICY_REFRESH_EVERY == 0):
@@ -1649,6 +1743,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         # the same tail.
         if checkpoint_every or resume:
             mark_run_completed(ck, expect)
+        if pipeline:
+            pipeline.shutdown()
         run.env.close()
 
 
@@ -1788,6 +1884,12 @@ def main():
                          "run_one weights .pth (a continuation run: learned "
                          "nets carry over; replay, optimizers, and schedules "
                          "start fresh)")
+    ap.add_argument("--ray", action="store_true",
+                    help="concurrent acting: a Ray actor plays each "
+                         "iteration's episode(s) while the driver trains "
+                         "(one-deep pipeline; see RayPipeline). Checkpoints, "
+                         "resume, refresh, and eval semantics are unchanged; "
+                         "paired-seed parity with sequential runs is not.")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
     if args.resume and args.overwrite:
@@ -1849,7 +1951,7 @@ def main():
                         args.train_steps, args.eval_every, out,
                         checkpoint_every=args.checkpoint_every,
                         resume=args.resume, overwrite=args.overwrite,
-                        init_weights=args.init_weights)
+                        init_weights=args.init_weights, use_ray=args.ray)
     plot(out, RESULTS)
 
 
