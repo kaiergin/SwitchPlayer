@@ -212,7 +212,8 @@ class DynamicsNetwork(nn.Module):
     """
 
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
-                 pool=(6, 6), transform=True, blocks=2, action_encoding="embed"):
+                 pool=(6, 6), transform=True, blocks=2, action_encoding="embed",
+                 reward_channels=32):
         super(DynamicsNetwork, self).__init__()
         # See PredictionNetwork: must match the encode side's transform flag.
         self.transform = transform
@@ -239,9 +240,12 @@ class DynamicsNetwork(nn.Module):
         self.blocks = nn.ModuleList([BasicBlock(latent_channels, latent_channels)
                                      for _ in range(blocks)])
 
-        # Reward head now outputs categorical logits.
-        self.reward_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
-        self.reward_fc = nn.Linear(32 * pool[0] * pool[1], num_bins)
+        # Reward head now outputs categorical logits. Channel width is a
+        # size knob like every other head's (audit follow-up: it was the
+        # one head left hardcoded when the others got knobs).
+        self.reward_channels = reward_channels
+        self.reward_conv = nn.Conv2d(latent_channels, reward_channels, kernel_size=1)
+        self.reward_fc = nn.Linear(reward_channels * pool[0] * pool[1], num_bins)
         # EfficientZero A.1 zero-init: reward decodes exactly 0 at init.
         nn.init.zeros_(self.reward_fc.weight)
         nn.init.zeros_(self.reward_fc.bias)

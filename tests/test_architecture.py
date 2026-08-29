@@ -63,6 +63,15 @@ def test_representation_norms_every_strided_conv():
         assert conv.bias is None, f"conv{i} kept its bias despite BN"
         assert isinstance(getattr(net, f"bn{i}"), torch.nn.BatchNorm2d)
     assert len(net.trunk) == 1
+    # forward() must actually ROUTE through the norms, not just own them
+    # (audit: constructing bn1..bn4 while forward skips them passed the
+    # attribute checks). A train-mode pass moves the running statistics.
+    net.train()
+    with torch.no_grad():
+        net(torch.rand(4, 12, 84, 84) + 3.0)
+    for i in (1, 2, 3, 4):
+        bn = getattr(net, f"bn{i}")
+        assert bn.running_mean.abs().sum() > 0, f"bn{i} never saw data"
     with torch.no_grad():
         net.eval()
         out = net(torch.rand(2, 12, 84, 84))
@@ -105,6 +114,10 @@ def test_smallnet_arm_overrides_reach_the_builders(monkeypatch):
     finally:
         ablation.ACTIONS = saved
     assert nets["representation"].conv4.out_channels == 64
+    assert len(nets["representation"].trunk) == 1
     assert len(nets["dynamics"].blocks) == 1
     assert nets["dynamics"].action_encoding == "plane"
+    assert nets["dynamics"].reward_channels == 16
     assert nets["prediction"].head_channels == 16
+    assert nets["prediction"].policy_hidden is not None
+    assert nets["prediction"].policy_hidden.out_features == 32

@@ -42,7 +42,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import muzero
 # Constants that arms may override are NEVER from-imported here -- they are
 # read muzero.-qualified at call time so overrides genuinely apply.
-from muzero import (IMAGE_RESHAPE, LATENT_CHANNELS, MCTSHelper, TrainingHelper,
+from muzero import (IMAGE_RESHAPE, MCTSHelper, TrainingHelper,
                     initial_frame_stack, preprocess_frame, push_frame)
 from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
                       RepresentationNetwork, ValuePrefixNetwork)
@@ -322,17 +322,23 @@ ARMS = {
         "POLICY_REFRESH_EVERY": 2,
         "POLICY_REFRESH_COUNT": 4,
         "USE_COMMUNAL_REANALYSIS": True,
-        "MAX_REPLAY_TRANSITIONS": 62_500,
+        # 31.25k matches the communal arm's CURRENT cap exactly -- the pair
+        # must differ only in architecture (audit: 62.5k here would have
+        # confounded network size with a 2x replay window).
+        "MAX_REPLAY_TRANSITIONS": 31_250,
         "LATENT_CHANNELS": 64,
         "REP_TRUNK_BLOCKS": 1,
         "DYN_BLOCKS": 1,
         "PRED_HEAD_CHANNELS": 16,
         "PRED_FC_HIDDEN": 32,
+        "REWARD_HEAD_CHANNELS": 16,
         "ACTION_ENCODING": "plane",
         "_doc": "effzero-repro-refresh5x-communal at EfficientZero's Atari "
-                "network dimensions (64ch, 1/1 blocks, 16-ch heads + [32], "
-                "single-plane actions). Buffer 62.5k. Run from scratch with "
-                "the communal arm's command, only --arms differing.",
+                "network dimensions (64ch, 1/1 blocks, 16-ch value/policy/"
+                "reward heads, [32] hiddens, single-plane actions). Run "
+                "from scratch with the communal arm's command, only --arms "
+                "differing; its control is a from-scratch run of the "
+                "repo-dims architecture at the same 31.25k buffer.",
     },
     "effzero-repro-smallbuf20": {
         # refresh5x with the replay window cut to 20 trajectories --
@@ -393,7 +399,11 @@ ARMS = {
                 "instead. E.g. --env Pong-v4 --frameskip 4 --iterations 90 "
                 "--episode-cap 3000 --episodes-per-iter 1 --eval-every 10 "
                 "--checkpoint-every 2 --init-weights <parent>, kill after "
-                "the iter-20 checkpoint.",
+                "the iter-20 checkpoint. ARCHITECTURE NOTE (2026-08-28): "
+                "the residual-dynamics/BN commit renamed state_dict keys, "
+                "so --init-weights strict-loads FAIL against any parent "
+                "trained before it -- warm starts require a "
+                "post-architecture parent run.",
     },
     "gumbel": {
         "USE_VALUE_PREFIX_IN_TREE": True,
@@ -575,24 +585,20 @@ def build_networks(spec):
         prefix_sup, prefix_bins = muzero.VALUE_PREFIX_SUPPORT, muzero.VALUE_PREFIX_BINS
         value_sup, value_bins = muzero.VALUE_SUPPORT, muzero.VALUE_BINS
 
-    # muzero.-qualified THROUGHOUT, including LATENT_CHANNELS: the from-import
-    # binds at import time, which would silently ignore an arm's channel
-    # override (the def-time-capture bug class) -- the smallnet arm is the
-    # first to override it.
+    # Architecture geometry comes from muzero's call-time factories, so an
+    # arm's knob overrides (the smallnet arm's 64 channels included) always
+    # apply; only the support/transform choices this harness owns are
+    # passed explicitly. LATENT_CHANNELS is deliberately NOT from-imported
+    # anywhere in this file: the import-time binding silently ignored
+    # overrides (audit 2026-08-28).
     return dict(
-        representation=RepresentationNetwork(input_channels=12,
-                                             latent_channels=muzero.LATENT_CHANNELS,
-                                             trunk_blocks=muzero.REP_TRUNK_BLOCKS).to(DEVICE),
-        dynamics=DynamicsNetwork(latent_channels=muzero.LATENT_CHANNELS, action_space=ACTIONS,
-                                 support_size=reward_sup, num_bins=reward_bins,
-                                 transform=transform,
-                                 blocks=muzero.DYN_BLOCKS,
-                                 action_encoding=muzero.ACTION_ENCODING).to(DEVICE),
-        prediction=PredictionNetwork(latent_channels=muzero.LATENT_CHANNELS, action_space=ACTIONS,
-                                     support_size=value_sup, num_bins=value_bins,
-                                     transform=transform,
-                                     head_channels=muzero.PRED_HEAD_CHANNELS,
-                                     fc_hidden=muzero.PRED_FC_HIDDEN).to(DEVICE),
+        representation=muzero.build_representation().to(DEVICE),
+        dynamics=muzero.build_dynamics(ACTIONS, support_size=reward_sup,
+                                       num_bins=reward_bins,
+                                       transform=transform).to(DEVICE),
+        prediction=muzero.build_prediction(ACTIONS, support_size=value_sup,
+                                           num_bins=value_bins,
+                                           transform=transform).to(DEVICE),
         value_prefix=ValuePrefixNetwork(latent_channels=muzero.LATENT_CHANNELS,
                                         hidden_size=muzero.VALUE_PREFIX_HIDDEN,
                                         support_size=prefix_sup, num_bins=prefix_bins,

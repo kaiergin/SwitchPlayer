@@ -22,7 +22,7 @@ import torch
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
 
 import muzero
-from muzero import (C_PUCT, IMAGE_RESHAPE, LATENT_CHANNELS, MCTS_BATCHES,
+from muzero import (C_PUCT, IMAGE_RESHAPE, MCTS_BATCHES,
                     MCTSHelper, NetworkManager, TOTAL_MCTS_SIMS, TRAINING_BATCHES,
                     initial_frame_stack, preprocess_frame, push_frame)
 from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
@@ -79,7 +79,7 @@ def fake_trajectory(length):
 # component benchmarks
 # ---------------------------------------------------------------------------
 def bench_components(traj_len=200):
-    print(f"\n=== components ({DEVICE}, latent {LATENT_CHANNELS}ch) ===")
+    print(f"\n=== components ({DEVICE}, latent {muzero.LATENT_CHANNELS}ch) ===")
     print(f"  {'stage':<38} {'median':>12} {'p90':>12}")
 
     # -- observation pipeline -------------------------------------------------
@@ -123,7 +123,7 @@ def bench_components(traj_len=200):
     h = w = muzero.LATENT_HW
 
     def expand(n):
-        nodes = [muzero.MCTSNode(latent=torch.randn(1, LATENT_CHANNELS, h, w, device=DEVICE),
+        nodes = [muzero.MCTSNode(latent=torch.randn(1, muzero.LATENT_CHANNELS, h, w, device=DEVICE),
                                  prior=1.0, policy=np.full(ACTIONS, 1 / ACTIONS))
                  for _ in range(n)]
         helper.batch_expand_nodes(nodes)
@@ -399,26 +399,19 @@ def _local_trainer(prefix_support=None):
     trainer.device = DEVICE
     trainer.action_space = ACTIONS
     trainer.training_steps = 0
-    trainer.representation = RepresentationNetwork(input_channels=12,
-                                                   latent_channels=LATENT_CHANNELS,
-                                                   trunk_blocks=muzero.REP_TRUNK_BLOCKS).to(DEVICE)
-    trainer.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                       support_size=muzero.REWARD_SUPPORT,
-                                       num_bins=muzero.REWARD_BINS,
-                                       blocks=muzero.DYN_BLOCKS,
-                                       action_encoding=muzero.ACTION_ENCODING).to(DEVICE)
-    trainer.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                           support_size=muzero.VALUE_SUPPORT,
-                                           num_bins=muzero.VALUE_BINS,
-                                           head_channels=muzero.PRED_HEAD_CHANNELS,
-                                           fc_hidden=muzero.PRED_FC_HIDDEN).to(DEVICE)
+    # Geometry via muzero's call-time factories -- never an import-time
+    # LATENT_CHANNELS binding (audit 2026-08-28: this builder kept the
+    # captured width after ablation's was fixed).
+    trainer.representation = muzero.build_representation().to(DEVICE)
+    trainer.dynamics = muzero.build_dynamics(ACTIONS).to(DEVICE)
+    trainer.prediction = muzero.build_prediction(ACTIONS).to(DEVICE)
     support = muzero.VALUE_PREFIX_SUPPORT if prefix_support is None else prefix_support
-    trainer.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+    trainer.value_prefix = ValuePrefixNetwork(latent_channels=muzero.LATENT_CHANNELS,
                                               hidden_size=muzero.VALUE_PREFIX_HIDDEN,
                                               support_size=support,
                                               num_bins=muzero.bins_for(support)).to(DEVICE)
     trainer.projector = LatentProjector(
-        LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE)
+        muzero.LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE)
     trainer.prefix_optimizer = muzero.make_optimizer(trainer.value_prefix.parameters())
     trainer.rep_optimizer = muzero.make_optimizer(trainer.representation.parameters())
     trainer.dyn_optimizer = muzero.make_optimizer(trainer.dynamics.parameters())

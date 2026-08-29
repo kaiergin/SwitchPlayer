@@ -20,8 +20,7 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import muzero
-from muzero import IMAGE_RESHAPE, LATENT_CHANNELS, initial_frame_stack, preprocess_frame, push_frame
-from networks import PredictionNetwork, RepresentationNetwork
+from muzero import IMAGE_RESHAPE, initial_frame_stack, preprocess_frame, push_frame
 
 ACTIONS = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,9 +33,18 @@ def load(checkpoint_path):
     value_sup = muzero.VALUE_CEILING if linear else muzero.VALUE_SUPPORT
     value_bins = 51 if linear else muzero.VALUE_BINS
 
-    rep = RepresentationNetwork(input_channels=12, latent_channels=LATENT_CHANNELS).to(DEVICE)
-    pred = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                             support_size=value_sup, num_bins=value_bins).to(DEVICE)
+    # The weights file records its arm spec: apply its overrides (the
+    # architecture knobs above all) before building, exactly as the harness
+    # did when it trained them -- a smallnet-arm checkpoint builds 64-channel
+    # nets here, not the module-default 128 (audit 2026-08-28: this builder
+    # was missed by the knob wiring and import-time-captured the width).
+    for key, value in spec.items():
+        if not key.startswith("_") and hasattr(muzero, key):
+            setattr(muzero, key, value)
+
+    rep = muzero.build_representation().to(DEVICE)
+    pred = muzero.build_prediction(ACTIONS, support_size=value_sup,
+                                   num_bins=value_bins).to(DEVICE)
     rep.load_state_dict(ck["representation"])
     pred.load_state_dict(ck["prediction"])
     rep.eval()
