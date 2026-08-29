@@ -23,19 +23,20 @@ import torch
 
 
 class SelfPlayActor:
-    def __init__(self, overrides, action_space, seed, run_length_steps,
+    def __init__(self, overrides, action_space, seed, schedule,
                  env_name, frameskip, episode_cap):
         import muzero as mz
         self.mz = mz
         # The arm's world, rebuilt locally: constants first (network
         # factories and the search read them at call time), then the
-        # run-length-keyed schedule globals the driver's
-        # _run_length_globals would otherwise own.
+        # run-length-keyed schedule VALUES the driver computed -- shipped,
+        # never re-derived, so the 0.3 horizon-decay formula lives in one
+        # place (_run_length_globals).
         for key, value in overrides.items():
             if hasattr(mz, key):
                 setattr(mz, key, value)
-        mz.TEMPERATURE_TOTAL_STEPS = run_length_steps
-        mz.OFFPOLICY_DECAY_STEPS = max(1, int(0.3 * run_length_steps))
+        for key, value in schedule.items():
+            setattr(mz, key, value)
         np.random.seed(seed * 7919 + 17)
         torch.manual_seed(seed * 7919 + 17)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -50,23 +51,12 @@ class SelfPlayActor:
                     nm.value_prefix):
             net.eval()
 
-        # Mirror Run.__init__'s env stack exactly.
-        import gymnasium as gym
-        from EpisodicLifeEnv import EpisodicLifeEnv
-        if mz.USE_ATARI_WRAPPERS:
-            from atari_wrappers import paper_atari_env
-            self.env = EpisodicLifeEnv(paper_atari_env(env_name,
-                                                       skip=frameskip or 4))
-        else:
-            kwargs = {"frameskip": frameskip} if frameskip else {}
-            self.env = EpisodicLifeEnv(gym.make(env_name, **kwargs))
-
-        # A minimal Run shell so ablation.Run.play_episode runs UNMODIFIED
-        # here -- one episode implementation, not two drifting copies. Its
-        # dependency surface is pinned by tests/test_ray_harness.py: the
-        # self.* attributes (env, searcher, env_steps) AND the ablation
-        # module globals it reads (ACTIONS, EPISODE_CAP; IMAGE_RESHAPE is a
-        # muzero re-export), which a fresh worker interpreter would
+        # ONE env implementation and ONE episode implementation, both
+        # ablation's own (build_env and Run.play_episode run UNMODIFIED
+        # here) -- no drifting copies. play_episode's dependency surface is
+        # pinned by tests/test_ray_harness.py: the self.* attributes (env,
+        # searcher, env_steps) AND the ablation module globals it reads
+        # (ACTIONS, EPISODE_CAP), which a fresh worker interpreter would
         # otherwise leave at their MsPacman defaults -- the first test run
         # crashed exactly there, 5-action choice against a 6-action policy.
         import ablation
@@ -75,6 +65,7 @@ class SelfPlayActor:
         ablation.ENV_NAME = env_name
         ablation.FRAMESKIP = frameskip
         self._ablation = ablation
+        self.env = ablation.build_env(env_name, frameskip)
         self.shell = object.__new__(ablation.Run)
         self.shell.env = self.env
         self.shell.searcher = self.searcher

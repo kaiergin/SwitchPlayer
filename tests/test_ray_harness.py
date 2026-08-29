@@ -3,6 +3,7 @@ shell's attribute contract, and process isolation. Runs a real (tiny) Ray
 cluster: actors live in genuine worker processes, so the override test
 exercises the actual cross-process transport the design exists for."""
 import ast
+import os
 import pathlib
 import sys
 
@@ -20,8 +21,8 @@ ray = pytest.importorskip("ray")
 def local_ray():
     ray.init(include_dashboard=False, ignore_reinit_error=True,
              logging_level="ERROR", num_cpus=2,
-             runtime_env={"env_vars": {
-                 "PYTHONPATH": f"{REPO};{REPO / 'experiments'}"}})
+             runtime_env={"env_vars": {"PYTHONPATH": os.pathsep.join(
+                 (str(REPO), str(REPO / "experiments")))}})
     try:
         yield ray
     finally:
@@ -36,7 +37,9 @@ def test_actor_applies_overrides_in_its_own_process(local_ray):
     actor = actor_cls.remote(
         {"DISCOUNT": 0.5, "MCTS_BATCHES": 3, "USE_ATARI_WRAPPERS": False,
          "USE_SEARCH_ACTING": False},
-        6, seed=0, run_length_steps=1000,
+        6, seed=0,
+        schedule={"TEMPERATURE_TOTAL_STEPS": 1000,
+                  "OFFPOLICY_DECAY_STEPS": 300},
         env_name="Pong-v4", frameskip=30, episode_cap=8)
     assert local_ray.get(actor.get_constant.remote("DISCOUNT")) == 0.5
     assert local_ray.get(actor.get_constant.remote("MCTS_BATCHES")) == 3
@@ -51,7 +54,9 @@ def test_actor_plays_a_real_episode(local_ray):
     actor = actor_cls.remote(
         {"USE_ATARI_WRAPPERS": False, "USE_SEARCH_ACTING": False,
          "USE_GUMBEL_SEARCH": False},
-        6, seed=1, run_length_steps=1000,
+        6, seed=1,
+        schedule={"TEMPERATURE_TOTAL_STEPS": 1000,
+                  "OFFPOLICY_DECAY_STEPS": 300},
         env_name="Pong-v4", frameskip=30, episode_cap=12)
     traj, terminated, steps = local_ray.get(actor.play.remote(1234))
     # The cap bounds stepping; a truncated episode's trajectory carries the
