@@ -126,6 +126,19 @@ statement that paired-seed reproducibility is given up in this mode.
 Sequenced AFTER batch-16 acting and the architecture rungs, which bought
 their speedups without touching concurrency semantics.
 
+Refresh offload (designed 2026-08-29, Kai's swap-on-ready idea): a
+refresh actor re-searches trajectories with the target model in the
+background and returns fresh targets; the DRIVER applies the swap at a
+safe point in its own loop -- single-threaded, so the loop is the mutex
+and no lock is needed. Real design constraints: (1) eviction races --
+swap matches trajectories by object identity and drops results for
+evicted ones (wasted work, never corruption); (2) observation shipping
+(~800 MB/request) argues for birthing trajectories in the Ray object
+store. The payoff is NOT the current ~1-2 min/iter (communal already
+made refresh cheap) but making RAISED refresh coverage free: 5-10x the
+revisit rate hidden entirely under training -- pair the offload with the
+coverage increase, never ship it alone.
+
 ## Carried decisions from the repro line
 
 Tiny buffer + live refresh direction; entropy-based refresh priority is
