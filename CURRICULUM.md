@@ -109,6 +109,23 @@ read at the student's operating γ_frame).
   EASIER (bigger frame deltas per transition): coarse guessing first,
   refined down the ladder, matching the curriculum's shape.
 
+## Infrastructure: concurrent harness (Ray) — P3-adjacent
+
+Training and gameplay overlap (added 2026-08-29, Kai). The ablation
+harness is deliberately single-process/sequential (paired seeds, atomic
+whole-world checkpoints, clean attribution); the PRODUCT pipeline already
+runs Ray actors concurrently, and EfficientZero's own system is fully
+concurrent, so overlap is more faithful, not less. Worth up to ~30-40%
+wall clock (iteration = max(acting, training) instead of the sum). Build
+it WITH the student/master phase, which wants separate processes anyway
+(student plays continuously, learner trains, master evaluates async —
+the real-time architecture in miniature). Requirements: Ray actors for
+self-play + learner, GPU sharing via mcts_gpu_share, pause-the-world
+checkpointing (the atomic resume story must survive), and an explicit
+statement that paired-seed reproducibility is given up in this mode.
+Sequenced AFTER batch-16 acting and the architecture rungs, which bought
+their speedups without touching concurrency semantics.
+
 ## Carried decisions from the repro line
 
 Tiny buffer + live refresh direction; entropy-based refresh priority is
