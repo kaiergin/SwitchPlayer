@@ -756,17 +756,23 @@ class Run:
         return traj, total, steps, terminated
 
     # -- re-analysis -------------------------------------------------------
-    def paper_targets(self, traj, terminated):
+    def paper_targets(self, traj, terminated, born_step=None):
         """Paper data path: every step already carries its acting-search
         policy and root value. Store the target ingredients (values are
         computed at BATCH time under the age-adjusted horizon), the birth
-        step for EfficientZero 4.3, and age-0 priorities |v - z|."""
+        step for EfficientZero 4.3, and age-0 priorities |v - z|.
+
+        born_step: explicit birth stamp for callers that collect a
+        trajectory AFTER further training happened (--ray's pipeline
+        passes the request-time count so the 4.3 age matches the
+        sequential harness exactly); default is the live counter."""
         if len(traj[0]) != 5:
             raise ValueError(
                 "PAPER_TARGETS requires USE_SEARCH_ACTING: trajectories must "
                 "carry per-step search records (5 fields), got "
                 f"{len(traj[0])}")
-        born = self.trainer.training_steps
+        born = (self.trainer.training_steps if born_step is None
+                else born_step)
         out = []
         for i, (obs, action, reward, pol, val) in enumerate(traj):
             # The terminal record of a TERMINATED episode carried no search
@@ -918,9 +924,9 @@ class Run:
             (nm.representation, nm.prediction,
              nm.dynamics, nm.value_prefix) = saved
 
-    def reanalyse(self, traj, terminated=True):
+    def reanalyse(self, traj, terminated=True, born_step=None):
         if muzero.PAPER_TARGETS:
-            return self.paper_targets(traj, terminated)
+            return self.paper_targets(traj, terminated, born_step=born_step)
         evaluated = self.searcher.eval_obs(traj)
         self.searcher.create_tree_from_game(evaluated, terminated=terminated)
         searched = self.searcher.select_reanalysis_indices(len(evaluated))
@@ -1454,6 +1460,26 @@ def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every
             "episode_cap": EPISODE_CAP, "eval_every": eval_every}
 
 
+def ray_scope_gate(spec):
+    """--ray's supported-regime check, called FIRST in run_one -- before
+    refuse_conflicting_state's --overwrite branch can destroy the pair's
+    rows/checkpoint/weights and before any prefill compute. Refused loudly
+    rather than run subtly wrong: non-paper arms reanalyse through the
+    searcher, which shares the trainer's LIVE nets (after-training
+    collection would build targets with W_it instead of W_{it-1});
+    linear-support arms build non-default net geometry the actor's
+    factories don't know."""
+    if not muzero.PAPER_TARGETS:
+        raise SystemExit("--ray currently requires a PAPER_TARGETS arm: "
+                         "non-paper reanalysis reads the trainer's live "
+                         "nets and would compute targets with post-update "
+                         "weights under the pipeline.")
+    if spec.get("_linear_support"):
+        raise SystemExit("--ray does not support _linear_support arms: the "
+                         "actor builds default-geometry networks and cannot "
+                         "load linear-support weights.")
+
+
 def build_env(env_name, frameskip):
     """The lineage's env stack, ONE implementation: raw no-skip env ->
     NoopReset -> MaxAndSkip -> EpisodicLife when the wrapper flag is on,
@@ -1493,20 +1519,9 @@ class RayPipeline:
 
     def __init__(self, run, spec, seed, iterations, train_steps,
                  episodes_per_iter):
-        # Scope gates, refused loudly rather than run subtly wrong:
-        # non-paper arms reanalyse through the searcher, which shares the
-        # trainer's LIVE nets -- after-training collection would build
-        # targets with W_it instead of W_{it-1}; and linear-support arms
-        # build non-default net geometry the actor's factories don't know.
-        if not muzero.PAPER_TARGETS:
-            raise SystemExit("--ray currently requires a PAPER_TARGETS arm: "
-                             "non-paper reanalysis reads the trainer's live "
-                             "nets and would compute targets with "
-                             "post-update weights under the pipeline.")
-        if spec.get("_linear_support"):
-            raise SystemExit("--ray does not support _linear_support arms: "
-                             "the actor builds default-geometry networks "
-                             "and cannot load linear-support weights.")
+        # Scope is validated by ray_scope_gate at the TOP of run_one --
+        # before --overwrite destroys the pair's data and before the
+        # warm-start prefill spends compute (verification finding).
         import ray
         self.ray = ray
         if not ray.is_initialized():
@@ -1550,8 +1565,14 @@ class RayPipeline:
         serialization instead of rebuilding identical dicts."""
         stamp = self.run.trainer.training_steps
         if self._states_cache[0] != stamp:
+            # clone(): on CPU-only builds, detach().cpu() ALIASES the live
+            # parameters, so a cached dict would silently track future
+            # weight mutations; cloning turns the stamp check from an
+            # invariant into a guarantee.
             self._states_cache = (stamp, {
-                n: _cpu_state(getattr(self.run.trainer, n).state_dict())
+                n: {k: v.clone() if torch.is_tensor(v) else v
+                    for k, v in _cpu_state(
+                        getattr(self.run.trainer, n).state_dict()).items()}
                 for n in ("representation", "dynamics", "prediction",
                           "value_prefix")})
         return self._states_cache[1]
@@ -1582,18 +1603,15 @@ class RayPipeline:
         futures, steps_at_request = self.pending
         results = self.ray.get(futures)
         self.pending = None
-        trainer = self.run.trainer
-        current_steps = trainer.training_steps
-        trainer.training_steps = steps_at_request
-        try:
-            for traj, terminated, steps in results:
-                traj = [self._own_arrays(r) for r in traj]
-                self.run.env_steps += steps
-                self.run.replay.append(
-                    self.run.reanalyse(traj, terminated=terminated))
-                evict_replay(self.run.replay)
-        finally:
-            trainer.training_steps = current_steps
+        # The request-time count flows as an EXPLICIT stamp -- no rewinding
+        # of the live trainer counter, so no window in which the two
+        # "current step" sources (trainer vs searcher mirror) disagree.
+        for traj, terminated, steps in results:
+            traj = [self._own_arrays(r) for r in traj]
+            self.run.env_steps += steps
+            self.run.replay.append(self.run.reanalyse(
+                traj, terminated=terminated, born_step=steps_at_request))
+            evict_replay(self.run.replay)
 
     def request_eval(self, it, episodes, diagnostics, write_row, elapsed_at):
         """Phase 2: greedy eval episodes run on a SECOND actor, concurrent
@@ -1639,6 +1657,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             checkpoint_every=10, resume=False, overwrite=False,
             init_weights=None, use_ray=False):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
+        if use_ray:
+            ray_scope_gate(spec)
         ck = resume_path(arm, seed)
         expect = run_expect(arm, seed, iterations, train_steps,
                             episodes_per_iter, eval_every)
@@ -1856,7 +1876,11 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     # this holds for ANY checkpoint/eval cadence and any
                     # later resume mode (the audit's misaligned-cadence and
                     # cross-mode-resume holes both close here, which is why
-                    # there is no resume-heal to maintain).
+                    # there is no resume-heal to maintain). Known cost: on
+                    # cadences where checkpoints land ON eval iterations,
+                    # this drain blocks on the row requested moments ago
+                    # and the eval overlap serializes for those boundaries
+                    # -- correctness bought with throughput, deliberately.
                     pipeline.drain_eval()
                 save_run_checkpoint(run, ck, {
                     **expect, "iteration": it,
