@@ -139,6 +139,21 @@ made refresh cheap) but making RAISED refresh coverage free: 5-10x the
 revisit rate hidden entirely under training -- pair the offload with the
 coverage increase, never ship it alone.
 
+Regime note (Kai, 2026-08-29): the transitions cap makes buffer size in
+TRAJECTORIES a moving target -- ~25-35 early (short losing episodes),
+~10-12 late (long rallies) at the same 31.25k cap. The eviction race is
+a late-regime concern only; the identity guard is cheap insurance, not a
+dominant cost. And the pieces form ONE system with the curriculum's
+entropy-prioritized revisiting: the tiny buffer creates ~50x sample
+reuse, which AMPLIFIES every flat stored target (it drags the policy
+toward flatness dozens of times per iteration), so re-searching the
+flattest targets first repairs the most-reused weakest signals -- the
+measured touch-high-then-give-back oscillation is the failure mode this
+aims at. Entropy-priority's value scales with reuse, reuse scales
+inversely with buffer size, and the offload is what makes the volume
+free. The no-sharpening guard separates repairable flatness from
+genuine ambiguity, which dominates in a fresh tiny buffer.
+
 ## Carried decisions from the repro line
 
 Tiny buffer + live refresh direction; entropy-based refresh priority is
