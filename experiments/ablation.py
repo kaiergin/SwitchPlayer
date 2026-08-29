@@ -133,11 +133,16 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # The papers' strictly sequential search: every simulation selects on
-        # statistics the previous one updated. Added 2026-08-23 with the
-        # virtual-loss sign fix; earlier archived runs of this arm searched in
-        # stale-statistics waves of 8 (see the fidelity audit).
-        "MCTS_BATCHES": 1,
+        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
+        # communal2 weights, 20 states x 2 searches, honest virtual loss):
+        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
+        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
+        # speed; batch 50 (one wave, no sequential refinement) dropped
+        # signal 40%. The papers' schedule is sequential (batch 1, set here
+        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
+        # target quality. The pre-fix waves-of-8 collapse was the broken
+        # virtual loss, not batching itself.
+        "MCTS_BATCHES": 16,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -199,11 +204,16 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # The papers' strictly sequential search: every simulation selects on
-        # statistics the previous one updated. Added 2026-08-23 with the
-        # virtual-loss sign fix; earlier archived runs of this arm searched in
-        # stale-statistics waves of 8 (see the fidelity audit).
-        "MCTS_BATCHES": 1,
+        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
+        # communal2 weights, 20 states x 2 searches, honest virtual loss):
+        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
+        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
+        # speed; batch 50 (one wave, no sequential refinement) dropped
+        # signal 40%. The papers' schedule is sequential (batch 1, set here
+        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
+        # target quality. The pre-fix waves-of-8 collapse was the broken
+        # virtual loss, not batching itself.
+        "MCTS_BATCHES": 16,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -257,7 +267,7 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        "MCTS_BATCHES": 1,
+        "MCTS_BATCHES": 16,  # measured, see effzero-repro's comment
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -313,7 +323,7 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        "MCTS_BATCHES": 1,
+        "MCTS_BATCHES": 16,  # measured, see effzero-repro's comment
         "MAX_DEPTH": 50,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
@@ -372,11 +382,16 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # The papers' strictly sequential search: every simulation selects on
-        # statistics the previous one updated. Added 2026-08-23 with the
-        # virtual-loss sign fix; earlier archived runs of this arm searched in
-        # stale-statistics waves of 8 (see the fidelity audit).
-        "MCTS_BATCHES": 1,
+        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
+        # communal2 weights, 20 states x 2 searches, honest virtual loss):
+        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
+        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
+        # speed; batch 50 (one wave, no sequential refinement) dropped
+        # signal 40%. The papers' schedule is sequential (batch 1, set here
+        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
+        # target quality. The pre-fix waves-of-8 collapse was the broken
+        # virtual loss, not batching itself.
+        "MCTS_BATCHES": 16,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
