@@ -30,21 +30,31 @@ def load(checkpoint_path):
     ck = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
     spec = ck.get("spec", {})
     linear = spec.get("_linear_support")
-    value_sup = muzero.VALUE_CEILING if linear else muzero.VALUE_SUPPORT
-    value_bins = 51 if linear else muzero.VALUE_BINS
 
     # The weights file records its arm spec: apply its overrides (the
     # architecture knobs above all) before building, exactly as the harness
     # did when it trained them -- a smallnet-arm checkpoint builds 64-channel
-    # nets here, not the module-default 128 (audit 2026-08-28: this builder
-    # was missed by the knob wiring and import-time-captured the width).
-    for key, value in spec.items():
-        if not key.startswith("_") and hasattr(muzero, key):
+    # nets here, not the module-default 128. Save/restore like arm_config so
+    # a second load() in the same process starts clean, and read the
+    # support constants only AFTER the overrides apply.
+    overrides = {k: v for k, v in spec.items()
+                 if not k.startswith("_") and hasattr(muzero, k)}
+    saved = {k: getattr(muzero, k) for k in overrides}
+    for key, value in overrides.items():
+        setattr(muzero, key, value)
+    try:
+        value_sup = muzero.VALUE_CEILING if linear else muzero.VALUE_SUPPORT
+        value_bins = 51 if linear else muzero.VALUE_BINS
+        # transform mirrors the harness (ablation build_networks): linear
+        # arms trained WITHOUT h(), so decoding through h_inverse here
+        # printed values wrong by orders of magnitude.
+        rep = muzero.build_representation().to(DEVICE)
+        pred = muzero.build_prediction(ACTIONS, support_size=value_sup,
+                                       num_bins=value_bins,
+                                       transform=not linear).to(DEVICE)
+    finally:
+        for key, value in saved.items():
             setattr(muzero, key, value)
-
-    rep = muzero.build_representation().to(DEVICE)
-    pred = muzero.build_prediction(ACTIONS, support_size=value_sup,
-                                   num_bins=value_bins).to(DEVICE)
     rep.load_state_dict(ck["representation"])
     pred.load_state_dict(ck["prediction"])
     rep.eval()

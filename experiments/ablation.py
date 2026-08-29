@@ -44,8 +44,10 @@ import muzero
 # read muzero.-qualified at call time so overrides genuinely apply.
 from muzero import (IMAGE_RESHAPE, MCTSHelper, TrainingHelper,
                     initial_frame_stack, preprocess_frame, push_frame)
-from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
-                      RepresentationNetwork, ValuePrefixNetwork)
+# No direct networks imports: all fresh-net construction goes through
+# muzero's call-time factories (build_representation & co.), the one place
+# the architecture knobs are resolved. Direct construction here is the
+# import-time-capture escape hatch the 2026-08-28 audit closed.
 
 # ABLATION_RESULTS overrides the output directory -- REQUIRED for smoke
 # tests, which have twice now appended to (and once clobbered the weights of)
@@ -599,13 +601,10 @@ def build_networks(spec):
         prediction=muzero.build_prediction(ACTIONS, support_size=value_sup,
                                            num_bins=value_bins,
                                            transform=transform).to(DEVICE),
-        value_prefix=ValuePrefixNetwork(latent_channels=muzero.LATENT_CHANNELS,
-                                        hidden_size=muzero.VALUE_PREFIX_HIDDEN,
-                                        support_size=prefix_sup, num_bins=prefix_bins,
-                                        transform=transform,
-                                        head_channels=muzero.PREFIX_HEAD_CHANNELS,
-                                        fc_hidden=muzero.PREFIX_FC_HIDDEN).to(DEVICE),
-        projector=LatentProjector(muzero.LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE),
+        value_prefix=muzero.build_value_prefix(support_size=prefix_sup,
+                                               num_bins=prefix_bins,
+                                               transform=transform).to(DEVICE),
+        projector=muzero.build_projector().to(DEVICE),
     )
 
 

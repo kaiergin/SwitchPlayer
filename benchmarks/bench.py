@@ -25,8 +25,8 @@ import muzero
 from muzero import (C_PUCT, IMAGE_RESHAPE, MCTS_BATCHES,
                     MCTSHelper, NetworkManager, TOTAL_MCTS_SIMS, TRAINING_BATCHES,
                     initial_frame_stack, preprocess_frame, push_frame)
-from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
-                      RepresentationNetwork, ValuePrefixNetwork)
+# No direct networks imports: construction goes through muzero's call-time
+# factories so bench always builds the geometry the current constants say.
 
 ACTIONS = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -406,12 +406,9 @@ def _local_trainer(prefix_support=None):
     trainer.dynamics = muzero.build_dynamics(ACTIONS).to(DEVICE)
     trainer.prediction = muzero.build_prediction(ACTIONS).to(DEVICE)
     support = muzero.VALUE_PREFIX_SUPPORT if prefix_support is None else prefix_support
-    trainer.value_prefix = ValuePrefixNetwork(latent_channels=muzero.LATENT_CHANNELS,
-                                              hidden_size=muzero.VALUE_PREFIX_HIDDEN,
-                                              support_size=support,
-                                              num_bins=muzero.bins_for(support)).to(DEVICE)
-    trainer.projector = LatentProjector(
-        muzero.LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE)
+    trainer.value_prefix = muzero.build_value_prefix(
+        support_size=support, num_bins=muzero.bins_for(support)).to(DEVICE)
+    trainer.projector = muzero.build_projector().to(DEVICE)
     trainer.prefix_optimizer = muzero.make_optimizer(trainer.value_prefix.parameters())
     trainer.rep_optimizer = muzero.make_optimizer(trainer.representation.parameters())
     trainer.dyn_optimizer = muzero.make_optimizer(trainer.dynamics.parameters())

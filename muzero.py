@@ -903,6 +903,20 @@ def build_prediction(action_space, support_size=None, num_bins=None, transform=T
                              fc_hidden=PRED_FC_HIDDEN)
 
 
+def build_value_prefix(support_size=None, num_bins=None, transform=True):
+    return ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+                              hidden_size=VALUE_PREFIX_HIDDEN,
+                              support_size=VALUE_PREFIX_SUPPORT if support_size is None else support_size,
+                              num_bins=VALUE_PREFIX_BINS if num_bins is None else num_bins,
+                              transform=transform,
+                              head_channels=PREFIX_HEAD_CHANNELS,
+                              fc_hidden=PREFIX_FC_HIDDEN)
+
+
+def build_projector():
+    return LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW)
+
+
 #create versioning like storage
 class NetworkHelper:
     def __init__(self, action_space, device, checkpoint_path = 'checkpoint.pth', enable_logging=False):
@@ -911,13 +925,8 @@ class NetworkHelper:
         self.representation = build_representation().to(device)
         self.dynamics = build_dynamics(action_space).to(device)
         self.prediction = build_prediction(action_space).to(device)
-        self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
-                                               hidden_size=VALUE_PREFIX_HIDDEN,
-                                               support_size=VALUE_PREFIX_SUPPORT,
-                                               num_bins=VALUE_PREFIX_BINS,
-                                               head_channels=PREFIX_HEAD_CHANNELS,
-                                               fc_hidden=PREFIX_FC_HIDDEN).to(device)
-        self.projector = LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW).to(device)
+        self.value_prefix = build_value_prefix().to(device)
+        self.projector = build_projector().to(device)
         self.rep_optimizer = make_optimizer(self.representation.parameters())
         self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
         self.pred_optimizer = make_optimizer(self.prediction.parameters())
@@ -1042,12 +1051,7 @@ class NetworkManager:
         self.prediction = build_prediction(action_space).to(device)
         if self.load_dynamics:
             self.dynamics = build_dynamics(action_space).to(device)
-            self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
-                                                   hidden_size=VALUE_PREFIX_HIDDEN,
-                                                   support_size=VALUE_PREFIX_SUPPORT,
-                                                   num_bins=VALUE_PREFIX_BINS,
-                                                   head_channels=PREFIX_HEAD_CHANNELS,
-                                                   fc_hidden=PREFIX_FC_HIDDEN).to(device)
+            self.value_prefix = build_value_prefix().to(device)
         # Inference-only consumer: BatchNorm must read the running statistics
         # training accumulated, not the statistics of whatever batch -- or
         # single acting frame -- happens to pass through (which also polluted
@@ -2055,13 +2059,8 @@ class TrainingHelper:
         self.representation = build_representation().to(device)
         self.dynamics = build_dynamics(action_space).to(device)
         self.prediction = build_prediction(action_space).to(device)
-        self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
-                                               hidden_size=VALUE_PREFIX_HIDDEN,
-                                               support_size=VALUE_PREFIX_SUPPORT,
-                                               num_bins=VALUE_PREFIX_BINS,
-                                               head_channels=PREFIX_HEAD_CHANNELS,
-                                               fc_hidden=PREFIX_FC_HIDDEN).to(device)
-        self.projector = LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW).to(device)
+        self.value_prefix = build_value_prefix().to(device)
+        self.projector = build_projector().to(device)
         self.rep_optimizer = make_optimizer(self.representation.parameters())
         self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
         self.pred_optimizer = make_optimizer(self.prediction.parameters())
