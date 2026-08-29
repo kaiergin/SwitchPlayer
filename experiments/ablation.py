@@ -42,10 +42,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import muzero
 # Constants that arms may override are NEVER from-imported here -- they are
 # read muzero.-qualified at call time so overrides genuinely apply.
-from muzero import (IMAGE_RESHAPE, LATENT_CHANNELS, MCTSHelper, TrainingHelper,
+from muzero import (IMAGE_RESHAPE, MCTSHelper, TrainingHelper,
                     initial_frame_stack, preprocess_frame, push_frame)
-from networks import (DynamicsNetwork, LatentProjector, PredictionNetwork,
-                      RepresentationNetwork, ValuePrefixNetwork)
+# No direct networks imports: all fresh-net construction goes through
+# muzero's call-time factories (build_representation & co.), the one place
+# the architecture knobs are resolved. Direct construction here is the
+# import-time-capture escape hatch the 2026-08-28 audit closed.
 
 # ABLATION_RESULTS overrides the output directory -- REQUIRED for smoke
 # tests, which have twice now appended to (and once clobbered the weights of)
@@ -131,11 +133,16 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # The papers' strictly sequential search: every simulation selects on
-        # statistics the previous one updated. Added 2026-08-23 with the
-        # virtual-loss sign fix; earlier archived runs of this arm searched in
-        # stale-statistics waves of 8 (see the fidelity audit).
-        "MCTS_BATCHES": 1,
+        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
+        # communal2 weights, 20 states x 2 searches, honest virtual loss):
+        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
+        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
+        # speed; batch 50 (one wave, no sequential refinement) dropped
+        # signal 40%. The papers' schedule is sequential (batch 1, set here
+        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
+        # target quality. The pre-fix waves-of-8 collapse was the broken
+        # virtual loss, not batching itself.
+        "MCTS_BATCHES": 16,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -197,11 +204,16 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # The papers' strictly sequential search: every simulation selects on
-        # statistics the previous one updated. Added 2026-08-23 with the
-        # virtual-loss sign fix; earlier archived runs of this arm searched in
-        # stale-statistics waves of 8 (see the fidelity audit).
-        "MCTS_BATCHES": 1,
+        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
+        # communal2 weights, 20 states x 2 searches, honest virtual loss):
+        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
+        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
+        # speed; batch 50 (one wave, no sequential refinement) dropped
+        # signal 40%. The papers' schedule is sequential (batch 1, set here
+        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
+        # target quality. The pre-fix waves-of-8 collapse was the broken
+        # virtual loss, not batching itself.
+        "MCTS_BATCHES": 16,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -255,7 +267,7 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        "MCTS_BATCHES": 1,
+        "MCTS_BATCHES": 16,  # measured, see effzero-repro's comment
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -289,6 +301,57 @@ ARMS = {
                 "--episodes-per-iter 1 --eval-every 5 --checkpoint-every 10, "
                 "stopped at the paired horizon.",
     },
+    "effzero-repro-smallnet": {
+        # Audit finding 7: the communal configuration at EfficientZero's
+        # OWN network dimensions -- 64 latent channels, single trunk/
+        # dynamics blocks, 16-channel value/policy heads with a [32]
+        # hidden, and their single-plane action encoding. The reference's
+        # 100k-sample recipe treats the small network as part of the
+        # method; this arm measures that claim against the rung-1
+        # (repo-dims, skip+BN) run at matched budget. From scratch only:
+        # every architecture knob breaks --init-weights compatibility.
+        "USE_SEARCH_ACTING": True,
+        "USE_GUMBEL_SEARCH": False,
+        "PAPER_TARGETS": True,
+        "PER_ENABLED": True,
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "REWARD_LOSS_WEIGHT": 0.0,
+        "DISCOUNT": 0.997 ** 4,
+        "TD_STEPS": 5,
+        "LEARNING_RATE": 3e-4,
+        "MAX_REPLAY": 85,
+        "USE_AUGMENTATION": True,
+        "REWARD_CLIP": 1.0,
+        "ACT_SEARCH_SIMS": 50,
+        "MCTS_BATCHES": 16,  # measured, see effzero-repro's comment
+        "MAX_DEPTH": 50,
+        "DIRICHLET_ALPHA": 0.3,
+        "PREFIX_HEAD_CHANNELS": 16,
+        "PREFIX_FC_HIDDEN": 32,
+        "USE_ATARI_WRAPPERS": True,
+        "USE_TARGET_MODEL": True,
+        "TRAINING_BATCHES": 256,
+        "POLICY_REFRESH_EVERY": 2,
+        "POLICY_REFRESH_COUNT": 4,
+        "USE_COMMUNAL_REANALYSIS": True,
+        # 31.25k matches the communal arm's CURRENT cap exactly -- the pair
+        # must differ only in architecture (audit: 62.5k here would have
+        # confounded network size with a 2x replay window).
+        "MAX_REPLAY_TRANSITIONS": 31_250,
+        "LATENT_CHANNELS": 64,
+        "REP_TRUNK_BLOCKS": 1,
+        "DYN_BLOCKS": 1,
+        "PRED_HEAD_CHANNELS": 16,
+        "PRED_FC_HIDDEN": 32,
+        "REWARD_HEAD_CHANNELS": 16,
+        "ACTION_ENCODING": "plane",
+        "_doc": "effzero-repro-refresh5x-communal at EfficientZero's Atari "
+                "network dimensions (64ch, 1/1 blocks, 16-ch value/policy/"
+                "reward heads, [32] hiddens, single-plane actions). Run "
+                "from scratch with the communal arm's command, only --arms "
+                "differing; its control is a from-scratch run of the "
+                "repo-dims architecture at the same 31.25k buffer.",
+    },
     "effzero-repro-smallbuf20": {
         # refresh5x with the replay window cut to 20 trajectories --
         # "reanalyze by deletion". Old trajectories carry the search policy
@@ -319,11 +382,16 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # The papers' strictly sequential search: every simulation selects on
-        # statistics the previous one updated. Added 2026-08-23 with the
-        # virtual-loss sign fix; earlier archived runs of this arm searched in
-        # stale-statistics waves of 8 (see the fidelity audit).
-        "MCTS_BATCHES": 1,
+        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
+        # communal2 weights, 20 states x 2 searches, honest virtual loss):
+        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
+        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
+        # speed; batch 50 (one wave, no sequential refinement) dropped
+        # signal 40%. The papers' schedule is sequential (batch 1, set here
+        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
+        # target quality. The pre-fix waves-of-8 collapse was the broken
+        # virtual loss, not batching itself.
+        "MCTS_BATCHES": 16,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -348,7 +416,11 @@ ARMS = {
                 "instead. E.g. --env Pong-v4 --frameskip 4 --iterations 90 "
                 "--episode-cap 3000 --episodes-per-iter 1 --eval-every 10 "
                 "--checkpoint-every 2 --init-weights <parent>, kill after "
-                "the iter-20 checkpoint.",
+                "the iter-20 checkpoint. ARCHITECTURE NOTE (2026-08-28): "
+                "the residual-dynamics/BN commit renamed state_dict keys, "
+                "so --init-weights strict-loads FAIL against any parent "
+                "trained before it -- warm starts require a "
+                "post-architecture parent run.",
     },
     "gumbel": {
         "USE_VALUE_PREFIX_IN_TREE": True,
@@ -530,22 +602,24 @@ def build_networks(spec):
         prefix_sup, prefix_bins = muzero.VALUE_PREFIX_SUPPORT, muzero.VALUE_PREFIX_BINS
         value_sup, value_bins = muzero.VALUE_SUPPORT, muzero.VALUE_BINS
 
+    # Architecture geometry comes from muzero's call-time factories, so an
+    # arm's knob overrides (the smallnet arm's 64 channels included) always
+    # apply; only the support/transform choices this harness owns are
+    # passed explicitly. LATENT_CHANNELS is deliberately NOT from-imported
+    # anywhere in this file: the import-time binding silently ignored
+    # overrides (audit 2026-08-28).
     return dict(
-        representation=RepresentationNetwork(input_channels=12,
-                                             latent_channels=LATENT_CHANNELS).to(DEVICE),
-        dynamics=DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                 support_size=reward_sup, num_bins=reward_bins,
-                                 transform=transform).to(DEVICE),
-        prediction=PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                                     support_size=value_sup, num_bins=value_bins,
-                                     transform=transform).to(DEVICE),
-        value_prefix=ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
-                                        hidden_size=muzero.VALUE_PREFIX_HIDDEN,
-                                        support_size=prefix_sup, num_bins=prefix_bins,
-                                        transform=transform,
-                                        head_channels=muzero.PREFIX_HEAD_CHANNELS,
-                                        fc_hidden=muzero.PREFIX_FC_HIDDEN).to(DEVICE),
-        projector=LatentProjector(LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE),
+        representation=muzero.build_representation().to(DEVICE),
+        dynamics=muzero.build_dynamics(ACTIONS, support_size=reward_sup,
+                                       num_bins=reward_bins,
+                                       transform=transform).to(DEVICE),
+        prediction=muzero.build_prediction(ACTIONS, support_size=value_sup,
+                                           num_bins=value_bins,
+                                           transform=transform).to(DEVICE),
+        value_prefix=muzero.build_value_prefix(support_size=prefix_sup,
+                                               num_bins=prefix_bins,
+                                               transform=transform).to(DEVICE),
+        projector=muzero.build_projector().to(DEVICE),
     )
 
 

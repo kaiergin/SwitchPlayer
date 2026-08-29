@@ -69,6 +69,7 @@ def test_legacy_arms_pin_augmentation_off(ablation):
         if name not in ("pong-kit", "pong-kit2", "effzero-repro",
                         "effzero-repro-refresh5x",
                         "effzero-repro-refresh5x-communal",
+                        "effzero-repro-smallnet",
                         "effzero-repro-smallbuf20"):
             assert spec["USE_AUGMENTATION"] is False, name
 

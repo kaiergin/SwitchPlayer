@@ -72,6 +72,21 @@ LATENT_CHANNELS = 128
 # through four stride-2 convolutions. Kept here so consumers stop hardcoding a
 # divisor of the observation size; test_networks asserts it matches reality.
 LATENT_HW = 6
+# Architecture knobs (audit findings 5-7), arm-overridable and read at
+# construction time. Defaults are the repo's own dimensions; the
+# effzero-repro-smallnet arm sets the reference's (trunk 1 / dyn 1 /
+# 16-ch heads with a [32] hidden / "plane" actions). The residual dynamics
+# skip and the strided-conv BatchNorms (findings 5-6) are NOT knobs -- they
+# are unconditional fixes in networks.py.
+REP_TRUNK_BLOCKS = 2
+DYN_BLOCKS = 2
+PRED_HEAD_CHANNELS = 32
+PRED_FC_HIDDEN = None
+REWARD_HEAD_CHANNELS = 32
+# How the dynamics conv sees the action: "embed" (latent-width learned
+# embedding, the repo's original), "plane" (EffZero's single a/|A| plane),
+# "onehot" (|A| binary planes; the curriculum branch's encoding).
+ACTION_ENCODING = "embed"
 UNROLL_STEPS = 5
 # gamma. Effective planning horizon is roughly 1/(1-DISCOUNT), so ~333 steps
 # here. Lowering it shortens credit assignment and converges faster to a worse
@@ -854,28 +869,64 @@ class StorageManager:
     async def take_random_gameplay(self):
         return await self.storage_helper.take_random_gameplay.remote()
 
+# Call-time factories: every architecture knob resolved from the module
+# constants AT CONSTRUCTION, so arm overrides always apply. The def-time/
+# import-time capture bug class lives wherever these kwargs get threaded by
+# hand -- six sites had grown six slightly different lists (audit,
+# 2026-08-28) -- so all fresh-network construction funnels through here.
+# The lagged target model deliberately does NOT: it mirrors the LIVE nets'
+# geometry so its strict state_dict sync can never meet a shape mismatch.
+def build_representation(input_channels=12):
+    return RepresentationNetwork(input_channels=input_channels,
+                                 latent_channels=LATENT_CHANNELS,
+                                 trunk_blocks=REP_TRUNK_BLOCKS)
+
+
+def build_dynamics(action_space, support_size=None, num_bins=None, transform=True):
+    return DynamicsNetwork(latent_channels=LATENT_CHANNELS,
+                           action_space=action_space,
+                           support_size=REWARD_SUPPORT if support_size is None else support_size,
+                           num_bins=REWARD_BINS if num_bins is None else num_bins,
+                           transform=transform,
+                           blocks=DYN_BLOCKS,
+                           action_encoding=ACTION_ENCODING,
+                           reward_channels=REWARD_HEAD_CHANNELS)
+
+
+def build_prediction(action_space, support_size=None, num_bins=None, transform=True):
+    return PredictionNetwork(latent_channels=LATENT_CHANNELS,
+                             action_space=action_space,
+                             support_size=VALUE_SUPPORT if support_size is None else support_size,
+                             num_bins=VALUE_BINS if num_bins is None else num_bins,
+                             transform=transform,
+                             head_channels=PRED_HEAD_CHANNELS,
+                             fc_hidden=PRED_FC_HIDDEN)
+
+
+def build_value_prefix(support_size=None, num_bins=None, transform=True):
+    return ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+                              hidden_size=VALUE_PREFIX_HIDDEN,
+                              support_size=VALUE_PREFIX_SUPPORT if support_size is None else support_size,
+                              num_bins=VALUE_PREFIX_BINS if num_bins is None else num_bins,
+                              transform=transform,
+                              head_channels=PREFIX_HEAD_CHANNELS,
+                              fc_hidden=PREFIX_FC_HIDDEN)
+
+
+def build_projector():
+    return LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW)
+
+
 #create versioning like storage
 class NetworkHelper:
     def __init__(self, action_space, device, checkpoint_path = 'checkpoint.pth', enable_logging=False):
         self.device = device
         self.action_space = action_space
-        self.representation = RepresentationNetwork(input_channels=12,
-                                                    latent_channels=LATENT_CHANNELS).to(device)
-        self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
-                                        action_space=action_space,
-                                        support_size=REWARD_SUPPORT,
-                                        num_bins=REWARD_BINS).to(device)
-        self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
-                                            action_space=action_space,
-                                            support_size=VALUE_SUPPORT,
-                                            num_bins=VALUE_BINS).to(device)
-        self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
-                                               hidden_size=VALUE_PREFIX_HIDDEN,
-                                               support_size=VALUE_PREFIX_SUPPORT,
-                                               num_bins=VALUE_PREFIX_BINS,
-                                               head_channels=PREFIX_HEAD_CHANNELS,
-                                               fc_hidden=PREFIX_FC_HIDDEN).to(device)
-        self.projector = LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW).to(device)
+        self.representation = build_representation().to(device)
+        self.dynamics = build_dynamics(action_space).to(device)
+        self.prediction = build_prediction(action_space).to(device)
+        self.value_prefix = build_value_prefix().to(device)
+        self.projector = build_projector().to(device)
         self.rep_optimizer = make_optimizer(self.representation.parameters())
         self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
         self.pred_optimizer = make_optimizer(self.prediction.parameters())
@@ -996,23 +1047,11 @@ class NetworkManager:
         self.network_helper = network_helper
         self.load_dynamics = load_dynamics
         self.device = device
-        self.representation = RepresentationNetwork(input_channels=12,
-                                                    latent_channels=LATENT_CHANNELS).to(device)
-        self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
-                                            action_space=action_space,
-                                            support_size=VALUE_SUPPORT,
-                                            num_bins=VALUE_BINS).to(device)
+        self.representation = build_representation().to(device)
+        self.prediction = build_prediction(action_space).to(device)
         if self.load_dynamics:
-            self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
-                                            action_space=action_space,
-                                            support_size=REWARD_SUPPORT,
-                                            num_bins=REWARD_BINS).to(device)
-            self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
-                                                   hidden_size=VALUE_PREFIX_HIDDEN,
-                                                   support_size=VALUE_PREFIX_SUPPORT,
-                                                   num_bins=VALUE_PREFIX_BINS,
-                                                   head_channels=PREFIX_HEAD_CHANNELS,
-                                                   fc_hidden=PREFIX_FC_HIDDEN).to(device)
+            self.dynamics = build_dynamics(action_space).to(device)
+            self.value_prefix = build_value_prefix().to(device)
         # Inference-only consumer: BatchNorm must read the running statistics
         # training accumulated, not the statistics of whatever batch -- or
         # single acting frame -- happens to pass through (which also polluted
@@ -2017,23 +2056,11 @@ class TrainingHelper:
         self.device = device
         self.action_space = action_space
         self.training_steps = 0
-        self.representation = RepresentationNetwork(input_channels=12,
-                                                    latent_channels=LATENT_CHANNELS).to(device)
-        self.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS,
-                                        action_space=action_space,
-                                        support_size=REWARD_SUPPORT,
-                                        num_bins=REWARD_BINS).to(device)
-        self.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS,
-                                            action_space=action_space,
-                                            support_size=VALUE_SUPPORT,
-                                            num_bins=VALUE_BINS).to(device)
-        self.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
-                                               hidden_size=VALUE_PREFIX_HIDDEN,
-                                               support_size=VALUE_PREFIX_SUPPORT,
-                                               num_bins=VALUE_PREFIX_BINS,
-                                               head_channels=PREFIX_HEAD_CHANNELS,
-                                               fc_hidden=PREFIX_FC_HIDDEN).to(device)
-        self.projector = LatentProjector(LATENT_CHANNELS * LATENT_HW * LATENT_HW).to(device)
+        self.representation = build_representation().to(device)
+        self.dynamics = build_dynamics(action_space).to(device)
+        self.prediction = build_prediction(action_space).to(device)
+        self.value_prefix = build_value_prefix().to(device)
+        self.projector = build_projector().to(device)
         self.rep_optimizer = make_optimizer(self.representation.parameters())
         self.dyn_optimizer = make_optimizer(self.dynamics.parameters())
         self.pred_optimizer = make_optimizer(self.prediction.parameters())
@@ -2291,21 +2318,34 @@ class TrainingHelper:
         intervals (200-400 steps), not the 0-200 a direct copy would give.
         """
         if getattr(self, "target_representation", None) is None:
+            # EVERY geometry field mirrored from the LIVE nets -- never the
+            # module constants -- so the strict load_state_dict below can
+            # never meet a shape mismatch, even when constants changed
+            # between net construction and the first sync (audit
+            # 2026-08-28: width and trunk depth were still
+            # constant-sourced here while the comment claimed otherwise).
+            latent = self.representation.conv4.out_channels
             self.target_representation = RepresentationNetwork(
-                input_channels=12, latent_channels=LATENT_CHANNELS).to(self.device)
+                input_channels=12, latent_channels=latent,
+                trunk_blocks=len(self.representation.trunk)).to(self.device)
             self.target_prediction = PredictionNetwork(
-                latent_channels=LATENT_CHANNELS, action_space=self.action_space,
+                latent_channels=latent, action_space=self.action_space,
                 support_size=self.prediction.support_size,
                 num_bins=self.prediction.num_bins,
-                transform=self.prediction.transform).to(self.device)
+                transform=self.prediction.transform,
+                head_channels=self.prediction.head_channels,
+                fc_hidden=self.prediction.fc_hidden).to(self.device)
             self.target_dynamics = DynamicsNetwork(
-                latent_channels=LATENT_CHANNELS,
+                latent_channels=latent,
                 action_space=self.action_space,
                 support_size=self.dynamics.support_size,
                 num_bins=self.dynamics.num_bins,
-                transform=self.dynamics.transform).to(self.device)
+                transform=self.dynamics.transform,
+                blocks=len(self.dynamics.blocks),
+                action_encoding=self.dynamics.action_encoding,
+                reward_channels=self.dynamics.reward_channels).to(self.device)
             self.target_value_prefix = ValuePrefixNetwork(
-                latent_channels=LATENT_CHANNELS,
+                latent_channels=self.value_prefix.conv.in_channels,
                 hidden_size=self.value_prefix.hidden_size,
                 support_size=self.value_prefix.support_size,
                 num_bins=self.value_prefix.num_bins,

@@ -20,8 +20,7 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import muzero
-from muzero import IMAGE_RESHAPE, LATENT_CHANNELS, initial_frame_stack, preprocess_frame, push_frame
-from networks import PredictionNetwork, RepresentationNetwork
+from muzero import IMAGE_RESHAPE, initial_frame_stack, preprocess_frame, push_frame
 
 ACTIONS = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,12 +30,31 @@ def load(checkpoint_path):
     ck = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
     spec = ck.get("spec", {})
     linear = spec.get("_linear_support")
-    value_sup = muzero.VALUE_CEILING if linear else muzero.VALUE_SUPPORT
-    value_bins = 51 if linear else muzero.VALUE_BINS
 
-    rep = RepresentationNetwork(input_channels=12, latent_channels=LATENT_CHANNELS).to(DEVICE)
-    pred = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
-                             support_size=value_sup, num_bins=value_bins).to(DEVICE)
+    # The weights file records its arm spec: apply its overrides (the
+    # architecture knobs above all) before building, exactly as the harness
+    # did when it trained them -- a smallnet-arm checkpoint builds 64-channel
+    # nets here, not the module-default 128. Save/restore like arm_config so
+    # a second load() in the same process starts clean, and read the
+    # support constants only AFTER the overrides apply.
+    overrides = {k: v for k, v in spec.items()
+                 if not k.startswith("_") and hasattr(muzero, k)}
+    saved = {k: getattr(muzero, k) for k in overrides}
+    for key, value in overrides.items():
+        setattr(muzero, key, value)
+    try:
+        value_sup = muzero.VALUE_CEILING if linear else muzero.VALUE_SUPPORT
+        value_bins = 51 if linear else muzero.VALUE_BINS
+        # transform mirrors the harness (ablation build_networks): linear
+        # arms trained WITHOUT h(), so decoding through h_inverse here
+        # printed values wrong by orders of magnitude.
+        rep = muzero.build_representation().to(DEVICE)
+        pred = muzero.build_prediction(ACTIONS, support_size=value_sup,
+                                       num_bins=value_bins,
+                                       transform=not linear).to(DEVICE)
+    finally:
+        for key, value in saved.items():
+            setattr(muzero, key, value)
     rep.load_state_dict(ck["representation"])
     pred.load_state_dict(ck["prediction"])
     rep.eval()
