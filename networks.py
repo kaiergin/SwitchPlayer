@@ -68,33 +68,44 @@ class RepresentationNetwork(nn.Module):
     small spatial sizes rather than large ones.
     """
 
-    def __init__(self, input_channels=3, latent_channels=128):
+    def __init__(self, input_channels=3, latent_channels=128, trunk_blocks=2):
         super(RepresentationNetwork, self).__init__()
         self.relu = nn.ReLU(inplace=False)
         c1, c2 = max(latent_channels // 4, 8), max(latent_channels // 2, 16)
 
-        self.conv1 = nn.Conv2d(input_channels, c1, kernel_size=3, stride=2, padding=1)  # 84 -> 42
-        self.conv2 = nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1)              # 42 -> 21
+        # Audit finding 6: EfficientZero's DownSample normalizes after EVERY
+        # strided convolution. These four previously ran bare (bias=True, no
+        # norm), so inter-layer scale drift was unconstrained and the final
+        # renormalize could only bound the output, not condition the path.
+        self.conv1 = nn.Conv2d(input_channels, c1, kernel_size=3, stride=2,
+                               padding=1, bias=False)                # 84 -> 42
+        self.bn1 = nn.BatchNorm2d(c1)
+        self.conv2 = nn.Conv2d(c1, c2, kernel_size=3, stride=2,
+                               padding=1, bias=False)                # 42 -> 21
+        self.bn2 = nn.BatchNorm2d(c2)
         self.block1 = BasicBlock(c2, c2)
-        self.conv3 = nn.Conv2d(c2, latent_channels, kernel_size=3, stride=2, padding=1)  # 21 -> 11
-        self.conv4 = nn.Conv2d(latent_channels, latent_channels,
-                               kernel_size=3, stride=2, padding=1)                       # 11 -> 6
-        self.block2 = BasicBlock(latent_channels, latent_channels)
-        self.block3 = BasicBlock(latent_channels, latent_channels)
+        self.conv3 = nn.Conv2d(c2, latent_channels, kernel_size=3, stride=2,
+                               padding=1, bias=False)                # 21 -> 11
+        self.bn3 = nn.BatchNorm2d(latent_channels)
+        self.conv4 = nn.Conv2d(latent_channels, latent_channels, kernel_size=3,
+                               stride=2, padding=1, bias=False)      # 11 -> 6
+        self.bn4 = nn.BatchNorm2d(latent_channels)
+        # Full-channel trunk depth is a size knob (finding 7): the repo
+        # default is 2; the EffZero-dims arm runs 1.
+        self.trunk = nn.ModuleList([BasicBlock(latent_channels, latent_channels)
+                                    for _ in range(trunk_blocks)])
 
     def forward(self, x):
         # Downsample hard before spending residual blocks. At batch 1 -- the
         # acting path -- this network is kernel-launch bound rather than compute
-        # bound, so layer COUNT costs more than layer width. Three blocks here
-        # against the previous four, and the two cheap early convolutions run
-        # back to back instead of sandwiching a block at 42x42.
-        x = self.relu(self.conv1(x))
-        x = self.relu(self.conv2(x))
+        # bound, so layer COUNT costs more than layer width.
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
         x = self.block1(x)
-        x = self.relu(self.conv3(x))
-        x = self.relu(self.conv4(x))
-        x = self.block2(x)
-        x = self.block3(x)
+        x = self.relu(self.bn3(self.conv3(x)))
+        x = self.relu(self.bn4(self.conv4(x)))
+        for block in self.trunk:
+            x = block(x)
         # latent state of shape (batch, latent_channels, 6, 6), scaled to [0,1]
         return renormalize(x)
 
@@ -108,7 +119,7 @@ class RepresentationNetwork(nn.Module):
 # applying softmax (for acting/priors) or log_softmax (for the training loss).
 class PredictionNetwork(nn.Module):
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
-                 pool=(6, 6), transform=True):
+                 pool=(6, 6), transform=True, head_channels=32, fc_hidden=None):
         super(PredictionNetwork, self).__init__()
         # Whether decoded scalars come back through h_inverse. Must match the
         # transform flag the training side passes to scalar_to_categorical_batch
@@ -120,16 +131,33 @@ class PredictionNetwork(nn.Module):
         self.pool = pool
         self.block = BasicBlock(latent_channels, latent_channels)
         self.relu = nn.ReLU(inplace=False)
-        
-        # Policy head:
-        self.policy_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
-        self.policy_fc = nn.Linear(32 * pool[0] * pool[1], action_space)
-        
-        # Value head now outputs categorical logits instead of a single scalar.
-        self.value_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
-        self.value_fc = nn.Linear(32 * pool[0] * pool[1], num_bins)
+        # Head dims are size knobs (audit finding 7): repo default 32-channel
+        # reductions with a direct feature->output FC; the EffZero-dims arm
+        # runs 16 channels with a [32] hidden (their A.1 head shape, minus
+        # the BN their FCs carry -- prediction runs batch-1 constantly on the
+        # acting path, where single-row BatchNorm is the prefix head's known
+        # hazard; documented deviation).
+        features = head_channels * pool[0] * pool[1]
 
-        # EfficientZero A.1: zero the final head layers, so at init the
+        # Policy head:
+        self.policy_conv = nn.Conv2d(latent_channels, head_channels, kernel_size=1)
+        if fc_hidden:
+            self.policy_hidden = nn.Linear(features, fc_hidden)
+            self.policy_fc = nn.Linear(fc_hidden, action_space)
+        else:
+            self.policy_hidden = None
+            self.policy_fc = nn.Linear(features, action_space)
+
+        # Value head now outputs categorical logits instead of a single scalar.
+        self.value_conv = nn.Conv2d(latent_channels, head_channels, kernel_size=1)
+        if fc_hidden:
+            self.value_hidden = nn.Linear(features, fc_hidden)
+            self.value_fc = nn.Linear(fc_hidden, num_bins)
+        else:
+            self.value_hidden = None
+            self.value_fc = nn.Linear(features, num_bins)
+
+        # EfficientZero A.1: zero the FINAL head layers, so at init the
         # categorical heads decode to exactly 0 (uniform logits over a
         # symmetric support) and the policy is exactly uniform -- warmup
         # searches and bootstraps start neutral instead of from init noise.
@@ -139,21 +167,27 @@ class PredictionNetwork(nn.Module):
 
         self.support_size = support_size
         self.num_bins = num_bins
-        
+        self.head_channels = head_channels
+        self.fc_hidden = fc_hidden
+
     def forward(self, latent):
         x = self.block(latent)
         x = self.relu(x)
-        
+
         # Policy branch:
         p = self.relu(self.policy_conv(x))
         p = F.adaptive_avg_pool2d(p, self.pool)
         p = p.contiguous().view(p.size(0), -1)
+        if self.policy_hidden is not None:
+            p = self.relu(self.policy_hidden(p))
         policy_logits = self.policy_fc(p)
 
         # Value branch:
         v = self.relu(self.value_conv(x))
         v = F.adaptive_avg_pool2d(v, self.pool)
         v = v.contiguous().view(v.size(0), -1)
+        if self.value_hidden is not None:
+            v = self.relu(self.value_hidden(v))
         value_logits = self.value_fc(v)  # shape: (batch_size, num_bins)
         support = create_support(self.support_size, self.num_bins, latent.device)
         value = scalar_from_logits(value_logits, support, invert=self.transform)
@@ -162,8 +196,23 @@ class PredictionNetwork(nn.Module):
 
 # Revised DynamicsNetwork with categorical reward representation.
 class DynamicsNetwork(nn.Module):
+    """Audit finding 5: EfficientZero's dynamics is an explicit RESIDUAL
+    update -- conv(cat(state, action)) -> BN -> += state -> relu -> blocks --
+    identity plus a learned delta. Without the skip, conv1 had to reproduce
+    the whole state before it could modify it, which is the axis multi-step
+    latent drift lives on (and the axis the SimSiam loss then fights alone).
+
+    action_encoding selects how the action reaches conv1:
+      "embed"  -- learned latent_channels-dim embedding broadcast spatially
+                  (the repo's original, richest, 2x conv1 width);
+      "plane"  -- EfficientZero's single constant plane of a/|A| (thinnest,
+                  imposes an ordinal fiction the reference tolerates);
+      "onehot" -- |A| binary planes (thin, no fake metric; the curriculum
+                  branch's choice, and it extends to duration planes).
+    """
+
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
-                 pool=(6, 6), transform=True):
+                 pool=(6, 6), transform=True, blocks=2, action_encoding="embed"):
         super(DynamicsNetwork, self).__init__()
         # See PredictionNetwork: must match the encode side's transform flag.
         self.transform = transform
@@ -171,29 +220,55 @@ class DynamicsNetwork(nn.Module):
         self.action_space = action_space
         self.support_size = support_size
         self.num_bins = num_bins
-        self.action_embedding = nn.Embedding(action_space, latent_channels)
-        self.conv1 = nn.Conv2d(latent_channels * 2, latent_channels,
-                               kernel_size=3, stride=1, padding=1)
+        self.action_encoding = action_encoding
+        if action_encoding == "embed":
+            self.action_embedding = nn.Embedding(action_space, latent_channels)
+            action_channels = latent_channels
+        elif action_encoding == "plane":
+            self.action_embedding = None
+            action_channels = 1
+        elif action_encoding == "onehot":
+            self.action_embedding = None
+            action_channels = action_space
+        else:
+            raise ValueError(f"unknown action_encoding {action_encoding!r}")
+        self.conv1 = nn.Conv2d(latent_channels + action_channels, latent_channels,
+                               kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(latent_channels)
         self.relu = nn.ReLU(inplace=False)
-        self.block1 = BasicBlock(latent_channels, latent_channels)
-        self.block2 = BasicBlock(latent_channels, latent_channels)
-        
+        self.blocks = nn.ModuleList([BasicBlock(latent_channels, latent_channels)
+                                     for _ in range(blocks)])
+
         # Reward head now outputs categorical logits.
         self.reward_conv = nn.Conv2d(latent_channels, 32, kernel_size=1)
         self.reward_fc = nn.Linear(32 * pool[0] * pool[1], num_bins)
         # EfficientZero A.1 zero-init: reward decodes exactly 0 at init.
         nn.init.zeros_(self.reward_fc.weight)
         nn.init.zeros_(self.reward_fc.bias)
-        
+
+    def _encode_action(self, action, batch, h, w, device):
+        if self.action_encoding == "embed":
+            e = self.action_embedding(action)
+            return e.contiguous().view(batch, -1, 1, 1).expand(-1, -1, h, w)
+        if self.action_encoding == "plane":
+            plane = action.to(torch.float32) / float(self.action_space)
+            return plane.view(batch, 1, 1, 1).expand(batch, 1, h, w)
+        planes = torch.zeros(batch, self.action_space, h, w, device=device)
+        index = action.view(batch, 1, 1, 1).expand(batch, 1, h, w)
+        return planes.scatter_(1, index, 1.0)
+
     def forward(self, latent, action):
         batch_size = latent.size(0)
-        act_emb = self.action_embedding(action)  # shape: (batch, latent_channels)
-        act_emb = act_emb.contiguous().view(batch_size, latent.size(1), 1, 1)
-        act_emb = act_emb.expand(-1, -1, latent.size(2), latent.size(3))
-        x = torch.cat([latent, act_emb], dim=1)
-        x = self.relu(self.conv1(x))
-        x = self.block1(x)
-        x = self.block2(x)
+        act = self._encode_action(action, batch_size,
+                                  latent.size(2), latent.size(3), latent.device)
+        x = self.conv1(torch.cat([latent, act], dim=1))
+        x = self.bn1(x)
+        # The residual update: the network learns a DELTA on the incoming
+        # latent rather than a from-scratch reconstruction of it.
+        x = x + latent
+        x = self.relu(x)
+        for block in self.blocks:
+            x = block(x)
         # Appendix G scaling on the emitted state; the reward branch below
         # reads the same renormalized latent every other head will see.
         x = renormalize(x)

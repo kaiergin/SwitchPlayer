@@ -289,6 +289,51 @@ ARMS = {
                 "--episodes-per-iter 1 --eval-every 5 --checkpoint-every 10, "
                 "stopped at the paired horizon.",
     },
+    "effzero-repro-smallnet": {
+        # Audit finding 7: the communal configuration at EfficientZero's
+        # OWN network dimensions -- 64 latent channels, single trunk/
+        # dynamics blocks, 16-channel value/policy heads with a [32]
+        # hidden, and their single-plane action encoding. The reference's
+        # 100k-sample recipe treats the small network as part of the
+        # method; this arm measures that claim against the rung-1
+        # (repo-dims, skip+BN) run at matched budget. From scratch only:
+        # every architecture knob breaks --init-weights compatibility.
+        "USE_SEARCH_ACTING": True,
+        "USE_GUMBEL_SEARCH": False,
+        "PAPER_TARGETS": True,
+        "PER_ENABLED": True,
+        "USE_VALUE_PREFIX_IN_TREE": True,
+        "REWARD_LOSS_WEIGHT": 0.0,
+        "DISCOUNT": 0.997 ** 4,
+        "TD_STEPS": 5,
+        "LEARNING_RATE": 3e-4,
+        "MAX_REPLAY": 85,
+        "USE_AUGMENTATION": True,
+        "REWARD_CLIP": 1.0,
+        "ACT_SEARCH_SIMS": 50,
+        "MCTS_BATCHES": 1,
+        "MAX_DEPTH": 50,
+        "DIRICHLET_ALPHA": 0.3,
+        "PREFIX_HEAD_CHANNELS": 16,
+        "PREFIX_FC_HIDDEN": 32,
+        "USE_ATARI_WRAPPERS": True,
+        "USE_TARGET_MODEL": True,
+        "TRAINING_BATCHES": 256,
+        "POLICY_REFRESH_EVERY": 2,
+        "POLICY_REFRESH_COUNT": 4,
+        "USE_COMMUNAL_REANALYSIS": True,
+        "MAX_REPLAY_TRANSITIONS": 62_500,
+        "LATENT_CHANNELS": 64,
+        "REP_TRUNK_BLOCKS": 1,
+        "DYN_BLOCKS": 1,
+        "PRED_HEAD_CHANNELS": 16,
+        "PRED_FC_HIDDEN": 32,
+        "ACTION_ENCODING": "plane",
+        "_doc": "effzero-repro-refresh5x-communal at EfficientZero's Atari "
+                "network dimensions (64ch, 1/1 blocks, 16-ch heads + [32], "
+                "single-plane actions). Buffer 62.5k. Run from scratch with "
+                "the communal arm's command, only --arms differing.",
+    },
     "effzero-repro-smallbuf20": {
         # refresh5x with the replay window cut to 20 trajectories --
         # "reanalyze by deletion". Old trajectories carry the search policy
@@ -530,22 +575,31 @@ def build_networks(spec):
         prefix_sup, prefix_bins = muzero.VALUE_PREFIX_SUPPORT, muzero.VALUE_PREFIX_BINS
         value_sup, value_bins = muzero.VALUE_SUPPORT, muzero.VALUE_BINS
 
+    # muzero.-qualified THROUGHOUT, including LATENT_CHANNELS: the from-import
+    # binds at import time, which would silently ignore an arm's channel
+    # override (the def-time-capture bug class) -- the smallnet arm is the
+    # first to override it.
     return dict(
         representation=RepresentationNetwork(input_channels=12,
-                                             latent_channels=LATENT_CHANNELS).to(DEVICE),
-        dynamics=DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
+                                             latent_channels=muzero.LATENT_CHANNELS,
+                                             trunk_blocks=muzero.REP_TRUNK_BLOCKS).to(DEVICE),
+        dynamics=DynamicsNetwork(latent_channels=muzero.LATENT_CHANNELS, action_space=ACTIONS,
                                  support_size=reward_sup, num_bins=reward_bins,
-                                 transform=transform).to(DEVICE),
-        prediction=PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
+                                 transform=transform,
+                                 blocks=muzero.DYN_BLOCKS,
+                                 action_encoding=muzero.ACTION_ENCODING).to(DEVICE),
+        prediction=PredictionNetwork(latent_channels=muzero.LATENT_CHANNELS, action_space=ACTIONS,
                                      support_size=value_sup, num_bins=value_bins,
-                                     transform=transform).to(DEVICE),
-        value_prefix=ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
+                                     transform=transform,
+                                     head_channels=muzero.PRED_HEAD_CHANNELS,
+                                     fc_hidden=muzero.PRED_FC_HIDDEN).to(DEVICE),
+        value_prefix=ValuePrefixNetwork(latent_channels=muzero.LATENT_CHANNELS,
                                         hidden_size=muzero.VALUE_PREFIX_HIDDEN,
                                         support_size=prefix_sup, num_bins=prefix_bins,
                                         transform=transform,
                                         head_channels=muzero.PREFIX_HEAD_CHANNELS,
                                         fc_hidden=muzero.PREFIX_FC_HIDDEN).to(DEVICE),
-        projector=LatentProjector(LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE),
+        projector=LatentProjector(muzero.LATENT_CHANNELS * muzero.LATENT_HW ** 2).to(DEVICE),
     )
 
 

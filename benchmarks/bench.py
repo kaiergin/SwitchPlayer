@@ -400,13 +400,18 @@ def _local_trainer(prefix_support=None):
     trainer.action_space = ACTIONS
     trainer.training_steps = 0
     trainer.representation = RepresentationNetwork(input_channels=12,
-                                                   latent_channels=LATENT_CHANNELS).to(DEVICE)
+                                                   latent_channels=LATENT_CHANNELS,
+                                                   trunk_blocks=muzero.REP_TRUNK_BLOCKS).to(DEVICE)
     trainer.dynamics = DynamicsNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
                                        support_size=muzero.REWARD_SUPPORT,
-                                       num_bins=muzero.REWARD_BINS).to(DEVICE)
+                                       num_bins=muzero.REWARD_BINS,
+                                       blocks=muzero.DYN_BLOCKS,
+                                       action_encoding=muzero.ACTION_ENCODING).to(DEVICE)
     trainer.prediction = PredictionNetwork(latent_channels=LATENT_CHANNELS, action_space=ACTIONS,
                                            support_size=muzero.VALUE_SUPPORT,
-                                           num_bins=muzero.VALUE_BINS).to(DEVICE)
+                                           num_bins=muzero.VALUE_BINS,
+                                           head_channels=muzero.PRED_HEAD_CHANNELS,
+                                           fc_hidden=muzero.PRED_FC_HIDDEN).to(DEVICE)
     support = muzero.VALUE_PREFIX_SUPPORT if prefix_support is None else prefix_support
     trainer.value_prefix = ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                                               hidden_size=muzero.VALUE_PREFIX_HIDDEN,
