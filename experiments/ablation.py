@@ -974,7 +974,14 @@ class Run:
         prediction-error metrics measured a few lines later.
         """
         returns = [self.play_episode(greedy=True)[1] for _ in range(episodes)]
+        return {"return_mean": float(np.mean(returns)),
+                "return_max": float(np.max(returns)),
+                **self.evaluate_diagnostics(batches=batches)}
 
+    def evaluate_diagnostics(self, batches=8):
+        """The driver-bound half of evaluate(): the prediction-error panel
+        on the TRAINER's nets. The greedy episodes are the offloadable half
+        -- --ray plays them on the eval actor with the same synced weights."""
         K = muzero.UNROLL_STEPS
         errs = {"per_step": 0.0, "prefix": 0.0, "control": 0.0, "value": 0.0,
                 "value_control": 0.0, "policy_entropy": 0.0, "policy_maxp": 0.0}
@@ -1011,8 +1018,7 @@ class Run:
                     errs["control"] += tgt.abs().mean().item()
             errs = {k: v / batches for k, v in errs.items()}
 
-        return {"return_mean": float(np.mean(returns)),
-                "return_max": float(np.max(returns)), **errs}
+        return errs
 
 
 NET_NAMES = ("representation", "dynamics", "prediction", "value_prefix",
@@ -1222,6 +1228,25 @@ def prune_stale_rows(out, arm, seed, start_it):
             fh.write(json.dumps(r) + "\n")
     os.replace(tmp, out)
     return len(rows) - len(keep) + (1 if torn else 0)
+
+
+def has_row(out, arm, seed, iteration):
+    """Whether this (arm, seed) already wrote the eval row for `iteration`
+    -- the --ray resume-heal's question."""
+    out = pathlib.Path(out)
+    if not out.exists():
+        return False
+    for l in open(out):
+        if not l.strip():
+            continue
+        try:
+            r = json.loads(l)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(r, dict) and r.get("arm") == arm
+                and r.get("seed") == seed and r.get("iteration") == iteration):
+            return True
+    return False
 
 
 def rows_for_pair(out, arm, seed):
@@ -1492,7 +1517,11 @@ class RayPipeline:
                          "PYTHONPATH": f"{here.parent};{here}"}})
         import ray_actors
         overrides = {k: v for k, v in spec.items() if not k.startswith("_")}
-        gpu = muzero.mcts_gpu_share(1) if torch.cuda.is_available() else 0
+        # Small FIXED share for every actor: the driver's training uses the
+        # GPU outside Ray's accounting, and two actors at mcts_gpu_share-
+        # style fractions could sum past 1.0 -- the second would never
+        # schedule and its first ray.get would block forever.
+        gpu = 0.2 if torch.cuda.is_available() else 0
         actor_cls = ray.remote(num_gpus=gpu)(ray_actors.SelfPlayActor)
         self.actor = actor_cls.remote(overrides, ACTIONS, seed,
                                       iterations * train_steps, ENV_NAME,
@@ -1500,7 +1529,11 @@ class RayPipeline:
         self.run = run
         self.seed = seed
         self.episodes_per_iter = episodes_per_iter
+        self.overrides = overrides
+        self.run_length_steps = iterations * train_steps
         self.pending = None
+        self.eval_actor = None
+        self.pending_eval = None
         self.sync()
 
     def sync(self):
@@ -1524,11 +1557,54 @@ class RayPipeline:
                 self.run.reanalyse(traj, terminated=terminated))
             evict_replay(self.run.replay)
 
+    def request_eval(self, it, episodes, diagnostics, write_row):
+        """Phase 2: greedy eval episodes run on a SECOND actor, concurrent
+        with the next iteration's training. Diagnostics were computed on
+        the driver at the boundary (they need the trainer's nets at W_it);
+        the row is written when the episodes come back -- drain_eval() runs
+        at the next eval boundary and at end-of-run, so rows stay in file
+        order. A kill in the in-flight window loses only the row, and
+        run_one's resume path regenerates it from the checkpoint's weights
+        (the resume-heal), preserving the never-skip-a-row guarantee."""
+        if self.eval_actor is None:
+            import ray_actors
+            gpu = 0.2 if torch.cuda.is_available() else 0
+            actor_cls = self.ray.remote(num_gpus=gpu)(ray_actors.SelfPlayActor)
+            self.eval_actor = actor_cls.remote(
+                self.overrides, ACTIONS, self.seed + 5000,
+                self.run_length_steps, ENV_NAME, FRAMESKIP, EPISODE_CAP)
+        states = {n: _cpu_state(getattr(self.run.trainer, n).state_dict())
+                  for n in ("representation", "dynamics", "prediction",
+                            "value_prefix")}
+        self.ray.get(self.eval_actor.set_weights.remote(
+            states, self.run.trainer.training_steps))
+        seeds = [self.seed * 100003 + it * 613 + 500000 + e
+                 for e in range(episodes)]
+        # Counters captured at REQUEST time: a late-written row must record
+        # iteration `it`'s train/env steps, not wherever the run is when
+        # the episodes come back.
+        self.pending_eval = (
+            it, self.eval_actor.eval_episodes.remote(seeds), diagnostics,
+            write_row, self.run.trainer.training_steps, self.run.env_steps)
+
+    def drain_eval(self):
+        if self.pending_eval is None:
+            return
+        it, future, diagnostics, write_row, tsteps, esteps = self.pending_eval
+        self.pending_eval = None
+        returns = self.ray.get(future)
+        write_row(it, {"return_mean": float(np.mean(returns)),
+                       "return_max": float(np.max(returns)), **diagnostics},
+                  tsteps, esteps)
+
     def shutdown(self):
-        try:
-            self.ray.kill(self.actor)
-        except Exception:
-            pass
+        self.drain_eval()
+        for actor in (self.actor, self.eval_actor):
+            if actor is not None:
+                try:
+                    self.ray.kill(actor)
+                except Exception:
+                    pass
 
 
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
@@ -1619,8 +1695,37 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"{WARMSTART_PREFILL_EPISODES} episodes "
                   f"({run.env_steps} env steps) before the first gradient",
                   flush=True)
+        def write_row(row_it, metrics, train_steps_at, env_steps_at):
+            eff_skip = (FRAMESKIP or 4) if muzero.USE_ATARI_WRAPPERS else FRAMESKIP
+            record = {"arm": arm, "seed": seed,
+                      "env": ENV_NAME, "frameskip": eff_skip,
+                      "wrappers": bool(muzero.USE_ATARI_WRAPPERS),
+                      **({"init_weights": init_name} if init_name else {}),
+                      "iteration": row_it,
+                      "train_steps": train_steps_at,
+                      "env_steps": env_steps_at,
+                      "elapsed_s": round(time.time() - started, 1), **metrics}
+            with open(out, "a") as fh:
+                fh.write(json.dumps(record) + "\n")
+            print(f"  [{arm} s{seed}] iter {row_it:>3}  return {metrics['return_mean']:>7.1f}  "
+                  f"prefix {metrics['prefix']:>6.2f} / control {metrics['control']:>6.2f}  "
+                  f"per-step {metrics['per_step']:>6.2f}  "
+                  f"H(pi) {metrics.get('policy_entropy', 0.0):>5.2f}", flush=True)
+
         pipeline = (RayPipeline(run, spec, seed, iterations, train_steps,
                                 episodes_per_iter) if use_ray else None)
+        if (pipeline and start_it
+                and ((eval_every and start_it % eval_every == 0)
+                     or start_it == iterations)
+                and not has_row(out, arm, seed, start_it)):
+            # --ray writes eval rows late; a kill inside that window loses
+            # row start_it after its checkpoint landed. Regenerate it from
+            # the checkpoint's own weights, preserving the loop's
+            # never-skip-a-row guarantee (fresh episodes, same policy).
+            print(f"  [{arm} s{seed}] regenerating eval row {start_it} "
+                  f"lost in the --ray late-write window", flush=True)
+            write_row(start_it, run.evaluate(),
+                      run.trainer.training_steps, run.env_steps)
         for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
@@ -1702,31 +1807,21 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 print(f"  saved {ckpt.name}", flush=True)
 
             if (eval_every and it % eval_every == 0) or it == iterations:
-                metrics = run.evaluate()
-                # The EFFECTIVE skip. The wrapper stack's skip-4 default is
-                # unreachable now that wrapper arms REFUSE to run without
-                # --frameskip, but this stays belt-and-braces: recording the
-                # raw flag (None) would misdescribe the env if the refusal
-                # ever regressed.
-                eff_skip = (FRAMESKIP or 4) if muzero.USE_ATARI_WRAPPERS else FRAMESKIP
-                record = {"arm": arm, "seed": seed,
-                          "env": ENV_NAME, "frameskip": eff_skip,
-                          "wrappers": bool(muzero.USE_ATARI_WRAPPERS),
-                          # A warm-started row is a DIFFERENT lineage from a
-                          # from-scratch row; the field keeps them separable
-                          # (init_name flows through the checkpoint on
-                          # resume, where the CLI arg is forbidden).
-                          **({"init_weights": init_name} if init_name else {}),
-                          "iteration": it,
-                          "train_steps": run.trainer.training_steps,
-                          "env_steps": run.env_steps,
-                          "elapsed_s": round(time.time() - started, 1), **metrics}
-                with open(out, "a") as fh:
-                    fh.write(json.dumps(record) + "\n")
-                print(f"  [{arm} s{seed}] iter {it:>3}  return {metrics['return_mean']:>7.1f}  "
-                      f"prefix {metrics['prefix']:>6.2f} / control {metrics['control']:>6.2f}  "
-                      f"per-step {metrics['per_step']:>6.2f}  "
-                      f"H(pi) {metrics.get('policy_entropy', 0.0):>5.2f}", flush=True)
+                if pipeline:
+                    # Any previous late row first, so rows stay file-ordered.
+                    pipeline.drain_eval()
+                if pipeline and it != iterations:
+                    # Phase 2: diagnostics need the trainer's nets at W_it
+                    # (driver, seconds); the greedy episodes run on the eval
+                    # actor concurrently with the next iteration's training.
+                    # The row lands at the next eval boundary or checkpoint
+                    # heal; the last iteration stays synchronous so
+                    # completion never races its own row.
+                    pipeline.request_eval(it, 8, run.evaluate_diagnostics(),
+                                          write_row)
+                else:
+                    write_row(it, run.evaluate(),
+                              run.trainer.training_steps, run.env_steps)
 
             # After the eval/record block, so a resumed run never repeats or
             # skips a jsonl row: it continues at it+1 with row `it` written.

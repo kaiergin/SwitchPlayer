@@ -98,6 +98,17 @@ class SelfPlayActor:
             self.shell, greedy=False, cap=self.episode_cap)
         return traj, terminated, self.shell.env_steps - before
 
+    def eval_episodes(self, seeds):
+        """Greedy evaluation episodes; returns their returns. Env steps from
+        eval are protocol-exempt (the driver never counts them) and the
+        shell's counter is scratch here."""
+        returns = []
+        for s in seeds:
+            self.env.reset(seed=int(s))
+            returns.append(self._ablation.Run.play_episode(
+                self.shell, greedy=True, cap=self.episode_cap)[1])
+        return returns
+
     def get_constant(self, name):
         """Test probe: what this PROCESS's muzero constant resolves to --
         counterfactual-proof that overrides crossed the process boundary."""
