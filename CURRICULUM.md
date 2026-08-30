@@ -154,6 +154,61 @@ inversely with buffer size, and the offload is what makes the volume
 free. The no-sharpening guard separates repairable flatness from
 genuine ambiguity, which dominates in a fresh tiny buffer.
 
+### Phase 3 spec (2026-08-30, approved direction; build gated per-step)
+
+Ordering principle: within-tree search stays sequential everywhere -- the
+2026-08-30 re-audit proved wave-batching flattens policy targets
+dose-dependently and that no budget buys it back (probe_budget_sweep:
+even at matched wave count the batched distribution never converges to
+sequential's, and on weak nets big budgets overshoot into noise-driven
+overcommitment). All parallelism is ACROSS trees/processes.
+
+Step 3a -- refresh actor + raised coverage (one package, never split):
+- Third Ray actor holding the lagged target nets; driver ships
+  trajectory refs (trajectories birthed in the object store to kill the
+  ~800 MB/request copy) + born_step; actor runs the communal windowed
+  re-search (width 16, probe-validated) and returns fresh targets.
+- Driver applies swap-on-ready at one fixed point in its loop
+  (single-threaded loop = the mutex); swaps are identity-checked
+  against eviction (a result for an evicted trajectory is dropped --
+  wasted work, never corruption).
+- Ships WITH 5-10x revisit coverage; the offload's payoff is making
+  that volume free, not saving the current ~1-2 min/iter.
+- Refresh candidate ordering becomes ENTROPY-PRIORITIZED (flattest
+  stored targets first) with the no-sharpening guard (stop re-searching
+  steps whose refreshed entropy does not drop). If the archfix verdict
+  is prior-echo stall (sharp + parked returns), the guard is mandatory
+  in the same commit; if archfix is healthy, priority still ships --
+  its value scales with the tiny buffer's ~50x reuse either way.
+- Target-model sync cadence: actor refreshes its nets at the same
+  iteration boundary the driver's lagged copy updates; a stamp on each
+  result ties targets to the model version that produced them.
+
+Step 3b -- N self-play workers + shared inference service (EffZero's
+own shape; the acting twin of communal's cross-root batching):
+- Lightweight env+tree workers (CPU: env stepping, tree ops, PUCT
+  bookkeeping) send leaf-evaluation requests to ONE GPU inference actor
+  that batches ACROSS workers. Per-tree schedule stays strictly
+  sequential; the GPU batch is formed from different trees' single
+  outstanding requests, so target quality is untouched by construction.
+- This is a RECIPE change (N episodes/iter alters data cadence and the
+  train-ratio); it gets its own design pass on cadence + 4.3 age
+  bookkeeping before build, its own audit loop, and a validation A/B
+  like phases 1-2. Paired-seed reproducibility is explicitly given up.
+- Cancellation story unchanged in kind: pause-the-world checkpointing,
+  drain in-flight episodes or drop them (same cost as today's kills).
+- Batch-size note: the service naturally reproduces acting-probe
+  batch-16-ish GPU efficiency WITHOUT wave semantics -- the batch is
+  across independent trees.
+
+Step 3c -- driver-side latency hiding (no semantics changes): PER
+root-list caching + batch prefetch (assemble batch k+1 while k trains),
+then AMP as its own measured change; CUDA graphs only if profiling
+still shows launch overhead after AMP.
+
+Zero-code lever available any time: parallel seeds of the same arm on
+one GPU (evidence throughput, no semantic change to any single run).
+
 ## Carried decisions from the repro line
 
 Tiny buffer + live refresh direction; entropy-based refresh priority is
