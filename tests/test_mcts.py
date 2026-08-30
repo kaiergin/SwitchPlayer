@@ -337,6 +337,44 @@ def test_virtual_loss_repels_on_negative_values(helper):
     assert second is not first
 
 
+def test_virtual_loss_never_boosts_a_below_minimum_child(helper):
+    """2026-08-30 verification round: a child whose composite lies BELOW the
+    tracked minimum normalizes negative, and the pre-clamp penalty
+    (score * n/(n+vl)) scaled it toward 0 -- a bonus. Both search paths must
+    hold such a child at its own score: PUCT selection must not let an
+    in-flight worst child outrank an honest better sibling, and the Gumbel
+    readout _normalized_q must never exceed the unclamped score."""
+    root = make_uniform_children(helper)
+    children = list(root.children.values())
+    for child in children:
+        child.expanded_value = -14.0
+    helper.min_max_stats = muzero.MinMaxStats()
+    helper.min_max_stats.update(-10.0)
+    helper.min_max_stats.update(0.0)
+    discount = 0.997
+    bad, good = children[0], children[1]
+    good.expanded_value = -12.0  # less bad, still below the minimum
+    bad.virtual_loss = 2.0
+    # Priors chosen so bad's and good's u-terms are EQUAL (bad's exploration
+    # denominator is 1+0+2=3, good's is 1), isolating the value clamp: the
+    # selection decision rests entirely on the penalized scores.
+    for child in children:
+        child.prior = 0.2 / 3
+    bad.prior, good.prior = 0.6, 0.2
+
+    unclamped = helper.min_max_stats.normalize(
+        bad.reward + discount * bad.expanded_value)
+    assert unclamped < 0  # the premise: below-minimum normalizes negative
+    boosted = unclamped * 1 / (1 + bad.virtual_loss)  # the old formula
+    qn = helper._normalized_q(bad, discount)
+    assert qn == pytest.approx(unclamped)  # held at its own score
+    assert qn < boosted  # never the old bonus
+
+    # Pre-clamp, bad's boosted score (-0.13) beat good's (-0.20) at equal u
+    # and selection descended the worst action; the clamp restores good.
+    assert select_once(helper) is good
+
+
 def test_communal_window_targets_and_release(helper):
     """Communal windows: every root gets a readout, the chain backup's
     bookkeeping visit -- and ONLY that visit -- is subtracted from the

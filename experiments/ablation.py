@@ -799,10 +799,11 @@ class Run:
             z0 = muzero.paper_value_target(out, idx, muzero.TD_STEPS,
                                            muzero.DISCOUNT)
             t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
-        pols = np.stack([t["target_policy"] for t in out
-                         if t["has_policy_target"]])
-        self._fresh_target_H = float(
-            (-pols * np.log(pols + 1e-12)).sum(axis=1).mean())
+        pols = [t["target_policy"] for t in out if t["has_policy_target"]]
+        if pols:  # empty only for a length-1 terminated episode (cap 0)
+            pols = np.stack(pols)
+            self._fresh_target_H = float(
+                (-pols * np.log(pols + 1e-12)).sum(axis=1).mean())
         return out
 
     def _refresh_traj_communal(self, traj):

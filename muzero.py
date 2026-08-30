@@ -1422,8 +1422,11 @@ class MCTSHelper:
         return while its siblings carry network estimates, which biases
         selection toward (early training) or away from (calibrated value
         head) the action already taken; neutral seeding removes that
-        asymmetry. The communal refresh uses it; the product pipeline keeps
-        seeded values, whose MC returns the warmup targets read.
+        asymmetry. Both the product pipeline and the communal refresh run
+        SEEDED (the refresh went neutral 2026-08-27..30, but at tiny-buffer
+        coverage the unanchored re-searches flattened most stored targets
+        each cycle -- see _refresh_traj_communal); neutral remains available
+        for callers that want a structure-only chain.
         """
         prev_node = None
         prev_action_taken = None
@@ -1510,16 +1513,16 @@ class MCTSHelper:
                 score = stats.normalize(child.reward + discount * onward)
                 if child.virtual_loss > 0:
                     # Virtual loss: each in-flight simulation counts as a
-                    # completed visit at the normalized MINIMUM, which is 0 by
-                    # construction -- pessimistic under any reward sign.
-                    # Algebraically identical to raw-space visits pinned at
-                    # min_max_stats.minimum (normalize is affine), and it
-                    # fades as real visits accumulate, so a genuinely
-                    # dominant action can still take several simulations of
-                    # one batch. An unvisited child's network estimate counts
-                    # as its single pseudo-visit. min() because a below-minimum
-                    # child normalizes NEGATIVE, and scaling a negative score
-                    # toward 0 would turn the penalty into a bonus
+                    # completed visit at the normalized MINIMUM (0 by
+                    # construction), fading as real visits accumulate, so a
+                    # genuinely dominant action can still take several
+                    # simulations of one batch. An unvisited child's network
+                    # estimate counts as its single pseudo-visit. For
+                    # score >= 0 this is algebraically identical to raw-space
+                    # visits pinned at min_max_stats.minimum (normalize is
+                    # affine); a BELOW-minimum child normalizes NEGATIVE and
+                    # scaling it toward 0 would be a bonus, so min() holds it
+                    # at its own score instead -- no penalty, never a boost
                     # (2026-08-30 re-audit).
                     n = max(child.visit_count, 1)
                     score = min(score, score * n / (n + child.virtual_loss))
@@ -1921,7 +1924,10 @@ class MCTSHelper:
         qn = self.min_max_stats.normalize(child.reward + discount * onward)
         if child.virtual_loss > 0:
             n = max(child.visit_count, 1)
-            qn = qn * n / (n + child.virtual_loss)
+            # min() mirrors the PUCT clamp: a below-minimum child
+            # normalizes NEGATIVE, and scaling it toward 0 would raise it
+            # (2026-08-30 verification round).
+            qn = min(qn, qn * n / (n + child.virtual_loss))
         return qn
 
     def _sigma_scale(self, node, baseline=None):
