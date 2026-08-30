@@ -48,7 +48,14 @@ MAX_DEPTH = 8
 # unsubtracted it nudges every policy target toward the behaviour action.
 # PUCT only; with USE_GUMBEL_SEARCH on, reanalysis falls back to sequential.
 USE_COMMUNAL_REANALYSIS = False
-COMMUNAL_WINDOW_ROOTS = 8
+# 16, raised from 8 on 2026-08-30 (Kai): probe on arch1@96k weights, 150
+# positions, 2 noise seeds -- width-16 targets differ from width-8 by
+# LESS than width-8's own noise floor (cross-KL 0.172 vs 0.222) at
+# identical entropy, 12% faster even on CPU. Width 32 drifted just past
+# the floor (0.259) for 5 ms/pos more; not taken. Each root still gets
+# exactly ONE simulation per round -- widening adds trees per GPU batch,
+# never concurrent sims within a tree.
+COMMUNAL_WINDOW_ROOTS = 16
 MAX_GAMEPLAY = 20
 MAX_REPLAY = 20
 # Optional TRANSITION-count cap on the replay buffer (0 = off). MAX_REPLAY
