@@ -1517,9 +1517,12 @@ class MCTSHelper:
                     # fades as real visits accumulate, so a genuinely
                     # dominant action can still take several simulations of
                     # one batch. An unvisited child's network estimate counts
-                    # as its single pseudo-visit.
+                    # as its single pseudo-visit. min() because a below-minimum
+                    # child normalizes NEGATIVE, and scaling a negative score
+                    # toward 0 would turn the penalty into a bonus
+                    # (2026-08-30 re-audit).
                     n = max(child.visit_count, 1)
-                    score = score * n / (n + child.virtual_loss)
+                    score = min(score, score * n / (n + child.virtual_loss))
                 score += u
                 if score > best_score:
                     best_score = score
@@ -1667,6 +1670,10 @@ class MCTSHelper:
         discount = DISCOUNT if discount is None else discount
         max_depth = MAX_DEPTH if max_depth is None else max_depth
         if USE_GUMBEL_SEARCH:
+            # sim_batches is PUCT-only: the Gumbel path ignores it entirely.
+            # A probe comparing batch widths with USE_GUMBEL_SEARCH left True
+            # measures Gumbel twice and reports identical results
+            # (2026-08-30 audit trap).
             return await self.run_gumbel_mcts(index, num_simulations=num_simulations,
                                               discount=discount, max_depth=max_depth)
         # Now that expansion is lazy the root has to be expanded explicitly:

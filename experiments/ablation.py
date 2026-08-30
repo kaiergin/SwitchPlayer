@@ -133,16 +133,19 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
-        # communal2 weights, 20 states x 2 searches, honest virtual loss):
-        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
-        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
-        # speed; batch 50 (one wave, no sequential refinement) dropped
-        # signal 40%. The papers' schedule is sequential (batch 1, set here
-        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
-        # target quality. The pre-fix waves-of-8 collapse was the broken
-        # virtual loss, not batching itself.
-        "MCTS_BATCHES": 16,
+        # SEQUENTIAL simulations -- the papers' schedule, restored
+        # 2026-08-30. Batch 16 (2026-08-29..30) was chosen on KL/signal-
+        # to-noise metrics that are DIRECTION-BLIND: the paired re-probe
+        # (seed-matched Dirichlet, wave width the only variable, arch1
+        # weights) shows batched waves flatten the visit policy dose-
+        # dependently -- dH vs sequential +0.025/+0.064/+0.135/+0.171
+        # at widths 2/4/8/16 -- because in-wave statistics are frozen (a
+        # 50-sim search refreshes stats 50 times sequentially, only 4 at
+        # width 16). At width 16 targets sit near PRIOR entropy, so every
+        # policy update flattens the prior: the arch1 run's climbing
+        # H(pi) (1.10->1.34, iters 15-45). No width is free; buy acting
+        # speed with --ray, not wave width.
+        "MCTS_BATCHES": 1,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -204,16 +207,19 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
-        # communal2 weights, 20 states x 2 searches, honest virtual loss):
-        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
-        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
-        # speed; batch 50 (one wave, no sequential refinement) dropped
-        # signal 40%. The papers' schedule is sequential (batch 1, set here
-        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
-        # target quality. The pre-fix waves-of-8 collapse was the broken
-        # virtual loss, not batching itself.
-        "MCTS_BATCHES": 16,
+        # SEQUENTIAL simulations -- the papers' schedule, restored
+        # 2026-08-30. Batch 16 (2026-08-29..30) was chosen on KL/signal-
+        # to-noise metrics that are DIRECTION-BLIND: the paired re-probe
+        # (seed-matched Dirichlet, wave width the only variable, arch1
+        # weights) shows batched waves flatten the visit policy dose-
+        # dependently -- dH vs sequential +0.025/+0.064/+0.135/+0.171
+        # at widths 2/4/8/16 -- because in-wave statistics are frozen (a
+        # 50-sim search refreshes stats 50 times sequentially, only 4 at
+        # width 16). At width 16 targets sit near PRIOR entropy, so every
+        # policy update flattens the prior: the arch1 run's climbing
+        # H(pi) (1.10->1.34, iters 15-45). No width is free; buy acting
+        # speed with --ray, not wave width.
+        "MCTS_BATCHES": 1,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -267,7 +273,7 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        "MCTS_BATCHES": 16,  # measured, see effzero-repro's comment
+        "MCTS_BATCHES": 1,  # sequential, see effzero-repro's comment
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -323,7 +329,7 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        "MCTS_BATCHES": 16,  # measured, see effzero-repro's comment
+        "MCTS_BATCHES": 1,  # sequential, see effzero-repro's comment
         "MAX_DEPTH": 50,
         "DIRICHLET_ALPHA": 0.3,
         "PREFIX_HEAD_CHANNELS": 16,
@@ -382,16 +388,19 @@ ARMS = {
         "USE_AUGMENTATION": True,
         "REWARD_CLIP": 1.0,
         "ACT_SEARCH_SIMS": 50,
-        # 16-wide simulation waves, chosen by MEASUREMENT (probe 2026-08-29,
-        # communal2 weights, 20 states x 2 searches, honest virtual loss):
-        # batch 16 gave the highest signal KL(pi||prior) 0.35 and best
-        # signal/noise 2.4 vs sequential's 0.17/0.57, at ~11x the acting
-        # speed; batch 50 (one wave, no sequential refinement) dropped
-        # signal 40%. The papers' schedule is sequential (batch 1, set here
-        # 2026-08-23..29) -- a knowing deviation that measures UPWARD on
-        # target quality. The pre-fix waves-of-8 collapse was the broken
-        # virtual loss, not batching itself.
-        "MCTS_BATCHES": 16,
+        # SEQUENTIAL simulations -- the papers' schedule, restored
+        # 2026-08-30. Batch 16 (2026-08-29..30) was chosen on KL/signal-
+        # to-noise metrics that are DIRECTION-BLIND: the paired re-probe
+        # (seed-matched Dirichlet, wave width the only variable, arch1
+        # weights) shows batched waves flatten the visit policy dose-
+        # dependently -- dH vs sequential +0.025/+0.064/+0.135/+0.171
+        # at widths 2/4/8/16 -- because in-wave statistics are frozen (a
+        # 50-sim search refreshes stats 50 times sequentially, only 4 at
+        # width 16). At width 16 targets sit near PRIOR entropy, so every
+        # policy update flattens the prior: the arch1 run's climbing
+        # H(pi) (1.10->1.34, iters 15-45). No width is free; buy acting
+        # speed with --ray, not wave width.
+        "MCTS_BATCHES": 1,
         # The papers have no depth cap; 50 effectively uncaps a 50-sim
         # search (MAX_DEPTH 8 made capped leaves re-back their static
         # network value each visit). Requires the in-tree prefix LSTM
@@ -790,6 +799,10 @@ class Run:
             z0 = muzero.paper_value_target(out, idx, muzero.TD_STEPS,
                                            muzero.DISCOUNT)
             t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
+        pols = np.stack([t["target_policy"] for t in out
+                         if t["has_policy_target"]])
+        self._fresh_target_H = float(
+            (-pols * np.log(pols + 1e-12)).sum(axis=1).mean())
         return out
 
     def _refresh_traj_communal(self, traj):
@@ -799,11 +812,14 @@ class Run:
         in lockstep -- one simulation per root per round, the papers'
         sequential schedule inside each tree, the GPU batch formed ACROSS
         roots -- and statistics accumulate communally across the searches.
-        The chain is seeded NEUTRALLY (create_tree_from_game with
-        seed_values=False): no Monte-Carlo value backup, so the behaviour
-        child starts symmetric with its imagined siblings and there is no
-        bookkeeping visit to subtract. Expansions along the chain are
-        shared between neighbouring roots, which is the design's point.
+        The chain is SEEDED (create_tree_from_game with seed_values=True,
+        restored 2026-08-30): the Monte-Carlo value backup anchors each
+        behaviour child with its realized return, and readout subtracts
+        the one bookkeeping visit. Neutral chains (2026-08-27..30) let the
+        early value head alone steer every re-search; at tiny-buffer
+        refresh coverage that rewrote most of the buffer's targets flatter
+        each cycle. Expansions along the chain are shared between
+        neighbouring roots, which is the design's point.
 
         Runs under the same target-model swap as the act_search path it
         replaces (the caller swapped the searcher's networks already). One
@@ -816,16 +832,19 @@ class Run:
         try:
             evaluated = searcher.eval_obs(
                 [(t["obs"], t["action"], t["reward"]) for t in traj])
-            # NEUTRAL chain (2026-08-27 audit finding): no Monte-Carlo value
-            # backup, so the behaviour child starts symmetric with its
-            # imagined siblings -- a seeded chain gives it a realized return
-            # against network estimates, pulling policy targets toward the
-            # behaviour action early and away from it once the value head
-            # calibrates. The chain still supplies structure, priors, and
-            # real edge rewards (the reuse communal wants).
+            # SEEDED chain, restored 2026-08-30. The 2026-08-27 neutral-chain
+            # change (no Monte-Carlo backup, behaviour child symmetric with
+            # imagined siblings) addressed grafting bias -- but under the
+            # 31.25k transition cap refresh covers the WHOLE buffer every
+            # ~10 iterations, so neutral re-searches, anchored only by the
+            # early value head, rewrote most targets flatter and collapsed
+            # root-value magnitudes (arch1: H(pi) 1.10->1.34 over iters
+            # 15-45 while mean |value target| fell 1.19->0.70; the old
+            # seeded run held both). The realized-return anchor is what
+            # keeps tiny-buffer refresh from feeding the flatness back.
             searcher.create_tree_from_game(
                 evaluated, terminated=not traj[-1].get("truncated", False),
-                seed_values=False)
+                seed_values=True)
             indices = list(range(len(traj)))
             if not traj[-1].get("has_policy_target", True):
                 # Terminated tail: carried no search then, none now.
@@ -837,7 +856,7 @@ class Run:
                 results = asyncio.run(searcher.run_communal_mcts(
                     widx, num_simulations=muzero.ACT_SEARCH_SIMS,
                     c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
-                    chain_seeded=False))
+                    chain_seeded=True))
                 for idx, (pol, val, has_policy) in results.items():
                     if not has_policy:
                         continue
@@ -1013,6 +1032,16 @@ class Run:
                     errs["prefix"] += (prefix - tgt).abs().mean().item()
                     errs["control"] += tgt.abs().mean().item()
             errs = {k: v / batches for k, v in errs.items()}
+
+        # Search-target flatness, straight from the last recorded episode
+        # (2026-08-30 re-audit): policy_entropy above is the HEAD's entropy
+        # on buffer states -- it lags its targets. This is the entropy of
+        # the acting searches' own visit distributions, the quantity the
+        # batch-width and chain-seeding regressions actually move, logged
+        # so search-side flattening is visible without a probe.
+        fresh = getattr(self, "_fresh_target_H", None)
+        if fresh is not None:
+            errs["fresh_target_entropy"] = fresh
 
         return errs
 
