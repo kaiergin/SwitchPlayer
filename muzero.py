@@ -1513,8 +1513,9 @@ class MCTSHelper:
                 score = stats.normalize(child.reward + discount * onward)
                 if child.virtual_loss > 0:
                     # Virtual loss: each in-flight simulation counts as a
-                    # completed visit at the normalized MINIMUM (0 by
-                    # construction), fading as real visits accumulate, so a
+                    # completed visit at the normalized MINIMUM (0 once the
+                    # stats have a range; identity before), fading as real
+                    # visits accumulate, so a
                     # genuinely dominant action can still take several
                     # simulations of one batch. An unvisited child's network
                     # estimate counts as its single pseudo-visit. For

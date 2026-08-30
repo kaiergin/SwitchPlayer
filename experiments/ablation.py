@@ -800,10 +800,16 @@ class Run:
                                            muzero.DISCOUNT)
             t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
         pols = [t["target_policy"] for t in out if t["has_policy_target"]]
-        if pols:  # empty only for a length-1 terminated episode (cap 0)
+        # Unreachable-empty from every current caller (play_episode always
+        # yields >= 1 policy-carrying record; cap 0 keeps its greedy tail
+        # search), but a future zero-target caller must clear the
+        # diagnostic, not silently repeat the previous episode's entropy.
+        if pols:
             pols = np.stack(pols)
             self._fresh_target_H = float(
                 (-pols * np.log(pols + 1e-12)).sum(axis=1).mean())
+        else:
+            self._fresh_target_H = None
         return out
 
     def _refresh_traj_communal(self, traj):
