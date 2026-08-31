@@ -219,6 +219,10 @@ def test_offloaded_search_and_apply_match_inline(monkeypatch):
     monkeypatch.setattr(muzero, "COMMUNAL_WINDOW_ROOTS", 2)
     monkeypatch.setattr(muzero, "REFRESH_ENTROPY_PRIORITY", True)
     monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
+    # STRIKES=1 so a single refresh CAN set the guard -- at the default 2
+    # the guard-parity assertion below would compare None == None
+    # (verification-round F2).
+    monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 1)
 
     np.random.seed(11)
     base = obs_traj([1.0] * 5, [5.0] * 5)
@@ -264,6 +268,8 @@ def test_offloaded_search_and_apply_match_inline(monkeypatch):
         assert a["priority"] == pytest.approx(b["priority"])
         assert a["refreshed_step"] == b["refreshed_step"] == 500
         assert a.get("refresh_guarded") == b.get("refresh_guarded")
+        assert (a.get("refresh_no_drop_strikes")
+                == b.get("refresh_no_drop_strikes"))
 
 
 def test_refresh_actor_runs_in_process(monkeypatch):

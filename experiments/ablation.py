@@ -1687,8 +1687,13 @@ class RayPipeline:
         self._target_states_cache = (None, None)  # (target sync stamp, dicts)
         self._records_refs = {}             # uid -> ray.put ref (immutable data)
         self._refresh_shipped_stamp = None  # last target stamp sent to actor
-        self.refresh_applied = 0            # trajectories applied (lifetime)
+        self.refresh_applied = 0            # trajectories applied (this process)
         self.refresh_skipped = 0            # dispatch points passed while cooking
+        if muzero.REFRESH_OFFLOAD:
+            # Zeroed stats from the first row on: a wedged actor that
+            # never applies must read as applied=0 in the jsonl, not as
+            # a run with no offload at all (verification-round F1).
+            self._note_refresh_stats()
         self.server = None                  # phase 3b inference server
         self.workers = []
         if ray_workers:
@@ -1866,6 +1871,7 @@ class RayPipeline:
             return
         if self.pending_refresh is not None:
             self.refresh_skipped += 1
+            self._note_refresh_stats()
             return
         candidates = self.run._refresh_candidates(muzero.POLICY_REFRESH_COUNT)
         if not candidates:
@@ -1918,19 +1924,29 @@ class RayPipeline:
         if jobs:
             self.pending_refresh = (jobs, now)
 
-    def _note_refresh_stats(self, now):
+    def _note_refresh_stats(self, now=None):
         """Accounting the 3a audit demanded: without it, a slow actor
         silently degrades '5x coverage' to ~1x at high staleness and the
-        A/B attributes the wrong thing. Surfaced into eval rows by
-        evaluate_diagnostics."""
-        self.run._refresh_offload_stats = {
+        A/B attributes the wrong thing. Refreshed at EVERY touch point --
+        pipeline construction, skipped dispatch, and apply -- so rows
+        carry live counters even when a batch cooks past the eval
+        cadence or the actor wedges before its first apply
+        (verification-round F1). Surfaced by evaluate_diagnostics."""
+        stats = {
             "refresh_applied": self.refresh_applied,
             "refresh_skipped_dispatches": self.refresh_skipped,
+        }
+        if now is not None:
             # How stale the just-applied batch's search weights are at
             # application time (inline is bounded by the target sync
             # interval; the offload adds cook time on top).
-            "refresh_lag_steps": self.run.trainer.training_steps - now,
-        }
+            stats["refresh_lag_steps"] = (
+                self.run.trainer.training_steps - now)
+        else:
+            prev = getattr(self.run, "_refresh_offload_stats", {})
+            if "refresh_lag_steps" in prev:
+                stats["refresh_lag_steps"] = prev["refresh_lag_steps"]
+        self.run._refresh_offload_stats = stats
 
     def poll_refresh(self):
         """Swap-on-ready: apply any completed refresh results whose
