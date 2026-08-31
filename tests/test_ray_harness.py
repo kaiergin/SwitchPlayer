@@ -20,7 +20,7 @@ ray = pytest.importorskip("ray")
 @pytest.fixture(scope="module")
 def local_ray():
     ray.init(include_dashboard=False, ignore_reinit_error=True,
-             logging_level="ERROR", num_cpus=2,
+             logging_level="ERROR", num_cpus=4,  # pool test: server + 2 workers
              runtime_env={"env_vars": {"PYTHONPATH": os.pathsep.join(
                  (str(REPO), str(REPO / "experiments")))}})
     try:
@@ -83,3 +83,46 @@ def test_play_episode_attribute_surface_matches_the_shell():
     assert attrs <= {"env", "searcher", "env_steps"}, (
         f"play_episode now touches {sorted(attrs)}; update the actor shell "
         f"in experiments/ray_actors.py to provide the new attributes")
+
+
+def test_worker_pool_through_a_real_cluster(local_ray):
+    """Phase 3b end to end on genuine Ray transport: an ASYNC
+    InferenceServer actor (its batching needs Ray's concurrent method
+    scheduling, which no in-process test exercises) serving two CPU
+    env/tree workers that play real search-acting episodes concurrently.
+    Tiny sims/caps keep it CPU-cheap; correctness of the search itself is
+    pinned by test_inference_server's exact-parity test."""
+    import ray_actors
+    overrides = {"USE_ATARI_WRAPPERS": False, "USE_SEARCH_ACTING": True,
+                 "USE_GUMBEL_SEARCH": False, "PAPER_TARGETS": True,
+                 "USE_VALUE_PREFIX_IN_TREE": True, "MCTS_BATCHES": 1,
+                 "ACT_SEARCH_SIMS": 4, "MAX_DEPTH": 8}
+    schedule = {"TEMPERATURE_TOTAL_STEPS": 1000,
+                "OFFPOLICY_DECAY_STEPS": 300}
+    srv_cls = local_ray.remote(max_concurrency=64)(
+        ray_actors.InferenceServer)
+    server = srv_cls.remote(overrides, 6, schedule, device="cpu")
+    worker_cls = local_ray.remote(ray_actors.SelfPlayActor)
+    workers = [worker_cls.remote(overrides, 6, seed=10 + w,
+                                 schedule=schedule, env_name="Pong-v4",
+                                 frameskip=30, episode_cap=6, server=server)
+               for w in range(2)]
+    # Weight sync: server once, workers mirror the counter only.
+    donor = muzero.MCTSHelper(action_space=6,
+                              device=__import__("torch").device("cpu"),
+                              network_ref=None, storage_ref=None)
+    states = {n: getattr(donor.network_manager, n).state_dict()
+              for n in ("representation", "dynamics", "prediction",
+                        "value_prefix")}
+    local_ray.get(server.set_weights.remote(states, 7))
+    assert local_ray.get([w.set_weights.remote({}, 7) for w in workers]) \
+        == [7, 7]
+    # Two episodes CONCURRENTLY through the one server.
+    results = local_ray.get([w.play.remote(999 + i)
+                             for i, w in enumerate(workers)])
+    for traj, terminated, steps in results:
+        assert 1 <= steps <= 7
+        assert len(traj) in (steps, steps + 1)
+        # Search-acting records are 5-field (paper mode).
+        assert len(traj[0]) == 5
+        assert isinstance(terminated, bool)

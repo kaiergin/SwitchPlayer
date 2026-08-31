@@ -12,6 +12,7 @@ first trains in iteration k+1).
 The class is deliberately UNDECORATED: the driver wraps it with
 ray.remote(num_gpus=...) at creation, and tests run it in ray local mode.
 """
+import asyncio
 import pathlib
 import sys
 
@@ -24,7 +25,7 @@ import torch
 
 class SelfPlayActor:
     def __init__(self, overrides, action_space, seed, schedule,
-                 env_name, frameskip, episode_cap):
+                 env_name, frameskip, episode_cap, server=None):
         import muzero as mz
         self.mz = mz
         # The arm's world, rebuilt locally: constants first (network
@@ -46,10 +47,20 @@ class SelfPlayActor:
         self.searcher = mz.MCTSHelper(action_space=action_space,
                                       device=self.device, network_ref=None,
                                       storage_ref=None, enable_logging=False)
-        nm = self.searcher.network_manager
-        for net in (nm.representation, nm.prediction, nm.dynamics,
-                    nm.value_prefix):
-            net.eval()
+        if server is not None:
+            # Phase 3b env/tree worker: no local nets -- every forward
+            # goes to the shared InferenceServer, which batches across
+            # workers. The locally-built nets above are discarded with
+            # the manager they hang off; the search runs on CPU tensors.
+            import ray
+            self.searcher.network_manager = RemoteNetworkManager(
+                server, ray, action_space)
+            self.device = torch.device("cpu")
+        else:
+            nm = self.searcher.network_manager
+            for net in (nm.representation, nm.prediction, nm.dynamics,
+                        nm.value_prefix):
+                net.eval()
 
         # ONE env implementation and ONE episode implementation, both
         # ablation's own (build_env and Run.play_episode run UNMODIFIED
@@ -73,6 +84,11 @@ class SelfPlayActor:
 
     def set_weights(self, state_dicts, training_steps):
         nm = self.searcher.network_manager
+        if isinstance(nm, RemoteNetworkManager):
+            # Weights live on the InferenceServer (the driver syncs it
+            # once for all workers); only the temperature mirror is ours.
+            nm.training_steps = training_steps
+            return training_steps
         for name, state in state_dicts.items():
             net = getattr(nm, name)
             net.load_state_dict(state)
@@ -104,6 +120,255 @@ class SelfPlayActor:
         """Test probe: what this PROCESS's muzero constant resolves to --
         counterfactual-proof that overrides crossed the process boundary."""
         return getattr(self.mz, name)
+
+
+class InferenceServer:
+    """Phase 3b: ONE GPU-resident copy of the four nets serving every
+    env/tree worker, batching requests ACROSS workers into single large
+    forwards -- the acting-side twin of communal refresh's cross-root
+    batching. Each worker runs strictly sequential per-tree search, so a
+    worker has at most one outstanding request; the server's natural
+    batch is "whatever is queued", converging on the worker count. A
+    small fill window (max_wait_ms) trades one wire-latency quantum for
+    batch width; requests never wait longer than that.
+
+    An ASYNC actor: the driver must create it with ray.remote(...) on
+    this class and Ray will run its coroutine methods on one event loop,
+    interleaving arrivals -- that interleaving is what lets _flush see
+    multiple workers' requests at once. Tests drive the class directly
+    on a local asyncio loop.
+    """
+
+    def __init__(self, overrides, action_space, schedule,
+                 max_wait_ms=2.0, max_batch=64, device=None):
+        import muzero as mz
+        self.mz = mz
+        for key, value in overrides.items():
+            if hasattr(mz, key):
+                setattr(mz, key, value)
+        for key, value in schedule.items():
+            setattr(mz, key, value)
+        torch.manual_seed(1)
+        # device override is for tests (CPU parity against local search);
+        # production leaves it None and takes the GPU.
+        self.device = (torch.device(device) if device else torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"))
+        self.nets = {
+            "representation": mz.build_representation().to(self.device),
+            "dynamics": mz.build_dynamics(action_space).to(self.device),
+            "prediction": mz.build_prediction(action_space).to(self.device),
+            "value_prefix": mz.build_value_prefix().to(self.device),
+        }
+        for net in self.nets.values():
+            net.eval()
+        self.max_wait = max_wait_ms / 1000.0
+        self.max_batch = max_batch
+        # kind -> list of (payload, asyncio.Future). Flushed as a unit.
+        self._queues = {"initial": [], "dynamics": [], "prediction": [],
+                        "value_prefix": []}
+        self._flusher = None
+
+    def set_weights(self, state_dicts, training_steps):
+        for name, state in state_dicts.items():
+            self.nets[name].load_state_dict(state)
+            self.nets[name].eval()
+        self.training_steps = training_steps
+        return training_steps
+
+    def prefix_hidden_size(self):
+        """Workers build LSTM zero-states locally; they only need H."""
+        return self.nets["value_prefix"].initial_state(1, "cpu")[0].shape[-1]
+
+    async def _enqueue(self, kind, payload):
+        fut = asyncio.get_event_loop().create_future()
+        self._queues[kind].append((payload, fut))
+        if self._flusher is None or self._flusher.done():
+            self._flusher = asyncio.ensure_future(self._flush_soon())
+        return await fut
+
+    async def _flush_soon(self):
+        # The fill window: yield so concurrently-arriving requests (other
+        # workers' calls interleaved on this actor's loop) can queue up,
+        # then serve everything present.
+        await asyncio.sleep(self.max_wait)
+        self._flush()
+
+    def _flush(self):
+        for kind in self._queues:
+            pending, self._queues[kind] = self._queues[kind], []
+            for i in range(0, len(pending), self.max_batch):
+                chunk = pending[i:i + self.max_batch]
+                try:
+                    outs = self._run(kind, [p for p, _ in chunk])
+                    for (_, fut), out in zip(chunk, outs):
+                        if not fut.done():
+                            fut.set_result(out)
+                except Exception as e:  # surface, never hang a worker
+                    for _, fut in chunk:
+                        if not fut.done():
+                            fut.set_exception(
+                                RuntimeError(f"{kind} batch failed: {e}"))
+
+    def _run(self, kind, payloads):
+        """One batched forward over concatenated payloads; returns one
+        result per payload, split by each payload's own batch size."""
+        with torch.no_grad():
+            if kind == "initial":
+                sizes = [np.asarray(p).shape[0] for p in payloads]
+                obs = torch.tensor(np.concatenate(payloads, axis=0),
+                                   dtype=torch.float32,
+                                   device=self.device) / 255.0
+                latents = self.nets["representation"](obs)
+                logits, values, _ = self.nets["prediction"](latents)
+                policy = torch.softmax(logits, dim=1).cpu().numpy()
+                lat = latents.cpu().numpy()
+                val = values.squeeze(-1).cpu().numpy()
+                out, at = [], 0
+                for s in sizes:
+                    out.append((lat[at:at + s], policy[at:at + s],
+                                val[at:at + s]))
+                    at += s
+                return out
+            if kind == "dynamics":
+                sizes = [p[0].shape[0] for p in payloads]
+                lat = torch.tensor(
+                    np.concatenate([p[0] for p in payloads], axis=0),
+                    dtype=torch.float32, device=self.device)
+                act = torch.tensor(
+                    np.concatenate([p[1] for p in payloads], axis=0),
+                    dtype=torch.long, device=self.device)
+                nxt, rew, _ = self.nets["dynamics"](lat, act)
+                nxt = nxt.cpu().numpy()
+                rew = rew.cpu().numpy()
+                out, at = [], 0
+                for s in sizes:
+                    out.append((nxt[at:at + s], rew[at:at + s]))
+                    at += s
+                return out
+            if kind == "prediction":
+                sizes = [p.shape[0] for p in payloads]
+                lat = torch.tensor(np.concatenate(payloads, axis=0),
+                                   dtype=torch.float32, device=self.device)
+                logits, values, _ = self.nets["prediction"](lat)
+                logits = logits.cpu().numpy()
+                values = values.cpu().numpy()
+                out, at = [], 0
+                for s in sizes:
+                    out.append((logits[at:at + s], values[at:at + s]))
+                    at += s
+                return out
+            # value_prefix: payload = (latents, h, c); batch along the
+            # LSTM's batch dim (dim 1 for states, dim 0 for latents).
+            sizes = [p[0].shape[0] for p in payloads]
+            lat = torch.tensor(np.concatenate([p[0] for p in payloads], 0),
+                               dtype=torch.float32, device=self.device)
+            h = torch.tensor(np.concatenate([p[1] for p in payloads], 1),
+                             dtype=torch.float32, device=self.device)
+            c = torch.tensor(np.concatenate([p[2] for p in payloads], 1),
+                             dtype=torch.float32, device=self.device)
+            prefixes, _, (nh, nc) = self.nets["value_prefix"](
+                lat, (h.contiguous(), c.contiguous()))
+            prefixes = prefixes.cpu().numpy()
+            nh, nc = nh.cpu().numpy(), nc.cpu().numpy()
+            out, at = [], 0
+            for s in sizes:
+                out.append((prefixes[at:at + s], nh[:, at:at + s],
+                            nc[:, at:at + s]))
+                at += s
+            return out
+
+    # One coroutine per request kind; Ray serves them concurrently on the
+    # actor's event loop, which is what fills the batch window.
+    async def initial(self, obs):
+        return await self._enqueue("initial", obs)
+
+    async def dynamics_step(self, latents, actions):
+        return await self._enqueue("dynamics", (latents, actions))
+
+    async def predict(self, latents):
+        return await self._enqueue("prediction", latents)
+
+    async def prefix_step(self, latents, h, c):
+        return await self._enqueue("value_prefix", (latents, h, c))
+
+
+class _RemoteModule:
+    """Callable stand-in for a torch module living on the InferenceServer.
+    Converts torch<->numpy at the wire, honours the .training/.eval()
+    protocol expand_prefixes uses, and blocks on the server's reply --
+    the worker's search is strictly sequential, so blocking is correct
+    and the server's cross-worker batching supplies the parallelism."""
+
+    def __init__(self, owner, kind):
+        self._owner = owner
+        self._kind = kind
+        self.training = False
+
+    def eval(self):
+        return self
+
+    def train(self, mode=True):
+        self.training = False  # workers never train
+        return self
+
+    def initial_state(self, batch, device):
+        h = self._owner.prefix_hidden
+        z = torch.zeros(1, batch, h)
+        return (z, z.clone())
+
+    def __call__(self, *args):
+        owner = self._owner
+        if self._kind == "dynamics":
+            lat, act = args
+            nxt, rew = owner._call("dynamics_step",
+                                   lat.detach().cpu().numpy(),
+                                   act.detach().cpu().numpy())
+            return (torch.from_numpy(np.array(nxt)),
+                    torch.from_numpy(np.array(rew)), None)
+        if self._kind == "prediction":
+            logits, values = owner._call(
+                "predict", args[0].detach().cpu().numpy())
+            return (torch.from_numpy(np.array(logits)),
+                    torch.from_numpy(np.array(values)), None)
+        # value_prefix
+        lat, (h, c) = args
+        prefixes, nh, nc = owner._call(
+            "prefix_step", lat.detach().cpu().numpy(),
+            h.detach().cpu().numpy(), c.detach().cpu().numpy())
+        return (torch.from_numpy(np.array(prefixes)), None,
+                (torch.from_numpy(np.array(nh)),
+                 torch.from_numpy(np.array(nc))))
+
+
+class RemoteNetworkManager:
+    """NetworkManager facade whose forwards run on the InferenceServer.
+    Exposes exactly the surface the search uses: batch_inference,
+    initial_inference, callable dynamics/prediction/value_prefix, and
+    training_steps for the temperature schedule. Latents live on the
+    worker as CPU torch tensors."""
+
+    def __init__(self, server, ray_module, action_space):
+        self.server = server
+        self.ray = ray_module
+        self.action_space = action_space
+        self.device = torch.device("cpu")
+        self.training_steps = 0
+        self.dynamics = _RemoteModule(self, "dynamics")
+        self.prediction = _RemoteModule(self, "prediction")
+        self.value_prefix = _RemoteModule(self, "value_prefix")
+        self.prefix_hidden = self.ray.get(
+            server.prefix_hidden_size.remote())
+
+    def _call(self, method, *args):
+        return self.ray.get(getattr(self.server, method).remote(*args))
+
+    def batch_inference(self, batch_obs):
+        lat, policy, value = self._call("initial", np.asarray(batch_obs))
+        return torch.from_numpy(np.array(lat)), policy, value
+
+    def initial_inference(self, obs):
+        lat, policy, value = self._call("initial", np.asarray(obs)[None])
+        return policy[0], float(value[0])
 
 
 class RefreshActor:

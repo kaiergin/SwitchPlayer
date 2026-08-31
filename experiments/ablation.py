@@ -1634,7 +1634,7 @@ class RayPipeline:
     """
 
     def __init__(self, run, spec, seed, iterations, train_steps,
-                 episodes_per_iter):
+                 episodes_per_iter, ray_workers=0):
         # Scope is validated by ray_scope_gate at the TOP of run_one --
         # before --overwrite destroys the pair's data and before the
         # warm-start prefill spends compute (verification finding).
@@ -1658,16 +1658,37 @@ class RayPipeline:
         self.refresh_actor = None           # phase 3a, lazy like eval_actor
         self.pending_refresh = None         # ([(uid, future)], now_stamp)
         self._target_states_cache = (None, None)  # (target sync stamp, dicts)
-        self.actor = self._make_actor(seed_extra=0)
+        self.server = None                  # phase 3b inference server
+        self.workers = []
+        if ray_workers:
+            import ray_actors
+            # GPU budget at fixed shares: server 0.5 + eval 0.2 +
+            # refresh 0.2 = 0.9; workers are CPU-only by construction.
+            gpu = 0.5 if torch.cuda.is_available() else 0
+            srv_cls = self.ray.remote(num_gpus=gpu, max_concurrency=256)(
+                ray_actors.InferenceServer)
+            self.server = srv_cls.remote(
+                self.overrides, ACTIONS,
+                {"TEMPERATURE_TOTAL_STEPS": muzero.TEMPERATURE_TOTAL_STEPS,
+                 "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS})
+            self.workers = [self._make_actor(seed_extra=100 + w,
+                                             server=self.server)
+                            for w in range(ray_workers)]
+            self.actor = None
+        else:
+            self.actor = self._make_actor(seed_extra=0)
         self.sync()
 
-    def _make_actor(self, seed_extra):
-        """ONE construction path for both actors. Small FIXED gpu share:
-        the driver trains outside Ray's accounting, and two actors at
-        mcts_gpu_share-style fractions could sum past 1.0 -- the second
-        would never schedule and its first ray.get would block forever."""
+    def _make_actor(self, seed_extra, server=None):
+        """ONE construction path for every acting actor. Small FIXED gpu
+        share: the driver trains outside Ray's accounting, and actors at
+        mcts_gpu_share-style fractions could sum past 1.0 -- the excess
+        would never schedule and its first ray.get would block forever.
+        Phase 3b workers get a server handle and NO gpu (their forwards
+        run on the InferenceServer)."""
         import ray_actors
-        gpu = 0.2 if torch.cuda.is_available() else 0
+        gpu = 0 if server is not None else (
+            0.2 if torch.cuda.is_available() else 0)
         actor_cls = self.ray.remote(num_gpus=gpu)(ray_actors.SelfPlayActor)
         # The run-length-keyed schedule values are COMPUTED once by the
         # driver's _run_length_globals and shipped as values -- the actor
@@ -1676,7 +1697,7 @@ class RayPipeline:
                     "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS}
         return actor_cls.remote(self.overrides, ACTIONS,
                                 self.seed + seed_extra, schedule,
-                                ENV_NAME, FRAMESKIP, EPISODE_CAP)
+                                ENV_NAME, FRAMESKIP, EPISODE_CAP, server)
 
     def _states(self):
         """CPU state dicts of the four synced nets, cached per
@@ -1697,18 +1718,31 @@ class RayPipeline:
         return self._states_cache[1]
 
     def sync(self):
-        self.ray.get(self.actor.set_weights.remote(
-            self._states(), self.run.trainer.training_steps))
+        steps = self.run.trainer.training_steps
+        if self.server is not None:
+            # One weight ship for the whole pool; workers only mirror the
+            # temperature counter (their set_weights skips empty dicts).
+            self.ray.get(self.server.set_weights.remote(
+                self._states(), steps))
+            self.ray.get([w.set_weights.remote({}, steps)
+                          for w in self.workers])
+        else:
+            self.ray.get(self.actor.set_weights.remote(
+                self._states(), steps))
 
     def request(self, it):
         # training_steps captured at REQUEST time: sequential reanalysis of
         # this episode would run at the TOP of the next iteration with
         # exactly this count, and paper_targets stamps born_step from it --
         # collecting after the gradient steps must not age the stamp.
-        self.pending = (
-            [self.actor.play.remote(self.seed * 100003 + it * 1009 + e)
-             for e in range(self.episodes_per_iter)],
-            self.run.trainer.training_steps)
+        if self.server is not None:
+            futures = [w.play.remote(self.seed * 100003 + it * 1009 + e)
+                       for e, w in enumerate(self.workers)]
+        else:
+            futures = [self.actor.play.remote(
+                self.seed * 100003 + it * 1009 + e)
+                for e in range(self.episodes_per_iter)]
+        self.pending = (futures, self.run.trainer.training_steps)
 
     @staticmethod
     def _own_arrays(record):
@@ -1854,7 +1888,8 @@ class RayPipeline:
 
     def shutdown(self):
         self.drain_eval()
-        for actor in (self.actor, self.eval_actor, self.refresh_actor):
+        for actor in (self.actor, self.eval_actor, self.refresh_actor,
+                      self.server, *self.workers):
             if actor is not None:
                 try:
                     self.ray.kill(actor)
@@ -1864,10 +1899,19 @@ class RayPipeline:
 
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
             checkpoint_every=10, resume=False, overwrite=False,
-            init_weights=None, use_ray=False):
+            init_weights=None, use_ray=False, ray_workers=0):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         if use_ray:
             ray_scope_gate(spec)
+        if ray_workers and not use_ray:
+            raise SystemExit("--ray-workers requires --ray")
+        if ray_workers:
+            # Phase 3b RECIPE CHANGE, stated loudly: with a worker pool
+            # each iteration collects one episode PER WORKER through the
+            # shared inference server -- episodes-per-iter is superseded.
+            print(f"  [{arm} s{seed}] worker pool: {ray_workers} env/tree "
+                  f"workers, {ray_workers} episodes/iteration "
+                  f"(--episodes-per-iter superseded)", flush=True)
         ck = resume_path(arm, seed)
         expect = run_expect(arm, seed, iterations, train_steps,
                             episodes_per_iter, eval_every)
@@ -1973,7 +2017,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"H(pi) {metrics.get('policy_entropy', 0.0):>5.2f}", flush=True)
 
         pipeline = (RayPipeline(run, spec, seed, iterations, train_steps,
-                                episodes_per_iter) if use_ray else None)
+                                episodes_per_iter, ray_workers=ray_workers)
+                    if use_ray else None)
         for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
@@ -2259,6 +2304,14 @@ def main():
                          "(one-deep pipeline; see RayPipeline). Checkpoints, "
                          "resume, refresh, and eval semantics are unchanged; "
                          "paired-seed parity with sequential runs is not.")
+    ap.add_argument("--ray-workers", type=int, default=0, metavar="N",
+                    help="phase 3b: N CPU env/tree workers share ONE "
+                         "GPU inference server that batches their network "
+                         "calls across trees (per-tree search stays "
+                         "strictly sequential). RECIPE CHANGE: each "
+                         "iteration collects N episodes (one per worker); "
+                         "--episodes-per-iter is superseded. Requires "
+                         "--ray. 0 = the validated single-actor pipeline.")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
     if args.resume and args.overwrite:
@@ -2320,7 +2373,8 @@ def main():
                         args.train_steps, args.eval_every, out,
                         checkpoint_every=args.checkpoint_every,
                         resume=args.resume, overwrite=args.overwrite,
-                        init_weights=args.init_weights, use_ray=args.ray)
+                        init_weights=args.init_weights, use_ray=args.ray,
+                        ray_workers=args.ray_workers)
     plot(out, RESULTS)
 
 
