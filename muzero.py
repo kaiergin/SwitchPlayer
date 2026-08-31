@@ -355,7 +355,16 @@ POLICY_REFRESH_COUNT = 2
 # is the mutex). Inline refresh remains the sequential-mode path.
 REFRESH_ENTROPY_PRIORITY = False
 REFRESH_NO_SHARPEN_GUARD = False
-REFRESH_GUARD_TOL = 1e-3
+# Guard calibration (3a audit, 2026-08-31): two re-searches of the SAME
+# step at the production budget (50 sims, window 16) differ by |dH|
+# median 0.037 / max 0.087 -- pure search noise. A step leaves the
+# rotation only after REFRESH_GUARD_STRIKES consecutive re-searches that
+# each failed to drop entropy by REFRESH_GUARD_TOL; one clear drop
+# resets the count. TOL near the noise median + 2 strikes makes random
+# retirement of converged steps ~unlikely while genuinely-ambiguous
+# steps (dH ~ 0) still exit within two visits.
+REFRESH_GUARD_TOL = 0.05
+REFRESH_GUARD_STRIKES = 2
 REFRESH_OFFLOAD = False
 
 

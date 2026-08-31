@@ -85,6 +85,44 @@ def test_play_episode_attribute_surface_matches_the_shell():
         f"in experiments/ray_actors.py to provide the new attributes")
 
 
+def test_refresh_actor_through_a_real_cluster(local_ray):
+    """Phase 3a transport: RefreshActor in a genuine worker process --
+    module import, ObjectRef argument deref (the driver ships records
+    via ray.put, once per trajectory), set_weights, and a windowed
+    communal re-search returning well-formed results."""
+    import numpy as np
+    import torch
+    import ray_actors
+    overrides = {"USE_GUMBEL_SEARCH": False, "USE_COMMUNAL_REANALYSIS": True,
+                 "COMMUNAL_WINDOW_ROOTS": 2, "MCTS_BATCHES": 1,
+                 "ACT_SEARCH_SIMS": 4, "MAX_DEPTH": 8,
+                 "USE_VALUE_PREFIX_IN_TREE": True}
+    cls = local_ray.remote(ray_actors.RefreshActor)
+    actor = cls.remote(overrides, 6, seed=2,
+                       schedule={"TEMPERATURE_TOTAL_STEPS": 1000,
+                                 "OFFPOLICY_DECAY_STEPS": None})
+    donor = muzero.MCTSHelper(action_space=6, device=torch.device("cpu"),
+                              network_ref=None, storage_ref=None)
+    states = {n: getattr(donor.network_manager, n).state_dict()
+              for n in ("representation", "dynamics", "prediction",
+                        "value_prefix")}
+    assert local_ray.get(actor.set_weights.remote(states, 5)) == 5
+    rng = np.random.default_rng(4)
+    records = [{"obs": rng.integers(0, 255, (12, *muzero.IMAGE_RESHAPE),
+                                    dtype=np.uint8),
+                "action": int(rng.integers(6)), "reward": 0.0,
+                "truncated": False, "has_policy_target": True}
+               for _ in range(4)]
+    records[-1]["truncated"] = True  # truncated tail stays searchable
+    ref = local_ray.put(records)     # the production shipping shape
+    results = local_ray.get(actor.refresh.remote(ref, [0, 1, 2]))
+    assert set(results) == {0, 1, 2}
+    for pol, val in results.values():
+        pol = np.asarray(pol)
+        assert pol.shape == (6,) and pol.sum() == pytest.approx(1.0)
+        assert np.isfinite(val)
+
+
 def test_worker_pool_through_a_real_cluster(local_ray):
     """Phase 3b end to end on genuine Ray transport: an ASYNC
     InferenceServer actor (its batching needs Ray's concurrent method

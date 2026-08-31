@@ -5,8 +5,9 @@ The offload's core promise is SEMANTIC IDENTITY with the inline path:
 the actor runs the same Run._search_traj and the driver applies through
 the same Run._apply_refresh, so the parity test below is the load-bearing
 one. RefreshActor is deliberately undecorated, so it is driven directly
-in-process here; the ray transport itself is exercised by
-test_ray_harness's cluster tests.
+in-process here; its real-ray transport (worker-process import, ObjectRef
+argument deref, actor scheduling) is covered by
+test_ray_harness.py::test_refresh_actor_through_a_real_cluster.
 """
 import copy
 import sys
@@ -123,6 +124,7 @@ def test_eligible_indices_respect_tail_and_guard(monkeypatch):
 
 def test_guard_marks_non_sharpening_steps_but_still_applies(monkeypatch):
     monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
+    monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 1)
     traj = traj_with_entropy(sharp_policy(), n=2)
     run = make_run([traj])
     flat, sharp = flat_policy(), sharp_policy()
@@ -141,6 +143,33 @@ def test_guard_marks_non_sharpening_steps_but_still_applies(monkeypatch):
     assert all(t["priority"] > 0 for t in traj)
 
 
+def test_guard_needs_consecutive_strikes_and_a_drop_resets(monkeypatch):
+    """Calibration against measured search noise (|dH| median 0.037 at
+    the production budget): one non-drop is a coin flip, so the guard
+    demands REFRESH_GUARD_STRIKES consecutive failures, and a single
+    clear drop wipes the count."""
+    monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
+    monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 2)
+    traj = traj_with_entropy(sharp_policy(), n=1)
+    run = make_run([traj])
+    flat = flat_policy()
+    sharper = np.full(ACTIONS, 0.01)
+    sharper[1] = 1.0 - 0.01 * (ACTIONS - 1)
+    # Strike 1: counted, not guarded.
+    run._apply_refresh(traj, {0: (flat, -1.0)}, now=100)
+    assert "refresh_guarded" not in traj[0]
+    assert traj[0]["refresh_no_drop_strikes"] == 1
+    # A clear drop resets the count...
+    run._apply_refresh(traj, {0: (sharper, -1.0)}, now=200)
+    assert "refresh_no_drop_strikes" not in traj[0]
+    # ...so two MORE non-drops are needed to guard.
+    run._apply_refresh(traj, {0: (flat, -1.0)}, now=300)
+    assert "refresh_guarded" not in traj[0]
+    run._apply_refresh(traj, {0: (flat.copy(), -1.0)}, now=400)
+    assert traj[0].get("refresh_guarded") is True
+    assert "refresh_no_drop_strikes" not in traj[0]
+
+
 def test_guard_off_never_marks(monkeypatch):
     monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", False)
     traj = traj_with_entropy(sharp_policy(), n=1)
@@ -156,6 +185,7 @@ def test_guard_demands_a_drop_of_at_least_the_tolerance(monkeypatch):
     particular uniform-to-uniform (the canonical genuinely-ambiguous
     step) is always guarded."""
     monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
+    monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 1)
     monkeypatch.setattr(muzero, "REFRESH_GUARD_TOL", 0.05)
     mid = 0.5 * sharp_policy() + 0.5 * flat_policy()
     traj = traj_with_entropy(mid, n=3)
@@ -315,10 +345,17 @@ def test_poll_refresh_applies_alive_drops_evicted_keeps_cooking(monkeypatch):
         ("uid-evicted", {"ready": True, "value": {0: (sharp, -9.0)}}),
         ("uid-alive2", {"ready": False, "value": None}),
     ], 500)
+    pipe.refresh_applied = 0
+    pipe.refresh_skipped = 3
     pipe.poll_refresh()
     # Applied to the alive trajectory...
     assert np.allclose(alive[0]["target_policy"], sharp)
     assert alive[0]["refreshed_step"] == 500
+    # ...and the offload accounting reached the run (3a audit F2).
+    stats = run._refresh_offload_stats
+    assert stats["refresh_applied"] == 1
+    assert stats["refresh_skipped_dispatches"] == 3
+    assert stats["refresh_lag_steps"] == run.trainer.training_steps - 500
     # ...evicted result dropped without error, unfinished future kept.
     assert pipe.pending_refresh is not None
     (uid, fut), = pipe.pending_refresh[0]

@@ -963,7 +963,20 @@ class Run:
                 old_h = float(-(old * np.log(old + 1e-12)).sum())
                 new_h = float(-(pol * np.log(pol + 1e-12)).sum())
                 if new_h >= old_h - muzero.REFRESH_GUARD_TOL:
-                    t["refresh_guarded"] = True
+                    # STRIKES consecutive non-drops guard the step; one
+                    # clear drop resets. Measured search noise (3a audit:
+                    # per-step |dH| median 0.037, max 0.087 at the
+                    # production budget) makes any single comparison a
+                    # coin flip -- the pair (TOL, STRIKES) is what turns
+                    # this into a discriminator instead of a ratchet.
+                    strikes = t.get("refresh_no_drop_strikes", 0) + 1
+                    if strikes >= muzero.REFRESH_GUARD_STRIKES:
+                        t["refresh_guarded"] = True
+                        t.pop("refresh_no_drop_strikes", None)
+                    else:
+                        t["refresh_no_drop_strikes"] = strikes
+                else:
+                    t.pop("refresh_no_drop_strikes", None)
             t["target_policy"] = pol
             t["root_value"] = float(val)
         for idx, t in enumerate(traj):
@@ -1130,6 +1143,12 @@ class Run:
         if fresh is not None:
             errs["fresh_target_entropy"] = fresh
 
+        # Offload accounting (3a audit): applied/skipped/lag land in every
+        # row so a slow refresh actor can never silently degrade coverage.
+        stats = getattr(self, "_refresh_offload_stats", None)
+        if stats:
+            errs.update(stats)
+
         return errs
 
 
@@ -1244,6 +1263,10 @@ def load_run_checkpoint(run, path, expect):
     # states are CPU ByteTensors that torch.set_rng_state rejects if a
     # cuda map_location relocates them.
     state = _read_checkpoint(path)
+    # Pre-3b checkpoints predate the ray_workers field; every one of them
+    # was a pool-less run, so absent means 0 -- normalized here rather
+    # than special-cased in the strict comparison below.
+    state.setdefault("ray_workers", 0)
     # Recipe validation FIRST, completed-marker check second: a completed
     # 60-iter marker must not silently satisfy a NEW 90-iter --resume
     # invocation -- that is a different experiment, and the caller needs
@@ -1565,15 +1588,19 @@ def env_tag_fragment(env):
     return re.sub(r"[^a-z0-9]+", "", env.split("-")[0].lower())
 
 
-def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every):
+def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every,
+               ray_workers=0):
     """The validated recipe. EPISODE_CAP and eval_every are part of the
     experiment too: a resume that forgot --episode-cap would silently
     continue with truncated episodes stitched onto the first half's
-    replay."""
+    replay. ray_workers likewise (3b audit): pool mode IS the recipe --
+    N episodes/iteration -- so a resume with a different worker count is
+    a different experiment and must be refused, not continued."""
     return {"arm": arm, "seed": seed, "env": ENV_NAME,
             "iterations": iterations, "train_steps_per_iter": train_steps,
             "episodes_per_iter": episodes_per_iter,
-            "episode_cap": EPISODE_CAP, "eval_every": eval_every}
+            "episode_cap": EPISODE_CAP, "eval_every": eval_every,
+            "ray_workers": ray_workers}
 
 
 def ray_scope_gate(spec):
@@ -1658,6 +1685,10 @@ class RayPipeline:
         self.refresh_actor = None           # phase 3a, lazy like eval_actor
         self.pending_refresh = None         # ([(uid, future)], now_stamp)
         self._target_states_cache = (None, None)  # (target sync stamp, dicts)
+        self._records_refs = {}             # uid -> ray.put ref (immutable data)
+        self._refresh_shipped_stamp = None  # last target stamp sent to actor
+        self.refresh_applied = 0            # trajectories applied (lifetime)
+        self.refresh_skipped = 0            # dispatch points passed while cooking
         self.server = None                  # phase 3b inference server
         self.workers = []
         if ray_workers:
@@ -1670,7 +1701,8 @@ class RayPipeline:
             self.server = srv_cls.remote(
                 self.overrides, ACTIONS,
                 {"TEMPERATURE_TOTAL_STEPS": muzero.TEMPERATURE_TOTAL_STEPS,
-                 "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS})
+                 "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS},
+                pool_size=ray_workers)
             self.workers = [self._make_actor(seed_extra=100 + w,
                                              server=self.server)
                             for w in range(ray_workers)]
@@ -1695,8 +1727,10 @@ class RayPipeline:
         # never re-derives them (no duplicated 0.3 formula).
         schedule = {"TEMPERATURE_TOTAL_STEPS": muzero.TEMPERATURE_TOTAL_STEPS,
                     "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS}
+        # seed*8191: plain seed+extra made seed s, worker w+1 share RNG
+        # streams with seed s+1, worker w (3b audit F7).
         return actor_cls.remote(self.overrides, ACTIONS,
-                                self.seed + seed_extra, schedule,
+                                self.seed * 8191 + seed_extra, schedule,
                                 ENV_NAME, FRAMESKIP, EPISODE_CAP, server)
 
     def _states(self):
@@ -1818,12 +1852,20 @@ class RayPipeline:
         """Dispatch one refresh batch (POLICY_REFRESH_COUNT candidate
         trajectories) to the refresh actor; lazy actor creation, at most
         one batch in flight (a still-cooking batch means this dispatch
-        point simply passes -- coverage resumes next cadence). Ships the
-        lagged target nets at their current sync stamp plus each
-        candidate's records and eligible indices. The driver's
+        point passes and is COUNTED -- see refresh_skipped). Target nets
+        ship only when their sync stamp changed. The driver's
         training_steps at dispatch is the rotation stamp `now`, matching
-        the inline path, which reads the counter at refresh time."""
-        if self.pending_refresh is not None or not self.run.replay:
+        the inline path, which reads the counter at refresh time.
+
+        Trajectory data ships as ObjectRefs put ONCE per trajectory (3a
+        audit F1: rebuilding record dicts per dispatch serialized the
+        whole buffer -- gigabytes -- inside the driver every cadence; the
+        shipped fields obs/action/reward/flags are immutable for a
+        trajectory's lifetime, so one put is exact)."""
+        if not self.run.replay:
+            return
+        if self.pending_refresh is not None:
+            self.refresh_skipped += 1
             return
         candidates = self.run._refresh_candidates(muzero.POLICY_REFRESH_COUNT)
         if not candidates:
@@ -1836,42 +1878,74 @@ class RayPipeline:
                 "TEMPERATURE_TOTAL_STEPS": muzero.TEMPERATURE_TOTAL_STEPS,
                 "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS}
             self.refresh_actor = cls.remote(self.overrides, ACTIONS,
-                                            self.seed + 9000, schedule)
-        self.ray.get(self.refresh_actor.set_weights.remote(
-            self._target_states(), self.run.trainer.training_steps))
+                                            self.seed * 8191 + 9000, schedule)
+        self.run.trainer._ensure_target_model()
+        stamp = self.run.trainer._target_synced_at
+        if stamp != self._refresh_shipped_stamp:
+            self.ray.get(self.refresh_actor.set_weights.remote(
+                self._target_states(), self.run.trainer.training_steps))
+            self._refresh_shipped_stamp = stamp
+        now = self.run.trainer.training_steps
+        # Prune record refs for evicted trajectories so the object store
+        # holds exactly the live buffer's worth.
+        live = {t[0].get("traj_uid") for t in self.run.replay if t}
+        self._records_refs = {u: r for u, r in self._records_refs.items()
+                              if u in live}
         jobs = []
         for ti in candidates:
             traj = self.run.replay[ti]
             idxs = self.run._eligible_indices(traj)
             if not idxs:
+                # Inline parity (3a audit F3): a no-eligible candidate
+                # still rotates -- priorities recomputed, stamp advanced
+                # -- or it would occupy a candidate slot forever.
+                self.run._apply_refresh(traj, {}, now)
                 continue
             # uid, not id(): CPython reuses addresses, so a raw id could
             # match a NEW trajectory allocated where an evicted one lived
             # and apply results to the wrong data. The uid rides the head
             # record (harmlessly into checkpoints).
             uid = traj[0].setdefault("traj_uid", uuid.uuid4().hex)
-            records = [{"obs": t["obs"], "action": t["action"],
-                        "reward": t["reward"],
-                        "truncated": t.get("truncated", False),
-                        "has_policy_target": t.get("has_policy_target", True)}
-                       for t in traj]
-            jobs.append((uid, self.refresh_actor.refresh.remote(records, idxs)))
+            if uid not in self._records_refs:
+                self._records_refs[uid] = self.ray.put(
+                    [{"obs": t["obs"], "action": t["action"],
+                      "reward": t["reward"],
+                      "truncated": t.get("truncated", False),
+                      "has_policy_target": t.get("has_policy_target", True)}
+                     for t in traj])
+            jobs.append((uid, self.refresh_actor.refresh.remote(
+                self._records_refs[uid], idxs)))
         if jobs:
-            self.pending_refresh = (jobs, self.run.trainer.training_steps)
+            self.pending_refresh = (jobs, now)
+
+    def _note_refresh_stats(self, now):
+        """Accounting the 3a audit demanded: without it, a slow actor
+        silently degrades '5x coverage' to ~1x at high staleness and the
+        A/B attributes the wrong thing. Surfaced into eval rows by
+        evaluate_diagnostics."""
+        self.run._refresh_offload_stats = {
+            "refresh_applied": self.refresh_applied,
+            "refresh_skipped_dispatches": self.refresh_skipped,
+            # How stale the just-applied batch's search weights are at
+            # application time (inline is bounded by the target sync
+            # interval; the offload adds cook time on top).
+            "refresh_lag_steps": self.run.trainer.training_steps - now,
+        }
 
     def poll_refresh(self):
         """Swap-on-ready: apply any completed refresh results whose
         trajectory is still in the buffer (uid check -- an evicted
         trajectory's results are dropped: wasted work, never corruption).
         Non-blocking; called at ONE fixed point in the driver loop, whose
-        single-threadedness is the mutex the design needs. Application
-        goes through the same _apply_refresh as the inline path."""
+        single-threadedness is the mutex. Application goes through the
+        same _apply_refresh as the inline path."""
         if self.pending_refresh is None:
             return
         jobs, now = self.pending_refresh
         alive = {t[0].get("traj_uid"): t for t in self.run.replay
                  if t and t[0].get("traj_uid")}
         remaining = []
+        applied = 0
         for uid, fut in jobs:
             ready, _ = self.ray.wait([fut], timeout=0)
             if not ready:
@@ -1884,6 +1958,10 @@ class RayPipeline:
             self.run._apply_refresh(
                 traj, {int(i): (np.array(p), float(v))
                        for i, (p, v) in results.items()}, now)
+            applied += 1
+        if applied:
+            self.refresh_applied += applied
+            self._note_refresh_stats(now)
         self.pending_refresh = (remaining, now) if remaining else None
 
     def shutdown(self):
@@ -1914,7 +1992,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"(--episodes-per-iter superseded)", flush=True)
         ck = resume_path(arm, seed)
         expect = run_expect(arm, seed, iterations, train_steps,
-                            episodes_per_iter, eval_every)
+                            episodes_per_iter, eval_every,
+                            ray_workers=ray_workers)
         if muzero.USE_ATARI_WRAPPERS and FRAMESKIP is None:
             # The wrapper stack forces fixed skip 4 regardless; without the
             # flag the TAG lacks "-skip4" and rows would land in the

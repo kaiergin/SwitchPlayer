@@ -708,9 +708,13 @@ def test_run_expect_covers_the_full_protocol(monkeypatch):
     e = ablation.run_expect("effzero-repro", 0, 90, 2000, 1, 10)
     assert e["episode_cap"] == 3000
     assert e["eval_every"] == 10
+    assert e["ray_workers"] == 0, \
+        "pool mode is the recipe (N episodes/iter); it must be validated"
     assert set(e) == {"arm", "seed", "env", "iterations",
                       "train_steps_per_iter", "episodes_per_iter",
-                      "episode_cap", "eval_every"}
+                      "episode_cap", "eval_every", "ray_workers"}
+    assert ablation.run_expect("effzero-repro", 0, 90, 2000, 1, 10,
+                               ray_workers=8)["ray_workers"] == 8
 
 
 def test_failed_save_preserves_the_previous_checkpoint(tmp_path, monkeypatch):

@@ -40,7 +40,13 @@ class SelfPlayActor:
             setattr(mz, key, value)
         np.random.seed(seed * 7919 + 17)
         torch.manual_seed(seed * 7919 + 17)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Pool workers are CPU actors by CONSTRUCTION, not just by Ray's
+        # CUDA masking (3b audit F5): the searcher's device places node
+        # latents and search tensors, and a worker must never park them
+        # on the GPU it is supposed to have no claim on.
+        self.device = (torch.device("cpu") if server is not None else
+                       torch.device(
+                           "cuda" if torch.cuda.is_available() else "cpu"))
         self.action_space = action_space
         self.episode_cap = episode_cap
 
@@ -50,12 +56,11 @@ class SelfPlayActor:
         if server is not None:
             # Phase 3b env/tree worker: no local nets -- every forward
             # goes to the shared InferenceServer, which batches across
-            # workers. The locally-built nets above are discarded with
-            # the manager they hang off; the search runs on CPU tensors.
+            # workers. The locally-built nets are discarded with the
+            # manager they hang off; the search runs on CPU tensors.
             import ray
             self.searcher.network_manager = RemoteNetworkManager(
                 server, ray, action_space)
-            self.device = torch.device("cpu")
         else:
             nm = self.searcher.network_manager
             for net in (nm.representation, nm.prediction, nm.dynamics,
@@ -137,10 +142,23 @@ class InferenceServer:
     interleaving arrivals -- that interleaving is what lets _flush see
     multiple workers' requests at once. Tests drive the class directly
     on a local asyncio loop.
+
+    Determinism scope (3b audit F3): batched forwards are bitwise-equal
+    to solo forwards at every width >= 2, but width-1-vs-N differs at
+    ~1e-6 (oneDNN/cuDNN kernel selection, not cross-sample mixing) -- so
+    a search's exact float path depends on which workers shared a flush
+    window. Semantically sound; pool runs are not seed-reproducible.
+
+    pool_size: when set, a flush fires the moment that many requests are
+    queued across kinds (each worker has at most one outstanding, so a
+    full house means nobody else is coming) -- the fill window then only
+    pays when some workers are env-stepping. On Windows the window
+    itself would otherwise cost ~15ms real time at 2ms nominal (timer
+    quantization); __init__ requests 1ms resolution to fix that.
     """
 
     def __init__(self, overrides, action_space, schedule,
-                 max_wait_ms=2.0, max_batch=64, device=None):
+                 max_wait_ms=2.0, max_batch=64, device=None, pool_size=0):
         import muzero as mz
         self.mz = mz
         for key, value in overrides.items():
@@ -163,6 +181,13 @@ class InferenceServer:
             net.eval()
         self.max_wait = max_wait_ms / 1000.0
         self.max_batch = max_batch
+        self.pool_size = pool_size
+        if sys.platform == "win32":
+            # asyncio.sleep(0.002) really sleeps ~15ms under the default
+            # Windows timer (3b audit F2, measured); 1ms resolution
+            # restores the design constant (re-measured 2.0-3.0ms).
+            import ctypes
+            ctypes.windll.winmm.timeBeginPeriod(1)
         # kind -> list of (payload, asyncio.Future). Flushed as a unit.
         self._queues = {"initial": [], "dynamics": [], "prediction": [],
                         "value_prefix": []}
@@ -176,13 +201,23 @@ class InferenceServer:
         return training_steps
 
     def prefix_hidden_size(self):
-        """Workers build LSTM zero-states locally; they only need H."""
-        return self.nets["value_prefix"].initial_state(1, "cpu")[0].shape[-1]
+        """Workers build LSTM zero-states locally; they need (L, H) --
+        hardcoding L=1 would mis-shape the state if the LSTM ever gains
+        depth (3b audit F4)."""
+        h = self.nets["value_prefix"].initial_state(1, "cpu")[0]
+        return (h.shape[0], h.shape[-1])
 
     async def _enqueue(self, kind, payload):
         fut = asyncio.get_event_loop().create_future()
         self._queues[kind].append((payload, fut))
-        if self._flusher is None or self._flusher.done():
+        if (self.pool_size
+                and sum(len(q) for q in self._queues.values())
+                >= self.pool_size):
+            # Full house: every worker's request is here, nobody else is
+            # coming -- serve now, skip the fill window entirely. The
+            # sleeping flusher wakes later onto empty queues (harmless).
+            self._flush()
+        elif self._flusher is None or self._flusher.done():
             self._flusher = asyncio.ensure_future(self._flush_soon())
         return await fut
 
@@ -312,8 +347,8 @@ class _RemoteModule:
         return self
 
     def initial_state(self, batch, device):
-        h = self._owner.prefix_hidden
-        z = torch.zeros(1, batch, h)
+        layers, hidden = self._owner.prefix_hidden
+        z = torch.zeros(layers, batch, hidden)
         return (z, z.clone())
 
     def __call__(self, *args):
@@ -356,8 +391,8 @@ class RemoteNetworkManager:
         self.dynamics = _RemoteModule(self, "dynamics")
         self.prediction = _RemoteModule(self, "prediction")
         self.value_prefix = _RemoteModule(self, "value_prefix")
-        self.prefix_hidden = self.ray.get(
-            server.prefix_hidden_size.remote())
+        self.prefix_hidden = tuple(self.ray.get(
+            server.prefix_hidden_size.remote()))
 
     def _call(self, method, *args):
         return self.ray.get(getattr(self.server, method).remote(*args))

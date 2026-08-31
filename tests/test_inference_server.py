@@ -99,6 +99,34 @@ def test_batch_failure_surfaces_not_hangs(guard_constants, monkeypatch):
         asyncio.run(go())
 
 
+def test_pool_size_full_house_skips_the_fill_window(guard_constants,
+                                                    monkeypatch):
+    """With pool_size workers all waiting, the flush must fire the
+    instant the last request arrives -- a 500ms window that is never
+    paid proves the count trigger works."""
+    import time
+    srv = make_server(max_wait_ms=500.0, pool_size=2)
+    calls = []
+    real_run = srv._run
+
+    def counting_run(kind, payloads):
+        calls.append(len(payloads))
+        return real_run(kind, payloads)
+
+    monkeypatch.setattr(srv, "_run", counting_run)
+    lat = np.zeros((1, muzero.LATENT_CHANNELS, muzero.LATENT_HW,
+                    muzero.LATENT_HW), dtype=np.float32)
+
+    async def go():
+        t0 = time.perf_counter()
+        await asyncio.gather(srv.predict(lat), srv.predict(lat.copy()))
+        return time.perf_counter() - t0
+
+    dt = asyncio.run(go())
+    assert dt < 0.25, f"full house waited the window ({dt:.3f}s)"
+    assert calls == [2]
+
+
 def test_max_batch_splits_oversized_queues(guard_constants, monkeypatch):
     srv = make_server(max_wait_ms=5.0, max_batch=2)
     calls = []
