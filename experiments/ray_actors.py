@@ -104,3 +104,67 @@ class SelfPlayActor:
         """Test probe: what this PROCESS's muzero constant resolves to --
         counterfactual-proof that overrides crossed the process boundary."""
         return getattr(self.mz, name)
+
+
+class RefreshActor:
+    """Phase 3a: re-searches stored trajectories so raised refresh
+    coverage runs concurrently with the driver's training.
+
+    Env-less -- refresh touches only stored observations. Its OWN nets
+    play the role of the driver's lagged target model: the driver ships
+    the target nets' state dicts each dispatch (set_weights), then
+    candidate records + eligible indices; results return as
+    {index: (policy, root_value)} and the DRIVER applies them through
+    the same Run._apply_refresh as the inline path (guard, priorities,
+    rotation stamp), so offloaded semantics cannot drift. The search
+    itself is Run._search_traj run UNMODIFIED through a shell -- no
+    drifting copy of the communal topology.
+
+    Undecorated like SelfPlayActor: the driver wraps with
+    ray.remote(num_gpus=...); tests drive it directly.
+    """
+
+    def __init__(self, overrides, action_space, seed, schedule):
+        import muzero as mz
+        self.mz = mz
+        for key, value in overrides.items():
+            if hasattr(mz, key):
+                setattr(mz, key, value)
+        for key, value in schedule.items():
+            setattr(mz, key, value)
+        np.random.seed(seed * 7919 + 23)
+        torch.manual_seed(seed * 7919 + 23)
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu")
+        self.searcher = mz.MCTSHelper(action_space=action_space,
+                                      device=self.device, network_ref=None,
+                                      storage_ref=None, enable_logging=False)
+        nm = self.searcher.network_manager
+        for net in (nm.representation, nm.prediction, nm.dynamics,
+                    nm.value_prefix):
+            net.eval()
+        import ablation
+        ablation.ACTIONS = action_space
+        self._ablation = ablation
+        self.shell = object.__new__(ablation.Run)
+        self.shell.searcher = self.searcher
+
+    def set_weights(self, state_dicts, training_steps):
+        """Load the driver's LAGGED TARGET nets; these are the networks
+        every refresh search runs with (EffZero's reanalyze searches the
+        target model, never the live weights)."""
+        nm = self.searcher.network_manager
+        for name, state in state_dicts.items():
+            net = getattr(nm, name)
+            net.load_state_dict(state)
+            net.eval()
+        nm.training_steps = training_steps
+        return training_steps
+
+    def refresh(self, records, indices):
+        """Search one trajectory's eligible indices; returns
+        {index: (policy, root_value)}. Records carry obs/action/reward
+        plus the truncated/has_policy_target flags -- everything
+        _search_traj reads, nothing it doesn't."""
+        return self._ablation.Run._search_traj(self.shell, records,
+                                               list(indices))

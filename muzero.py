@@ -338,6 +338,25 @@ TARGET_MODEL_INTERVAL = 200
 # -- fresh policy targets never restore the 4.3 age-shrunk value horizon.
 POLICY_REFRESH_EVERY = 5
 POLICY_REFRESH_COUNT = 2
+# Phase 3a (2026-08-31, spec in CURRICULUM.md). All default OFF so every
+# archived arm keeps its recorded meaning; the entropy-refresh arm turns
+# them on together with a raised POLICY_REFRESH_COUNT.
+# REFRESH_ENTROPY_PRIORITY: refresh candidates are ordered flattest-mean-
+# stored-target-entropy first (the tiny buffer's ~50x reuse amplifies
+# every flat target, so repairing the flattest first repairs the most-
+# reused weakest signals) instead of oldest-first rotation.
+# REFRESH_NO_SHARPEN_GUARD: a step whose re-search does NOT drop its
+# target entropy (genuine ambiguity, not repairable flatness) is marked
+# and excluded from FUTURE re-searches; the fresh result is still
+# applied (newer target model = better value/priority regardless).
+# REFRESH_OFFLOAD: under --ray, refresh runs on a dedicated actor
+# against the lagged target nets and the driver applies results at a
+# fixed point in its own loop (swap-on-ready; the single-threaded loop
+# is the mutex). Inline refresh remains the sequential-mode path.
+REFRESH_ENTROPY_PRIORITY = False
+REFRESH_NO_SHARPEN_GUARD = False
+REFRESH_GUARD_TOL = 1e-3
+REFRESH_OFFLOAD = False
 
 
 def visit_softmax_temperature(training_steps):
@@ -1432,7 +1451,7 @@ class MCTSHelper:
         asymmetry. Both the product pipeline and the communal refresh run
         SEEDED (the refresh went neutral 2026-08-27..30, but at tiny-buffer
         coverage the unanchored re-searches flattened most stored targets
-        each cycle -- see _refresh_traj_communal); neutral remains available
+        each cycle -- see _search_traj_communal); neutral remains available
         for callers that want a structure-only chain.
         """
         prev_node = None

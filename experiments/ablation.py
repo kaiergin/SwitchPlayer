@@ -33,6 +33,7 @@ import pickle
 import random
 import sys
 import time
+import uuid
 
 import numpy as np
 import torch
@@ -556,6 +557,29 @@ ARMS = {
     },
 }
 
+# Phase 3a arm, DERIVED (not transcribed) from the communal arm so the base
+# recipe can never drift from its control. Same everything, plus the
+# entropy-refresh triangle: 5x coverage, flattest-first candidates, the
+# no-sharpen guard, and --ray refresh offload to make the volume free.
+ARMS["effzero-repro-communal-entropyrefresh"] = {
+    **ARMS["effzero-repro-refresh5x-communal"],
+    "POLICY_REFRESH_COUNT": 20,
+    "REFRESH_ENTROPY_PRIORITY": True,
+    "REFRESH_NO_SHARPEN_GUARD": True,
+    "REFRESH_OFFLOAD": True,
+    "_doc": "effzero-repro-refresh5x-communal plus the phase-3a "
+            "entropy-refresh package (2026-08-31): 5x refresh coverage "
+            "(COUNT 4->20; at the 31.25k transition cap that re-searches "
+            "roughly the whole buffer every 2 iterations), candidates "
+            "ordered flattest stored-target entropy first, the no-sharpen "
+            "guard (a step whose re-search does not drop its entropy is "
+            "genuinely ambiguous and leaves the rotation), and refresh "
+            "offloaded to a dedicated Ray actor under --ray (without "
+            "--ray the same coverage runs inline and costs iteration "
+            "time). Control: the communal arm at the same command; only "
+            "--arms differs.",
+}
+
 
 # Arms defined before augmentation existed keep their archived meaning: any
 # arm that does not opt in explicitly runs WITHOUT augmentation, regardless of
@@ -812,50 +836,43 @@ class Run:
             self._fresh_target_H = None
         return out
 
-    def _refresh_traj_communal(self, traj):
-        """Communal refresh (USE_COMMUNAL_REANALYSIS): re-search a stored
-        trajectory's policies through the SHARED chain tree instead of one
-        independent act_search per position. COMMUNAL_WINDOW_ROOTS roots run
-        in lockstep -- one simulation per root per round, the papers'
-        sequential schedule inside each tree, the GPU batch formed ACROSS
-        roots -- and statistics accumulate communally across the searches.
-        The chain is SEEDED (create_tree_from_game with seed_values=True,
-        restored 2026-08-30): the Monte-Carlo value backup anchors each
-        behaviour child with its realized return, and readout subtracts
-        the one bookkeeping visit. Neutral chains (2026-08-27..30) let the
-        early value head alone steer every re-search; at tiny-buffer
-        refresh coverage that rewrote most of the buffer's targets flatter
-        each cycle. Expansions along the chain are shared between
-        neighbouring roots, which is the design's point.
+    def _search_traj_communal(self, traj, indices):
+        """Communal refresh search (USE_COMMUNAL_REANALYSIS): re-search a
+        stored trajectory's policies through the SHARED chain tree instead
+        of one independent act_search per position. COMMUNAL_WINDOW_ROOTS
+        roots run in lockstep -- one simulation per root per round, the
+        papers' sequential schedule inside each tree, the GPU batch formed
+        ACROSS roots -- and statistics accumulate communally across the
+        searches. The chain is SEEDED (create_tree_from_game with
+        seed_values=True, restored 2026-08-30): the Monte-Carlo value
+        backup anchors each behaviour child with its realized return, and
+        readout subtracts the one bookkeeping visit. Neutral chains
+        (2026-08-27..30) let the early value head alone steer every
+        re-search; at tiny-buffer refresh coverage that rewrote most of
+        the buffer's targets flatter each cycle. Expansions along the
+        chain are shared between neighbouring roots, the design's point.
 
-        Runs under the same target-model swap as the act_search path it
-        replaces (the caller swapped the searcher's networks already). One
-        behavioural difference besides topology: a truncated tail's search
-        takes root noise like every other position, where the act_search
-        path searched it greedily.
+        SEARCH ONLY -- returns {index: (policy, root_value)} and applies
+        nothing; _apply_refresh is the single application path for both
+        the inline caller (which swapped the searcher's networks to the
+        target model already) and the --ray refresh actor (whose own nets
+        ARE the target copies). `indices` is the caller's eligible set
+        (ascending; the terminated tail and guard-excluded steps are
+        already filtered out). One behavioural difference besides
+        topology: a truncated tail's search takes root noise like every
+        other position, where the act_search path searched it greedily.
         """
+        if not indices:
+            return {}
         searcher = self.searcher
         saved = getattr(searcher, "current_trajectory", None)
+        out = {}
         try:
             evaluated = searcher.eval_obs(
                 [(t["obs"], t["action"], t["reward"]) for t in traj])
-            # SEEDED chain, restored 2026-08-30. The 2026-08-27 neutral-chain
-            # change (no Monte-Carlo backup, behaviour child symmetric with
-            # imagined siblings) addressed grafting bias -- but under the
-            # 31.25k transition cap refresh covers the WHOLE buffer every
-            # ~10 iterations, so neutral re-searches, anchored only by the
-            # early value head, rewrote most targets flatter and collapsed
-            # root-value magnitudes (arch1: H(pi) 1.10->1.34 over iters
-            # 15-45 while mean |value target| fell 1.19->0.70; the old
-            # seeded run held both). The realized-return anchor is what
-            # keeps tiny-buffer refresh from feeding the flatness back.
             searcher.create_tree_from_game(
                 evaluated, terminated=not traj[-1].get("truncated", False),
                 seed_values=True)
-            indices = list(range(len(traj)))
-            if not traj[-1].get("has_policy_target", True):
-                # Terminated tail: carried no search then, none now.
-                indices = indices[:-1]
             window = max(1, muzero.COMMUNAL_WINDOW_ROOTS)
             released = -1
             for w0 in range(0, len(indices), window):
@@ -867,8 +884,7 @@ class Run:
                 for idx, (pol, val, has_policy) in results.items():
                     if not has_policy:
                         continue
-                    traj[idx]["target_policy"] = np.asarray(pol, dtype=np.float64)
-                    traj[idx]["root_value"] = float(val)
+                    out[idx] = (np.asarray(pol, dtype=np.float64), float(val))
                 # Windows advance in ascending order, so everything up to
                 # this window's last root is unreachable from any later
                 # search and can be freed.
@@ -879,28 +895,121 @@ class Run:
             searcher.release_span(released + 1, len(traj) - 1)
         finally:
             searcher.current_trajectory = saved
+        return out
 
-    def refresh_targets(self, count):
-        """EfficientZero's reanalyze, policy half (approximated): re-search
-        every position of the `count` OLDEST trajectories through the LAGGED
-        TARGET MODEL -- noisy, as their reanalyze workers search -- replacing
-        policy targets and root values (the terminated tail's record carried
-        no search and is skipped), recomputing priorities, and stamping
-        the refresh rotation (ages are preserved). Their
-        revisit_policy_search_rate=0.99 re-searches sampled positions per
-        batch on a CPU fleet; this is the compute-bounded analogue."""
-        if not self.replay:
-            return
-        # Rotation stamp is refreshed_step, NOT born_step: fresh policy
-        # targets do not make the stored ACTION SEQUENCE on-policy, so the
-        # 4.3 age-shrunk value horizon (keyed on born_step) must keep
-        # shrinking (their delta_td keys on buffer position and is never
-        # restored by a re-search).
+    def _eligible_indices(self, traj):
+        """Steps a refresh may re-search: policy-carrying (the terminated
+        tail carried no search then, none now) and, under the no-sharpen
+        guard, not yet marked as unrepairably ambiguous."""
+        return [i for i, t in enumerate(traj)
+                if t.get("has_policy_target", True)
+                and not (muzero.REFRESH_NO_SHARPEN_GUARD
+                         and t.get("refresh_guarded"))]
+
+    def _search_traj(self, traj, indices):
+        """Search one stored trajectory's eligible steps with whatever
+        networks the searcher currently holds; returns
+        {index: (policy, root_value)}. Topology per the arm's flags."""
+        if muzero.USE_COMMUNAL_REANALYSIS and not muzero.USE_GUMBEL_SEARCH:
+            return self._search_traj_communal(traj, indices)
+        out = {}
+        for i in indices:
+            terminal_record = i == len(traj) - 1
+            _, pol, val = asyncio.run(self.searcher.act_search(
+                traj[i]["obs"], greedy=terminal_record))
+            out[i] = (np.asarray(pol, dtype=np.float64), float(val))
+        return out
+
+    def _refresh_candidates(self, count):
+        """Which stored trajectories to re-search. Default: oldest by
+        refresh rotation (EffZero's cadence). REFRESH_ENTROPY_PRIORITY:
+        flattest mean stored target entropy first over eligible steps --
+        the tiny buffer's sample reuse amplifies every flat target, so
+        repairing the flattest first repairs the most-reused weakest
+        signals; rotation age breaks ties so equal-entropy trajectories
+        still rotate. A trajectory with no eligible steps is skipped
+        outright (nothing left to repair)."""
         def freshness(i):
             head = self.replay[i][0]
             return head.get("refreshed_step", head.get("born_step", 0))
 
-        oldest = sorted(range(len(self.replay)), key=freshness)[:count]
+        if not muzero.REFRESH_ENTROPY_PRIORITY:
+            return sorted(range(len(self.replay)), key=freshness)[:count]
+        scored = []
+        for i, traj in enumerate(self.replay):
+            hs = [float(-(t["target_policy"]
+                          * np.log(t["target_policy"] + 1e-12)).sum())
+                  for t in (traj[j] for j in self._eligible_indices(traj))]
+            if hs:
+                scored.append((-float(np.mean(hs)), freshness(i), i))
+        scored.sort()
+        return [i for _, _, i in scored[:count]]
+
+    def _apply_refresh(self, traj, results, now):
+        """Apply fresh search results to a stored trajectory: guard
+        bookkeeping, target/root-value replacement, priority recompute
+        under the 4.3 age-shrunk horizon, and the rotation stamp. The
+        SINGLE application path -- the inline refresh and the --ray
+        refresh actor's swap-on-ready both land here, so offloaded
+        semantics cannot drift from sequential. The fresh result is
+        applied even when the guard trips: a newer target model gives a
+        better value/priority regardless; the guard only stops FUTURE
+        re-searches of a step whose entropy would not drop."""
+        for idx, (pol, val) in results.items():
+            t = traj[idx]
+            pol = np.asarray(pol, dtype=np.float64)
+            if muzero.REFRESH_NO_SHARPEN_GUARD and not t.get("refresh_guarded"):
+                old = np.asarray(t["target_policy"], dtype=np.float64)
+                old_h = float(-(old * np.log(old + 1e-12)).sum())
+                new_h = float(-(pol * np.log(pol + 1e-12)).sum())
+                if new_h >= old_h - muzero.REFRESH_GUARD_TOL:
+                    t["refresh_guarded"] = True
+            t["target_policy"] = pol
+            t["root_value"] = float(val)
+        for idx, t in enumerate(traj):
+            # Priority against the z the trainer will actually compute
+            # for this position: the 4.3 age-shrunk horizon, not the
+            # full TD_STEPS (refresh candidates are the oldest, where
+            # it shrinks most). The bootstrap is the just-refreshed
+            # stored search value -- MuZero's canonical priority --
+            # which tracks, without exactly equaling, the trainer's
+            # target-net value-head bootstrap. Recomputed for EVERY
+            # record: refreshed neighbours shift unsearched steps' z.
+            age = max(0, now - t.get("born_step", now))
+            z0 = muzero.paper_value_target(
+                traj, idx, muzero.paper_horizon(age), muzero.DISCOUNT)
+            t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
+        for t in traj:
+            # Stamped last, in its own pass: freshness() reads the head
+            # record, which must only carry a stamp once the whole
+            # trajectory -- searches AND priorities -- completed.
+            t["refreshed_step"] = now
+
+    def refresh_targets(self, count):
+        """EfficientZero's reanalyze, policy half (approximated): re-search
+        every eligible position of `count` candidate trajectories through
+        the LAGGED TARGET MODEL -- noisy, as their reanalyze workers search
+        -- replacing policy targets and root values, recomputing
+        priorities, and stamping the refresh rotation (ages are
+        preserved). Candidates are oldest-first by default; flattest-first
+        under REFRESH_ENTROPY_PRIORITY (see _refresh_candidates). Their
+        revisit_policy_search_rate=0.99 re-searches sampled positions per
+        batch on a CPU fleet; this is the compute-bounded analogue.
+
+        Rotation stamp is refreshed_step, NOT born_step: fresh policy
+        targets do not make the stored ACTION SEQUENCE on-policy, so the
+        4.3 age-shrunk value horizon (keyed on born_step) must keep
+        shrinking (their delta_td keys on buffer position and is never
+        restored by a re-search). Under --ray with REFRESH_OFFLOAD the
+        search half of this runs on a dedicated actor instead
+        (RayPipeline.request_refresh/poll_refresh); this inline path is
+        the sequential-mode implementation and the offload's semantic
+        reference."""
+        if not self.replay:
+            return
+        candidates = self._refresh_candidates(count)
+        if not candidates:
+            return
         now = self.trainer.training_steps
         # Their reanalyze re-searches with the LAGGED TARGET MODEL, not the
         # current weights: swap the searcher's networks for the duration.
@@ -913,39 +1022,10 @@ class Run:
             nm.prediction = self.trainer.target_prediction
             nm.dynamics = self.trainer.target_dynamics
             nm.value_prefix = self.trainer.target_value_prefix
-            for ti in oldest:
+            for ti in candidates:
                 traj = self.replay[ti]
-                if muzero.USE_COMMUNAL_REANALYSIS and not muzero.USE_GUMBEL_SEARCH:
-                    # Kai's communal topology: shared chain tree, lockstep
-                    # windows across roots, statistics accumulating.
-                    self._refresh_traj_communal(traj)
-                else:
-                    for i, t in enumerate(traj):
-                        terminal_record = i == len(traj) - 1
-                        if terminal_record and not t.get("has_policy_target", True):
-                            # Terminated tail: carried no search then, none now.
-                            continue
-                        _, pol, val = asyncio.run(self.searcher.act_search(
-                            t["obs"], greedy=terminal_record))
-                        t["target_policy"] = np.asarray(pol, dtype=np.float64)
-                        t["root_value"] = float(val)
-                for idx, t in enumerate(traj):
-                    # Priority against the z the trainer will actually compute
-                    # for this position: the 4.3 age-shrunk horizon, not the
-                    # full TD_STEPS (refresh candidates are the oldest, where
-                    # it shrinks most). The bootstrap is the just-refreshed
-                    # stored search value -- MuZero's canonical priority --
-                    # which tracks, without exactly equaling, the trainer's
-                    # target-net value-head bootstrap.
-                    age = max(0, now - t.get("born_step", now))
-                    z0 = muzero.paper_value_target(
-                        traj, idx, muzero.paper_horizon(age), muzero.DISCOUNT)
-                    t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
-                for t in traj:
-                    # Stamped last, in its own pass: freshness() reads the head
-                    # record, which must only carry a stamp once the whole
-                    # trajectory -- searches AND priorities -- completed.
-                    t["refreshed_step"] = now
+                results = self._search_traj(traj, self._eligible_indices(traj))
+                self._apply_refresh(traj, results, now)
         finally:
             (nm.representation, nm.prediction,
              nm.dynamics, nm.value_prefix) = saved
@@ -1575,6 +1655,9 @@ class RayPipeline:
         self.eval_actor = None
         self.pending_eval = None
         self._states_cache = (None, None)   # (training_steps, state dicts)
+        self.refresh_actor = None           # phase 3a, lazy like eval_actor
+        self.pending_refresh = None         # ([(uid, future)], now_stamp)
+        self._target_states_cache = (None, None)  # (target sync stamp, dicts)
         self.actor = self._make_actor(seed_extra=0)
         self.sync()
 
@@ -1679,9 +1762,99 @@ class RayPipeline:
                        "return_max": float(np.max(returns)), **diagnostics},
                   tsteps, esteps, elapsed_at)
 
+    # ---- phase 3a: refresh offload (swap-on-ready) ----
+
+    def _target_states(self):
+        """CPU state dicts of the four LAGGED TARGET nets, cached per
+        target-sync stamp (the target model is what refresh searches
+        with; _states above is the LIVE nets for acting/eval)."""
+        self.run.trainer._ensure_target_model()
+        stamp = self.run.trainer._target_synced_at
+        if self._target_states_cache[0] != stamp:
+            self._target_states_cache = (stamp, {
+                n: {k: v.clone() if torch.is_tensor(v) else v
+                    for k, v in _cpu_state(getattr(
+                        self.run.trainer,
+                        "target_" + n).state_dict()).items()}
+                for n in ("representation", "dynamics", "prediction",
+                          "value_prefix")})
+        return self._target_states_cache[1]
+
+    def request_refresh(self):
+        """Dispatch one refresh batch (POLICY_REFRESH_COUNT candidate
+        trajectories) to the refresh actor; lazy actor creation, at most
+        one batch in flight (a still-cooking batch means this dispatch
+        point simply passes -- coverage resumes next cadence). Ships the
+        lagged target nets at their current sync stamp plus each
+        candidate's records and eligible indices. The driver's
+        training_steps at dispatch is the rotation stamp `now`, matching
+        the inline path, which reads the counter at refresh time."""
+        if self.pending_refresh is not None or not self.run.replay:
+            return
+        candidates = self.run._refresh_candidates(muzero.POLICY_REFRESH_COUNT)
+        if not candidates:
+            return
+        if self.refresh_actor is None:
+            import ray_actors
+            gpu = 0.2 if torch.cuda.is_available() else 0
+            cls = self.ray.remote(num_gpus=gpu)(ray_actors.RefreshActor)
+            schedule = {
+                "TEMPERATURE_TOTAL_STEPS": muzero.TEMPERATURE_TOTAL_STEPS,
+                "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS}
+            self.refresh_actor = cls.remote(self.overrides, ACTIONS,
+                                            self.seed + 9000, schedule)
+        self.ray.get(self.refresh_actor.set_weights.remote(
+            self._target_states(), self.run.trainer.training_steps))
+        jobs = []
+        for ti in candidates:
+            traj = self.run.replay[ti]
+            idxs = self.run._eligible_indices(traj)
+            if not idxs:
+                continue
+            # uid, not id(): CPython reuses addresses, so a raw id could
+            # match a NEW trajectory allocated where an evicted one lived
+            # and apply results to the wrong data. The uid rides the head
+            # record (harmlessly into checkpoints).
+            uid = traj[0].setdefault("traj_uid", uuid.uuid4().hex)
+            records = [{"obs": t["obs"], "action": t["action"],
+                        "reward": t["reward"],
+                        "truncated": t.get("truncated", False),
+                        "has_policy_target": t.get("has_policy_target", True)}
+                       for t in traj]
+            jobs.append((uid, self.refresh_actor.refresh.remote(records, idxs)))
+        if jobs:
+            self.pending_refresh = (jobs, self.run.trainer.training_steps)
+
+    def poll_refresh(self):
+        """Swap-on-ready: apply any completed refresh results whose
+        trajectory is still in the buffer (uid check -- an evicted
+        trajectory's results are dropped: wasted work, never corruption).
+        Non-blocking; called at ONE fixed point in the driver loop, whose
+        single-threadedness is the mutex the design needs. Application
+        goes through the same _apply_refresh as the inline path."""
+        if self.pending_refresh is None:
+            return
+        jobs, now = self.pending_refresh
+        alive = {t[0].get("traj_uid"): t for t in self.run.replay
+                 if t and t[0].get("traj_uid")}
+        remaining = []
+        for uid, fut in jobs:
+            ready, _ = self.ray.wait([fut], timeout=0)
+            if not ready:
+                remaining.append((uid, fut))
+                continue
+            results = self.ray.get(fut)
+            traj = alive.get(uid)
+            if traj is None:
+                continue
+            self.run._apply_refresh(
+                traj, {int(i): (np.array(p), float(v))
+                       for i, (p, v) in results.items()}, now)
+        self.pending_refresh = (remaining, now) if remaining else None
+
     def shutdown(self):
         self.drain_eval()
-        for actor in (self.actor, self.eval_actor):
+        for actor in (self.actor, self.eval_actor, self.refresh_actor):
             if actor is not None:
                 try:
                     self.ray.kill(actor)
@@ -1852,9 +2025,18 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     pipeline.sync()
                     pipeline.request(it + 1)
 
+            if pipeline and muzero.REFRESH_OFFLOAD and muzero.PAPER_TARGETS:
+                # Phase 3a swap-on-ready: THE fixed apply point in the
+                # driver's loop (single-threaded, so the loop is the
+                # mutex). Runs every iteration so finished batches land
+                # promptly; dispatch stays on the refresh cadence below.
+                pipeline.poll_refresh()
             if (muzero.PAPER_TARGETS and muzero.POLICY_REFRESH_EVERY
                     and it % muzero.POLICY_REFRESH_EVERY == 0):
-                run.refresh_targets(muzero.POLICY_REFRESH_COUNT)
+                if pipeline and muzero.REFRESH_OFFLOAD:
+                    pipeline.request_refresh()
+                else:
+                    run.refresh_targets(muzero.POLICY_REFRESH_COUNT)
 
             if muzero.LR_DECAY_AT and it == max(1, int(iterations * muzero.LR_DECAY_AT)):
                 muzero.decay_optimizer_lr(
