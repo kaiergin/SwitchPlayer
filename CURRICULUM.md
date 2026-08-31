@@ -154,7 +154,20 @@ inversely with buffer size, and the offload is what makes the volume
 free. The no-sharpening guard separates repairable flatness from
 genuine ambiguity, which dominates in a fresh tiny buffer.
 
-### Phase 3 spec (2026-08-30, approved direction; build gated per-step)
+### Phase 3 spec (2026-08-30; 3a+3b BUILT & AUDITED 2026-08-31, 3c deferred)
+
+Status: 3a and 3b implemented on branch phase3-speed and taken through a
+four-round audit loop (two initial auditors, a verification round, a
+termination round with runtime smoke -- NO FINDINGS to close). Inline
+refresh semantics verified bit-identical to pre-refactor; every new knob
+defaults OFF. The offload arm is effzero-repro-communal-entropyrefresh;
+pool mode is --ray --ray-workers N (recipe change: N episodes/iter,
+stamped into the checkpoint's validated recipe). Guard calibrated
+against measured search noise (TOL 0.05, 2 consecutive strikes). Still
+owed before first production use: a toy --ray A/B of the entropyrefresh
+arm vs its control, and a pool-mode wall-clock measurement. 3c (PER
+caching/prefetch, AMP) deferred to its own pass -- it touches the hot
+training path and AMP needs its own measured A/B.
 
 Ordering principle: within-tree search stays sequential everywhere -- the
 2026-08-30 re-audit proved wave-batching flattens policy targets
