@@ -132,9 +132,11 @@ class VectorizedPUCT:
 
         noise_override: optional [T,A] Dirichlet draws (tests inject the
         sequential engine's exact draw for parity). generator: torch
-        Generator for noise/tie-breaks. tie_break: "random" (production,
-        matching the sequential engine's random.choice among exact ties)
-        or "first" (deterministic; the parity tests patch the sequential
+        Generator for TIE-BREAKS ONLY -- production noise uses torch's
+        global RNG (torch.distributions takes no generator; see the
+        module docstring). tie_break: "random" (production, matching
+        the sequential engine's random.choice among exact ties) or
+        "first" (deterministic; the parity tests patch the sequential
         engine to match)."""
         sims = max(int(muzero.ACT_SEARCH_SIMS if num_simulations is None
                        else num_simulations), 1)  # sequential clamps too
@@ -142,6 +144,9 @@ class VectorizedPUCT:
             "VectorizedPUCT is PUCT-only (v1 scope); the sequential engine "
             "dispatches Gumbel -- wiring this engine under a Gumbel arm "
             "would silently swap algorithms")
+        assert (muzero.MAX_DEPTH if max_depth is None else max_depth) >= 1, (
+            "max_depth=0 forbids leaving the root: zero visits, NaN "
+            "policies (termination-round F2; fail loud instead)")
         c_puct = float(muzero.C_PUCT if c_puct is None else c_puct)
         discount = float(muzero.DISCOUNT if discount is None else discount)
         max_depth = int(muzero.MAX_DEPTH if max_depth is None else max_depth)
