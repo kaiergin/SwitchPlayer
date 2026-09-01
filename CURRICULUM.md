@@ -511,7 +511,11 @@ own shape; the acting twin of communal's cross-root batching):
   batch-16-ish GPU efficiency WITHOUT wave semantics -- the batch is
   across independent trees.
 
-Step 3b.5 -- FULL INFERENCE UNIFICATION (queued 2026-09-01, Kai): the
+Step 3b.5 -- FULL INFERENCE UNIFICATION (BUILT & AUDITED 2026-09-01;
+three-round loop closed NO FINDINGS incl. behavioral eval-freeze smoke;
+the audit added a third frozen "eval" weight set -- eval through the
+shared live set lost freeze semantics and put the final row one
+iteration stale -- plus a pre-destruction CPU-budget refusal): the
 server hosts {live, target} weight sets, every request carries a set
 tag; the eval actor routes through with the live set; refresh becomes
 CPU REFRESH WORKERS using the target set -- dissolving both the
