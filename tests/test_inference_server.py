@@ -65,9 +65,9 @@ def test_concurrent_initial_requests_share_one_forward(guard_constants,
     calls = []
     real_run = srv._run
 
-    def counting_run(kind, payloads):
+    def counting_run(kind, payloads, which="live"):
         calls.append((kind, len(payloads)))
-        return real_run(kind, payloads)
+        return real_run(kind, payloads, which)
 
     monkeypatch.setattr(srv, "_run", counting_run)
 
@@ -83,7 +83,7 @@ def test_concurrent_initial_requests_share_one_forward(guard_constants,
     # Parity with a direct forward on the server's own nets.
     with torch.no_grad():
         obs = torch.tensor(fake_obs(2), dtype=torch.float32) / 255.0
-        lat = srv.nets["representation"](obs)
+        lat = srv.nets["live"]["representation"](obs)
     assert np.allclose(r2[0], lat.numpy(), atol=1e-5)
 
 
@@ -109,9 +109,9 @@ def test_pool_size_full_house_skips_the_fill_window(guard_constants,
     calls = []
     real_run = srv._run
 
-    def counting_run(kind, payloads):
+    def counting_run(kind, payloads, which="live"):
         calls.append(len(payloads))
-        return real_run(kind, payloads)
+        return real_run(kind, payloads, which)
 
     monkeypatch.setattr(srv, "_run", counting_run)
     lat = np.zeros((1, muzero.LATENT_CHANNELS, muzero.LATENT_HW,
@@ -132,9 +132,9 @@ def test_max_batch_splits_oversized_queues(guard_constants, monkeypatch):
     calls = []
     real_run = srv._run
 
-    def counting_run(kind, payloads):
+    def counting_run(kind, payloads, which="live"):
         calls.append(len(payloads))
-        return real_run(kind, payloads)
+        return real_run(kind, payloads, which)
 
     monkeypatch.setattr(srv, "_run", counting_run)
 
@@ -163,24 +163,28 @@ class _Method:
     def __init__(self, fn):
         self.fn = fn
 
-    def remote(self, *args):
-        return _Box(self.fn(*args))
+    def remote(self, *args, **kwargs):
+        return _Box(self.fn(*args, **kwargs))
 
 
 class _SyncHandle:
     """Server handle whose .method.remote computes synchronously through
     the server's own _run (batching itself is covered above); pairs with
-    _FakeRay so RemoteNetworkManager runs fully in-process."""
+    _FakeRay so RemoteNetworkManager runs fully in-process. Honours the
+    3b.5 `which` weight-set tag exactly as the real endpoints do."""
 
     def __init__(self, srv):
         self.initial = _Method(
-            lambda obs: srv._run("initial", [obs])[0])
+            lambda obs, which="live": srv._run("initial", [obs], which)[0])
         self.dynamics_step = _Method(
-            lambda lat, act: srv._run("dynamics", [(lat, act)])[0])
+            lambda lat, act, which="live":
+            srv._run("dynamics", [(lat, act)], which)[0])
         self.predict = _Method(
-            lambda lat: srv._run("prediction", [lat])[0])
+            lambda lat, which="live":
+            srv._run("prediction", [lat], which)[0])
         self.prefix_step = _Method(
-            lambda lat, h, c: srv._run("value_prefix", [(lat, h, c)])[0])
+            lambda lat, h, c, which="live":
+            srv._run("value_prefix", [(lat, h, c)], which)[0])
         self.prefix_hidden_size = _Method(srv.prefix_hidden_size)
 
 
@@ -251,6 +255,41 @@ def test_remote_module_protocol(guard_constants):
     policy, value = nm.initial_inference(fake_obs(1)[0])
     assert policy.shape == (ACTIONS,)
     assert np.isfinite(value)
+
+
+def test_weight_sets_route_independently(guard_constants):
+    """3b.5: the server hosts {live, target}; a request's `which` tag
+    must select the set. Load DIFFERENT weights into the two sets and
+    verify the same input produces the two sets' respective outputs --
+    and that a target-tagged manager (the refresh workers') gets the
+    target function, not the live one."""
+    srv = make_server()
+    donor_a = muzero.MCTSHelper(action_space=ACTIONS, device=CPU,
+                                network_ref=None, storage_ref=None)
+    torch.manual_seed(99)
+    donor_b = muzero.MCTSHelper(action_space=ACTIONS, device=CPU,
+                                network_ref=None, storage_ref=None)
+    states = lambda d: {n: getattr(d.network_manager, n).state_dict()
+                        for n in ("representation", "dynamics",
+                                  "prediction", "value_prefix")}
+    srv.set_weights(states(donor_a), 1)                  # live
+    srv.set_weights(states(donor_b), 1, which="target")  # target
+    obs = fake_obs(1)
+    live_lat, _, live_val = srv._run("initial", [obs])[0]
+    tgt_lat, _, tgt_val = srv._run("initial", [obs], "target")[0]
+    assert not np.allclose(live_lat, tgt_lat),         "the two sets must be genuinely different functions here"
+    # Direct forwards against each donor confirm which set answered.
+    with torch.no_grad():
+        t = torch.tensor(obs, dtype=torch.float32) / 255.0
+        ref_live = donor_a.network_manager.representation(t).numpy()
+        ref_tgt = donor_b.network_manager.representation(t).numpy()
+    assert np.allclose(live_lat, ref_live, atol=1e-5)
+    assert np.allclose(tgt_lat, ref_tgt, atol=1e-5)
+    # A target-tagged RemoteNetworkManager routes every call to target.
+    nm = ray_actors.RemoteNetworkManager(_SyncHandle(srv), _FakeRay,
+                                         ACTIONS, which="target")
+    lat, _, _ = nm.batch_inference(obs)
+    assert np.allclose(lat.numpy(), ref_tgt, atol=1e-5)
 
 
 def test_worker_set_weights_skips_when_remote(guard_constants):

@@ -171,14 +171,23 @@ class InferenceServer:
         # production leaves it None and takes the GPU.
         self.device = (torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"))
-        self.nets = {
-            "representation": mz.build_representation().to(self.device),
-            "dynamics": mz.build_dynamics(action_space).to(self.device),
-            "prediction": mz.build_prediction(action_space).to(self.device),
-            "value_prefix": mz.build_value_prefix().to(self.device),
-        }
-        for net in self.nets.values():
-            net.eval()
+        # Two weight sets (3b.5): "live" serves acting/eval, "target"
+        # serves refresh workers -- refresh must search the LAGGED target
+        # model, and hosting both here is what lets every GPU consumer
+        # route through one server (no private net copies, no fractional
+        # GPU shares, one weight ship per set per boundary).
+        def build():
+            nets = {
+                "representation": mz.build_representation().to(self.device),
+                "dynamics": mz.build_dynamics(action_space).to(self.device),
+                "prediction": mz.build_prediction(action_space).to(self.device),
+                "value_prefix": mz.build_value_prefix().to(self.device),
+            }
+            for net in nets.values():
+                net.eval()
+            return nets
+
+        self.nets = {"live": build(), "target": build()}
         self.max_wait = max_wait_ms / 1000.0
         self.max_batch = max_batch
         self.pool_size = pool_size
@@ -188,28 +197,28 @@ class InferenceServer:
             # restores the design constant (re-measured 2.0-3.0ms).
             import ctypes
             ctypes.windll.winmm.timeBeginPeriod(1)
-        # kind -> list of (payload, asyncio.Future). Flushed as a unit.
-        self._queues = {"initial": [], "dynamics": [], "prediction": [],
-                        "value_prefix": []}
+        # (kind, which) -> list of (payload, asyncio.Future); keys created
+        # lazily. Batches never mix weight sets.
+        self._queues = {}
         self._flusher = None
 
-    def set_weights(self, state_dicts, training_steps):
+    def set_weights(self, state_dicts, training_steps, which="live"):
         for name, state in state_dicts.items():
-            self.nets[name].load_state_dict(state)
-            self.nets[name].eval()
+            self.nets[which][name].load_state_dict(state)
+            self.nets[which][name].eval()
         self.training_steps = training_steps
         return training_steps
 
     def prefix_hidden_size(self):
         """Workers build LSTM zero-states locally; they need (L, H) --
         hardcoding L=1 would mis-shape the state if the LSTM ever gains
-        depth (3b audit F4)."""
-        h = self.nets["value_prefix"].initial_state(1, "cpu")[0]
+        depth (3b audit F4). Geometry is set-independent."""
+        h = self.nets["live"]["value_prefix"].initial_state(1, "cpu")[0]
         return (h.shape[0], h.shape[-1])
 
-    async def _enqueue(self, kind, payload):
+    async def _enqueue(self, kind, which, payload):
         fut = asyncio.get_event_loop().create_future()
-        self._queues[kind].append((payload, fut))
+        self._queues.setdefault((kind, which), []).append((payload, fut))
         if (self.pool_size
                 and sum(len(q) for q in self._queues.values())
                 >= self.pool_size):
@@ -229,12 +238,13 @@ class InferenceServer:
         self._flush()
 
     def _flush(self):
-        for kind in self._queues:
-            pending, self._queues[kind] = self._queues[kind], []
+        for key in list(self._queues):
+            kind, which = key
+            pending, self._queues[key] = self._queues[key], []
             for i in range(0, len(pending), self.max_batch):
                 chunk = pending[i:i + self.max_batch]
                 try:
-                    outs = self._run(kind, [p for p, _ in chunk])
+                    outs = self._run(kind, [p for p, _ in chunk], which)
                     for (_, fut), out in zip(chunk, outs):
                         if not fut.done():
                             fut.set_result(out)
@@ -244,17 +254,19 @@ class InferenceServer:
                             fut.set_exception(
                                 RuntimeError(f"{kind} batch failed: {e}"))
 
-    def _run(self, kind, payloads):
-        """One batched forward over concatenated payloads; returns one
-        result per payload, split by each payload's own batch size."""
+    def _run(self, kind, payloads, which="live"):
+        """One batched forward over concatenated payloads against ONE
+        weight set; returns one result per payload, split by each
+        payload's own batch size."""
+        nets = self.nets[which]
         with torch.no_grad():
             if kind == "initial":
                 sizes = [np.asarray(p).shape[0] for p in payloads]
                 obs = torch.tensor(np.concatenate(payloads, axis=0),
                                    dtype=torch.float32,
                                    device=self.device) / 255.0
-                latents = self.nets["representation"](obs)
-                logits, values, _ = self.nets["prediction"](latents)
+                latents = nets["representation"](obs)
+                logits, values, _ = nets["prediction"](latents)
                 policy = torch.softmax(logits, dim=1).cpu().numpy()
                 lat = latents.cpu().numpy()
                 val = values.squeeze(-1).cpu().numpy()
@@ -272,7 +284,7 @@ class InferenceServer:
                 act = torch.tensor(
                     np.concatenate([p[1] for p in payloads], axis=0),
                     dtype=torch.long, device=self.device)
-                nxt, rew, _ = self.nets["dynamics"](lat, act)
+                nxt, rew, _ = nets["dynamics"](lat, act)
                 nxt = nxt.cpu().numpy()
                 rew = rew.cpu().numpy()
                 out, at = [], 0
@@ -284,7 +296,7 @@ class InferenceServer:
                 sizes = [p.shape[0] for p in payloads]
                 lat = torch.tensor(np.concatenate(payloads, axis=0),
                                    dtype=torch.float32, device=self.device)
-                logits, values, _ = self.nets["prediction"](lat)
+                logits, values, _ = nets["prediction"](lat)
                 logits = logits.cpu().numpy()
                 values = values.cpu().numpy()
                 out, at = [], 0
@@ -301,7 +313,7 @@ class InferenceServer:
                              dtype=torch.float32, device=self.device)
             c = torch.tensor(np.concatenate([p[2] for p in payloads], 1),
                              dtype=torch.float32, device=self.device)
-            prefixes, _, (nh, nc) = self.nets["value_prefix"](
+            prefixes, _, (nh, nc) = nets["value_prefix"](
                 lat, (h.contiguous(), c.contiguous()))
             prefixes = prefixes.cpu().numpy()
             nh, nc = nh.cpu().numpy(), nc.cpu().numpy()
@@ -314,17 +326,17 @@ class InferenceServer:
 
     # One coroutine per request kind; Ray serves them concurrently on the
     # actor's event loop, which is what fills the batch window.
-    async def initial(self, obs):
-        return await self._enqueue("initial", obs)
+    async def initial(self, obs, which="live"):
+        return await self._enqueue("initial", which, obs)
 
-    async def dynamics_step(self, latents, actions):
-        return await self._enqueue("dynamics", (latents, actions))
+    async def dynamics_step(self, latents, actions, which="live"):
+        return await self._enqueue("dynamics", which, (latents, actions))
 
-    async def predict(self, latents):
-        return await self._enqueue("prediction", latents)
+    async def predict(self, latents, which="live"):
+        return await self._enqueue("prediction", which, latents)
 
-    async def prefix_step(self, latents, h, c):
-        return await self._enqueue("value_prefix", (latents, h, c))
+    async def prefix_step(self, latents, h, c, which="live"):
+        return await self._enqueue("value_prefix", which, (latents, h, c))
 
 
 class _RemoteModule:
@@ -382,10 +394,11 @@ class RemoteNetworkManager:
     training_steps for the temperature schedule. Latents live on the
     worker as CPU torch tensors."""
 
-    def __init__(self, server, ray_module, action_space):
+    def __init__(self, server, ray_module, action_space, which="live"):
         self.server = server
         self.ray = ray_module
         self.action_space = action_space
+        self.which = which  # weight set every call runs against (3b.5)
         self.device = torch.device("cpu")
         self.training_steps = 0
         self.dynamics = _RemoteModule(self, "dynamics")
@@ -395,7 +408,8 @@ class RemoteNetworkManager:
             server.prefix_hidden_size.remote()))
 
     def _call(self, method, *args):
-        return self.ray.get(getattr(self.server, method).remote(*args))
+        return self.ray.get(
+            getattr(self.server, method).remote(*args, which=self.which))
 
     def batch_inference(self, batch_obs):
         lat, policy, value = self._call("initial", np.asarray(batch_obs))
@@ -410,21 +424,22 @@ class RefreshActor:
     """Phase 3a: re-searches stored trajectories so raised refresh
     coverage runs concurrently with the driver's training.
 
-    Env-less -- refresh touches only stored observations. Its OWN nets
-    play the role of the driver's lagged target model: the driver ships
-    the target nets' state dicts each dispatch (set_weights), then
-    candidate records + eligible indices; results return as
-    {index: (policy, root_value)} and the DRIVER applies them through
-    the same Run._apply_refresh as the inline path (guard, priorities,
-    rotation stamp), so offloaded semantics cannot drift. The search
+    Env-less -- refresh touches only stored observations. Two modes:
+    OWN-NETS (server=None, the 3a original): its nets play the driver's
+    lagged target model, shipped by set_weights each stamp change.
+    SERVER mode (3b.5): a CPU refresh WORKER whose every forward routes
+    to the shared InferenceServer's "target" weight set -- no private
+    nets, no private GPU slice, and refresh parallelizes across
+    trajectories by running several such workers. Either way the search
     itself is Run._search_traj run UNMODIFIED through a shell -- no
-    drifting copy of the communal topology.
+    drifting copy of the communal topology -- and results return as
+    {index: (policy, root_value)} for the DRIVER's _apply_refresh.
 
     Undecorated like SelfPlayActor: the driver wraps with
-    ray.remote(num_gpus=...); tests drive it directly.
+    ray.remote(...); tests drive it directly.
     """
 
-    def __init__(self, overrides, action_space, seed, schedule):
+    def __init__(self, overrides, action_space, seed, schedule, server=None):
         import muzero as mz
         self.mz = mz
         for key, value in overrides.items():
@@ -434,15 +449,23 @@ class RefreshActor:
             setattr(mz, key, value)
         np.random.seed(seed * 7919 + 23)
         torch.manual_seed(seed * 7919 + 23)
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu")
+        # CPU by construction in server mode, same reasoning as the pool
+        # workers (3b audit F5).
+        self.device = (torch.device("cpu") if server is not None else
+                       torch.device(
+                           "cuda" if torch.cuda.is_available() else "cpu"))
         self.searcher = mz.MCTSHelper(action_space=action_space,
                                       device=self.device, network_ref=None,
                                       storage_ref=None, enable_logging=False)
-        nm = self.searcher.network_manager
-        for net in (nm.representation, nm.prediction, nm.dynamics,
-                    nm.value_prefix):
-            net.eval()
+        if server is not None:
+            import ray
+            self.searcher.network_manager = RemoteNetworkManager(
+                server, ray, action_space, which="target")
+        else:
+            nm = self.searcher.network_manager
+            for net in (nm.representation, nm.prediction, nm.dynamics,
+                        nm.value_prefix):
+                net.eval()
         import ablation
         ablation.ACTIONS = action_space
         self._ablation = ablation
@@ -452,8 +475,13 @@ class RefreshActor:
     def set_weights(self, state_dicts, training_steps):
         """Load the driver's LAGGED TARGET nets; these are the networks
         every refresh search runs with (EffZero's reanalyze searches the
-        target model, never the live weights)."""
+        target model, never the live weights). In server mode the target
+        set lives on the InferenceServer (the driver ships it there once
+        per stamp change); only the counter mirror is ours."""
         nm = self.searcher.network_manager
+        if isinstance(nm, RemoteNetworkManager):
+            nm.training_steps = training_steps
+            return training_steps
         for name, state in state_dicts.items():
             net = getattr(nm, name)
             net.load_state_dict(state)

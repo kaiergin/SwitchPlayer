@@ -1687,6 +1687,7 @@ class RayPipeline:
         self._target_states_cache = (None, None)  # (target sync stamp, dicts)
         self._records_refs = {}             # uid -> ray.put ref (immutable data)
         self._refresh_shipped_stamp = None  # last target stamp sent to actor
+        self.refresh_workers = []           # 3b.5: CPU workers via server
         self.refresh_applied = 0            # trajectories applied (this process)
         self.refresh_skipped = 0            # dispatch points passed while cooking
         if muzero.REFRESH_OFFLOAD:
@@ -1814,9 +1815,13 @@ class RayPipeline:
         by PREVENTION: run_one drains any pending row before every
         checkpoint, so no checkpoint can ever precede a row it implies."""
         if self.eval_actor is None:
-            self.eval_actor = self._make_actor(seed_extra=5000)
+            # 3b.5: in pool mode eval is one more CPU worker through the
+            # server's live set -- no private nets, no GPU share.
+            self.eval_actor = self._make_actor(seed_extra=5000,
+                                               server=self.server)
+        states = {} if self.server is not None else self._states()
         self.ray.get(self.eval_actor.set_weights.remote(
-            self._states(), self.run.trainer.training_steps))
+            states, self.run.trainer.training_steps))
         seeds = [self.seed * 100003 + it * 613 + 500000 + e
                  for e in range(episodes)]
         self.pending_eval = (
@@ -1876,20 +1881,42 @@ class RayPipeline:
         candidates = self.run._refresh_candidates(muzero.POLICY_REFRESH_COUNT)
         if not candidates:
             return
-        if self.refresh_actor is None:
+        if self.refresh_actor is None and not self.refresh_workers:
             import ray_actors
-            gpu = 0.2 if torch.cuda.is_available() else 0
-            cls = self.ray.remote(num_gpus=gpu)(ray_actors.RefreshActor)
             schedule = {
                 "TEMPERATURE_TOTAL_STEPS": muzero.TEMPERATURE_TOTAL_STEPS,
                 "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS}
-            self.refresh_actor = cls.remote(self.overrides, ACTIONS,
-                                            self.seed * 8191 + 9000, schedule)
+            if self.server is not None:
+                # 3b.5: refresh as CPU workers through the server's
+                # "target" set -- refresh draws on the whole pooled GPU
+                # instead of one actor's slice, and parallelizes across
+                # trajectories. Two workers saturate the current
+                # coverage; the count is deliberately modest so acting
+                # workers keep CPU headroom.
+                cls = self.ray.remote(num_gpus=0)(ray_actors.RefreshActor)
+                self.refresh_workers = [
+                    cls.remote(self.overrides, ACTIONS,
+                               self.seed * 8191 + 9000 + w, schedule,
+                               self.server)
+                    for w in range(2)]
+            else:
+                gpu = 0.2 if torch.cuda.is_available() else 0
+                cls = self.ray.remote(num_gpus=gpu)(ray_actors.RefreshActor)
+                self.refresh_actor = cls.remote(
+                    self.overrides, ACTIONS, self.seed * 8191 + 9000,
+                    schedule)
         self.run.trainer._ensure_target_model()
         stamp = self.run.trainer._target_synced_at
         if stamp != self._refresh_shipped_stamp:
-            self.ray.get(self.refresh_actor.set_weights.remote(
-                self._target_states(), self.run.trainer.training_steps))
+            if self.server is not None:
+                # One target-set ship to the server covers every refresh
+                # worker (3b.5 weight-sync collapse).
+                self.ray.get(self.server.set_weights.remote(
+                    self._target_states(), self.run.trainer.training_steps,
+                    which="target"))
+            else:
+                self.ray.get(self.refresh_actor.set_weights.remote(
+                    self._target_states(), self.run.trainer.training_steps))
             self._refresh_shipped_stamp = stamp
         now = self.run.trainer.training_steps
         # Prune record refs for evicted trajectories so the object store
@@ -1919,7 +1946,9 @@ class RayPipeline:
                       "truncated": t.get("truncated", False),
                       "has_policy_target": t.get("has_policy_target", True)}
                      for t in traj])
-            jobs.append((uid, self.refresh_actor.refresh.remote(
+            sink = (self.refresh_workers[len(jobs) % len(self.refresh_workers)]
+                    if self.refresh_workers else self.refresh_actor)
+            jobs.append((uid, sink.refresh.remote(
                 self._records_refs[uid], idxs)))
         if jobs:
             self.pending_refresh = (jobs, now)
@@ -1983,7 +2012,7 @@ class RayPipeline:
     def shutdown(self):
         self.drain_eval()
         for actor in (self.actor, self.eval_actor, self.refresh_actor,
-                      self.server, *self.workers):
+                      self.server, *self.workers, *self.refresh_workers):
             if actor is not None:
                 try:
                     self.ray.kill(actor)

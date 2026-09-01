@@ -123,6 +123,46 @@ def test_refresh_actor_through_a_real_cluster(local_ray):
         assert np.isfinite(val)
 
 
+def test_refresh_worker_via_server_through_a_real_cluster(local_ray):
+    """3b.5 transport: a CPU refresh WORKER whose searches route to the
+    shared server's TARGET weight set -- the unified-inference path the
+    entropyrefresh arm will run under --ray --ray-workers."""
+    import numpy as np
+    import torch
+    import ray_actors
+    overrides = {"USE_GUMBEL_SEARCH": False, "USE_COMMUNAL_REANALYSIS": True,
+                 "COMMUNAL_WINDOW_ROOTS": 2, "MCTS_BATCHES": 1,
+                 "ACT_SEARCH_SIMS": 4, "MAX_DEPTH": 8,
+                 "USE_VALUE_PREFIX_IN_TREE": True}
+    schedule = {"TEMPERATURE_TOTAL_STEPS": 1000, "OFFPOLICY_DECAY_STEPS": None}
+    srv_cls = local_ray.remote(max_concurrency=64)(ray_actors.InferenceServer)
+    server = srv_cls.remote(overrides, 6, schedule, device="cpu")
+    donor = muzero.MCTSHelper(action_space=6, device=torch.device("cpu"),
+                              network_ref=None, storage_ref=None)
+    states = {n: getattr(donor.network_manager, n).state_dict()
+              for n in ("representation", "dynamics", "prediction",
+                        "value_prefix")}
+    local_ray.get(server.set_weights.remote(states, 5, which="target"))
+    worker_cls = local_ray.remote(ray_actors.RefreshActor)
+    worker = worker_cls.remote(overrides, 6, seed=3, schedule=schedule,
+                               server=server)
+    assert local_ray.get(worker.set_weights.remote({}, 5)) == 5
+    rng = np.random.default_rng(6)
+    records = [{"obs": rng.integers(0, 255, (12, *muzero.IMAGE_RESHAPE),
+                                    dtype=np.uint8),
+                "action": int(rng.integers(6)), "reward": 0.0,
+                "truncated": False, "has_policy_target": True}
+               for _ in range(4)]
+    records[-1]["truncated"] = True
+    results = local_ray.get(worker.refresh.remote(
+        local_ray.put(records), [0, 1, 2]))
+    assert set(results) == {0, 1, 2}
+    for pol, val in results.values():
+        pol = np.asarray(pol)
+        assert pol.shape == (6,) and pol.sum() == pytest.approx(1.0)
+        assert np.isfinite(val)
+
+
 def test_worker_pool_through_a_real_cluster(local_ray):
     """Phase 3b end to end on genuine Ray transport: an ASYNC
     InferenceServer actor (its batching needs Ray's concurrent method
