@@ -39,7 +39,9 @@ def dezero_heads(nets, seed):
                         (nets["value_prefix"], "fc")):
         if hasattr(owner, attr):
             heads.append(getattr(owner, attr))
-    assert heads, "head layout changed; update dezero_heads"
+    # == 4: a PARTIAL head rename must fail here, not silently revert
+    # that head to zero-init degeneracy (verification round F-B).
+    assert len(heads) == 4, "head layout changed; update dezero_heads"
     with torch.no_grad():
         for layer in heads:
             for prm in layer.parameters():
@@ -125,7 +127,10 @@ def test_exact_parity_real_heads(world, monkeypatch, sims, max_depth,
                                    max_depth=max_depth, root_noise=False)
     assert counts.tolist() == [c.tolist() for c, _ in seq], \
         "visit counts must match the sequential engine EXACTLY"
-    assert np.allclose(vals, [v for _, v in seq], atol=1e-12)
+    # rtol=0: numpy's default rtol 1e-5 would dominate at |v|~20 and
+    # quietly loosen the gate 2e8x; the true diff is bitwise 0.0
+    # (verification round F-A, measured).
+    assert np.allclose(vals, [v for _, v in seq], rtol=0, atol=1e-12)
 
 
 def test_exact_parity_with_injected_noise(world, monkeypatch):
