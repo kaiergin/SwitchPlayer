@@ -290,6 +290,14 @@ def test_weight_sets_route_independently(guard_constants):
                                          ACTIONS, which="target")
     lat, _, _ = nm.batch_inference(obs)
     assert np.allclose(lat.numpy(), ref_tgt, atol=1e-5)
+    # The eval set is its own frozen copy: shipping donor_a there must
+    # not read back the (different) live-set weights object.
+    srv.set_weights(states(donor_a), 2, which="eval")
+    eval_lat, _, _ = srv._run("initial", [obs], "eval")[0]
+    assert np.allclose(eval_lat, ref_live, atol=1e-5)
+    srv.set_weights(states(donor_b), 3)  # live overwritten...
+    eval_lat2, _, _ = srv._run("initial", [obs], "eval")[0]
+    assert np.allclose(eval_lat2, ref_live, atol=1e-5),         "a live-set ship must never mutate the frozen eval set"
 
 
 def test_worker_set_weights_skips_when_remote(guard_constants):

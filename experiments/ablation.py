@@ -1699,6 +1699,18 @@ class RayPipeline:
         self.workers = []
         if ray_workers:
             import ray_actors
+            # Logical-CPU budget (3b.5 audit F3): N acting + server +
+            # eval + 2 refresh workers each reserve one Ray CPU. Past
+            # the machine's count, the lazily-created eval/refresh
+            # actors would PEND forever and the driver's first
+            # ray.get(set_weights) on them would block the run silently
+            # -- refuse loudly instead.
+            avail = int(self.ray.cluster_resources().get("CPU", 0))
+            if ray_workers + 4 > avail:
+                raise SystemExit(
+                    f"--ray-workers {ray_workers} needs {ray_workers + 4} "
+                    f"Ray CPUs (workers + server + eval + 2 refresh) but "
+                    f"the cluster has {avail}; lower --ray-workers.")
             # GPU budget at fixed shares: server 0.5 + eval 0.2 +
             # refresh 0.2 = 0.9; workers are CPU-only by construction.
             gpu = 0.5 if torch.cuda.is_available() else 0
@@ -1717,7 +1729,7 @@ class RayPipeline:
             self.actor = self._make_actor(seed_extra=0)
         self.sync()
 
-    def _make_actor(self, seed_extra, server=None):
+    def _make_actor(self, seed_extra, server=None, server_set="live"):
         """ONE construction path for every acting actor. Small FIXED gpu
         share: the driver trains outside Ray's accounting, and actors at
         mcts_gpu_share-style fractions could sum past 1.0 -- the excess
@@ -1737,7 +1749,8 @@ class RayPipeline:
         # streams with seed s+1, worker w (3b audit F7).
         return actor_cls.remote(self.overrides, ACTIONS,
                                 self.seed * 8191 + seed_extra, schedule,
-                                ENV_NAME, FRAMESKIP, EPISODE_CAP, server)
+                                ENV_NAME, FRAMESKIP, EPISODE_CAP, server,
+                                server_set)
 
     def _states(self):
         """CPU state dicts of the four synced nets, cached per
@@ -1816,12 +1829,23 @@ class RayPipeline:
         checkpoint, so no checkpoint can ever precede a row it implies."""
         if self.eval_actor is None:
             # 3b.5: in pool mode eval is one more CPU worker through the
-            # server's live set -- no private nets, no GPU share.
+            # server's dedicated "eval" set -- no private nets, no GPU
+            # share, and FREEZE semantics preserved: the eval set is
+            # written only here, never by sync(), so in-flight eval
+            # episodes cannot see the next iteration's weights (3b.5
+            # audit F2), and the final row ships W_N explicitly even
+            # though the last sync() is skipped (F1).
             self.eval_actor = self._make_actor(seed_extra=5000,
-                                               server=self.server)
-        states = {} if self.server is not None else self._states()
-        self.ray.get(self.eval_actor.set_weights.remote(
-            states, self.run.trainer.training_steps))
+                                               server=self.server,
+                                               server_set="eval")
+        steps = self.run.trainer.training_steps
+        if self.server is not None:
+            self.ray.get(self.server.set_weights.remote(
+                self._states(), steps, which="eval"))
+            self.ray.get(self.eval_actor.set_weights.remote({}, steps))
+        else:
+            self.ray.get(self.eval_actor.set_weights.remote(
+                self._states(), steps))
         seeds = [self.seed * 100003 + it * 613 + 500000 + e
                  for e in range(episodes)]
         self.pending_eval = (
@@ -1910,10 +1934,16 @@ class RayPipeline:
         if stamp != self._refresh_shipped_stamp:
             if self.server is not None:
                 # One target-set ship to the server covers every refresh
-                # worker (3b.5 weight-sync collapse).
+                # worker (3b.5 weight-sync collapse). The workers' counter
+                # mirrors ride along -- unread by refresh today, but a
+                # search that ever keys on training progress must not see
+                # a frozen 0 (3b.5 audit F4).
                 self.ray.get(self.server.set_weights.remote(
                     self._target_states(), self.run.trainer.training_steps,
                     which="target"))
+                self.ray.get([w.set_weights.remote(
+                    {}, self.run.trainer.training_steps)
+                    for w in self.refresh_workers])
             else:
                 self.ray.get(self.refresh_actor.set_weights.remote(
                     self._target_states(), self.run.trainer.training_steps))

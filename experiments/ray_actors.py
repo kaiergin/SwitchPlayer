@@ -25,7 +25,8 @@ import torch
 
 class SelfPlayActor:
     def __init__(self, overrides, action_space, seed, schedule,
-                 env_name, frameskip, episode_cap, server=None):
+                 env_name, frameskip, episode_cap, server=None,
+                 server_set="live"):
         import muzero as mz
         self.mz = mz
         # The arm's world, rebuilt locally: constants first (network
@@ -60,7 +61,7 @@ class SelfPlayActor:
             # manager they hang off; the search runs on CPU tensors.
             import ray
             self.searcher.network_manager = RemoteNetworkManager(
-                server, ray, action_space)
+                server, ray, action_space, which=server_set)
         else:
             nm = self.searcher.network_manager
             for net in (nm.representation, nm.prediction, nm.dynamics,
@@ -149,10 +150,12 @@ class InferenceServer:
     a search's exact float path depends on which workers shared a flush
     window. Semantically sound; pool runs are not seed-reproducible.
 
-    pool_size: when set, a flush fires the moment that many requests are
-    queued across kinds (each worker has at most one outstanding, so a
-    full house means nobody else is coming) -- the fill window then only
-    pays when some workers are env-stepping. On Windows the window
+    pool_size: when set, a flush fires the moment that many requests
+    are queued across kinds and sets. With eval/refresh workers also
+    enqueueing, a "full house" can fire before every ACTING worker's
+    request arrives -- that fragments a batch (stragglers are picked up
+    by the still-sleeping flusher within max_wait) but never delays or
+    corrupts one; pool_size errs deliberately on the early-flush side. On Windows the window
     itself would otherwise cost ~15ms real time at 2ms nominal (timer
     quantization); __init__ requests 1ms resolution to fix that.
     """
@@ -171,11 +174,15 @@ class InferenceServer:
         # production leaves it None and takes the GPU.
         self.device = (torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"))
-        # Two weight sets (3b.5): "live" serves acting/eval, "target"
-        # serves refresh workers -- refresh must search the LAGGED target
-        # model, and hosting both here is what lets every GPU consumer
-        # route through one server (no private net copies, no fractional
-        # GPU shares, one weight ship per set per boundary).
+        # Three weight sets (3b.5): "live" serves acting, "eval" serves
+        # greedy evaluation (shipped at each eval boundary and then
+        # FROZEN -- the 3b.5 audit found eval reading "live" would mutate
+        # under an in-flight eval when the next sync landed, and the
+        # final row would run one iteration stale), "target" serves
+        # refresh workers (the LAGGED model). Hosting all three is what
+        # lets every GPU consumer route through one server -- no private
+        # net copies, no fractional GPU shares, one ship per set per
+        # boundary.
         def build():
             nets = {
                 "representation": mz.build_representation().to(self.device),
@@ -187,7 +194,7 @@ class InferenceServer:
                 net.eval()
             return nets
 
-        self.nets = {"live": build(), "target": build()}
+        self.nets = {"live": build(), "target": build(), "eval": build()}
         self.max_wait = max_wait_ms / 1000.0
         self.max_batch = max_batch
         self.pool_size = pool_size
@@ -206,7 +213,6 @@ class InferenceServer:
         for name, state in state_dicts.items():
             self.nets[which][name].load_state_dict(state)
             self.nets[which][name].eval()
-        self.training_steps = training_steps
         return training_steps
 
     def prefix_hidden_size(self):
