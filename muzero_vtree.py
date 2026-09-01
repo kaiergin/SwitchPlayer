@@ -32,11 +32,23 @@ per-tree semantics of MCTSHelper.run_full_mcts at sim_batches=1:
   * readout: RAW visit fractions (never tempered), root q as value;
     acting samples at the staged temperature (argmax when greedy).
 
-Score arithmetic runs in float64 (the sequential engine computes scores
-as Python floats over .item()ed float32 net outputs), which is what
-makes the parity gate exact: same nets, same noise, same tie-breaks ->
-identical visit counts, tree for tree. tests/test_vtree.py pins that
-against the real MCTSHelper.
+Score arithmetic runs in float64. The parity contract (audited
+2026-09-01): EXACT -- bitwise visit counts and 1e-12 values -- when
+inference is per-row reproducible, which in practice means comparing at
+matched net batch shapes (the tests run T=1 for the exact gate; the
+representation conv stack is NOT batch-size-invariant, ~1e-7 latent
+wobble at B>1 amplifying to ~1e-3 in decoded values). At T>1 visit
+counts are empirically stable across batch shapes (0 flips in ~280
+audited trees) but not guaranteed: selection margins can reach 5e-6.
+Two residual float asymmetries, both benign and documented rather than
+chased: the sequential engine rounds c_puct*prior and the Dirichlet mix
+through float32 (its prior is an np.float32 scalar; this engine keeps
+float64), ~1e-8 relative. Production Dirichlet noise draws use torch's
+GLOBAL RNG (torch.distributions takes no generator); the `generator`
+argument seeds tie-breaks only. tests/test_vtree.py pins the contract
+against the real MCTSHelper with de-zeroed heads (fresh factory nets
+zero-init every final head, which makes all values a shared constant
+and would leave the score arithmetic untested).
 
 Scope (v1): fresh-root acting/refresh searches -- the act_search shape.
 Chain trees (communal refresh) and Gumbel are out of scope; the
@@ -61,7 +73,9 @@ class VectorizedPUCT:
         self.nets = nets
         self.A = int(action_space)
         self.device = torch.device(device)
-        self.use_prefix = None  # resolved per search from muzero
+        # Resolved per search() from muzero (arm-override contract); one
+        # engine instance therefore serves ONE search call at a time.
+        self.use_prefix = None
 
     # ---- network wrappers (float32 in, float64 stats out) ----
 
@@ -122,8 +136,12 @@ class VectorizedPUCT:
         matching the sequential engine's random.choice among exact ties)
         or "first" (deterministic; the parity tests patch the sequential
         engine to match)."""
-        sims = int(muzero.ACT_SEARCH_SIMS if num_simulations is None
-                   else num_simulations)
+        sims = max(int(muzero.ACT_SEARCH_SIMS if num_simulations is None
+                       else num_simulations), 1)  # sequential clamps too
+        assert not muzero.USE_GUMBEL_SEARCH, (
+            "VectorizedPUCT is PUCT-only (v1 scope); the sequential engine "
+            "dispatches Gumbel -- wiring this engine under a Gumbel arm "
+            "would silently swap algorithms")
         c_puct = float(muzero.C_PUCT if c_puct is None else c_puct)
         discount = float(muzero.DISCOUNT if discount is None else discount)
         max_depth = int(muzero.MAX_DEPTH if max_depth is None else max_depth)
@@ -270,13 +288,10 @@ class VectorizedPUCT:
         maxv = torch.maximum(maxv, seed_comp.max(dim=1).values)
 
         gen = generator
-        path = torch.full((T, max_depth + 1), -1, dtype=torch.long,
-                          device=dev)
         for _ in range(sims):
-            # ---- selection (all trees descend in lockstep) ----
-            path.fill_(-1)
+            # ---- selection (all trees descend in lockstep; backup walks
+            # parent pointers, so no explicit path bookkeeping) ----
             cur = torch.zeros(T, dtype=torch.long, device=dev)
-            plen = torch.zeros(T, dtype=torch.long, device=dev)
             descending = torch.ones(T, dtype=torch.bool, device=dev)
             for d in range(max_depth):
                 at_leaf = ~expanded[rows, cur]
@@ -286,10 +301,7 @@ class VectorizedPUCT:
                 scores = child_scores(cur)
                 nxt_local = pick(scores, gen)
                 nxt_node = children[rows, cur, nxt_local]
-                path[descending, d] = cur[descending]
                 cur = torch.where(descending, nxt_node, cur)
-                plen = plen + descending.long()
-            path[rows, plen] = cur                   # leaf terminates path
 
             # ---- expansion (skip depth-capped already-expanded leaves) ----
             expand(cur, ~expanded[rows, cur])
