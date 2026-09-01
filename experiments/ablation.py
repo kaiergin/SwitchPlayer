@@ -1699,20 +1699,20 @@ class RayPipeline:
         self.workers = []
         if ray_workers:
             import ray_actors
-            # Logical-CPU budget (3b.5 audit F3): N acting + server +
-            # eval + 2 refresh workers each reserve one Ray CPU. Past
-            # the machine's count, the lazily-created eval/refresh
-            # actors would PEND forever and the driver's first
-            # ray.get(set_weights) on them would block the run silently
-            # -- refuse loudly instead.
+            # Logical-CPU backstop (3b.5 audit F3; the primary refusal
+            # sits in run_one BEFORE --overwrite/prefill): every actor
+            # here reserves one Ray CPU, and past the cluster's count the
+            # lazily-created eval/refresh actors would PEND forever and
+            # the driver's first ray.get on them would block silently.
+            need = ray_workers + 2 + (2 if muzero.REFRESH_OFFLOAD else 0)
             avail = int(self.ray.cluster_resources().get("CPU", 0))
-            if ray_workers + 4 > avail:
+            if need > avail:
                 raise SystemExit(
-                    f"--ray-workers {ray_workers} needs {ray_workers + 4} "
-                    f"Ray CPUs (workers + server + eval + 2 refresh) but "
-                    f"the cluster has {avail}; lower --ray-workers.")
-            # GPU budget at fixed shares: server 0.5 + eval 0.2 +
-            # refresh 0.2 = 0.9; workers are CPU-only by construction.
+                    f"--ray-workers {ray_workers} needs {need} Ray CPUs "
+                    f"but the cluster has {avail}; lower --ray-workers.")
+            # GPU: the server's 0.5 share is the pool mode's ONLY Ray-GPU
+            # reservation -- eval and refresh are CPU workers through it
+            # (3b.5); the driver trains outside Ray's accounting.
             gpu = 0.5 if torch.cuda.is_available() else 0
             srv_cls = self.ray.remote(num_gpus=gpu, max_concurrency=256)(
                 ray_actors.InferenceServer)
@@ -2059,6 +2059,20 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         if ray_workers and not use_ray:
             raise SystemExit("--ray-workers requires --ray")
         if ray_workers:
+            # Budget refusal BEFORE refuse_conflicting_state's --overwrite
+            # branch can destroy the pair's data and before prefill compute
+            # (verification round F-1 -- the same ordering invariant
+            # ray_scope_gate documents). os.cpu_count() equals a fresh
+            # local Ray cluster's CPU total; the in-pipeline check remains
+            # as the post-init backstop.
+            need = ray_workers + 2 + (2 if muzero.REFRESH_OFFLOAD else 0)
+            avail = os.cpu_count() or 0
+            if need > avail:
+                raise SystemExit(
+                    f"--ray-workers {ray_workers} needs {need} CPUs "
+                    f"(workers + server + eval"
+                    f"{' + 2 refresh workers' if muzero.REFRESH_OFFLOAD else ''}) "
+                    f"but this machine has {avail}; lower --ray-workers.")
             # Phase 3b RECIPE CHANGE, stated loudly: with a worker pool
             # each iteration collects one episode PER WORKER through the
             # shared inference server -- episodes-per-iter is superseded.

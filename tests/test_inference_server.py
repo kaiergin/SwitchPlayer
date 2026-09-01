@@ -258,7 +258,7 @@ def test_remote_module_protocol(guard_constants):
 
 
 def test_weight_sets_route_independently(guard_constants):
-    """3b.5: the server hosts {live, target}; a request's `which` tag
+    """3b.5: the server hosts {live, target, eval}; a request's `which` tag
     must select the set. Load DIFFERENT weights into the two sets and
     verify the same input produces the two sets' respective outputs --
     and that a target-tagged manager (the refresh workers') gets the
