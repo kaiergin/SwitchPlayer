@@ -542,6 +542,24 @@ still shows launch overhead after AMP.
 Zero-code lever available any time: parallel seeds of the same arm on
 one GPU (evidence throughput, no semantic change to any single run).
 
+### Phase 5 candidate — fully asynchronous loop (Kai, 2026-09-02)
+
+Never bound one lane on another: the actor plays continuously (never
+blocked -- THE invariant of the real-time framing), the GPU trains and
+refreshes continuously, weights sync at episode boundaries no matter
+how many gradient steps elapsed, collection happens whenever an episode
+lands. "Iteration" dissolves; eval/checkpoint re-key to env-steps or
+wall-clock; evaluation is end-to-end (return vs wall clock), per the
+carried decision below. Implementation shape: the single driver loop
+interleaves CHUNKS (poll episode future; ~100 train steps; a refresh
+candidate) -- loop-as-mutex preserved, no threads. REQUIRED GUARD: a
+train-ratio cap (MAX_TRAIN_PER_ENV_STEP, at/near today's ~2) so the
+emergent hardware-dependent ratio cannot explode into tiny-buffer
+overtraining early; the realized ratio logged in every row. Slot:
+after the saturation tests 1-2 report (their per-iteration
+comparability is what this retires). This is the live-Switch skeleton:
+the game does not pause for the learner.
+
 ## Carried decisions from the repro line
 
 Tiny buffer + live refresh direction; entropy-based refresh priority is
