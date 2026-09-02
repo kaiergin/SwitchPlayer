@@ -377,6 +377,19 @@ REFRESH_OFFLOAD = False
 # are the SAME code as every other refresh path.
 REFRESH_VTREE = False
 VTREE_REFRESH_BATCH = 256
+# Saturation refresh (2026-09-02, Kai): instead of a fixed quota every
+# POLICY_REFRESH_EVERY iterations, the driver refreshes AS MUCH AS FITS
+# in the slack while the CPU environment actor plays -- one candidate
+# trajectory at a time, flattest first, polling the actor between
+# trajectories, with a floor of one candidate per cadence point so an
+# early-returning actor never starves refresh entirely. Requires the
+# no-sharpen guard (refused loudly otherwise): the guard is what makes
+# saturation self-limiting -- converged steps strike out and leave the
+# rotation, evictions bring fresh unguarded trajectories, so coverage
+# concentrates exactly where targets are still repairable. Requires
+# REFRESH_VTREE and the --ray pipeline (there is no slack window in
+# sequential mode; the scheduled quota remains its fallback).
+REFRESH_SATURATE = False
 
 
 def visit_softmax_temperature(training_steps):

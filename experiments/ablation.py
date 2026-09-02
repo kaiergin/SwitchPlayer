@@ -581,6 +581,23 @@ ARMS["effzero-repro-vtree-refresh"] = {
             "deltas = refresh topology+coverage, actor device).",
 }
 
+# Saturation arm (2026-09-02, Kai): drop the fixed refresh quota; fill
+# the actor-play slack with as much entropy-prioritized refresh as fits.
+ARMS["effzero-repro-vtree-saturate"] = {
+    **ARMS["effzero-repro-vtree-refresh"],
+    "REFRESH_SATURATE": True,
+    "_doc": "effzero-repro-vtree-refresh with SATURATION refresh: no "
+            "fixed quota -- while the CPU environment actor plays each "
+            "episode, the GPU refreshes one flattest candidate "
+            "trajectory at a time (re-selected after every application "
+            "so updated entropies/guard strikes reorder the queue), "
+            "stopping when the episode arrives; floor of one candidate "
+            "per old cadence point. The no-sharpen guard is mandatory "
+            "(self-limiting). POLICY_REFRESH_COUNT is inert here. Run "
+            "with --ray --cpu-actor. Control: pong-vtree-2026-09-02 "
+            "(same command, quota arm) and pong-archfix-2026-08-30.",
+}
+
 # Phase 3a arm, DERIVED (not transcribed) from the communal arm so the base
 # recipe can never drift from its control. Same everything, plus the
 # entropy-refresh triangle: 5x coverage, flattest-first candidates, the
@@ -1085,37 +1102,69 @@ class Run:
         if not candidates:
             return
         now = self.trainer.training_steps
+        engine = self._vtree_engine()
+        for ti in candidates:
+            self._refresh_traj_vtree(self.replay[ti], engine, now)
+
+    def _vtree_engine(self):
+        """The vectorized engine over the CURRENT lagged target nets;
+        cheap to construct (wraps existing modules, allocates nothing)."""
         self.trainer._ensure_target_model()
         import muzero_vtree
-        engine = muzero_vtree.VectorizedPUCT(
+        return muzero_vtree.VectorizedPUCT(
             {"representation": self.trainer.target_representation,
              "dynamics": self.trainer.target_dynamics,
              "prediction": self.trainer.target_prediction,
              "value_prefix": self.trainer.target_value_prefix},
             ACTIONS, self.trainer.device)
-        jobs = []
-        for ti in candidates:
-            traj = self.replay[ti]
-            for i in self._eligible_indices(traj):
-                jobs.append((traj, i))
+
+    def _refresh_traj_vtree(self, traj, engine, now):
+        """Search-and-apply ONE trajectory's eligible steps in batched
+        waves. The unit of work for both the scheduled quota and the
+        saturation loop; application is the shared _apply_refresh (a
+        no-eligible trajectory still rotates)."""
+        idxs = self._eligible_indices(traj)
         results = {}
         batch = max(1, int(muzero.VTREE_REFRESH_BATCH))
-        for w0 in range(0, len(jobs), batch):
-            chunk = jobs[w0:w0 + batch]
-            obs = np.stack([t[i]["obs"] for t, i in chunk])
+        for w0 in range(0, len(idxs), batch):
+            chunk = idxs[w0:w0 + batch]
+            obs = np.stack([traj[i]["obs"] for i in chunk])
             pols, vals, _ = engine.search(
                 obs, num_simulations=muzero.ACT_SEARCH_SIMS,
                 c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
                 root_noise=True)
-            for (traj, i), pol, val in zip(chunk, pols, vals):
-                results.setdefault(id(traj), {})[i] = (
-                    np.asarray(pol, dtype=np.float64), float(val))
-        for ti in candidates:
-            traj = self.replay[ti]
-            # id() keying is safe HERE (unlike the offload path's uids):
-            # nothing evicts between job collection and application
-            # within this single driver-side call.
-            self._apply_refresh(traj, results.get(id(traj), {}), now)
+            for i, pol, val in zip(chunk, pols, vals):
+                results[i] = (np.asarray(pol, dtype=np.float64),
+                              float(val))
+        self._apply_refresh(traj, results, now)
+
+    def refresh_saturate(self, acting_ready, floor=1):
+        """Kai's saturation refresh (REFRESH_SATURATE): refresh one
+        flattest candidate at a time until the environment actor's
+        episode is ready, with a minimum of `floor` candidates
+        regardless of slack. Each candidate is re-selected fresh so a
+        just-refreshed trajectory's updated entropy (and guard strikes)
+        immediately reorder the queue; the guard makes the loop
+        self-limiting. Returns the number refreshed (accounting)."""
+        if not self.replay:
+            return 0
+        engine = self._vtree_engine()
+        done = 0
+        while True:
+            if done >= floor and acting_ready():
+                break
+            candidates = self._refresh_candidates(1)
+            if not candidates:
+                break  # everything guarded/ineligible: nothing to repair
+            now = self.trainer.training_steps
+            self._refresh_traj_vtree(self.replay[candidates[0]], engine,
+                                     now)
+            done += 1
+        stats = getattr(self, "_refresh_offload_stats", None) or {}
+        total = stats.get("refresh_applied", 0) + done
+        self._refresh_offload_stats = {"refresh_applied": total,
+                                       "refresh_last_iter": done}
+        return done
 
     def reanalyse(self, traj, terminated=True, born_step=None):
         if muzero.PAPER_TARGETS:
@@ -1882,6 +1931,16 @@ class RayPipeline:
         return tuple(np.array(f) if isinstance(f, np.ndarray) else f
                      for f in record)
 
+    def acting_ready(self):
+        """Non-blocking: are ALL in-flight episode futures done? The
+        saturation loop polls this between refresh candidates."""
+        if self.pending is None:
+            return True
+        futures, _ = self.pending
+        ready, _ = self.ray.wait(futures, num_returns=len(futures),
+                                 timeout=0)
+        return len(ready) == len(futures)
+
     def collect(self):
         futures, steps_at_request = self.pending
         results = self.ray.get(futures)
@@ -2138,6 +2197,21 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             raise SystemExit("--ray-workers requires --ray")
         if cpu_actor and not use_ray:
             raise SystemExit("--cpu-actor requires --ray")
+        if spec.get("REFRESH_SATURATE"):
+            if not use_ray:
+                raise SystemExit(
+                    "REFRESH_SATURATE arms need --ray: saturation fills "
+                    "the slack while the actor plays, and sequential "
+                    "mode has no such window (use the scheduled-quota "
+                    "vtree arm instead)")
+            if not spec.get("REFRESH_VTREE"):
+                raise SystemExit("REFRESH_SATURATE requires REFRESH_VTREE")
+            if not spec.get("REFRESH_NO_SHARPEN_GUARD"):
+                raise SystemExit(
+                    "REFRESH_SATURATE requires REFRESH_NO_SHARPEN_GUARD: "
+                    "the guard is what makes saturation self-limiting -- "
+                    "without it the flattest trajectory is re-searched "
+                    "forever")
         if cpu_actor and spec.get("REFRESH_OFFLOAD"):
             raise SystemExit(
                 "--cpu-actor promises the whole GPU to the driver, but "
@@ -2328,6 +2402,15 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     pipeline.sync()
                     pipeline.request(it + 1)
 
+            if (pipeline and muzero.REFRESH_SATURATE
+                    and muzero.PAPER_TARGETS):
+                # Saturation: refresh fills the GPU's idle window while
+                # the CPU actor finishes its episode; floor of one
+                # candidate at the old cadence so refresh never starves.
+                floor = (1 if (muzero.POLICY_REFRESH_EVERY and
+                               it % muzero.POLICY_REFRESH_EVERY == 0)
+                         else 0)
+                run.refresh_saturate(pipeline.acting_ready, floor=floor)
             if pipeline and muzero.REFRESH_OFFLOAD and muzero.PAPER_TARGETS:
                 # Phase 3a swap-on-ready: THE fixed apply point in the
                 # driver's loop (single-threaded, so the loop is the
@@ -2335,7 +2418,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 # promptly; dispatch stays on the refresh cadence below.
                 pipeline.poll_refresh()
             if (muzero.PAPER_TARGETS and muzero.POLICY_REFRESH_EVERY
-                    and it % muzero.POLICY_REFRESH_EVERY == 0):
+                    and it % muzero.POLICY_REFRESH_EVERY == 0
+                    and not (pipeline and muzero.REFRESH_SATURATE)):
                 if muzero.REFRESH_VTREE:
                     # Phase 4: fast enough inline (tens of seconds at 5x
                     # coverage) that no offload is needed; explicit
