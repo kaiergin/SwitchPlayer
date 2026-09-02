@@ -601,7 +601,6 @@ ARMS["effzero-repro-vtree-sat-stale"] = {
             "effzero-repro-vtree-saturate.",
 }
 
-# Staged-attribution arm
 
 # Saturation arm (2026-09-02, Kai): drop the fixed refresh quota; fill
 # the actor-play slack with as much entropy-prioritized refresh as fits.

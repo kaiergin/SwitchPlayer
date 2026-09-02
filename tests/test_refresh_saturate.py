@@ -111,7 +111,11 @@ def test_saturate_arm_gates():
 
 
 def _gate_case(monkeypatch, key, value, pattern):
-    spec = dict(ablation.ARMS["effzero-repro-vtree-saturate"])
+    # Based on the sat-stale arm (guard/entropy False) so reaching a
+    # LATER gate proves the removed guard/entropy refusals stay removed
+    # -- re-adding either would fire first and break the match
+    # (round F1: the previous base's True flags made this vacuous).
+    spec = dict(ablation.ARMS["effzero-repro-vtree-sat-stale"])
     spec[key] = value
     monkeypatch.setitem(ablation.ARMS, "sat-variant", spec)
     with pytest.raises(SystemExit, match=pattern):
@@ -120,9 +124,10 @@ def _gate_case(monkeypatch, key, value, pattern):
 
 
 def test_saturate_arm_gate_demands_vtree(monkeypatch):
-    """Also proves guard/entropy are NOT gated (staged attribution,
-    2026-09-02): the sat-stale spec with VTREE stripped reaches the
-    VTREE refusal -- no guard/entropy refusal fires first."""
+    """The VTREE refusal is reachable (no earlier gate shadows it).
+    The proof that guard/entropy are NOT gated lives in
+    test_saturate_arm_gate_refuses_offload, whose sat-stale base
+    crosses the former gate site with both flags False."""
     spec = dict(ablation.ARMS["effzero-repro-vtree-sat-stale"])
     spec["REFRESH_VTREE"] = False
     monkeypatch.setitem(ablation.ARMS, "sat-variant", spec)
@@ -132,6 +137,10 @@ def test_saturate_arm_gate_demands_vtree(monkeypatch):
 
 
 def test_saturate_arm_gate_refuses_offload(monkeypatch):
+    """DISCRIMINATOR for the gate relaxation: the sat-stale base has
+    guard/entropy False, so reaching the "exclusive" offload refusal
+    proves no guard/entropy gate fires en route -- re-adding either
+    fails this match."""
     _gate_case(monkeypatch, "REFRESH_OFFLOAD", True, "exclusive")
 
 
@@ -147,9 +156,9 @@ def test_stale_saturate_arm_passes_gates_and_derives(monkeypatch):
         if key in changed:
             continue
         assert arm[key] == base[key], f"unexpected drift on {key}"
-    # The gate chain accepts it: with cpu_actor False it reaches the
-    # cpu-actor refusal (i.e., past --ray, with no guard/entropy gate
-    # in the way).
+    # With cpu_actor False the chain stops at the cpu-actor refusal
+    # (past --ray only; the guard/entropy non-gating proof is in
+    # test_saturate_arm_gate_refuses_offload).
     with pytest.raises(SystemExit, match="requires --cpu-actor"):
         ablation.run_one("effzero-repro-vtree-sat-stale", 0, 1, 1, 1, 1,
                          None, use_ray=True, cpu_actor=False)
