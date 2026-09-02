@@ -105,15 +105,40 @@ def test_saturate_arm_gates():
     with pytest.raises(SystemExit, match="need --ray"):
         ablation.run_one("effzero-repro-vtree-saturate", 0, 1, 1, 1, 1,
                          None, use_ray=False)
+    with pytest.raises(SystemExit, match="requires --cpu-actor"):
+        ablation.run_one("effzero-repro-vtree-saturate", 0, 1, 1, 1, 1,
+                         None, use_ray=True, cpu_actor=False)
+
+
+def _gate_case(monkeypatch, key, value, pattern):
+    spec = dict(ablation.ARMS["effzero-repro-vtree-saturate"])
+    spec[key] = value
+    monkeypatch.setitem(ablation.ARMS, "sat-variant", spec)
+    with pytest.raises(SystemExit, match=pattern):
+        ablation.run_one("sat-variant", 0, 1, 1, 1, 1, None,
+                         use_ray=True, cpu_actor=True)
 
 
 def test_saturate_arm_gate_demands_guard(monkeypatch):
-    spec = dict(ablation.ARMS["effzero-repro-vtree-saturate"])
-    spec["REFRESH_NO_SHARPEN_GUARD"] = False
-    monkeypatch.setitem(ablation.ARMS, "sat-no-guard", spec)
-    with pytest.raises(SystemExit, match="NO_SHARPEN_GUARD"):
-        ablation.run_one("sat-no-guard", 0, 1, 1, 1, 1, None,
-                         use_ray=True)
+    _gate_case(monkeypatch, "REFRESH_NO_SHARPEN_GUARD", False,
+               "NO_SHARPEN_GUARD")
+
+
+def test_saturate_arm_gate_demands_entropy_priority(monkeypatch):
+    _gate_case(monkeypatch, "REFRESH_ENTROPY_PRIORITY", False,
+               "ENTROPY_PRIORITY")
+
+
+def test_saturate_arm_gate_refuses_offload(monkeypatch):
+    _gate_case(monkeypatch, "REFRESH_OFFLOAD", True, "exclusive")
+
+
+def test_saturate_never_repicks_within_a_call_and_is_bounded(sat_world):
+    """Audit F3: consecutive strikes must land in different calls,
+    and a hung actor bounds the call at one pass over the buffer."""
+    run = sat_world(3)
+    done = run.refresh_saturate(lambda: False, floor=0)
+    assert done == 3,         "never-ready actor: exactly one pass over the buffer, no spin"
 
 
 def test_saturate_arm_derivation():

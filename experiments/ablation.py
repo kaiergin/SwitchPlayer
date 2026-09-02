@@ -1150,15 +1150,26 @@ class Run:
             return 0
         engine = self._vtree_engine()
         done = 0
+        seen = set()
         while True:
             if done >= floor and acting_ready():
                 break
-            candidates = self._refresh_candidates(1)
-            if not candidates:
-                break  # everything guarded/ineligible: nothing to repair
+            # One pass over the buffer per call (audit F3): a trajectory
+            # is never re-picked within a call, so consecutive guard
+            # strikes land in DIFFERENT calls -- across real training
+            # windows, the regime the (TOL, STRIKES) pair was calibrated
+            # for -- and the loop is bounded by the buffer size even if
+            # the actor hangs.
+            pick = None
+            for ci in self._refresh_candidates(len(seen) + 1):
+                if id(self.replay[ci]) not in seen:
+                    pick = ci
+                    break
+            if pick is None:
+                break  # everything guarded, ineligible, or already done
+            seen.add(id(self.replay[pick]))
             now = self.trainer.training_steps
-            self._refresh_traj_vtree(self.replay[candidates[0]], engine,
-                                     now)
+            self._refresh_traj_vtree(self.replay[pick], engine, now)
             done += 1
         stats = getattr(self, "_refresh_offload_stats", None) or {}
         total = stats.get("refresh_applied", 0) + done
@@ -2204,6 +2215,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     "the slack while the actor plays, and sequential "
                     "mode has no such window (use the scheduled-quota "
                     "vtree arm instead)")
+            if not cpu_actor:
+                raise SystemExit(
+                    "REFRESH_SATURATE requires --cpu-actor: with a GPU "
+                    "acting actor, saturation's searches contend with "
+                    "acting inference and lengthen the very episode "
+                    "window they fill")
             if not spec.get("REFRESH_VTREE"):
                 raise SystemExit("REFRESH_SATURATE requires REFRESH_VTREE")
             if not spec.get("REFRESH_NO_SHARPEN_GUARD"):
@@ -2212,6 +2229,17 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     "the guard is what makes saturation self-limiting -- "
                     "without it the flattest trajectory is re-searched "
                     "forever")
+            if not spec.get("REFRESH_ENTROPY_PRIORITY"):
+                raise SystemExit(
+                    "REFRESH_SATURATE requires REFRESH_ENTROPY_PRIORITY: "
+                    "the rotation branch never skips guarded trajectories "
+                    "and ties on the stamp within a call -- only the "
+                    "entropy branch terminates the loop (audit F2)")
+            if spec.get("REFRESH_OFFLOAD"):
+                raise SystemExit(
+                    "REFRESH_SATURATE and REFRESH_OFFLOAD are exclusive: "
+                    "saturation's loop skips the cadence block, leaving "
+                    "the offload silently inert (audit F4)")
         if cpu_actor and spec.get("REFRESH_OFFLOAD"):
             raise SystemExit(
                 "--cpu-actor promises the whole GPU to the driver, but "
@@ -2390,6 +2418,24 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 run.trainer.training_steps += 1
             run.set_train_mode(False)
 
+            if (pipeline and muzero.REFRESH_SATURATE
+                    and muzero.PAPER_TARGETS):
+                # Saturation (audit F1: this block must sit BETWEEN the
+                # training block and collect, where episode `it` is
+                # genuinely still in flight -- placed after request(it+1)
+                # it would poll a just-launched episode and serialize
+                # the pipeline for its whole duration): refresh fills
+                # the GPU's idle window until the actor's episode is
+                # ready. Refresh sees the PRE-collect buffer (episode
+                # `it` joins afterwards) -- one episode behind, which
+                # entropy priority makes immaterial (the freshest
+                # trajectory is rarely a candidate). On the primed
+                # first iteration pending is None -> floor-only.
+                floor = (1 if (muzero.POLICY_REFRESH_EVERY and
+                               it % muzero.POLICY_REFRESH_EVERY == 0)
+                         else 0)
+                run.refresh_saturate(pipeline.acting_ready, floor=floor)
+
             if pipeline:
                 if not primed_sequential:
                     # Episode `it`, played on the actor during the gradient
@@ -2402,15 +2448,6 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     pipeline.sync()
                     pipeline.request(it + 1)
 
-            if (pipeline and muzero.REFRESH_SATURATE
-                    and muzero.PAPER_TARGETS):
-                # Saturation: refresh fills the GPU's idle window while
-                # the CPU actor finishes its episode; floor of one
-                # candidate at the old cadence so refresh never starves.
-                floor = (1 if (muzero.POLICY_REFRESH_EVERY and
-                               it % muzero.POLICY_REFRESH_EVERY == 0)
-                         else 0)
-                run.refresh_saturate(pipeline.acting_ready, floor=floor)
             if pipeline and muzero.REFRESH_OFFLOAD and muzero.PAPER_TARGETS:
                 # Phase 3a swap-on-ready: THE fixed apply point in the
                 # driver's loop (single-threaded, so the loop is the
