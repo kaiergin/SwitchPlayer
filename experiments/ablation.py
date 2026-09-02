@@ -570,8 +570,9 @@ ARMS["effzero-repro-vtree-refresh"] = {
     "_doc": "effzero-repro-refresh5x-communal with refresh moved to the "
             "phase-4 vectorized engine (2026-09-02): fresh-root GPU "
             "searches against the target model at VTREE_REFRESH_BATCH "
-            "positions per wave (measured 307 searches/s at 256 -- 5x "
-            "coverage costs ~30-60s/iter inline, no offload actor), "
+            "positions per wave (measured 307 searches/s at 256; early "
+            "whole-buffer refreshes cost ~100s inline every 2 iters, "
+            "shrinking as the guard retires steps -- no offload actor), "
             "flattest-first candidates, no-sharpen guard, COUNT 4->20. "
             "Acting is unchanged sequential PUCT; run with --ray "
             "--cpu-actor so the env actor holds local CPU nets and the "
@@ -2137,6 +2138,11 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             raise SystemExit("--ray-workers requires --ray")
         if cpu_actor and not use_ray:
             raise SystemExit("--cpu-actor requires --ray")
+        if cpu_actor and spec.get("REFRESH_OFFLOAD"):
+            raise SystemExit(
+                "--cpu-actor promises the whole GPU to the driver, but "
+                "this arm's REFRESH_OFFLOAD would create a 0.2-GPU "
+                "refresh actor; use a REFRESH_VTREE arm instead")
         if cpu_actor and ray_workers:
             raise SystemExit("--cpu-actor is the latency-lane mode "
                              "(single CPU env actor); it excludes the "
