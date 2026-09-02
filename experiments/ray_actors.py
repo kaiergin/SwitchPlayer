@@ -461,13 +461,11 @@ class RefreshActor:
         np.random.seed(seed * 7919 + 23)
         torch.manual_seed(seed * 7919 + 23)
         # CPU by construction in server mode, same reasoning as the pool
-        # workers (3b audit F5).
-        # force_cpu (phase 4, Kai's latency lane): the environment actor
-        # runs local CPU nets and the sequential engine -- at batch-1 on
-        # these nets the CPU search is as fast as GPU kernel launches
-        # and it never contends with training/refresh for the device.
-        self.device = (torch.device("cpu")
-                       if (server is not None or force_cpu) else
+        # workers (3b audit F5). (RefreshActor has no force_cpu: its
+        # own-nets mode is a GPU actor by design, and its server mode is
+        # already CPU -- the phase-4 latency-lane flag belongs to the
+        # ENVIRONMENT actor only.)
+        self.device = (torch.device("cpu") if server is not None else
                        torch.device(
                            "cuda" if torch.cuda.is_available() else "cpu"))
         self.searcher = mz.MCTSHelper(action_space=action_space,
