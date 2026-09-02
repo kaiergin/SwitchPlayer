@@ -133,9 +133,13 @@ def test_saturate_arm_gate_refuses_offload(monkeypatch):
     _gate_case(monkeypatch, "REFRESH_OFFLOAD", True, "exclusive")
 
 
-def test_saturate_never_repicks_within_a_call_and_is_bounded(sat_world):
+def test_saturate_never_repicks_within_a_call_and_is_bounded(sat_world,
+                                                              monkeypatch):
     """Audit F3: consecutive strikes must land in different calls,
-    and a hung actor bounds the call at one pass over the buffer."""
+    and a hung actor bounds the call at one pass over the buffer.
+    STRIKES=2 makes this DISCRIMINATE (round-2 F-A): at the fixture's
+    STRIKES=1 the guard alone bounded the parent commit's loop too."""
+    monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 2)
     run = sat_world(3)
     done = run.refresh_saturate(lambda: False, floor=0)
     assert done == 3,         "never-ready actor: exactly one pass over the buffer, no spin"

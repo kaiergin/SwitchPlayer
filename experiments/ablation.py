@@ -589,8 +589,9 @@ ARMS["effzero-repro-vtree-saturate"] = {
     "_doc": "effzero-repro-vtree-refresh with SATURATION refresh: no "
             "fixed quota -- while the CPU environment actor plays each "
             "episode, the GPU refreshes one flattest candidate "
-            "trajectory at a time (re-selected after every application "
-            "so updated entropies/guard strikes reorder the queue), "
+            "trajectory at a time (one pass over the buffer max per "
+            "iteration; a refreshed trajectory re-enters next call, so "
+            "guard strikes land across training windows), "
             "stopping when the episode arrives; floor of one candidate "
             "per old cadence point. The no-sharpen guard is mandatory "
             "(self-limiting). POLICY_REFRESH_COUNT is inert here. Run "
@@ -1142,10 +1143,11 @@ class Run:
         """Kai's saturation refresh (REFRESH_SATURATE): refresh one
         flattest candidate at a time until the environment actor's
         episode is ready, with a minimum of `floor` candidates
-        regardless of slack. Each candidate is re-selected fresh so a
-        just-refreshed trajectory's updated entropy (and guard strikes)
-        immediately reorder the queue; the guard makes the loop
-        self-limiting. Returns the number refreshed (accounting)."""
+        regardless of slack. Re-selection reorders the REMAINING unseen
+        candidates each round; a refreshed trajectory re-enters the
+        queue next call, never within one -- the seen-set bounds a call
+        at one pass over the buffer, and the guard limits work ACROSS
+        calls (round-2 F-C). Returns the number refreshed."""
         if not self.replay:
             return 0
         engine = self._vtree_engine()
@@ -1784,6 +1786,10 @@ class RayPipeline:
     eval, LR events, and checkpoints all run AFTER collect, so they see
     exactly the buffer state the sequential harness would at that point.
 
+    Saturate-arm exception to the after-collect rule above: its refresh
+    runs PRE-collect (between training and collect, filling the acting
+    window), deliberately one episode behind -- see run_one (round-2 F-D).
+
     Cancellation semantics preserved by construction: the checkpoint blob
     is unchanged and never contains the in-flight episode, so a kill at
     any moment resumes from the last checkpoint and merely replays the
@@ -2232,9 +2238,9 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             if not spec.get("REFRESH_ENTROPY_PRIORITY"):
                 raise SystemExit(
                     "REFRESH_SATURATE requires REFRESH_ENTROPY_PRIORITY: "
-                    "the rotation branch never skips guarded trajectories "
-                    "and ties on the stamp within a call -- only the "
-                    "entropy branch terminates the loop (audit F2)")
+                    "the rotation branch never skips guarded/no-eligible "
+                    "trajectories, so the window burns on no-op stamp "
+                    "rotations instead of repairable flatness")
             if spec.get("REFRESH_OFFLOAD"):
                 raise SystemExit(
                     "REFRESH_SATURATE and REFRESH_OFFLOAD are exclusive: "
