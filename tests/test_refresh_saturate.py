@@ -152,9 +152,11 @@ def test_stale_saturate_arm_passes_gates_and_derives(monkeypatch):
     assert arm["REFRESH_SATURATE"] is True
     assert arm["REFRESH_ENTROPY_PRIORITY"] is False
     assert arm["REFRESH_NO_SHARPEN_GUARD"] is False
+    assert arm["POLICY_REFRESH_COUNT"] == 4,         "the floor must be the BASE schedule, not the quota arm's 20"
     base = ablation.ARMS["effzero-repro-vtree-refresh"]
     changed = {"REFRESH_SATURATE", "REFRESH_ENTROPY_PRIORITY",
-               "REFRESH_NO_SHARPEN_GUARD", "_doc"}
+               "REFRESH_NO_SHARPEN_GUARD", "POLICY_REFRESH_COUNT",
+               "_doc"}
     for key in set(base) | set(arm):
         if key in changed:
             continue

@@ -590,6 +590,10 @@ ARMS["effzero-repro-vtree-sat-stale"] = {
     "REFRESH_SATURATE": True,
     "REFRESH_ENTROPY_PRIORITY": False,
     "REFRESH_NO_SHARPEN_GUARD": False,
+    # The saturation FLOOR: base-schedule coverage (archfix's 4 per 2
+    # iters) guaranteed even when training outlasts the episode and no
+    # slack exists; saturation is strictly additive on top.
+    "POLICY_REFRESH_COUNT": 4,
     "_doc": "Saturation refresh with STALENESS ordering and NO guard: "
             "while the CPU env actor plays, the GPU re-searches oldest-"
             "rotation trajectories one at a time (one pass over the "
@@ -2463,8 +2467,17 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 # entropy priority makes immaterial (the freshest
                 # trajectory is rarely a candidate). On the primed
                 # first iteration pending is None -> floor-only.
-                floor = (1 if (muzero.POLICY_REFRESH_EVERY and
-                               it % muzero.POLICY_REFRESH_EVERY == 0)
+                # Floor = the BASE schedule (POLICY_REFRESH_COUNT per
+                # cadence), not a token 1: early iterations have NO
+                # slack (short episodes finish during training), and a
+                # 1-per-cadence floor under-refreshed the first rows
+                # BELOW archfix's 2-trajs/iter base -- inverting the
+                # coverage delta the saturate arms exist to test
+                # (measured, pong-satstale iter 5: refresh_last_iter 0).
+                # Saturation adds on top once episodes outgrow training.
+                floor = (muzero.POLICY_REFRESH_COUNT
+                         if (muzero.POLICY_REFRESH_EVERY and
+                             it % muzero.POLICY_REFRESH_EVERY == 0)
                          else 0)
                 run.refresh_saturate(pipeline.acting_ready, floor=floor)
 
