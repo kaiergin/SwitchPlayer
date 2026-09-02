@@ -366,6 +366,17 @@ REFRESH_NO_SHARPEN_GUARD = False
 REFRESH_GUARD_TOL = 0.05
 REFRESH_GUARD_STRIKES = 2
 REFRESH_OFFLOAD = False
+# Phase 4 (2026-09-02, Kai's latency/throughput split): refresh runs as
+# fresh-root VECTORIZED searches on the GPU against the lagged target
+# model (muzero_vtree; measured 307 searches/s at batch 256 on this
+# box, 77x one sequential CPU search) while the environment actor stays
+# on CPU with local nets -- the latency lane never touches the GPU or
+# any server. Fresh-root topology (the pre-communal refresh5x shape,
+# noise at every root as the communal path also did); candidate
+# selection, entropy priority, the no-sharpen guard, and application
+# are the SAME code as every other refresh path.
+REFRESH_VTREE = False
+VTREE_REFRESH_BATCH = 256
 
 
 def visit_softmax_temperature(training_steps):

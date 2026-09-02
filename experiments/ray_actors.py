@@ -26,7 +26,7 @@ import torch
 class SelfPlayActor:
     def __init__(self, overrides, action_space, seed, schedule,
                  env_name, frameskip, episode_cap, server=None,
-                 server_set="live"):
+                 server_set="live", force_cpu=False):
         import muzero as mz
         self.mz = mz
         # The arm's world, rebuilt locally: constants first (network
@@ -45,7 +45,12 @@ class SelfPlayActor:
         # CUDA masking (3b audit F5): the searcher's device places node
         # latents and search tensors, and a worker must never park them
         # on the GPU it is supposed to have no claim on.
-        self.device = (torch.device("cpu") if server is not None else
+        # force_cpu (phase 4, Kai's latency lane): the environment actor
+        # runs local CPU nets and the sequential engine -- at batch-1 on
+        # these nets the CPU search is as fast as GPU kernel launches
+        # and it never contends with training/refresh for the device.
+        self.device = (torch.device("cpu")
+                       if (server is not None or force_cpu) else
                        torch.device(
                            "cuda" if torch.cuda.is_available() else "cpu"))
         self.action_space = action_space
@@ -457,7 +462,12 @@ class RefreshActor:
         torch.manual_seed(seed * 7919 + 23)
         # CPU by construction in server mode, same reasoning as the pool
         # workers (3b audit F5).
-        self.device = (torch.device("cpu") if server is not None else
+        # force_cpu (phase 4, Kai's latency lane): the environment actor
+        # runs local CPU nets and the sequential engine -- at batch-1 on
+        # these nets the CPU search is as fast as GPU kernel launches
+        # and it never contends with training/refresh for the device.
+        self.device = (torch.device("cpu")
+                       if (server is not None or force_cpu) else
                        torch.device(
                            "cuda" if torch.cuda.is_available() else "cpu"))
         self.searcher = mz.MCTSHelper(action_space=action_space,

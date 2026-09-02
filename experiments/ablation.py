@@ -557,6 +557,29 @@ ARMS = {
     },
 }
 
+# Phase 4 arm (2026-09-02, Kai's architecture): CPU latency-lane actor +
+# GPU vectorized refresh. DERIVED from the communal arm; refresh topology
+# changes to fresh-root vtree at 5x coverage with the entropy package.
+ARMS["effzero-repro-vtree-refresh"] = {
+    **ARMS["effzero-repro-refresh5x-communal"],
+    "USE_COMMUNAL_REANALYSIS": False,
+    "REFRESH_VTREE": True,
+    "REFRESH_ENTROPY_PRIORITY": True,
+    "REFRESH_NO_SHARPEN_GUARD": True,
+    "POLICY_REFRESH_COUNT": 20,
+    "_doc": "effzero-repro-refresh5x-communal with refresh moved to the "
+            "phase-4 vectorized engine (2026-09-02): fresh-root GPU "
+            "searches against the target model at VTREE_REFRESH_BATCH "
+            "positions per wave (measured 307 searches/s at 256 -- 5x "
+            "coverage costs ~30-60s/iter inline, no offload actor), "
+            "flattest-first candidates, no-sharpen guard, COUNT 4->20. "
+            "Acting is unchanged sequential PUCT; run with --ray "
+            "--cpu-actor so the env actor holds local CPU nets and the "
+            "GPU belongs entirely to training + refresh. Control: "
+            "pong-archfix-2026-08-30 (same command minus the flags; "
+            "deltas = refresh topology+coverage, actor device).",
+}
+
 # Phase 3a arm, DERIVED (not transcribed) from the communal arm so the base
 # recipe can never drift from its control. Same everything, plus the
 # entropy-refresh triangle: 5x coverage, flattest-first candidates, the
@@ -1042,6 +1065,56 @@ class Run:
         finally:
             (nm.representation, nm.prediction,
              nm.dynamics, nm.value_prefix) = saved
+
+    def refresh_targets_vtree(self, count):
+        """Phase-4 refresh (REFRESH_VTREE): fresh-root VECTORIZED
+        searches on the trainer's device against the lagged target
+        model -- hundreds of stored positions per wave through
+        muzero_vtree, so 5x coverage costs tens of seconds inline and
+        needs no offload actor. Topology is the pre-communal refresh5x
+        shape (independent root per position; root noise at every
+        position, which the communal path also applies, truncated tails
+        included). Candidate selection (_refresh_candidates: rotation or
+        entropy priority), eligibility (guard), and application
+        (_apply_refresh: guard strikes, 4.3-horizon priorities, rotation
+        stamps) are the SAME code as every other refresh path."""
+        if not self.replay:
+            return
+        candidates = self._refresh_candidates(count)
+        if not candidates:
+            return
+        now = self.trainer.training_steps
+        self.trainer._ensure_target_model()
+        import muzero_vtree
+        engine = muzero_vtree.VectorizedPUCT(
+            {"representation": self.trainer.target_representation,
+             "dynamics": self.trainer.target_dynamics,
+             "prediction": self.trainer.target_prediction,
+             "value_prefix": self.trainer.target_value_prefix},
+            ACTIONS, self.trainer.device)
+        jobs = []
+        for ti in candidates:
+            traj = self.replay[ti]
+            for i in self._eligible_indices(traj):
+                jobs.append((traj, i))
+        results = {}
+        batch = max(1, int(muzero.VTREE_REFRESH_BATCH))
+        for w0 in range(0, len(jobs), batch):
+            chunk = jobs[w0:w0 + batch]
+            obs = np.stack([t[i]["obs"] for t, i in chunk])
+            pols, vals, _ = engine.search(
+                obs, num_simulations=muzero.ACT_SEARCH_SIMS,
+                c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                root_noise=True)
+            for (traj, i), pol, val in zip(chunk, pols, vals):
+                results.setdefault(id(traj), {})[i] = (
+                    np.asarray(pol, dtype=np.float64), float(val))
+        for ti in candidates:
+            traj = self.replay[ti]
+            # id() keying is safe HERE (unlike the offload path's uids):
+            # nothing evicts between job collection and application
+            # within this single driver-side call.
+            self._apply_refresh(traj, results.get(id(traj), {}), now)
 
     def reanalyse(self, traj, terminated=True, born_step=None):
         if muzero.PAPER_TARGETS:
@@ -1661,7 +1734,7 @@ class RayPipeline:
     """
 
     def __init__(self, run, spec, seed, iterations, train_steps,
-                 episodes_per_iter, ray_workers=0):
+                 episodes_per_iter, ray_workers=0, cpu_actor=False):
         # Scope is validated by ray_scope_gate at the TOP of run_one --
         # before --overwrite destroys the pair's data and before the
         # warm-start prefill spends compute (verification finding).
@@ -1726,10 +1799,13 @@ class RayPipeline:
                             for w in range(ray_workers)]
             self.actor = None
         else:
-            self.actor = self._make_actor(seed_extra=0)
+            self.actor = self._make_actor(seed_extra=0,
+                                          force_cpu=cpu_actor)
+        self.cpu_actor = cpu_actor
         self.sync()
 
-    def _make_actor(self, seed_extra, server=None, server_set="live"):
+    def _make_actor(self, seed_extra, server=None, server_set="live",
+                    force_cpu=False):
         """ONE construction path for every acting actor. Small FIXED gpu
         share: the driver trains outside Ray's accounting, and actors at
         mcts_gpu_share-style fractions could sum past 1.0 -- the excess
@@ -1737,7 +1813,7 @@ class RayPipeline:
         Phase 3b workers get a server handle and NO gpu (their forwards
         run on the InferenceServer)."""
         import ray_actors
-        gpu = 0 if server is not None else (
+        gpu = 0 if (server is not None or force_cpu) else (
             0.2 if torch.cuda.is_available() else 0)
         actor_cls = self.ray.remote(num_gpus=gpu)(ray_actors.SelfPlayActor)
         # The run-length-keyed schedule values are COMPUTED once by the
@@ -1750,7 +1826,7 @@ class RayPipeline:
         return actor_cls.remote(self.overrides, ACTIONS,
                                 self.seed * 8191 + seed_extra, schedule,
                                 ENV_NAME, FRAMESKIP, EPISODE_CAP, server,
-                                server_set)
+                                server_set, force_cpu)
 
     def _states(self):
         """CPU state dicts of the four synced nets, cached per
@@ -1835,9 +1911,9 @@ class RayPipeline:
             # episodes cannot see the next iteration's weights (3b.5
             # audit F2), and the final row ships W_N explicitly even
             # though the last sync() is skipped (F1).
-            self.eval_actor = self._make_actor(seed_extra=5000,
-                                               server=self.server,
-                                               server_set="eval")
+            self.eval_actor = self._make_actor(
+                seed_extra=5000, server=self.server, server_set="eval",
+                force_cpu=getattr(self, "cpu_actor", False))
         steps = self.run.trainer.training_steps
         if self.server is not None:
             self.ray.get(self.server.set_weights.remote(
@@ -2052,12 +2128,19 @@ class RayPipeline:
 
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
             checkpoint_every=10, resume=False, overwrite=False,
-            init_weights=None, use_ray=False, ray_workers=0):
+            init_weights=None, use_ray=False, ray_workers=0,
+            cpu_actor=False):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         if use_ray:
             ray_scope_gate(spec)
         if ray_workers and not use_ray:
             raise SystemExit("--ray-workers requires --ray")
+        if cpu_actor and not use_ray:
+            raise SystemExit("--cpu-actor requires --ray")
+        if cpu_actor and ray_workers:
+            raise SystemExit("--cpu-actor is the latency-lane mode "
+                             "(single CPU env actor); it excludes the "
+                             "--ray-workers pool")
         if ray_workers:
             # Budget refusal BEFORE refuse_conflicting_state's --overwrite
             # branch can destroy the pair's data and before prefill compute
@@ -2185,7 +2268,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"H(pi) {metrics.get('policy_entropy', 0.0):>5.2f}", flush=True)
 
         pipeline = (RayPipeline(run, spec, seed, iterations, train_steps,
-                                episodes_per_iter, ray_workers=ray_workers)
+                                episodes_per_iter, ray_workers=ray_workers,
+                                cpu_actor=cpu_actor)
                     if use_ray else None)
         for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
@@ -2246,7 +2330,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 pipeline.poll_refresh()
             if (muzero.PAPER_TARGETS and muzero.POLICY_REFRESH_EVERY
                     and it % muzero.POLICY_REFRESH_EVERY == 0):
-                if pipeline and muzero.REFRESH_OFFLOAD:
+                if muzero.REFRESH_VTREE:
+                    # Phase 4: fast enough inline (tens of seconds at 5x
+                    # coverage) that no offload is needed; explicit
+                    # precedence over REFRESH_OFFLOAD.
+                    run.refresh_targets_vtree(muzero.POLICY_REFRESH_COUNT)
+                elif pipeline and muzero.REFRESH_OFFLOAD:
                     pipeline.request_refresh()
                 else:
                     run.refresh_targets(muzero.POLICY_REFRESH_COUNT)
@@ -2472,6 +2561,13 @@ def main():
                          "(one-deep pipeline; see RayPipeline). Checkpoints, "
                          "resume, refresh, and eval semantics are unchanged; "
                          "paired-seed parity with sequential runs is not.")
+    ap.add_argument("--cpu-actor", action="store_true",
+                    help="phase 4 latency lane: the environment actor "
+                         "(and eval actor) run LOCAL CPU nets with the "
+                         "sequential engine -- no GPU share, no server "
+                         "-- leaving the whole GPU to training and "
+                         "vectorized refresh. Requires --ray; excludes "
+                         "--ray-workers. Recipe-neutral (device only).")
     ap.add_argument("--ray-workers", type=int, default=0, metavar="N",
                     help="phase 3b: N CPU env/tree workers share ONE "
                          "GPU inference server that batches their network "
@@ -2542,7 +2638,8 @@ def main():
                         checkpoint_every=args.checkpoint_every,
                         resume=args.resume, overwrite=args.overwrite,
                         init_weights=args.init_weights, use_ray=args.ray,
-                        ray_workers=args.ray_workers)
+                        ray_workers=args.ray_workers,
+                        cpu_actor=args.cpu_actor)
     plot(out, RESULTS)
 
 
