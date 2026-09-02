@@ -1159,6 +1159,7 @@ class Run:
                 results[i] = (np.asarray(pol, dtype=np.float64),
                               float(val))
         self._apply_refresh(traj, results, now)
+        return len(idxs)  # positions searched (accounting)
 
     def refresh_saturate(self, acting_ready, floor=1):
         """Kai's saturation refresh (REFRESH_SATURATE): refresh one
@@ -1173,6 +1174,7 @@ class Run:
             return 0
         engine = self._vtree_engine()
         done = 0
+        steps = 0
         seen = set()
         while True:
             if done >= floor and acting_ready():
@@ -1192,12 +1194,20 @@ class Run:
                 break  # everything guarded, ineligible, or already done
             seen.add(id(self.replay[pick]))
             now = self.trainer.training_steps
-            self._refresh_traj_vtree(self.replay[pick], engine, now)
+            steps += self._refresh_traj_vtree(self.replay[pick], engine,
+                                              now)
             done += 1
         stats = getattr(self, "_refresh_offload_stats", None) or {}
-        total = stats.get("refresh_applied", 0) + done
-        self._refresh_offload_stats = {"refresh_applied": total,
-                                       "refresh_last_iter": done}
+        self._refresh_offload_stats = {
+            "refresh_applied": stats.get("refresh_applied", 0) + done,
+            "refresh_last_iter": done,
+            # POSITIONS re-searched -- the "# of steps refreshed" Kai's
+            # cross-run comparison needs (trajectory counts hide length
+            # variance; archfix's volume reconstructs as ~2 trajs/iter
+            # of every position, so this is the like-for-like number).
+            "refresh_steps_total": stats.get("refresh_steps_total", 0)
+            + steps,
+            "refresh_steps_last_iter": steps}
         return done
 
     def reanalyse(self, traj, terminated=True, born_step=None):

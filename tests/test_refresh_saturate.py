@@ -73,6 +73,9 @@ def test_saturate_runs_until_ready_and_reselects(sat_world):
     stats = run._refresh_offload_stats
     assert stats["refresh_last_iter"] == done
     assert stats["refresh_applied"] == done
+    # 3 eligible positions per fixture trajectory (truncated tail incl.)
+    assert stats["refresh_steps_last_iter"] == 3 * done
+    assert stats["refresh_steps_total"] == 3 * done
 
 
 def test_saturate_floor_ignores_early_ready(sat_world):
