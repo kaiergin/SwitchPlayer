@@ -119,18 +119,55 @@ def _gate_case(monkeypatch, key, value, pattern):
                          use_ray=True, cpu_actor=True)
 
 
-def test_saturate_arm_gate_demands_guard(monkeypatch):
-    _gate_case(monkeypatch, "REFRESH_NO_SHARPEN_GUARD", False,
-               "NO_SHARPEN_GUARD")
-
-
-def test_saturate_arm_gate_demands_entropy_priority(monkeypatch):
-    _gate_case(monkeypatch, "REFRESH_ENTROPY_PRIORITY", False,
-               "ENTROPY_PRIORITY")
+def test_saturate_arm_gate_demands_vtree(monkeypatch):
+    """Also proves guard/entropy are NOT gated (staged attribution,
+    2026-09-02): the sat-stale spec with VTREE stripped reaches the
+    VTREE refusal -- no guard/entropy refusal fires first."""
+    spec = dict(ablation.ARMS["effzero-repro-vtree-sat-stale"])
+    spec["REFRESH_VTREE"] = False
+    monkeypatch.setitem(ablation.ARMS, "sat-variant", spec)
+    with pytest.raises(SystemExit, match="requires REFRESH_VTREE"):
+        ablation.run_one("sat-variant", 0, 1, 1, 1, 1, None,
+                         use_ray=True, cpu_actor=True)
 
 
 def test_saturate_arm_gate_refuses_offload(monkeypatch):
     _gate_case(monkeypatch, "REFRESH_OFFLOAD", True, "exclusive")
+
+
+def test_stale_saturate_arm_passes_gates_and_derives(monkeypatch):
+    arm = ablation.ARMS["effzero-repro-vtree-sat-stale"]
+    assert arm["REFRESH_SATURATE"] is True
+    assert arm["REFRESH_ENTROPY_PRIORITY"] is False
+    assert arm["REFRESH_NO_SHARPEN_GUARD"] is False
+    base = ablation.ARMS["effzero-repro-vtree-refresh"]
+    changed = {"REFRESH_SATURATE", "REFRESH_ENTROPY_PRIORITY",
+               "REFRESH_NO_SHARPEN_GUARD", "_doc"}
+    for key in set(base) | set(arm):
+        if key in changed:
+            continue
+        assert arm[key] == base[key], f"unexpected drift on {key}"
+    # The gate chain accepts it: with cpu_actor False it reaches the
+    # cpu-actor refusal (i.e., past --ray, with no guard/entropy gate
+    # in the way).
+    with pytest.raises(SystemExit, match="requires --cpu-actor"):
+        ablation.run_one("effzero-repro-vtree-sat-stale", 0, 1, 1, 1, 1,
+                         None, use_ray=True, cpu_actor=False)
+
+
+def test_saturate_rotation_mode_one_pass_no_guard(sat_world, monkeypatch):
+    """Kai's staleness-first configuration: rotation ordering, guard
+    off. The seen-set alone must bound the call at one pass with every
+    trajectory searched and stamped."""
+    monkeypatch.setattr(muzero, "REFRESH_ENTROPY_PRIORITY", False)
+    monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", False)
+    run = sat_world(3)
+    done = run.refresh_saturate(lambda: False, floor=0)
+    assert done == 3
+    assert all(traj[0].get("refreshed_step") == 500
+               for traj in run.replay)
+    assert not any(t.get("refresh_guarded")
+                   for traj in run.replay for t in traj)
 
 
 def test_saturate_never_repicks_within_a_call_and_is_bounded(sat_world,

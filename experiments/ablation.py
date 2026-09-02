@@ -581,6 +581,28 @@ ARMS["effzero-repro-vtree-refresh"] = {
             "deltas = refresh topology+coverage, actor device).",
 }
 
+# Staged-attribution arm (2026-09-02, Kai): saturation coverage with
+# archfix's exact refresh SELECTION semantics -- staleness rotation,
+# always-replace, no guard. Deltas vs archfix: parallel stack, fresh-
+# root topology, coverage volume. Entropy+guard test layers on after.
+ARMS["effzero-repro-vtree-sat-stale"] = {
+    **ARMS["effzero-repro-vtree-refresh"],
+    "REFRESH_SATURATE": True,
+    "REFRESH_ENTROPY_PRIORITY": False,
+    "REFRESH_NO_SHARPEN_GUARD": False,
+    "_doc": "Saturation refresh with STALENESS ordering and NO guard: "
+            "while the CPU env actor plays, the GPU re-searches oldest-"
+            "rotation trajectories one at a time (one pass over the "
+            "buffer max per iteration; every position, always replaced) "
+            "-- archfix's selection semantics at saturation volume. Run "
+            "with --ray --cpu-actor. Control: pong-archfix-2026-08-30 "
+            "(deltas: pipeline+cpu actor, fresh-root topology, coverage "
+            "volume). The entropy+guard package tests separately in "
+            "effzero-repro-vtree-saturate.",
+}
+
+# Staged-attribution arm
+
 # Saturation arm (2026-09-02, Kai): drop the fixed refresh quota; fill
 # the actor-play slack with as much entropy-prioritized refresh as fits.
 ARMS["effzero-repro-vtree-saturate"] = {
@@ -2229,18 +2251,13 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     "window they fill")
             if not spec.get("REFRESH_VTREE"):
                 raise SystemExit("REFRESH_SATURATE requires REFRESH_VTREE")
-            if not spec.get("REFRESH_NO_SHARPEN_GUARD"):
-                raise SystemExit(
-                    "REFRESH_SATURATE requires REFRESH_NO_SHARPEN_GUARD: "
-                    "the guard is what makes saturation self-limiting -- "
-                    "without it the flattest trajectory is re-searched "
-                    "forever")
-            if not spec.get("REFRESH_ENTROPY_PRIORITY"):
-                raise SystemExit(
-                    "REFRESH_SATURATE requires REFRESH_ENTROPY_PRIORITY: "
-                    "the rotation branch never skips guarded/no-eligible "
-                    "trajectories, so the window burns on no-op stamp "
-                    "rotations instead of repairable flatness")
+            # Guard and entropy priority are DELIBERATELY not required
+            # (2026-09-02, Kai's staged attribution): the one-pass
+            # seen-set bounds every saturate call regardless -- the
+            # termination round proved one pass with the guard neutered
+            # -- and an ineligible rotation pick costs a stamp, not a
+            # search. Staleness-ordered guard-free saturation is the
+            # minimal-delta first test; entropy+guard layer on next.
             if spec.get("REFRESH_OFFLOAD"):
                 raise SystemExit(
                     "REFRESH_SATURATE and REFRESH_OFFLOAD are exclusive: "
