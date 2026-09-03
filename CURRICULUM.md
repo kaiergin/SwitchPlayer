@@ -560,6 +560,37 @@ after the saturation tests 1-2 report (their per-iteration
 comparability is what this retires). This is the live-Switch skeleton:
 the game does not pause for the learner.
 
+### Future experiment — buffer eviction (Kai, 2026-09-03; recorded, not scheduled)
+
+Replace/augment whole-trajectory age-FIFO. Motivating evidence: at high
+capability the 31.25k FIFO buffer became a winning-rallies monoculture
+(test-1 satstale run) -- age-FIFO's real failure is DIVERSITY loss, not
+keeping stale data (refresh keeps targets fresh; 4.3 handles off-policy
+value decay). Candidate designs, in rough order: (1) diversity
+reservoir -- stratify by return/phase/novelty and protect a varied
+slice from FIFO (the safe form; naive evict-the-mastered risks
+evicting exactly what drift is about to forget); (2) segment-level
+eviction -- split trajectories at low-priority autopilot runs, keep
+informative segments with K+TD_STEPS window margins (prefix cuts free;
+suffix cuts need tail-flag surgery) = several-fold effective capacity
+at the same transition cap; (3) priority-eviction with a forgetting
+safeguard. PREREQ: per-row buffer-composition logging (age spread,
+return distribution, mean priority, guarded fraction) -- the satstale
+monoculture should have been visible before the collapse, not inferred
+after.
+
+### Guard criterion note (2026-09-03, from Kai's collapsed-policy question)
+
+The no-sharpen guard measures progress as ENTROPY DROP only -- but a
+re-search that REDIRECTS a sharp target (collapsed on action a, better
+action b found: sharp -> sharp, dH ~ 0) reads as no-progress, strikes,
+and freezes the wrong action into the stored target for the
+trajectory's remaining lifetime. A KL-based criterion -- retire a step
+when re-searches stop CHANGING the target, KL(new||old) < tol -- counts
+both sharpening and redirection as progress and cannot freeze a
+correctable collapse. Candidate replacement if/when the guard ships in
+anger.
+
 ## Carried decisions from the repro line
 
 Tiny buffer + live refresh direction; entropy-based refresh priority is
