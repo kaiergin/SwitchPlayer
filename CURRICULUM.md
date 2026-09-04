@@ -594,8 +594,9 @@ anger.
 ## Carried decisions from the repro line
 
 Tiny buffer + live refresh direction; entropy-based refresh priority is
-Kai's chosen decisiveness-annealing mechanism in this regime (guard: stop
-re-searching steps whose refreshed entropy does not drop). Reward-clip
+Kai's chosen decisiveness-annealing mechanism in this regime (guard v2:
+retire only stable-sharp targets -- sharp AND reproduced by re-search;
+flat targets stay eligible). Reward-clip
 growth curriculum (inert on Pong, real elsewhere) sized against the
 categorical supports. Evaluation of this algorithm vs the repro line is
 END-TO-END ONLY: return vs wall-clock/game-time, not per env step.

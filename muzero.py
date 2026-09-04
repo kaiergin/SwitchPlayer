@@ -345,10 +345,14 @@ POLICY_REFRESH_COUNT = 2
 # stored-target-entropy first (the tiny buffer's ~50x reuse amplifies
 # every flat target, so repairing the flattest first repairs the most-
 # reused weakest signals) instead of oldest-first rotation.
-# REFRESH_NO_SHARPEN_GUARD: a step whose re-search does NOT drop its
-# target entropy (genuine ambiguity, not repairable flatness) is marked
-# and excluded from FUTURE re-searches; the fresh result is still
-# applied (newer target model = better value/priority regardless).
+# REFRESH_NO_SHARPEN_GUARD: guard v2 (2026-09-03) -- a step is marked
+# and excluded from FUTURE re-searches only once STABLE-SHARP: its
+# re-search returns a sharp target (H <= REFRESH_GUARD_SHARP_H) that
+# reproduces the stored one (KL <= REFRESH_GUARD_KL_TOL), STRIKES
+# times running. Flat targets never retire (flatness indicts the
+# model); redirects reset. The fresh result is always applied. (The
+# flag/key names date from the v1 delta-H criterion and are kept for
+# arm-dict and checkpoint compatibility.)
 # REFRESH_OFFLOAD: under --ray, refresh runs on a dedicated actor
 # against the lagged target nets and the driver applies results at a
 # fixed point in its own loop (swap-on-ready; the single-threaded loop
@@ -387,12 +391,12 @@ VTREE_REFRESH_BATCH = 256
 # POLICY_REFRESH_EVERY iterations, the driver refreshes AS MUCH AS FITS
 # in the slack while the CPU environment actor plays -- one candidate
 # trajectory at a time, flattest first, polling the actor between
-# trajectories, with a floor of one candidate per cadence point so an
-# early-returning actor never starves refresh entirely. Requires the
-# no-sharpen guard (refused loudly otherwise): the guard is what makes
-# saturation self-limiting -- converged steps strike out and leave the
-# rotation, evictions bring fresh unguarded trajectories, so coverage
-# concentrates exactly where targets are still repairable. Requires
+# trajectories, with a base-schedule floor so refresh never runs below
+# the control's rate. The one-pass seen-set bounds every call; the v2
+# guard additionally retires STABLE-SHARP (converged) targets so
+# late-phase churn is damped where re-searching only replays noise --
+# flat targets stay eligible (their flatness indicts the model).
+# Requires
 # REFRESH_VTREE and the --ray pipeline (there is no slack window in
 # sequential mode; the scheduled quota remains its fallback).
 REFRESH_SATURATE = False

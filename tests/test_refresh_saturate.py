@@ -186,10 +186,10 @@ def test_saturate_rotation_mode_one_pass_no_guard(sat_world, monkeypatch):
 
 def test_saturate_never_repicks_within_a_call_and_is_bounded(sat_world,
                                                               monkeypatch):
-    """Audit F3: consecutive strikes must land in different calls,
-    and a hung actor bounds the call at one pass over the buffer.
-    STRIKES=2 makes this DISCRIMINATE (round-2 F-A): at the fixture's
-    STRIKES=1 the guard alone bounded the parent commit's loop too."""
+    """Audit F3: a hung actor bounds the call at one pass over the
+    buffer via the seen-set. (Under guard v2 the fixture's uniform
+    targets can never strike, so the seen-set is the ONLY bound here --
+    which is exactly what this pins.)"""
     monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 2)
     run = sat_world(3)
     done = run.refresh_saturate(lambda: False, floor=0)

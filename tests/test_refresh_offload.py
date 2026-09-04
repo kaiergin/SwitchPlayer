@@ -196,15 +196,19 @@ def test_offloaded_search_and_apply_match_inline(monkeypatch):
     monkeypatch.setattr(muzero, "COMMUNAL_WINDOW_ROOTS", 2)
     monkeypatch.setattr(muzero, "REFRESH_ENTROPY_PRIORITY", True)
     monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
-    # STRIKES=1 so a single refresh CAN set the guard -- at the default 2
-    # the guard-parity assertion below would compare None == None
-    # (verification-round F2).
+    # Under guard v2 these fixtures' UNIFORM stored targets cannot take
+    # a search-driven strike (KL(new||uniform) >= ln5 - SHARP_H > TOL
+    # whenever the new target is sharp) -- so the guard-key equality
+    # below would be vacuously None == None. Seeding one step with a
+    # strike makes it non-vacuous: both paths must process (here:
+    # reset) it identically.
     monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 1)
 
     np.random.seed(11)
     base = obs_traj([1.0] * 5, [5.0] * 5)
     for t in base:
         t["born_step"] = 0
+    base[1]["refresh_no_drop_strikes"] = 1  # see fixture comment above
 
     # Inline side.
     inline_traj = copy.deepcopy(base)

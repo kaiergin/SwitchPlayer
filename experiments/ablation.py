@@ -639,8 +639,8 @@ ARMS["effzero-repro-communal-entropyrefresh"] = {
             "(COUNT 4->20; at the 31.25k transition cap that re-searches "
             "roughly the whole buffer every 2 iterations), candidates "
             "ordered flattest stored-target entropy first, the no-sharpen "
-            "guard (a step whose re-search does not drop its entropy is "
-            "genuinely ambiguous and leaves the rotation), and refresh "
+            "guard (v2: a step retires once its re-search reproduces a "
+            "stable sharp answer; flat targets stay eligible), and refresh "
             "offloaded to a dedicated Ray actor under --ray (without "
             "--ray the same coverage runs inline and costs iteration "
             "time). Control: the communal arm at the same command; only "
@@ -967,7 +967,7 @@ class Run:
     def _eligible_indices(self, traj):
         """Steps a refresh may re-search: policy-carrying (the terminated
         tail carried no search then, none now) and, under the no-sharpen
-        guard, not yet marked as unrepairably ambiguous."""
+        guard, not yet retired as stable-sharp/converged (guard v2)."""
         return [i for i, t in enumerate(traj)
                 if t.get("has_policy_target", True)
                 and not (muzero.REFRESH_NO_SHARPEN_GUARD
@@ -1021,7 +1021,8 @@ class Run:
         semantics cannot drift from sequential. The fresh result is
         applied even when the guard trips: a newer target model gives a
         better value/priority regardless; the guard only stops FUTURE
-        re-searches of a step whose entropy would not drop."""
+        re-searches of a step whose target is STABLE-SHARP (v2: sharp
+        and reproduced -- see the muzero constants block)."""
         for idx, (pol, val) in results.items():
             t = traj[idx]
             pol = np.asarray(pol, dtype=np.float64)
@@ -1191,7 +1192,7 @@ class Run:
             # One pass over the buffer per call (audit F3): a trajectory
             # is never re-picked within a call, so consecutive guard
             # strikes land in DIFFERENT calls -- across real training
-            # windows, the regime the (TOL, STRIKES) pair was calibrated
+            # windows, the regime the (SHARP_H, KL_TOL, STRIKES) triple targets
             # for -- and the loop is bounded by the buffer size even if
             # the actor hangs.
             pick = None
