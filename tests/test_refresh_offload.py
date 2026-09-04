@@ -122,52 +122,59 @@ def test_eligible_indices_respect_tail_and_guard(monkeypatch):
 # The no-sharpen guard inside _apply_refresh
 # --------------------------------------------------------------------------
 
-def test_guard_marks_non_sharpening_steps_but_still_applies(monkeypatch):
+def test_guard_v2_strikes_only_stable_sharp(monkeypatch):
+    """Guard v2: a strike requires the NEW target to be sharp (H <=
+    SHARP_H) and to REPRODUCE the stored one (KL <= KL_TOL). The fresh
+    result is always applied regardless."""
     monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
     monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 1)
     traj = traj_with_entropy(sharp_policy(), n=2)
     run = make_run([traj])
-    flat, sharp = flat_policy(), sharp_policy()
-    # Step 0: re-search came back FLATTER -> guarded, result applied anyway.
-    # Step 1: re-search sharpened (entropy dropped) -> stays in rotation.
-    sharper = np.full(ACTIONS, 0.01)
-    sharper[1] = 1.0 - 0.01 * (ACTIONS - 1)
-    run._apply_refresh(traj, {0: (flat, -1.0), 1: (sharper, -2.0)}, now=500)
+    # Step 0: sharp target reproduced exactly -> stable-sharp -> guarded.
+    # Step 1: FLAT result -> can never strike, stays eligible.
+    run._apply_refresh(traj, {0: (sharp_policy(), -1.0),
+                              1: (flat_policy(), -2.0)}, now=500)
     assert traj[0].get("refresh_guarded") is True
-    assert np.allclose(traj[0]["target_policy"], flat), \
-        "the guard must not block application -- only future re-searches"
-    assert traj[0]["root_value"] == -1.0
+    assert np.allclose(traj[0]["target_policy"], sharp_policy())
     assert "refresh_guarded" not in traj[1]
-    assert np.allclose(traj[1]["target_policy"], sharper)
+    assert np.allclose(traj[1]["target_policy"], flat_policy()),         "the guard must not block application"
     assert all(t["refreshed_step"] == 500 for t in traj)
-    assert all(t["priority"] > 0 for t in traj)
 
 
-def test_guard_needs_consecutive_strikes_and_a_drop_resets(monkeypatch):
-    """Calibration against measured search noise (|dH| median 0.037 at
-    the production budget): one non-drop is a coin flip, so the guard
-    demands REFRESH_GUARD_STRIKES consecutive failures, and a single
-    clear drop wipes the count."""
+def test_guard_v2_flat_targets_never_strike(monkeypatch):
+    """The test-2 failure mode: early flat targets re-searched to flat
+    must STAY ELIGIBLE -- their flatness indicts the model, and freezing
+    them trains the policy on weak-model targets at ~50x reuse."""
+    monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
+    monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 1)
+    traj = traj_with_entropy(flat_policy(), n=1)
+    run = make_run([traj])
+    for step in range(4):
+        run._apply_refresh(traj, {0: (flat_policy(), -1.0)},
+                           now=100 * (step + 1))
+    assert "refresh_guarded" not in traj[0]
+    assert "refresh_no_drop_strikes" not in traj[0]
+
+
+def test_guard_v2_redirect_resets_strikes(monkeypatch):
+    """The collapsed-policy fix: a sharp target redirected onto a
+    DIFFERENT action (sharp -> sharp, dH ~ 0, KL large) is PROGRESS and
+    resets the count -- a correctable collapse is never frozen."""
     monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
     monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 2)
-    traj = traj_with_entropy(sharp_policy(), n=1)
+    traj = traj_with_entropy(sharp_policy(), n=1)  # sharp on action 1
     run = make_run([traj])
-    flat = flat_policy()
-    sharper = np.full(ACTIONS, 0.01)
-    sharper[1] = 1.0 - 0.01 * (ACTIONS - 1)
-    # Strike 1: counted, not guarded.
-    run._apply_refresh(traj, {0: (flat, -1.0)}, now=100)
-    assert "refresh_guarded" not in traj[0]
+    run._apply_refresh(traj, {0: (sharp_policy(), -1.0)}, now=100)
     assert traj[0]["refresh_no_drop_strikes"] == 1
-    # A clear drop resets the count...
-    run._apply_refresh(traj, {0: (sharper, -1.0)}, now=200)
-    assert "refresh_no_drop_strikes" not in traj[0]
-    # ...so two MORE non-drops are needed to guard.
-    run._apply_refresh(traj, {0: (flat, -1.0)}, now=300)
+    redirect = np.full(ACTIONS, 0.02)
+    redirect[3] = 1.0 - 0.02 * (ACTIONS - 1)  # sharp on action 3
+    run._apply_refresh(traj, {0: (redirect, -1.0)}, now=200)
+    assert "refresh_no_drop_strikes" not in traj[0],         "a redirect must reset, not strike"
     assert "refresh_guarded" not in traj[0]
-    run._apply_refresh(traj, {0: (flat.copy(), -1.0)}, now=400)
+    # Two consecutive reproductions of the NEW answer then retire it.
+    run._apply_refresh(traj, {0: (redirect.copy(), -1.0)}, now=300)
+    run._apply_refresh(traj, {0: (redirect.copy(), -1.0)}, now=400)
     assert traj[0].get("refresh_guarded") is True
-    assert "refresh_no_drop_strikes" not in traj[0]
 
 
 def test_guard_off_never_marks(monkeypatch):
@@ -177,36 +184,6 @@ def test_guard_off_never_marks(monkeypatch):
     run._apply_refresh(traj, {0: (flat_policy(), -1.0)}, now=500)
     assert "refresh_guarded" not in traj[0]
 
-
-def test_guard_demands_a_drop_of_at_least_the_tolerance(monkeypatch):
-    """Semantics: staying in the rotation requires sharpening by MORE
-    than REFRESH_GUARD_TOL. A sub-tolerance drop (noise-sized) trips the
-    guard exactly like no drop at all; a clear drop does not. In
-    particular uniform-to-uniform (the canonical genuinely-ambiguous
-    step) is always guarded."""
-    monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
-    monkeypatch.setattr(muzero, "REFRESH_GUARD_STRIKES", 1)
-    monkeypatch.setattr(muzero, "REFRESH_GUARD_TOL", 0.05)
-    mid = 0.5 * sharp_policy() + 0.5 * flat_policy()
-    traj = traj_with_entropy(mid, n=3)
-    old_h = entropy(mid)
-    clear_drop = sharp_policy()                      # sharpens a lot
-    tiny_drop = 0.98 * mid + 0.02 * sharp_policy()  # sharpens < TOL
-    tiny_drop /= tiny_drop.sum()
-    assert 0 < old_h - entropy(tiny_drop) < 0.05
-    assert old_h - entropy(clear_drop) > 0.05
-    run = make_run([traj])
-    run._apply_refresh(traj, {0: (clear_drop, -1.0),
-                              1: (tiny_drop, -1.0),
-                              2: (mid.copy(), -1.0)}, now=500)
-    assert "refresh_guarded" not in traj[0], "a clear drop must not guard"
-    assert traj[1].get("refresh_guarded") is True, "sub-TOL drop must guard"
-    assert traj[2].get("refresh_guarded") is True, "no drop must guard"
-
-
-# --------------------------------------------------------------------------
-# Offload parity: actor-shaped path == inline path
-# --------------------------------------------------------------------------
 
 def test_offloaded_search_and_apply_match_inline(monkeypatch):
     """The load-bearing test: records shipped the way request_refresh

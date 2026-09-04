@@ -1026,16 +1026,21 @@ class Run:
             t = traj[idx]
             pol = np.asarray(pol, dtype=np.float64)
             if muzero.REFRESH_NO_SHARPEN_GUARD and not t.get("refresh_guarded"):
+                # Guard v2 (2026-09-03): strike ONLY on stable-sharp --
+                # target already sharp AND reproduced by the re-search.
+                # Flat targets never strike (their flatness indicts the
+                # model; test 2 froze weak-model flat targets and lost
+                # test 1's acceleration), and a redirect (sharp toward a
+                # DIFFERENT action: large KL) resets -- a correctable
+                # collapse is never frozen into the buffer.
                 old = np.asarray(t["target_policy"], dtype=np.float64)
-                old_h = float(-(old * np.log(old + 1e-12)).sum())
                 new_h = float(-(pol * np.log(pol + 1e-12)).sum())
-                if new_h >= old_h - muzero.REFRESH_GUARD_TOL:
-                    # STRIKES consecutive non-drops guard the step; one
-                    # clear drop resets. Measured search noise (3a audit:
-                    # per-step |dH| median 0.037, max 0.087 at the
-                    # production budget) makes any single comparison a
-                    # coin flip -- the pair (TOL, STRIKES) is what turns
-                    # this into a discriminator instead of a ratchet.
+                o = old + 1e-6
+                q = pol + 1e-6
+                o, q = o / o.sum(), q / q.sum()
+                kl = float((q * np.log(q / o)).sum())
+                if (new_h <= muzero.REFRESH_GUARD_SHARP_H
+                        and kl <= muzero.REFRESH_GUARD_KL_TOL):
                     strikes = t.get("refresh_no_drop_strikes", 0) + 1
                     if strikes >= muzero.REFRESH_GUARD_STRIKES:
                         t["refresh_guarded"] = True

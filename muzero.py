@@ -355,15 +355,21 @@ POLICY_REFRESH_COUNT = 2
 # is the mutex). Inline refresh remains the sequential-mode path.
 REFRESH_ENTROPY_PRIORITY = False
 REFRESH_NO_SHARPEN_GUARD = False
-# Guard calibration (3a audit, 2026-08-31): two re-searches of the SAME
-# step at the production budget (50 sims, window 16) differ by |dH|
-# median 0.037 / max 0.087 -- pure search noise. A step leaves the
-# rotation only after REFRESH_GUARD_STRIKES consecutive re-searches that
-# each failed to drop entropy by REFRESH_GUARD_TOL; one clear drop
-# resets the count. TOL near the noise median + 2 strikes makes random
-# retirement of converged steps ~unlikely while genuinely-ambiguous
-# steps (dH ~ 0) still exit within two visits.
-REFRESH_GUARD_TOL = 0.05
+# Guard criterion v2 (2026-09-03, from tests 1+2): retire a step ONLY
+# when its target is STABLE-SHARP -- entropy below REFRESH_GUARD_SHARP_H
+# AND the re-search reproduces it (KL(new||old) <= REFRESH_GUARD_KL_TOL)
+# for REFRESH_GUARD_STRIKES consecutive visits; anything else resets.
+# The v1 delta-H criterion punished flat->flat (dH ~ 0), which indicts
+# the MODEL, not the state: test 2 froze weak-model flat targets at
+# iter ~5 and trained on them at ~50x reuse until eviction -- killing
+# test 1's 2x acceleration despite HIGHER refresh volume. v2 never
+# retires a flat target (the model may yet sharpen it) and never
+# freezes a redirect (sharp->different-sharp has large KL and resets),
+# fixing the collapsed-policy freeze recorded in CURRICULUM.md. Repeat
+# searches of a CONVERGED sharp target measure KL ~ 0.02-0.05; the
+# all-states repeat-noise floor is ~0.19-0.22 -- tol 0.1 separates them.
+REFRESH_GUARD_SHARP_H = 0.9
+REFRESH_GUARD_KL_TOL = 0.1
 REFRESH_GUARD_STRIKES = 2
 REFRESH_OFFLOAD = False
 # Phase 4 (2026-09-02, Kai's latency/throughput split): refresh runs as
