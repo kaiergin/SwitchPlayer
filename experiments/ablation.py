@@ -606,6 +606,29 @@ ARMS["effzero-repro-vtree-sat-stale"] = {
 }
 
 
+# Attribution arm (2026-09-05, Kai): the replicating winner's allocation
+# (staleness rotation, always-replace) with ONLY guard v2 added -- one
+# variable vs sat-stale. Motivated by the buffer-scan correction: late-
+# stage coverage is whole-buffer in every saturate arm, but during iters
+# ~5-15 coverage is partial and ordering allocates differently; sat-stale
+# accelerated 2/2 seeds while the entropy-ordered saturate arm tracked
+# archfix. If THIS arm accelerates, entropy ordering caused test 3's
+# flop and the guard is compatible with the speedup (best case: speed +
+# collapse protection). If it flops, the guard is implicated.
+ARMS["effzero-repro-vtree-sat-guard"] = {
+    **ARMS["effzero-repro-vtree-sat-stale"],
+    "REFRESH_NO_SHARPEN_GUARD": True,
+    "_doc": "effzero-repro-vtree-sat-stale plus guard v2 retirement "
+            "(stable-sharp only: H <= REFRESH_GUARD_SHARP_H and "
+            "KL <= REFRESH_GUARD_KL_TOL, REFRESH_GUARD_STRIKES strikes "
+            "in different calls). Rotation may pick a fully-guarded "
+            "trajectory: it costs a stamp, not a search (the audited "
+            "one-pass seen-set bound). Controls: pong-satstale-2026-09-02 "
+            "and pong-satstale-s1-2026-09-04 (same allocation, no guard) "
+            "vs pong-vsat2-2026-09-03 (guard, entropy ordering). Run "
+            "with --ray --cpu-actor.",
+}
+
 # Saturation arm (2026-09-02, Kai): drop the fixed refresh quota; fill
 # the actor-play slack with as much entropy-prioritized refresh as fits.
 ARMS["effzero-repro-vtree-saturate"] = {
@@ -1204,9 +1227,19 @@ class Run:
                 break  # everything guarded, ineligible, or already done
             seen.add(id(self.replay[pick]))
             now = self.trainer.training_steps
-            steps += self._refresh_traj_vtree(self.replay[pick], engine,
-                                              now)
-            done += 1
+            got = self._refresh_traj_vtree(self.replay[pick], engine, now)
+            steps += got
+            # Only REAL work counts toward the floor and the applied
+            # counters (sat-guard audit F1): under rotation ordering a
+            # fully-guarded trajectory is a legal pick that searches
+            # zero positions -- it still burns its seen-set slot (and
+            # gets stamped in _apply_refresh, so it rotates to the
+            # back), but letting it satisfy the floor would quietly
+            # shrink cadence coverage below the base schedule as
+            # retirement grows. Zero-work picks also kept
+            # refresh_applied like-for-like across arms (audit F2).
+            if got > 0:
+                done += 1
         stats = getattr(self, "_refresh_offload_stats", None) or {}
         self._refresh_offload_stats = {
             "refresh_applied": stats.get("refresh_applied", 0) + done,
