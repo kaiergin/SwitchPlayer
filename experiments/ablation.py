@@ -606,6 +606,33 @@ ARMS["effzero-repro-vtree-sat-stale"] = {
 }
 
 
+# Phase 5 arm (2026-09-06, Kai): the fully asynchronous loop with the
+# freshness contract -- every trained-on target refreshed within one
+# sweep period, newcomers refreshed at collect. Refresh SEMANTICS are
+# sat-stale's (rotation, always-replace, no guard: the only variant
+# that accelerated, 2/2 seeds); what changes is the DRIVER (chunked
+# async loop, continuous acting, train-ratio cap) and the coverage
+# guarantee (contract, not slack).
+ARMS["effzero-repro-async-fresh"] = {
+    **ARMS["effzero-repro-vtree-sat-stale"],
+    "REFRESH_SATURATE": False,
+    "ASYNC_LOOP": True,
+    "_doc": "Phase-5 chunked asynchronous driver: actor plays "
+            "continuously (new episode requested at every collect), "
+            "gradient steps run in ASYNC_TRAIN_CHUNK chunks capped at "
+            "MAX_TRAIN_PER_ENV_STEP x env_steps, and the refresh lane "
+            "keeps a standing contract -- full-buffer rotation sweep "
+            "at least once per ASYNC_SWEEP_TRAIN_STEPS gradient steps "
+            "(always-replace, no guard) plus newcomer refresh at "
+            "collect. Rows re-key to gradient steps (u = "
+            "training_steps/train-steps) so the family's per-row "
+            "comparison axis survives; env_steps and the realized "
+            "train ratio are logged per row. Run with --ray "
+            "--cpu-actor. Controls: pong-satstale-2026-09-02 and "
+            "pong-satstale-s1-2026-09-04 (same refresh semantics, "
+            "iteration-bound driver).",
+}
+
 # Attribution arm (2026-09-05, Kai): the replicating winner's allocation
 # (staleness rotation, always-replace) with ONLY guard v2 added -- one
 # variable vs sat-stale. Motivated by the buffer-scan correction: late-
@@ -1252,6 +1279,65 @@ class Run:
             + steps,
             "refresh_steps_last_iter": steps}
         return done
+
+    def refresh_trajs(self, trajs):
+        """Phase 5: refresh EXACTLY these trajectory objects (newcomer
+        refresh at collect), sharing refresh_saturate's accounting keys
+        so eval rows stay comparable. Returns positions searched."""
+        if not trajs:
+            return 0
+        engine = self._vtree_engine()
+        done = steps = 0
+        now = self.trainer.training_steps
+        for traj in trajs:
+            got = self._refresh_traj_vtree(traj, engine, now)
+            steps += got
+            if got > 0:
+                done += 1
+        self._note_sweep_stats(done, steps)
+        return steps
+
+    def refresh_sweep(self, count):
+        """Phase 5: unconditionally refresh the `count` least-recently-
+        refreshed trajectories (rotation order via _refresh_candidates
+        with entropy priority off), always-replace. No guard, no floor,
+        no acting poll -- the async driver paces calls so the whole
+        buffer turns over at least once per ASYNC_SWEEP_TRAIN_STEPS
+        gradient steps (the freshness contract). Returns trajectories
+        refreshed."""
+        if not self.replay or count <= 0:
+            return 0
+        engine = self._vtree_engine()
+        done = steps = 0
+        for ci in self._refresh_candidates(count):
+            now = self.trainer.training_steps
+            got = self._refresh_traj_vtree(self.replay[ci], engine, now)
+            steps += got
+            if got > 0:
+                done += 1
+        self._note_sweep_stats(done, steps)
+        return done
+
+    def _note_sweep_stats(self, done, steps):
+        """Accumulate into the SAME keys refresh_saturate writes;
+        *_last_iter accumulates between eval rows and is zeroed by the
+        async driver when a row is requested (there is no iteration to
+        scope it otherwise)."""
+        stats = getattr(self, "_refresh_offload_stats", None) or {}
+        self._refresh_offload_stats = {
+            "refresh_applied": stats.get("refresh_applied", 0) + done,
+            "refresh_last_iter": stats.get("refresh_last_iter", 0) + done,
+            "refresh_steps_total": stats.get("refresh_steps_total", 0)
+            + steps,
+            "refresh_steps_last_iter":
+                stats.get("refresh_steps_last_iter", 0) + steps}
+
+    def zero_sweep_window(self):
+        """Reset the per-row accumulators at an eval boundary."""
+        stats = getattr(self, "_refresh_offload_stats", None) or {}
+        if stats:
+            stats["refresh_last_iter"] = 0
+            stats["refresh_steps_last_iter"] = 0
 
     def reanalyse(self, traj, terminated=True, born_step=None):
         if muzero.PAPER_TARGETS:
@@ -2315,6 +2401,27 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     "REFRESH_SATURATE and REFRESH_OFFLOAD are exclusive: "
                     "saturation's loop skips the cadence block, leaving "
                     "the offload silently inert (audit F4)")
+        if spec.get("ASYNC_LOOP"):
+            if not (use_ray and cpu_actor):
+                raise SystemExit(
+                    "ASYNC_LOOP arms need --ray --cpu-actor: the phase-5 "
+                    "driver's whole point is a continuously-playing CPU "
+                    "actor beside a GPU train+refresh lane")
+            if ray_workers:
+                raise SystemExit(
+                    "ASYNC_LOOP is the single-latency-lane driver; it "
+                    "excludes the --ray-workers pool")
+            if not spec.get("REFRESH_VTREE"):
+                raise SystemExit("ASYNC_LOOP requires REFRESH_VTREE (the "
+                                 "sweep is vectorized GPU search)")
+            if spec.get("REFRESH_SATURATE") or spec.get("REFRESH_OFFLOAD"):
+                raise SystemExit(
+                    "ASYNC_LOOP replaces the saturate/offload refresh "
+                    "drivers; the arm must set both off")
+            if init_weights:
+                raise SystemExit(
+                    "ASYNC_LOOP does not support --init-weights yet: the "
+                    "warm-start ramp is keyed to the iteration loop")
         if cpu_actor and spec.get("REFRESH_OFFLOAD"):
             raise SystemExit(
                 "--cpu-actor promises the whole GPU to the driver, but "
@@ -2454,6 +2561,157 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                                 episodes_per_iter, ray_workers=ray_workers,
                                 cpu_actor=cpu_actor)
                     if use_ray else None)
+
+        if pipeline and muzero.ASYNC_LOOP:
+            # ---- Phase 5: the chunked asynchronous driver ------------
+            # "Iteration" dissolves. The loop interleaves chunks: poll
+            # the in-flight episode (collect + immediately request the
+            # next -- the actor NEVER idles waiting on the driver),
+            # ~ASYNC_TRAIN_CHUNK gradient steps under the
+            # MAX_TRAIN_PER_ENV_STEP cap, then the refresh sweep's next
+            # trajectories (freshness contract: the whole buffer turns
+            # over at least once per ASYNC_SWEEP_TRAIN_STEPS gradient
+            # steps; newcomers are refreshed at collect before they can
+            # be sampled). Rows/checkpoints re-key to the gradient-step
+            # unit u = training_steps // train_steps, so the family's
+            # per-row axis survives; the chunk is capped at the next
+            # boundary, so rows land on EXACT multiples. Loop-as-mutex:
+            # no threads, same as every driver in this file. "The actor
+            # never blocks" means precisely: a new episode is requested
+            # at every collect, and collection latency is bounded by one
+            # loop iteration (a boundary's eval drain included) -- a
+            # finished episode can sit briefly before collection, and at
+            # shutdown at most one in-flight episode is discarded
+            # (legacy's exact cancellation class; audit F3).
+            total_train = iterations * train_steps
+            u_done = start_it
+            # Episode-seed key: only uniqueness matters, but the gap
+            # must outrun any dead timeline's episode count past its
+            # last checkpoint (audit F5) -- acting is unthrottled, so
+            # 1000 was crossable in principle; 10^6 is not.
+            ep_counter = start_it * 1_000_000
+            episodes_proc = 0
+            owed = 0.0                    # sweep debt, in trajectories
+
+            def collect_and_relaunch():
+                nonlocal ep_counter, episodes_proc
+                pipeline.collect()
+                if muzero.ASYNC_REFRESH_ON_COLLECT:
+                    # The newcomers are the last append(s); eviction
+                    # only ever removes from the front.
+                    run.refresh_trajs(run.replay[-episodes_per_iter:])
+                pipeline.sync()
+                ep_counter += 1
+                episodes_proc += 1
+                pipeline.request(ep_counter)
+
+            def async_boundary(v):
+                if (muzero.LR_DECAY_AT
+                        and v == max(1, int(iterations * muzero.LR_DECAY_AT))):
+                    muzero.decay_optimizer_lr(
+                        (run.trainer.rep_optimizer,
+                         run.trainer.dyn_optimizer,
+                         run.trainer.pred_optimizer,
+                         run.trainer.prefix_optimizer,
+                         run.trainer.proj_optimizer),
+                        muzero.LR_DECAY_FACTOR)
+                    print(f"  [{arm} s{seed}] lr decayed "
+                          f"x{muzero.LR_DECAY_FACTOR} at u {v}", flush=True)
+                if v == iterations:
+                    ckpt = RESULTS / f"weights{TAG}-{arm}-seed{seed}.pth"
+                    torch.save({
+                        "arm": arm, "seed": seed,
+                        "spec": {k: val for k, val in spec.items()},
+                        "training_steps": run.trainer.training_steps,
+                        "representation":
+                            run.trainer.representation.state_dict(),
+                        "dynamics": run.trainer.dynamics.state_dict(),
+                        "prediction": run.trainer.prediction.state_dict(),
+                        "value_prefix": run.trainer.value_prefix.state_dict(),
+                        "projector": run.trainer.projector.state_dict(),
+                    }, ckpt)
+                    print(f"  saved {ckpt.name}", flush=True)
+                if (eval_every and v % eval_every == 0) or v == iterations:
+                    pipeline.drain_eval()
+                    diag = run.evaluate_diagnostics()
+                    # The phase-5 spec's required per-row realized ratio.
+                    diag["train_per_env_step"] = round(
+                        run.trainer.training_steps
+                        / max(1, run.env_steps), 3)
+                    diag["episodes_since_resume"] = episodes_proc
+                    run.zero_sweep_window()
+                    pipeline.request_eval(v, 8, diag, write_row,
+                                          round(time.time() - started, 1))
+                    if v == iterations:
+                        pipeline.drain_eval()
+                if (checkpoint_every and v % checkpoint_every == 0
+                        and v != iterations):
+                    pipeline.drain_eval()
+                    save_run_checkpoint(run, ck, {
+                        **expect, "iteration": v,
+                        "training_steps": run.trainer.training_steps,
+                        "elapsed_s": round(time.time() - started, 1),
+                        "init_weights": init_name})
+                    print(f"  [{arm} s{seed}] checkpoint at u {v} "
+                          f"({ck.stat().st_size / 1e9:.1f} GB)", flush=True)
+
+            # Prime: play the first episode sequentially (nothing is in
+            # flight from scratch or after a resume), then acting is
+            # continuous -- every later collect immediately requests.
+            pipeline.request(ep_counter)
+            collect_and_relaunch()
+            while run.trainer.training_steps < total_train:
+                run.searcher.network_manager.training_steps = \
+                    run.trainer.training_steps
+                if pipeline.acting_ready():
+                    collect_and_relaunch()
+                allowed = (int(muzero.MAX_TRAIN_PER_ENV_STEP
+                               * run.env_steps)
+                           - run.trainer.training_steps)
+                chunk = min(muzero.ASYNC_TRAIN_CHUNK,
+                            total_train - run.trainer.training_steps,
+                            allowed,
+                            # Never cross a u boundary mid-chunk: rows
+                            # then land on EXACT train-step multiples
+                            # (the toy smoke showed two boundaries
+                            # crossed by one chunk sharing counters).
+                            train_steps - (run.trainer.training_steps
+                                           % train_steps))
+                if chunk > 0:
+                    run.set_train_mode(True)
+                    for _ in range(chunk):
+                        batch = asyncio.run(run.trainer.prepare_batch(
+                            run.replay, muzero.TRAINING_BATCHES,
+                            muzero.UNROLL_STEPS, ACTIONS))
+                        asyncio.run(run.trainer.train_step(batch))
+                        run.trainer.training_steps += 1
+                    run.set_train_mode(False)
+                    owed += (len(run.replay) * chunk
+                             / muzero.ASYNC_SWEEP_TRAIN_STEPS)
+                due = int(owed)
+                if due > 0:
+                    run.refresh_sweep(due)
+                    # due = int(owed) is consumed every accrual, so the
+                    # residue is always < 1 trajectory (audit F4: no
+                    # buffer-size clamp is needed -- debt can never
+                    # exceed one trajectory, let alone one sweep).
+                    owed -= due
+                if chunk <= 0 and due <= 0 and not pipeline.acting_ready():
+                    # Train lane capped, contract satisfied: the only
+                    # remaining work is the in-flight episode. Block on
+                    # it (the actor itself never blocks -- collect
+                    # relaunches immediately).
+                    collect_and_relaunch()
+                u_now = run.trainer.training_steps // train_steps
+                while u_done < u_now:
+                    u_done += 1
+                    async_boundary(u_done)
+            if checkpoint_every or resume:
+                mark_run_completed(ck, expect)
+            pipeline.shutdown()
+            run.env.close()
+            return
+
         for it in range(start_it + 1, iterations + 1):
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.

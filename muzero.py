@@ -400,6 +400,31 @@ VTREE_REFRESH_BATCH = 256
 # REFRESH_VTREE and the --ray pipeline (there is no slack window in
 # sequential mode; the scheduled quota remains its fallback).
 REFRESH_SATURATE = False
+# Phase 5 (2026-09-06, Kai): the fully asynchronous chunked loop --
+# "iteration" dissolves. One driver loop interleaves CHUNKS (poll the
+# episode future / ~ASYNC_TRAIN_CHUNK gradient steps / the refresh
+# sweep's next trajectories); the actor plays CONTINUOUSLY (a new
+# episode is requested the moment one is collected -- THE invariant of
+# the real-time framing), and the loop stays the mutex (no threads).
+# Freshness contract (Kai's requirement, in place of every guard/
+# quota/priority mechanism): the WHOLE buffer is re-searched at least
+# once per ASYNC_SWEEP_TRAIN_STEPS gradient steps (rotation order,
+# always-replace, no guard -- the twice-replicated sat-stale
+# semantics), and a newly collected trajectory is refreshed against
+# the lagged target model BEFORE it can be sampled
+# (ASYNC_REFRESH_ON_COLLECT) -- so no target trained on is ever older
+# than one sweep period, INCLUDING during the early iterations where
+# the slack-bounded saturate arms under-covered. MAX_TRAIN_PER_ENV_STEP
+# is the REQUIRED train-ratio cap (CURRICULUM.md phase-5 spec, at
+# today's ~2): without it the emergent hardware-dependent ratio could
+# explode into tiny-buffer overtraining early; the realized ratio is
+# logged in every row. Eval/checkpoint re-key to gradient steps
+# (u = training_steps // train_steps keeps the family's row axis).
+ASYNC_LOOP = False
+ASYNC_TRAIN_CHUNK = 100
+ASYNC_SWEEP_TRAIN_STEPS = 2000
+ASYNC_REFRESH_ON_COLLECT = True
+MAX_TRAIN_PER_ENV_STEP = 2.0
 
 
 def visit_softmax_temperature(training_steps):

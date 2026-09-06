@@ -74,7 +74,9 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-communal-entropyrefresh",
                         "effzero-repro-vtree-refresh",
                         "effzero-repro-vtree-saturate",
-                        "effzero-repro-vtree-sat-stale"):
+                        "effzero-repro-vtree-sat-stale",
+                        "effzero-repro-vtree-sat-guard",
+                        "effzero-repro-async-fresh"):
             assert spec["USE_AUGMENTATION"] is False, name
 
 
