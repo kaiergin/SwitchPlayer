@@ -154,6 +154,16 @@ def test_throttle_arm_delta_is_the_floor_only():
         "the floor must default OFF for every other arm"
 
 
+def test_keepnew_arm_delta_is_newcomer_refresh_only():
+    spec = ablation.ARMS["effzero-repro-async-keepnew"]
+    base = ablation.ARMS["effzero-repro-async-throttle"]
+    delta = {k: v for k, v in spec.items()
+             if k != "_doc" and base.get(k) != v}
+    assert delta == {"ASYNC_REFRESH_ON_COLLECT": False}
+    assert muzero.ASYNC_REFRESH_ON_COLLECT is True, \
+        "newcomer refresh must default ON for the other async arms"
+
+
 def test_async_arm_delta_is_driver_only():
     spec = ablation.ARMS["effzero-repro-async-fresh"]
     base = ablation.ARMS["effzero-repro-vtree-sat-stale"]

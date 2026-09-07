@@ -656,6 +656,29 @@ ARMS["effzero-repro-async-throttle"] = {
             "(legacy driver, same seed and refresh semantics).",
 }
 
+# Test 7 arm (2026-09-07, from the throttle verdict): the admission
+# floor did NOT restore the corridor (-16.0 @ u 25 vs the pair's
+# -12.9/-9.9), so reuse alone is not the lever. One variable vs the
+# throttle arm: newcomers KEEP their actor-generated on-policy search
+# targets at collect (as in every accelerating legacy run) instead of
+# being immediately overwritten by the lagged target model's re-search;
+# the rotation sweep still reaches them within one sweep period. The
+# premature-sharpness fingerprint (policy sharper than family norm at
+# matched returns, present in every flop and both async runs from u 5)
+# is the motivating observation.
+ARMS["effzero-repro-async-keepnew"] = {
+    **ARMS["effzero-repro-async-throttle"],
+    "ASYNC_REFRESH_ON_COLLECT": False,
+    "_doc": "effzero-repro-async-throttle with newcomer refresh OFF: "
+            "collected episodes enter the buffer with the actor's own "
+            "search targets and are first re-searched only when the "
+            "freshness sweep rotates to them. Deltas vs the legacy "
+            "accelerators shrink to the driver + the full-contract "
+            "sweep cadence. Run with --ray --cpu-actor. Controls: "
+            "pong-throttle-s1-2026-09-07 (newcomer refresh on) and "
+            "pong-satstale-s1-2026-09-04 (legacy driver).",
+}
+
 # Attribution arm (2026-09-05, Kai): the replicating winner's allocation
 # (staleness rotation, always-replace) with ONLY guard v2 added -- one
 # variable vs sat-stale. Motivated by the buffer-scan correction: late-
