@@ -633,6 +633,29 @@ ARMS["effzero-repro-async-fresh"] = {
             "iteration-bound driver).",
 }
 
+# Test 6 arm (2026-09-07, from the pong-async-s1 u-25 verdict): the
+# async driver lost the satstale acceleration while running at
+# train/env ~1.06-1.31 vs legacy's ~2.0 -- the continuous actor
+# doubled buffer inflow and halved per-position reuse. One variable
+# vs async-fresh: the admission floor. The actor is never blocked or
+# slowed; excess episodes count env_steps but never enter the buffer
+# (dropped BEFORE eviction can churn stored data). Newcomer-refresh
+# timing deliberately unchanged -- if the throttle fails to restore
+# the corridor, ASYNC_REFRESH_ON_COLLECT=False is the isolated test 7.
+ARMS["effzero-repro-async-throttle"] = {
+    **ARMS["effzero-repro-async-fresh"],
+    "ASYNC_MIN_TRAIN_PER_ENV_STEP": 2.0,
+    "_doc": "effzero-repro-async-fresh plus admission control: a "
+            "collected episode enters the buffer only if the ADMITTED "
+            "train/env ratio stays >= 2.0 (legacy's implicit data "
+            "diet, made explicit); dropped episodes still count "
+            "env_steps and still drive the sync/request cycle. Rows "
+            "add episodes_dropped and train_per_admitted_env. Run "
+            "with --ray --cpu-actor. Controls: pong-async-s1-"
+            "2026-09-06 (no floor) and pong-satstale-s1-2026-09-04 "
+            "(legacy driver, same seed and refresh semantics).",
+}
+
 # Attribution arm (2026-09-05, Kai): the replicating winner's allocation
 # (staleness rotation, always-replace) with ONLY guard v2 added -- one
 # variable vs sat-stale. Motivated by the buffer-scan correction: late-
@@ -1454,6 +1477,18 @@ OPT_NAMES = ("rep_optimizer", "dyn_optimizer", "pred_optimizer",
              "prefix_optimizer", "proj_optimizer")
 
 
+def async_admit(floor, training_steps, admitted_env, ep_steps,
+                buffer_empty):
+    """Test-6 admission rule: admit unless the floor is set and taking
+    this episode would push the ADMITTED train/env ratio below it. An
+    empty buffer always admits (bootstrap: nothing can train until the
+    first episode exists, and legacy's first iteration ran ratio ~2 on
+    exactly one episode)."""
+    if not floor or buffer_empty:
+        return True
+    return (admitted_env + ep_steps) * floor <= training_steps
+
+
 def resume_path(arm, seed):
     return RESULTS / f"resume{TAG}-{arm}-seed{seed}.ckpt"
 
@@ -2118,7 +2153,7 @@ class RayPipeline:
                                  timeout=0)
         return len(ready) == len(futures)
 
-    def collect(self):
+    def collect(self, admit=None):
         futures, steps_at_request = self.pending
         results = self.ray.get(futures)
         self.pending = None
@@ -2126,8 +2161,15 @@ class RayPipeline:
         # of the live trainer counter, so no window in which the two
         # "current step" sources (trainer vs searcher mirror) disagree.
         for traj, terminated, steps in results:
-            traj = [self._own_arrays(r) for r in traj]
             self.run.env_steps += steps
+            # Test-6 admission control (async driver only; None
+            # everywhere else): the decision runs BEFORE the append so
+            # a dropped episode never evicts stored data to make room
+            # for frames that are then discarded. env_steps always
+            # counts -- the interaction happened.
+            if admit is not None and not admit(steps):
+                continue
+            traj = [self._own_arrays(r) for r in traj]
             self.run.replay.append(self.run.reanalyse(
                 traj, terminated=terminated, born_step=steps_at_request))
             evict_replay(self.run.replay)
@@ -2591,15 +2633,42 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             # 1000 was crossable in principle; 10^6 is not.
             ep_counter = start_it * 1_000_000
             episodes_proc = 0
+            episodes_dropped = 0
             owed = 0.0                    # sweep debt, in trajectories
+            floor = muzero.ASYNC_MIN_TRAIN_PER_ENV_STEP
+            # Admitted-env is not checkpointed; on resume, initialize to
+            # the steady-state value the invariant itself enforces
+            # (train/floor), so post-resume admission continues at the
+            # same rate instead of feasting or starving.
+            admitted_env = (int(run.trainer.training_steps / floor)
+                            if floor else 0)
 
             def collect_and_relaunch():
-                nonlocal ep_counter, episodes_proc
-                pipeline.collect()
+                nonlocal ep_counter, episodes_proc, episodes_dropped, \
+                    admitted_env
+                admitted_now = 0
+
+                def admit(ep_steps):
+                    nonlocal admitted_env, episodes_dropped, admitted_now
+                    if async_admit(floor, run.trainer.training_steps,
+                                   admitted_env, ep_steps,
+                                   not run.replay):
+                        admitted_env += ep_steps
+                        admitted_now += 1
+                        return True
+                    episodes_dropped += 1
+                    return False
+
+                pipeline.collect(admit=admit if floor else None)
                 if muzero.ASYNC_REFRESH_ON_COLLECT:
                     # The newcomers are the last append(s); eviction
-                    # only ever removes from the front.
-                    run.refresh_trajs(run.replay[-episodes_per_iter:])
+                    # only ever removes from the front. Under admission
+                    # control only ADMITTED episodes exist to refresh.
+                    tail = admitted_now if floor else episodes_per_iter
+                    if tail:
+                        run.refresh_trajs(run.replay[-tail:])
+                # Dropped or admitted, the actor never waits: sync and
+                # request unconditionally.
                 pipeline.sync()
                 ep_counter += 1
                 episodes_proc += 1
@@ -2639,6 +2708,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                         run.trainer.training_steps
                         / max(1, run.env_steps), 3)
                     diag["episodes_since_resume"] = episodes_proc
+                    diag["episodes_dropped"] = episodes_dropped
+                    if floor and admitted_env:
+                        diag["train_per_admitted_env"] = round(
+                            run.trainer.training_steps / admitted_env, 3)
                     run.zero_sweep_window()
                     pipeline.request_eval(v, 8, diag, write_row,
                                           round(time.time() - started, 1))

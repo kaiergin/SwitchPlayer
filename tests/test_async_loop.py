@@ -129,6 +129,31 @@ def test_sweep_on_empty_or_zero_is_a_noop(async_world):
     assert run.refresh_sweep(3) == 0
 
 
+def test_admission_rule_bootstrap_floor_and_steady_state():
+    admit = ablation.async_admit
+    # Floor off: everything admits.
+    assert admit(0.0, 0, 0, 1000, False)
+    # Bootstrap: empty buffer admits regardless of the ratio.
+    assert admit(2.0, 0, 0, 1000, True)
+    # First post-bootstrap episode: needs train >= (admitted+ep)*floor.
+    assert not admit(2.0, 3999, 1000, 1000, False)
+    assert admit(2.0, 4000, 1000, 1000, False)
+    # Steady state pins the ADMITTED ratio at >= floor.
+    assert not admit(2.0, 20000, 9500, 600, False)   # would be 1.98
+    assert admit(2.0, 20200, 9500, 600, False)       # exactly 2.0
+
+
+def test_throttle_arm_delta_is_the_floor_only():
+    spec = ablation.ARMS["effzero-repro-async-throttle"]
+    base = ablation.ARMS["effzero-repro-async-fresh"]
+    delta = {k: v for k, v in spec.items()
+             if k != "_doc" and base.get(k) != v}
+    assert delta == {"ASYNC_MIN_TRAIN_PER_ENV_STEP": 2.0}
+    assert hasattr(muzero, "ASYNC_MIN_TRAIN_PER_ENV_STEP")
+    assert muzero.ASYNC_MIN_TRAIN_PER_ENV_STEP == 0.0, \
+        "the floor must default OFF for every other arm"
+
+
 def test_async_arm_delta_is_driver_only():
     spec = ablation.ARMS["effzero-repro-async-fresh"]
     base = ablation.ARMS["effzero-repro-vtree-sat-stale"]

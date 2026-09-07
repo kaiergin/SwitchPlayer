@@ -425,6 +425,20 @@ ASYNC_TRAIN_CHUNK = 100
 ASYNC_SWEEP_TRAIN_STEPS = 2000
 ASYNC_REFRESH_ON_COLLECT = True
 MAX_TRAIN_PER_ENV_STEP = 2.0
+# Test 6 (2026-09-07, from the pong-async-s1 verdict): 0 = off. When
+# set, ADMISSION CONTROL on the buffer -- a collected episode enters
+# the replay buffer only if the realized train/env ratio stays >= this
+# floor; excess episodes still count env_steps (they happened) and
+# still drive the weight-sync/request cycle (the actor is NEVER
+# blocked or slowed), but their data is dropped; rows carry the
+# cumulative-since-resume episodes_dropped counter. Rationale: the unthrottled async driver ran at
+# ratio ~1.06-1.31 vs the legacy driver's ~2.0 -- doubling buffer
+# inflow, halving per-position sample reuse -- and lost the satstale
+# acceleration (-17.5 @ u 25 vs the pair's -12.9/-9.9). Legacy's
+# 1-episode-per-iteration was an implicit data throttle; this makes it
+# explicit and tunable while keeping every other async property
+# (continuous acting, freshness contract, newcomer refresh timing).
+ASYNC_MIN_TRAIN_PER_ENV_STEP = 0.0
 
 
 def visit_softmax_temperature(training_steps):
