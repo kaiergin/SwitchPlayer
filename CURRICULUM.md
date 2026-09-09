@@ -560,6 +560,30 @@ after the saturation tests 1-2 report (their per-iteration
 comparability is what this retires). This is the live-Switch skeleton:
 the game does not pause for the learner.
 
+### Future experiment — tandem (batch-time) reanalysis, author-aware (Kai, 2026-09-08; designed, not scheduled)
+
+Kai's original phase-5 ask, in full strength: everything trained on has
+been re-searched at batch time, so no stored target exists. Cost of the
+literal version: 256 x 2000 = 512k re-searches/unit vs the sweep
+contract's ~12k (~28 min/unit of pure vtree search at the measured
+307/s; ~3x wall clock). The tests 6/7 verdict REFRAMES it: staleness
+was never the binding variable — TARGET AUTHORSHIP was (immediate
+re-search by the weak LAGGED model poisoned strong on-policy targets;
+keeping actor targets beat everything). So the design worth running is
+AUTHOR-AWARE refresh, not maximal freshness: (a) model-progress gating
+— refresh a position only when the current/target model is plausibly
+better than the target's author (capability threshold or
+training-steps-since-author gap); (b) batch-time reanalysis enabled
+only PAST a capability threshold, where its 3x cost buys strictly
+better targets; (c) pipelined prefetch (re-search batch k+1 during
+step k) to hide latency if (b) ever runs. Zero-lag (live-model)
+authorship is a separate risk: self-distillation loop with no anchor —
+the papers' lag exists for a reason; any zero-lag variant needs its
+own guard. SLOT: after the keepnew-90 endpoint and throttle-90
+long-horizon reads — if keepnew-90 holds its endpoint without
+oscillation, this shrinks; if it oscillates near the top, (a)/(b) are
+the fix class.
+
 ### Future experiment — buffer eviction (Kai, 2026-09-03; recorded, not scheduled)
 
 Replace/augment whole-trajectory age-FIFO. Motivating evidence: at high
