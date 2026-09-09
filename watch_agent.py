@@ -102,6 +102,11 @@ def main():
     ap.add_argument("--sims", type=int, default=30,
                     help="search sims per decision (0 = raw policy head)")
     ap.add_argument("--seed", type=int, default=1000)
+    ap.add_argument("--cap", type=int, default=3000,
+                    help="decisions per episode before truncation (the "
+                         "training recipe's --episode-cap); greedy play in "
+                         "deterministic Pong can enter a perpetual rally, "
+                         "which without a cap never ends and never reloads")
     ap.add_argument("--smoke", type=int, default=0, metavar="N",
                     help="headless: run N decisions and exit (self-test)")
     args = ap.parse_args()
@@ -142,9 +147,9 @@ def main():
                 _, pols, vals = nm.batch_inference(np.asarray(stack)[None])
                 action, value = int(np.argmax(pols[0])), float(vals[0])
             obs, reward, term, trunc, _ = env.step(action)
-            done = term or trunc
             score += float(reward)
             steps += 1
+            done = term or trunc or steps >= args.cap
             if args.smoke:
                 if steps >= args.smoke:
                     print(f"SMOKE OK: {steps} decisions, score {score}, "
@@ -163,7 +168,8 @@ def main():
                 env.close()
                 cv2.destroyAllWindows()
                 return
-        print(f"episode {episode}: score {score:+.0f} in {steps} decisions",
+        print(f"episode {episode}: score {score:+.0f} in {steps} decisions"
+              f"{' (CAP -- looping/perpetual rally)' if steps >= args.cap else ''}",
               flush=True)
         # Pick up the newest weights for the next episode.
         try:
