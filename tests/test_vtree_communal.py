@@ -184,6 +184,21 @@ def test_multi_root_window_exact(monkeypatch, name, length, terminated,
         assert seq[9][2] is False and vec[9][2] is False
 
 
+@pytest.mark.parametrize("name,windows,sims", [
+    # Gapped windows (audit F1): REFRESH_NO_SHARPEN_GUARD's guarded steps
+    # leave holes in the eligible set; the stagger must grow with the
+    # CHAIN distance between roots, not their window slot.
+    ("stride-2", [list(range(0, 32, 2))], 50),
+    ("irregular", [[0, 1, 4, 5, 6, 11, 12, 20, 21, 22, 23, 29, 30, 33, 35, 36]], 50),
+    ("two-gapped-windows", [[0, 3, 5, 9, 10, 14], [15, 16, 21, 27, 28, 31]], 30),
+])
+def test_gapped_windows_exact_at_production_shape(monkeypatch, name, windows,
+                                                  sims):
+    traj = make_traj(70, 40, True)
+    run_both(monkeypatch, traj, windows, sims=sims, noise=True, horizon=5,
+             max_depth=50)
+
+
 def test_two_windows_through_one_shared_chain_tree(monkeypatch):
     """Windows advance with release_span between them; the second
     window's roots may have been expanded (and visited) by the first
@@ -390,6 +405,72 @@ def test_gumbel_scope_is_refused(monkeypatch):
         engine.search_window(forest, [0, 1], num_simulations=4)
 
 
+def test_released_span_cannot_be_searched_again(monkeypatch):
+    """Audit F5: a root inside a released span would gather through -1
+    child links (garbage on CPU, a device assert on CUDA); refuse."""
+    helper, engine = build_world(monkeypatch)
+    traj = make_traj(14, 8, True)
+    lat, pol, val = engine.evaluate(traj["obs"])
+    forest = engine.build([{"latents": lat, "policies": pol, "values": val,
+                            "actions": traj["actions"],
+                            "rewards": traj["rewards"], "terminated": True}])
+    engine.search_window(forest, [0, 1, 2], num_simulations=4)
+    forest.release({0: 2})
+    with pytest.raises(AssertionError, match="released span"):
+        engine.search_window(forest, [2, 3], num_simulations=4)
+    with pytest.raises(AssertionError, match="outside tree"):
+        engine.search_window(forest, [8], num_simulations=4)
+    engine.search_window(forest, [3, 4], num_simulations=4)   # still fine
+
+
+def test_rewards_must_not_be_numpy_integers(monkeypatch):
+    """Audit F4: np.int64 is a STRONG scalar under NEP 50 (int + float ->
+    float64), unlike a Python int; refuse rather than mistype."""
+    helper, engine = build_world(monkeypatch)
+    traj = make_traj(15, 4, True)
+    lat, pol, val = engine.evaluate(traj["obs"])
+    bad = dict(latents=lat, policies=pol, values=val, actions=traj["actions"],
+               rewards=[np.int64(1)] * 4, terminated=True)
+    with pytest.raises(AssertionError, match="np.floating"):
+        engine.build([bad])
+    with pytest.raises(TypeError):
+        muzero_vtree._scalar_type(np.int64(1))
+    assert muzero_vtree._scalar_type(1) == WEAK
+    assert muzero_vtree._scalar_type(np.float32(1)) == F32
+
+
+def test_forest_allocates_once_and_never_shrinks(monkeypatch):
+    """Audit F3: a window sequence over one forest reserves up front,
+    compacts IN PLACE at release (capacity never drops), and grows at
+    most once."""
+    helper, engine = build_world(monkeypatch, noise=True)
+    traj = make_traj(16, 40, True)
+    caps = []
+    orig_release = muzero_vtree.ChainForest.release
+
+    def spy_release(self, bounds):
+        orig_release(self, bounds)
+        caps.append(self.capacity)
+
+    monkeypatch.setattr(muzero_vtree.ChainForest, "release", spy_release)
+    forests = []
+    orig_sw = VectorizedCommunalPUCT.search_window
+
+    def grab(self, forest, *a, **kw):
+        forests.append(forest)
+        return orig_sw(self, forest, *a, **kw)
+
+    monkeypatch.setattr(VectorizedCommunalPUCT, "search_window", grab)
+    engine.search_trajectories([traj], [list(range(39))], window=4,
+                               num_simulations=8, c_puct=C_PUCT,
+                               discount=DISCOUNT, tie_break="first")
+    forest = forests[0]
+    assert len(caps) == 10 and all(c == caps[0] for c in caps), \
+        "capacity must never shrink across releases"
+    assert forest.grows <= 1
+    assert forest.count >= 40      # the chain survives every release
+
+
 def test_two_trees_in_one_forest_match_their_solo_runs_on_the_all_ties_tree(
         monkeypatch):
     """Zero-init heads + zero rewards: every selection is an exact tie,
@@ -551,6 +632,52 @@ def test_vtree_communal_refresh_matches_inline_communal_exactly(
     # The searches actually changed something (not a vacuous match).
     assert any(not np.allclose(a["target_policy"], b["target_policy"])
                for a, b in zip(base[0], vtree_replay[0]))
+
+
+def test_guarded_gaps_route_through_the_communal_engine_exactly(
+        quiet_communal, monkeypatch):
+    """Audit F1 end to end: REFRESH_NO_SHARPEN_GUARD's refresh_guarded
+    records make _eligible_indices GAPPED; the vectorized communal path
+    must still equal the inline sequential one field by field."""
+    import copy
+    ablation = _ablation()
+    monkeypatch.setattr(muzero, "REFRESH_NO_SHARPEN_GUARD", True)
+    monkeypatch.setattr(muzero, "COMMUNAL_WINDOW_ROOTS", 16)
+    from tests.test_reanalyze_refresh import obs_traj
+    from tests.test_paper_mode import ACTIONS as HA
+    rng = np.random.default_rng(71)
+    np.random.seed(71)
+    long = obs_traj([float(x) for x in rng.choice([-1.0, 0.0, 1.0], 24)],
+                    [3.0] * 24)
+    guarded = (1, 2, 5, 9, 10, 11, 12, 17, 20)
+    for t in long:
+        t["born_step"] = 0
+        t["action"] = int(rng.integers(HA))
+    for i in guarded:
+        long[i]["refresh_guarded"] = True
+    base = [long]
+    inline_replay = copy.deepcopy(base)
+    run_a = _make_run(ablation, inline_replay, dezero_seed=21)
+    assert run_a._eligible_indices(inline_replay[0]) == \
+        [i for i in range(24) if i not in guarded]
+    monkeypatch.setattr(muzero, "REFRESH_VTREE", False)
+    np.random.seed(21)
+    run_a.refresh_targets(1)
+    monkeypatch.setattr(muzero, "REFRESH_VTREE", True)
+    vtree_replay = copy.deepcopy(base)
+    run_b = _make_run(ablation, vtree_replay)
+    run_b.trainer = run_a.trainer
+    np.random.seed(21)
+    run_b.refresh_targets_vtree(1)
+    for a, b in zip(inline_replay[0], vtree_replay[0]):
+        assert np.allclose(a["target_policy"], b["target_policy"],
+                           rtol=0, atol=1e-12)
+        assert a["root_value"] == pytest.approx(b["root_value"], rel=0,
+                                                abs=1e-12)
+        assert a["priority"] == pytest.approx(b["priority"], rel=0,
+                                              abs=1e-12)
+        assert a.get("refresh_guarded") == b.get("refresh_guarded")
+        assert a.get("refresh_no_drop_strikes") == b.get("refresh_no_drop_strikes")
 
 
 def test_sweep_and_quota_callers_take_the_communal_path(quiet_communal,

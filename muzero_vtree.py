@@ -375,6 +375,12 @@ def _scalar_type(x):
     """Type code of a Python/NumPy scalar as the sequential engine holds it."""
     if isinstance(x, np.floating):
         return F32 if x.dtype == np.float32 else F64
+    if isinstance(x, np.integer):
+        # NEP 50: a NumPy integer scalar is STRONG (int64 + float ->
+        # float64), unlike a Python int. Not produced by any record path
+        # today (clip_reward returns float()); refuse rather than mistype.
+        raise TypeError(f"NumPy integer scalar {x!r}: rewards must be Python "
+                        "floats/ints or np.floating (audit F4)")
     return WEAK
 
 
@@ -435,12 +441,15 @@ class ChainForest:
       latent[C,H,W]            float32; pref_h/pref_c[L,N,H] LSTM state
     """
 
+    GROWTH = 1.25   # geometric growth factor once a forest outgrows itself
+
     def __init__(self, engine, capacity):
         self.engine = engine
         self.A = engine.A
         self.dev = engine.device
         self.count = 0
         self.capacity = 0
+        self.grows = 0          # allocations after the initial one (audit F3)
         self.base = []          # per tree: first chain node id
         self.length = []        # per tree: chain length
         self.terminated = []    # per tree
@@ -506,8 +515,27 @@ class ChainForest:
             self.count = int(keep.numel())
 
     def ensure_capacity(self, needed):
+        """Grow geometrically, never shrink: a window sequence over one
+        forest should allocate once (the initial reserve) and at most
+        grow once more (audit F3). Growth is the only moment old and new
+        tables coexist."""
         if needed > self.capacity:
-            self._alloc(int(needed))
+            if self.capacity > 0:
+                self.grows += 1
+            self._alloc(max(int(needed), int(self.capacity * self.GROWTH)))
+
+    def compact(self, keep_ids):
+        """Keep rows `keep_ids` (new-id order) IN PLACE: no reallocation,
+        capacity unchanged, only the kept rows pass through a temporary
+        (audit F3: the old shrink-then-regrow path held two full tables
+        alive at once)."""
+        k = int(keep_ids.numel())
+        for name, t in self.f.items():
+            if name in ("pref_h", "pref_c"):
+                t[:, :k] = t[:, keep_ids]
+            else:
+                t[:k] = t[keep_ids]
+        self.count = k
 
     def set_geometry(self, latent_shape, state_shape):
         """Called once by build() before the first chain is appended."""
@@ -562,6 +590,10 @@ class ChainForest:
             pr = pol[np.arange(L - 1), np.asarray(actions[:-1], dtype=np.int64)]
             f["prior"][ids[1:]] = torch.as_tensor(pr, dtype=torch.float64, device=dev)
             f["prior_t"][ids[1:]] = F32
+        for r in rewards:
+            assert isinstance(r, (int, float, np.floating)) and not isinstance(
+                r, np.integer), f"reward {r!r} ({type(r).__name__}): stored " \
+                "rewards must be Python floats/ints or np.floating (audit F4)"
         rtypes = [_scalar_type(r) for r in rewards]
         f["reward"][ids] = torch.as_tensor(
             np.asarray([float(r) for r in rewards], dtype=np.float64), device=dev)
@@ -626,7 +658,7 @@ class ChainForest:
         ch[ch < 0] = n
         f["children"][:n] = remap[ch]
         old_base = list(self.base)
-        self._alloc(int(keep_ids.numel()), keep=keep_ids)
+        self.compact(keep_ids)
         for t in range(len(self.base)):
             self.base[t] = int(remap[old_base[t]])
 
@@ -801,6 +833,7 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         pexp = pids.unsqueeze(1).expand(B, A).reshape(-1)
         dead = is_beh.view(-1)
         f["parent"][flat] = torch.where(dead, torch.full_like(pexp, -1), pexp)
+        f["children"][flat] = -1     # rows may be recycled by compact()
         f["tree"][flat] = f["tree"][pexp]
         f["cidx"][flat] = -1
         f["owner"][flat] = torch.where(dead, torch.full_like(pexp, -1),
@@ -1056,14 +1089,28 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
             return {}
         forest.ensure_capacity(forest.count + R * (sims + 1) * A)
         f = forest.f
+        for t, i in roots:
+            assert 0 <= i < forest.length[t], f"root {i} outside tree {t}"
+            # A released span can never be searched again: its imagined
+            # subtrees and latents are gone, and its chain nodes' child
+            # links would gather garbage (audit F5; release_span's
+            # forward-only contract).
+            assert i > forest.released[t], (
+                f"root {i} of tree {t} lies in the released span "
+                f"(<= {forest.released[t]}); windows must advance")
         root_ids = torch.tensor([forest.node_id(t, i) for t, i in roots],
                                 dtype=torch.long, device=dev)
-        slots = []
-        per_tree = {}
-        for t, _ in roots:
-            slots.append(per_tree.get(t, 0))
-            per_tree[t] = per_tree.get(t, 0) + 1
-        slots = torch.tensor(slots, dtype=torch.long, device=dev)
+        # Stagger by CHAIN OFFSET within the tree, NOT by window slot: root
+        # k reaches root j's region only after i_j - i_k chain steps, so
+        # the wave proof needs the stagger to grow with that distance.
+        # Slot-based stagger was only correct for contiguous windows;
+        # gapped ones (guarded steps) put two roots on one node in one
+        # wave (audit F1, DESIGN.md).
+        first = {}
+        for t, i in roots:
+            first.setdefault(t, i)
+        slots = torch.tensor([i - first[t] for t, i in roots],
+                             dtype=torch.long, device=dev)
 
         # 1. Expand the unexpanded roots in one batch (index order;
         #    batch_expand_nodes drops the terminal ones).
@@ -1183,17 +1230,30 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         {idx: (policy, root_value)} for roots with a policy."""
         window = max(1, int(muzero.COMMUNAL_WINDOW_ROOTS if window is None
                             else window))
-        evaluated = []
-        for tr in trajectories:
-            lat, pol, val = self.evaluate(tr["obs"])
-            evaluated.append({"latents": lat, "policies": pol, "values": val,
-                              "actions": tr["actions"], "rewards": tr["rewards"],
-                              "terminated": tr["terminated"]})
         sims = max(int(muzero.ACT_SEARCH_SIMS if num_simulations is None
                        else num_simulations), 1)
-        forest = self.build(evaluated, seed_values=seed_values,
-                            extra_capacity=window * len(trajectories)
-                            * (sims + 1) * self.A)
+        self.use_prefix = bool(muzero.USE_VALUE_PREFIX_IN_TREE)
+        seed_discount = muzero.DISCOUNT
+        # Reserve up front: chain + 1.5x one window's expansion bound
+        # (R*(sims+1)*A). The carry past a window is a fraction of a
+        # window's expansions, so growth is rare (audit F3).
+        total = sum(len(tr["actions"]) for tr in trajectories)
+        reserve = int(1.5 * window * len(trajectories) * (sims + 1) * self.A)
+        forest = ChainForest(self, 0)
+        for tr in trajectories:
+            # One trajectory at a time: its evaluate() latents are copied
+            # into the forest and dropped before the next is evaluated.
+            lat, pol, val = self.evaluate(tr["obs"])
+            if forest.latent_shape is None:
+                state_shape = None
+                if self.use_prefix:
+                    init = self.nets["value_prefix"].initial_state(1, self.device)[0]
+                    state_shape = (int(init.shape[0]), int(init.shape[-1]))
+                forest.set_geometry(lat.shape[1:], state_shape)
+                forest.ensure_capacity(total + reserve)
+            forest.append_chain(lat, pol, val, tr["actions"], tr["rewards"],
+                                tr["terminated"], seed_values, seed_discount)
+            del lat
         windows = [[list(idx[w0:w0 + window])
                     for w0 in range(0, len(idx), window)]
                    for idx in (sorted(i) for i in indices_per_traj)]
