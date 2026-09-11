@@ -19,7 +19,7 @@ BASE = os.path.join(REPO, "benchmarks", "results", "pong-archfix-ray-2026-09-11"
 PY = os.path.join(REPO, ".venv", "Scripts", "python.exe")
 JSONL = os.path.join(BASE, "ablation-pong-skip4.jsonl")
 CKPT = os.path.join(
-    BASE, "resume-pong-skip4-effzero-repro-refresh5x-communal-seed1.ckpt")
+    BASE, "resume-pong-skip4-effzero-repro-refresh5x-communal-seed0.ckpt")
 DEATHS = os.path.join(BASE, "deaths.log")
 COMMON = [PY, "experiments/ablation.py", "--arms",
           "effzero-repro-refresh5x-communal", "--seed", "0", "--iterations",

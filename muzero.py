@@ -451,7 +451,7 @@ ASYNC_MIN_TRAIN_PER_ENV_STEP = 0.0
 # (the worker is the only consumer of the numpy RNG during a training
 # block; batch i is assembled with training_steps = base + i, exactly
 # the value the serial loop would have used). With PER on, priorities
-# updated by step i are seen one batch late by the prefetcher
+# updated by step i reach the prefetcher late
 # (a lag of TRAIN_PREFETCH_DEPTH + 1 batches: the queue holds DEPTH and
 # the worker holds one more -- audit F3). MEASURED on the real
 # checkpoint: no gain -- the assembly half is only ~40 ms and the
@@ -2436,6 +2436,8 @@ class TrainingHelper:
         try:
             while True:
                 await self.storage_manager.update_if_needed()
+                # Buffer may have changed: drop the bootstrap cache (id() reuse).
+                self.invalidate_bootstrap_cache()
                 if len(self.storage_manager.replay_buffer) < MAX_REPLAY // 2:
                     self.logger.debug("Training sleeping")
                     await asyncio.sleep(1)
@@ -2655,8 +2657,10 @@ class TrainingHelper:
             # (invalidate_bootstrap_cache), and trajectories are never
             # allocated/evicted inside a block, so an id() can never be
             # reused while its entry is live. Numerics: a value computed in
-            # a different chunk composition differs at ~1e-6 (batch-shape
-            # conv wobble), never more.
+            # a different chunk composition differs at ~1e-6 in fp32 and
+            # up to ~1e-3 relative under PyTorch's TF32 conv defaults --
+            # the same class of wobble the uncached chunked forward
+            # already had from batch to batch.
             stamp = self._target_synced_at
             cache = getattr(self, "_boot_cache", None)
             if cache is None or getattr(self, "_boot_cache_stamp", None) != stamp:
