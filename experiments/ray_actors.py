@@ -117,15 +117,21 @@ class SelfPlayActor:
         return traj, terminated, self.shell.env_steps - before
 
     def eval_episodes(self, seeds):
-        """Greedy evaluation episodes; returns their returns. Env steps from
-        eval are protocol-exempt (the driver never counts them) and the
-        shell's counter is scratch here."""
-        returns = []
+        """Greedy evaluation episodes; returns one (return, decisions,
+        terminated) triple per episode. Greedy play in deterministic
+        Pong can enter a perpetual rally that only the cap ends, and a
+        capped game's return is a PARTIAL score -- the driver logs the
+        mean length and the capped count per row so those reads are
+        visible (2026-09-10). Env steps from eval are protocol-exempt
+        (the driver never counts them) and the shell's counter is
+        scratch here."""
+        out = []
         for s in seeds:
             self.env.reset(seed=int(s))
-            returns.append(self._ablation.Run.play_episode(
-                self.shell, greedy=True, cap=self.episode_cap)[1])
-        return returns
+            _, ret, steps, terminated = self._ablation.Run.play_episode(
+                self.shell, greedy=True, cap=self.episode_cap)
+            out.append((float(ret), int(steps), bool(terminated)))
+        return out
 
     def get_constant(self, name):
         """Test probe: what this PROCESS's muzero constant resolves to --

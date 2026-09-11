@@ -819,6 +819,27 @@ def build_networks(spec):
     )
 
 
+def eval_summary(episodes):
+    """Row fields from greedy eval episodes given as (return, decisions,
+    terminated) triples. eval_len_mean / eval_capped exist because greedy
+    play in deterministic Pong can lock into a perpetual rally that only
+    EPISODE_CAP ends -- such an episode's return is a partial score, and
+    a row where eval_capped > 0 must be read with that in mind
+    (2026-09-10; the fields are additive, older rows simply lack them).
+    Mechanism: eval_capped counts play_episode returns with
+    terminated=False, which under the paper stack means the cap fired --
+    a gym truncation and an EpisodicLifeEnv life-loss both read as
+    terminated=True there. On Pong-v4 (no lives; ALE's 108000-frame
+    limit is ~27000 decisions, never before a 3000 cap) it is exactly
+    the cap-truncation count; a multi-life game or a cap >= 27000 would
+    need this re-read."""
+    returns = [float(r) for r, _, _ in episodes]
+    return {"return_mean": float(np.mean(returns)),
+            "return_max": float(np.max(returns)),
+            "eval_len_mean": float(np.mean([s for _, s, _ in episodes])),
+            "eval_capped": int(sum(1 for _, _, t in episodes if not t))}
+
+
 class Run:
     """One arm at one seed: networks, trainer, searcher, environment."""
 
@@ -1430,9 +1451,12 @@ class Run:
         through train-mode BatchNorm: a different function from the one the
         prediction-error metrics measured a few lines later.
         """
-        returns = [self.play_episode(greedy=True)[1] for _ in range(episodes)]
-        return {"return_mean": float(np.mean(returns)),
-                "return_max": float(np.max(returns)),
+        # Triples built inside the comprehension so no eval trajectory
+        # outlives its episode (8 cap-3000 trajectories would be ~2 GB
+        # transient; verification F1).
+        played = [(ret, steps, term) for _, ret, steps, term in
+                  (self.play_episode(greedy=True) for _ in range(episodes))]
+        return {**eval_summary(played),
                 **self.evaluate_diagnostics(batches=batches)}
 
     def evaluate_diagnostics(self, batches=8):
@@ -2237,9 +2261,7 @@ class RayPipeline:
         (it, future, diagnostics, write_row,
          tsteps, esteps, elapsed_at) = self.pending_eval
         self.pending_eval = None
-        returns = self.ray.get(future)
-        write_row(it, {"return_mean": float(np.mean(returns)),
-                       "return_max": float(np.max(returns)), **diagnostics},
+        write_row(it, {**eval_summary(self.ray.get(future)), **diagnostics},
                   tsteps, esteps, elapsed_at)
 
     # ---- phase 3a: refresh offload (swap-on-ready) ----

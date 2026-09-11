@@ -256,3 +256,19 @@ def test_greedy_eval_searches_only_in_paper_mode(ablation, monkeypatch):
     run.env = NeverEndsEnv()
     run.play_episode(greedy=True, cap=1)
     assert calls == [True], "truncated greedy eval burned a tail search"
+
+
+def test_eval_summary_flags_capped_partial_scores(ablation):
+    """Greedy eval in deterministic Pong can lock into a perpetual rally
+    that only EPISODE_CAP ends; its return is a partial score. The row
+    must carry the mean length and the capped count so such reads are
+    visible, alongside the unchanged return_mean/return_max."""
+    rows = ablation.eval_summary([(-21.0, 760, True),
+                                  (-3.0, 3000, False),   # capped mid-game
+                                  (+4.0, 2100, True)])
+    assert rows["return_mean"] == pytest.approx((-21.0 - 3.0 + 4.0) / 3)
+    assert rows["return_max"] == 4.0
+    assert rows["eval_len_mean"] == pytest.approx((760 + 3000 + 2100) / 3)
+    assert rows["eval_capped"] == 1
+    clean = ablation.eval_summary([(-21.0, 760, True)])
+    assert clean["eval_capped"] == 0 and clean["eval_len_mean"] == 760.0
