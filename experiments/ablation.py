@@ -819,6 +819,35 @@ def build_networks(spec):
     )
 
 
+import contextlib
+
+
+@contextlib.contextmanager
+def train_batches(run, n_steps):
+    """Yield a next_batch() for a contiguous block of n_steps gradient
+    steps: a muzero.BatchPrefetcher when TRAIN_PREFETCH is on (CPU batch
+    assembly overlapped with GPU training), else the serial builder. The
+    caller must not mutate run.replay inside the block."""
+    # The buffer may have changed since the last block (collect/evict/
+    # refresh): drop the bootstrap value cache so no id()-keyed entry can
+    # outlive its trajectory.
+    if hasattr(run.trainer, "invalidate_bootstrap_cache"):
+        run.trainer.invalidate_bootstrap_cache()
+    if (muzero.TRAIN_PREFETCH and n_steps > 0
+            and hasattr(run.trainer, "assemble_batch")):
+        with muzero.BatchPrefetcher(run.trainer, run.replay,
+                                    muzero.TRAINING_BATCHES,
+                                    muzero.UNROLL_STEPS, ACTIONS,
+                                    n_steps) as pf:
+            yield pf.next
+    else:
+        def serial():
+            return asyncio.run(run.trainer.prepare_batch(
+                run.replay, muzero.TRAINING_BATCHES, muzero.UNROLL_STEPS,
+                ACTIONS))
+        yield serial
+
+
 def eval_summary(episodes):
     """Row fields from greedy eval episodes given as (return, decisions,
     terminated) triples. eval_len_mean / eval_capped exist because greedy
@@ -1463,6 +1492,11 @@ class Run:
         """The driver-bound half of evaluate(): the prediction-error panel
         on the TRAINER's nets. The greedy episodes are the offloadable half
         -- --ray plays them on the eval actor with the same synced weights."""
+        # Runs after collect/evict with no training block in between: drop
+        # the bootstrap cache so an id()-keyed entry from an evicted
+        # trajectory can never serve a new one (prefetch audit F4).
+        if hasattr(self.trainer, "invalidate_bootstrap_cache"):
+            self.trainer.invalidate_bootstrap_cache()
         K = muzero.UNROLL_STEPS
         errs = {"per_step": 0.0, "prefix": 0.0, "control": 0.0, "value": 0.0,
                 "value_control": 0.0, "policy_entropy": 0.0, "policy_maxp": 0.0}
@@ -2797,12 +2831,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                                            % train_steps))
                 if chunk > 0:
                     run.set_train_mode(True)
-                    for _ in range(chunk):
-                        batch = asyncio.run(run.trainer.prepare_batch(
-                            run.replay, muzero.TRAINING_BATCHES,
-                            muzero.UNROLL_STEPS, ACTIONS))
-                        asyncio.run(run.trainer.train_step(batch))
-                        run.trainer.training_steps += 1
+                    # Prefetcher scoped to the chunk: collect/refresh only
+                    # ever run between chunks, after it is closed.
+                    with train_batches(run, chunk) as next_batch:
+                        for _ in range(chunk):
+                            asyncio.run(run.trainer.train_step(next_batch()))
+                            run.trainer.training_steps += 1
                     run.set_train_mode(False)
                     owed += (len(run.replay) * chunk
                              / muzero.ASYNC_SWEEP_TRAIN_STEPS)
@@ -2853,20 +2887,24 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             if init_name and it <= ramp_iters:
                 steps_this_iter = max(1, train_steps * it // ramp_iters)
             run.set_train_mode(True)
-            for _ in range(steps_this_iter):
-                if init_name:
-                    apply_warmstart_lr(
-                        (run.trainer.rep_optimizer, run.trainer.dyn_optimizer,
-                         run.trainer.pred_optimizer,
-                         run.trainer.prefix_optimizer,
-                         run.trainer.proj_optimizer),
-                        run.trainer.training_steps)
-                    apply_warmstart_consistency(
-                        consistency_base, run.trainer.training_steps)
-                batch = asyncio.run(run.trainer.prepare_batch(
-                    run.replay, muzero.TRAINING_BATCHES, muzero.UNROLL_STEPS, ACTIONS))
-                asyncio.run(run.trainer.train_step(batch))
-                run.trainer.training_steps += 1
+            # TRAIN_PREFETCH: batch i+1 assembles on a worker thread while
+            # the GPU trains on batch i (bit-identical batch sequence to the
+            # serial loop; see muzero.BatchPrefetcher). The prefetcher is
+            # scoped to this contiguous block -- nothing mutates the replay
+            # buffer until it is closed.
+            with train_batches(run, steps_this_iter) as next_batch:
+                for _ in range(steps_this_iter):
+                    if init_name:
+                        apply_warmstart_lr(
+                            (run.trainer.rep_optimizer, run.trainer.dyn_optimizer,
+                             run.trainer.pred_optimizer,
+                             run.trainer.prefix_optimizer,
+                             run.trainer.proj_optimizer),
+                            run.trainer.training_steps)
+                        apply_warmstart_consistency(
+                            consistency_base, run.trainer.training_steps)
+                    asyncio.run(run.trainer.train_step(next_batch()))
+                    run.trainer.training_steps += 1
             run.set_train_mode(False)
 
             if (pipeline and muzero.REFRESH_SATURATE

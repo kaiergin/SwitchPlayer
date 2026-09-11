@@ -439,6 +439,29 @@ MAX_TRAIN_PER_ENV_STEP = 2.0
 # explicit and tunable while keeping every other async property
 # (continuous acting, freshness contract, newcomer refresh timing).
 ASYNC_MIN_TRAIN_PER_ENV_STEP = 0.0
+# Training-lane speedup (2026-09-11, Kai): a measured gradient step was
+# ~255 ms of CPU batch assembly + ~285 ms of GPU compute, SERIALIZED, so
+# neither device exceeded ~50% utilization. BatchPrefetcher overlaps
+# them: a worker thread assembles batch i+1 (pure CPU: sampling, unroll
+# windows, stored-value parts) while the GPU trains on batch i; the
+# target-model bootstrap forward stays on the MAIN thread right before
+# the train step, so the worker never touches CUDA or the target nets
+# (no torn-read race with the target sync) and the sequence of batches
+# is BIT-IDENTICAL to the serial loop for the same seed with PER off
+# (the worker is the only consumer of the numpy RNG during a training
+# block; batch i is assembled with training_steps = base + i, exactly
+# the value the serial loop would have used). With PER on, priorities
+# updated by step i are seen one batch late by the prefetcher
+# (a lag of TRAIN_PREFETCH_DEPTH + 1 batches: the queue holds DEPTH and
+# the worker holds one more -- audit F3). MEASURED on the real
+# checkpoint: no gain -- the assembly half is only ~40 ms and the
+# worker's Python loop contends for the GIL with kernel launches; the
+# ~210 ms that looked like CPU work was the target-model bootstrap
+# forward, which the bootstrap CACHE in finish_batch_paper removes.
+# Default OFF: opt-in, correct, but not worth a threading surface and
+# the PER lag for a ~0-10% return.
+TRAIN_PREFETCH = False
+TRAIN_PREFETCH_DEPTH = 2
 
 
 def visit_softmax_temperature(training_steps):
@@ -2501,12 +2524,17 @@ class TrainingHelper:
                 for net, _ in online]
             self._target_synced_at = self.training_steps
 
-    def prepare_batch_paper(self, replay_buffer, batch_size, unroll_steps, action_space):
+    def assemble_batch_paper(self, replay_buffer, batch_size, unroll_steps,
+                             action_space, training_steps=None):
         """The papers' batch: PER-sampled window roots with importance
         weights, and value targets computed NOW from stored rewards + stored
         root values under the age-adjusted horizon (EfficientZero 4.3).
         Policy targets are the recorded acting-search policies -- every real
         position carries one."""
+        # Pure CPU half (safe on a prefetch worker): no CUDA, no target-net
+        # access, no replay mutation. `training_steps` is explicit so a
+        # prefetched batch i uses base + i like the serial loop would.
+        ts = self.training_steps if training_steps is None else training_steps
         trajectories = list(replay_buffer)
         roots, priorities = [], []
         for traj in trajectories:
@@ -2534,12 +2562,10 @@ class TrainingHelper:
         chosen = np.random.choice(len(roots), size=batch_size, p=probs,
                                   replace=replace)
         # w = (N * P)^-beta with the annealed beta, normalized by the max.
-        weights = (len(roots) * probs[chosen]) ** (-per_beta(self.training_steps))
+        weights = (len(roots) * probs[chosen]) ** (-per_beta(ts))
         weights = weights / weights.max()
 
         use_tm = USE_TARGET_MODEL
-        if use_tm:
-            self._ensure_target_model()
         # (traj_id, tail) -> [tail_obs, [(row, step, g), ...]] for the
         # batch-time bootstrap refresh; deduped since windows share tails.
         pending = {}
@@ -2548,8 +2574,7 @@ class TrainingHelper:
         for flat in chosen:
             traj, start = roots[flat]
             refs.append(traj[start])
-            age = max(0, self.training_steps
-                      - traj[start].get("born_step", self.training_steps))
+            age = max(0, ts - traj[start].get("born_step", ts))
             horizon = paper_horizon(age)
             L = len(traj)
             obs, actions, rewards = [], [], []
@@ -2603,23 +2628,60 @@ class TrainingHelper:
             batch_value.append(vals)
             batch_has.append(has)
 
+        return {"pending": pending, "weights": weights, "refs": refs,
+                "use_tm": use_tm, "obs": batch_obs, "actions": batch_actions,
+                "rewards": batch_rewards, "policy": batch_policy,
+                "value": batch_value, "has": batch_has}
+
+    def finish_batch_paper(self, a):
+        """Main-thread half: the target-model bootstrap forward (CUDA,
+        target nets) and the final arrays. Runs at the exact serial point
+        -- after the previous train_step's target sync, before this one."""
+        pending, weights, refs = a["pending"], a["weights"], a["refs"]
+        batch_obs, batch_actions, batch_rewards = a["obs"], a["actions"], a["rewards"]
+        batch_policy, batch_value, batch_has = a["policy"], a["value"], a["has"]
+        if a["use_tm"]:
+            self._ensure_target_model()
         if pending:
             # One (chunked) forward through the LAGGED target model supplies
             # every bootstrap value; z = reward_sum + g * v_target(tail).
+            # BOOTSTRAP CACHE (2026-09-11): the target nets are frozen
+            # between syncs (TARGET_MODEL_INTERVAL steps), so v_target of a
+            # stored tail is a constant over that window -- and the same
+            # tails recur every step (256 lookups/step over a ~30k-position
+            # buffer). Only MISSES go through the forward. Keyed on
+            # (id(traj), tail); the cache is dropped whenever the target
+            # sync stamp changes and at every training-block start
+            # (invalidate_bootstrap_cache), and trajectories are never
+            # allocated/evicted inside a block, so an id() can never be
+            # reused while its entry is live. Numerics: a value computed in
+            # a different chunk composition differs at ~1e-6 (batch-shape
+            # conv wobble), never more.
+            stamp = self._target_synced_at
+            cache = getattr(self, "_boot_cache", None)
+            if cache is None or getattr(self, "_boot_cache_stamp", None) != stamp:
+                cache = self._boot_cache = {}
+                self._boot_cache_stamp = stamp
             keys = list(pending)
-            obs_arr = np.stack([pending[k][0] for k in keys])
-            values = np.empty(len(keys), dtype=np.float64)
-            with torch.no_grad():
-                for lo in range(0, len(keys), 256):
-                    chunk = torch.tensor(obs_arr[lo:lo + 256],
-                                         dtype=torch.float32,
-                                         device=self.device) / 255.0
-                    _, v, _ = self.target_prediction(
-                        self.target_representation(chunk))
-                    values[lo:lo + 256] = v.squeeze(-1).cpu().numpy()
-            for k, val in zip(keys, values):
+            miss = [k for k in keys if k not in cache]
+            self.boot_cache_hits = getattr(self, "boot_cache_hits", 0) + (len(keys) - len(miss))
+            self.boot_cache_misses = getattr(self, "boot_cache_misses", 0) + len(miss)
+            if miss:
+                obs_arr = np.stack([pending[k][0] for k in miss])
+                with torch.no_grad():
+                    for lo in range(0, len(miss), 256):
+                        chunk = torch.tensor(obs_arr[lo:lo + 256],
+                                             dtype=torch.float32,
+                                             device=self.device) / 255.0
+                        _, v, _ = self.target_prediction(
+                            self.target_representation(chunk))
+                        vals = v.squeeze(-1).cpu().numpy()
+                        for k, val in zip(miss[lo:lo + 256], vals):
+                            cache[k] = float(val)
+            for k in keys:
+                val = cache[k]
                 for row, step, g in pending[k][1]:
-                    batch_value[row][step] += g * float(val)
+                    batch_value[row][step] += g * val
 
         return {
             "obs": np.array(batch_obs),
@@ -2631,6 +2693,32 @@ class TrainingHelper:
             "is_weights": weights.astype(np.float32),
             "sample_refs": refs,
         }
+
+    def prepare_batch_paper(self, replay_buffer, batch_size, unroll_steps, action_space):
+        return self.finish_batch_paper(self.assemble_batch_paper(
+            replay_buffer, batch_size, unroll_steps, action_space))
+
+    def invalidate_bootstrap_cache(self):
+        """Drop cached target-model bootstrap values. Called at every
+        training-block start (the only points where the replay buffer
+        may have changed) -- see finish_batch_paper."""
+        self._boot_cache = None
+        self._boot_cache_stamp = None
+
+    def assemble_batch(self, replay_buffer, batch_size, unroll_steps,
+                       action_space, training_steps=None):
+        """Prefetch-worker half of prepare_batch for either target mode.
+        The plain (non-paper) builder is pure CPU already."""
+        if PAPER_TARGETS:
+            return ("paper", self.assemble_batch_paper(
+                replay_buffer, batch_size, unroll_steps, action_space,
+                training_steps=training_steps))
+        return ("plain", asyncio.run(self.prepare_batch(
+            replay_buffer, batch_size, unroll_steps, action_space)))
+
+    def finish_batch(self, item):
+        kind, payload = item
+        return self.finish_batch_paper(payload) if kind == "paper" else payload
 
     async def prepare_batch(self, replay_buffer, batch_size, unroll_steps, action_space):
         """
@@ -2759,6 +2847,99 @@ class TrainingHelper:
             "target_value": batch_target_value,
             "has_policy_target": batch_has_policy
         }
+
+class BatchPrefetcher:
+    """Overlap CPU batch assembly with GPU training for a block of exactly
+    n_steps gradient steps (see TRAIN_PREFETCH). Contract: the caller
+    must not mutate `replay` (append/evict/refresh) while the prefetcher
+    is open -- open it around a contiguous training block and close() it
+    before collect/refresh run; close() always joins the worker, even if
+    the consumer stopped early (an exception in train_step). A worker
+    exception surfaces on the next next()."""
+
+    def __init__(self, trainer, replay, batch_size, unroll_steps,
+                 action_space, n_steps, depth=None):
+        import queue
+        import threading
+        self.trainer, self.replay = trainer, replay
+        self.args = (batch_size, unroll_steps, action_space)
+        self.n_steps = int(n_steps)
+        self.base = trainer.training_steps
+        self.q = queue.Queue(maxsize=max(1, int(depth or TRAIN_PREFETCH_DEPTH)))
+        self.err = None
+        self._stop = threading.Event()
+        self.produced = self.consumed = 0
+        self.thread = threading.Thread(target=self._work, name="batch-prefetch",
+                                       daemon=True)
+        self.thread.start()
+
+    def _work(self):
+        try:
+            for i in range(self.n_steps):
+                if self._stop.is_set():
+                    return
+                item = self.trainer.assemble_batch(
+                    self.replay, *self.args, training_steps=self.base + i)
+                while True:  # bounded put that still honours a stop request
+                    try:
+                        self.q.put(item, timeout=0.1)
+                        break
+                    except Exception:
+                        if self._stop.is_set():
+                            return
+                self.produced += 1
+        except BaseException as e:  # surfaced by next(); never lost
+            self.err = e
+            while not self._stop.is_set():  # keep offering the sentinel
+                try:
+                    self.q.put(None, timeout=0.1)
+                    break
+                except Exception:
+                    continue
+
+    def next(self):
+        if self.consumed >= self.n_steps:
+            raise RuntimeError("BatchPrefetcher exhausted")
+        import queue as _queue
+        while True:
+            try:
+                item = self.q.get(timeout=1.0)
+                break
+            except _queue.Empty:
+                # Audit F1: a worker that died without a sentinel landing
+                # (queue full at the moment of failure) must not leave the
+                # consumer blocked forever (un-interruptible on Windows,
+                # invisible to the supervisor) -- surface it.
+                if not self.thread.is_alive() and self.q.empty():
+                    item = None
+                    break
+        if item is None:
+            self._err_raised = True
+            raise RuntimeError("batch prefetch worker failed") from self.err
+        self.consumed += 1
+        return self.trainer.finish_batch(item)
+
+    def close(self):
+        self._stop.set()
+        while True:  # unblock a worker parked on a full queue
+            try:
+                self.q.get_nowait()
+            except Exception:
+                break
+        self.thread.join()
+        # A worker failure that next() already surfaced is not raised
+        # twice; one that nobody saw (block abandoned early) is.
+        if (self.err is not None and not getattr(self, "_err_raised", False)
+                and self.consumed < self.n_steps):
+            raise RuntimeError("batch prefetch worker failed") from self.err
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
 
 #Agent will be single threaded for real time learning
 class MuZeroAgent:
