@@ -399,6 +399,32 @@ def _tc(op, a, ta, b, tb):
     return torch.where(t == F32, op(a.float(), b.float()), op(a, b))
 
 
+def _tbw(op, a, ta, b):
+    """Typed op with a WEAK right operand (a Python float/int, or an
+    int-valued / weak tensor): the result keeps a's type; float32
+    arithmetic iff a is F32. A Python scalar is pre-rounded to float32
+    for the f32 path exactly as NumPy casts the weak operand. Fewer
+    kernels than _tb (audit F2)."""
+    if isinstance(b, torch.Tensor):
+        b64, b32 = b, b.float()
+    else:
+        b64, b32 = b, float(np.float32(b))
+    r64 = op(a, b64)
+    r32 = op(a.float(), b32).double()
+    return torch.where(ta == F32, r32, r64), ta
+
+
+def _tcw(op, a, ta, b):
+    """Typed comparison against a WEAK Python scalar."""
+    return torch.where(ta == F32, op(a.float(), float(np.float32(b))), op(a, b))
+
+
+# CUDA-graph replay of the selection wave body (audit F2). Off = eager
+# waves on CUDA; CPU is always eager. The GPU benchmark's "check" mode
+# pins eager == graph.
+USE_CUDA_GRAPHS = True
+
+
 _ADD = torch.add
 _SUB = torch.sub
 _MUL = torch.mul
@@ -870,107 +896,164 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
     def _composite(self, f, ch, discount):
         """reward + discount * onward for child ids `ch` (typed)."""
         v = f["visit"][ch]
-        q, qt = _tb(_DIV, f["wsum"][ch], f["wsum_t"][ch], v.clamp(min=1),
-                    torch.zeros_like(f["wsum_t"][ch]))
+        wt = f["wsum_t"][ch]
+        q, qt = _tbw(_DIV, f["wsum"][ch], wt, v.clamp(min=1))
         dn = f["done"][ch]
         zero = torch.zeros_like(q)
         onward = torch.where(v > 0, q, torch.where(dn, zero, f["evalue"][ch]))
         onward_t = torch.where(v > 0, qt, torch.where(
             dn, torch.zeros_like(qt), f["evalue_t"][ch]))
-        d = torch.full_like(q, discount)
-        dt = torch.zeros_like(qt)
-        prod, prodt = _tb(_MUL, d, dt, onward, onward_t)
+        prod, prodt = _tbw(_MUL, onward, onward_t, discount)
         return _tb(_ADD, f["reward"][ch], f["reward_t"][ch], prod, prodt)
 
-    def _child_scores(self, f, n, st, g, c_puct, discount, floor):
-        """[G,A] float64 PUCT scores of n's children with the typed
+    def _child_scores(self, f, n, st, c_puct, cp32, discount, floor):
+        """[R,A] float64 PUCT scores of n's children with the typed
         arithmetic of selection_task_no_expand, including the virtual-
-        loss clamp on children that earlier roots chose this round."""
-        ch = f["children"][n]                               # [G,A]
+        loss clamp on children that earlier roots chose this round.
+        Fixed shape: every root scores (leaf rows gather clamped ids and
+        are discarded by the caller's mask), so the body is CUDA-graph
+        capturable."""
+        ch = f["children"][n].clamp(min=0)                  # [R,A]
         v = f["visit"][ch]
         vl = f["vl"][ch]
         comp, compt = self._composite(f, ch, discount)
-        minv = st["minv"][g].unsqueeze(1)
-        mint = st["mint"][g].unsqueeze(1)
-        maxv = st["maxv"][g].unsqueeze(1)
-        maxt = st["maxt"][g].unsqueeze(1)
-        has_range = _tc(_GT, maxv, maxt, minv, mint)          # [G,1]
+        minv = st["minv"].unsqueeze(1)
+        mint = st["mint"].unsqueeze(1)
+        maxv = st["maxv"].unsqueeze(1)
+        maxt = st["maxt"].unsqueeze(1)
+        has_range = _tc(_GT, maxv, maxt, minv, mint)          # [R,1]
         num, numt = _tb(_SUB, comp, compt, minv, mint)
         span, spant = _tb(_SUB, maxv, maxt, minv, mint)
-        fl = torch.full_like(span, floor)
-        flt = torch.zeros_like(spant)
-        use_floor = _tc(_GT, fl, flt, span, spant)            # max(span, floor)
-        den = torch.where(use_floor, fl, span)
-        dent = torch.where(use_floor, flt, spant)
+        use_floor = _tcw(_LT, span, spant, floor)             # max(span, floor)
+        den = torch.where(use_floor, torch.full_like(span, floor), span)
+        dent = torch.where(use_floor, torch.zeros_like(spant), spant)
         norm, normt = _tb(_DIV, num, numt, den, dent)
         score = torch.where(has_range, norm, comp)
         scoret = torch.where(has_range, normt, compt)
         nvis = v.clamp(min=1)
-        zt = torch.zeros_like(scoret)
-        pen, pent = _tb(_MUL, score, scoret, nvis, zt)
-        pen, pent = _tb(_DIV, pen, pent, nvis + vl, zt)
+        pen, pent = _tbw(_MUL, score, scoret, nvis)
+        pen, pent = _tbw(_DIV, pen, pent, nvis + vl)
         use_pen = (vl > 0) & _tc(_LT, pen, pent, score, scoret)  # min(score, pen)
         score = torch.where(use_pen, pen, score)
         pr = f["prior"][ch]
         prt = f["prior_t"][ch]
-        cp32 = (torch.tensor(c_puct, dtype=torch.float32, device=pr.device)
-                * pr.float()).double()
-        cp = torch.where(prt == F32, cp32, c_puct * pr)
+        cp = torch.where(prt == F32, (cp32 * pr.float()).double(), c_puct * pr)
         total = (v + vl).sum(dim=1, keepdim=True)
         u = cp * torch.sqrt(total) / (1 + v + vl)
         return score + u
 
-    def _pick(self, scores, beh, tie_break, gen):
+    def _pick(self, scores, beh, arangeA, tie_break, gen):
         best = scores.max(dim=1, keepdim=True).values
         tie = scores == best
         A = scores.shape[1]
         if tie_break == "first":
             # dict order: the gameplay child first, then actions ascending
-            ar = torch.arange(A, device=scores.device).unsqueeze(0)
-            order = ar + 1
-            order = torch.where(ar == beh.unsqueeze(1), torch.zeros_like(order),
-                                order)
+            order = arangeA + 1
+            order = torch.where(arangeA == beh.unsqueeze(1),
+                                torch.zeros_like(order), order)
             key = torch.where(tie, order, torch.full_like(order, A + 2))
             return key.argmin(dim=1)
-        return torch.multinomial(tie.double(), 1, generator=gen).squeeze(1)
+        # uniform among ties: the largest random key among tied entries
+        r = torch.rand(scores.shape, device=scores.device, generator=gen)
+        return torch.where(tie, r, torch.full_like(r, -1.0)).argmax(dim=1)
 
-    def _select_round(self, forest, root_ids, slots, st, c_puct, discount,
-                      max_depth, tie_break, gen):
-        """One simulation per root, wave-staggered (slot j starts at wave
-        2j) so every cross-root virtual-loss read happens after the
-        deposit the sequential order would have made. Returns (path
-        [R, max_depth+1] node ids, -1 padded; plen [R])."""
-        f, dev = forest.f, self.device
-        R = int(root_ids.numel())
-        cur = root_ids.clone()
-        depth = torch.zeros(R, dtype=torch.long, device=dev)
-        active = torch.ones(R, dtype=torch.bool, device=dev)
-        path = torch.full((R, max_depth + 1), -1, dtype=torch.long, device=dev)
-        path[:, 0] = root_ids
-        rows = torch.arange(R, device=dev)
-        floor = float(muzero.MINMAX_RANGE_FLOOR)
-        wave = 0
-        while bool(active.any()):
-            step = active & (2 * slots <= wave)
-            wave += 1
-            if not bool(step.any()):
-                continue
-            at_leaf = (~f["expanded"][cur]) | f["done"][cur] | (depth >= max_depth)
-            stop = step & at_leaf
-            active = active & ~stop
-            go = step & ~at_leaf
-            if not bool(go.any()):
-                continue
-            g = rows[go]
-            n = cur[g]
-            scores = self._child_scores(f, n, st, g, c_puct, discount, floor)
-            a = self._pick(scores, f["beh"][n], tie_break, gen)
-            child = f["children"][n, a]
-            f["vl"][child] += 1.0   # distinct nodes within a wave (DESIGN.md)
-            cur[g] = child
-            depth[g] += 1
-            path[g, depth[g]] = child
-        return path, depth + 1
+    def _wave_body(self, forest, ws, st, c_puct, discount, max_depth,
+                   tie_break, gen):
+        """ONE wave for every root, masked, fixed shapes, no host syncs:
+        roots whose stagger has started and that are still descending
+        score their children, deposit virtual loss on the chosen child,
+        and advance. CUDA-graph capturable (audit F2)."""
+        f = forest.f
+        step = self._ready(ws)
+        n = ws["cur"]
+        at_leaf = (~f["expanded"][n]) | f["done"][n] | (ws["depth"] >= max_depth)
+        go = step & ~at_leaf
+        ws["active"].copy_(ws["active"] & ~(step & at_leaf))
+        scores = self._child_scores(f, n, st, c_puct, ws["cp32"], discount,
+                                    ws["floor"])
+        a = self._pick(scores, f["beh"][n], ws["arangeA"], tie_break, gen)
+        child = f["children"][n, a].clamp(min=0)
+        # index_add_ accumulates; non-stepping rows add 0 (distinct nodes
+        # among the stepping rows is the readiness proof, DESIGN.md).
+        f["vl"].index_add_(0, child, go.double())
+        # A root that steps from a chain node into an imagined child has
+        # LEFT the chain at that chain index: from then on it can only
+        # touch the region of roots at or before that index.
+        was_chain = f["cidx"][n]
+        now = torch.where(go, child, n)
+        left = go & (was_chain >= 0) & (f["cidx"][now] < 0)
+        ws["left_at"].copy_(torch.where(left, was_chain, ws["left_at"]))
+        ws["cur"].copy_(now)
+        ws["depth"].add_(go.long())
+        ws["path"].scatter_(1, ws["depth"].unsqueeze(1), ws["cur"].unsqueeze(1))
+        ws["wave"].add_(1)
+
+    def _ready(self, ws):
+        """Which roots may take their next step THIS wave so that every
+        cross-root virtual-loss read/deposit lands in the sequential
+        engine's index order. Root k < j (same tree, chain index i_k <
+        i_j) can only touch root j's depth-d node by walking i_j - i_k
+        chain steps first, i.e. at its own depth d + (i_j - i_k). So root
+        j at depth d may step once, for every such k: k has stopped, or k
+        left the chain at an index < i_j (its subtree is disjoint from
+        root j's region), or k has already passed that depth. Two roots
+        stepping in one wave therefore never touch one node, and the
+        static chain-offset stagger (root j at wave d + 2*(i_j - i_0)) is
+        a special case -- this rule never runs more waves than it
+        (DESIGN.md), and far fewer once roots leave the chain."""
+        active = ws["active"]
+        depth = ws["depth"]
+        cidx = ws["cidx"]
+        dk = depth.unsqueeze(1)                      # [k, 1]
+        dj = depth.unsqueeze(0)                      # [1, j]
+        ik = cidx.unsqueeze(1)
+        ij = cidx.unsqueeze(0)
+        ok = ((~active).unsqueeze(1) | (ws["left_at"].unsqueeze(1) < ij)
+              | (dk > dj + ij - ik))                 # [k, j]
+        blocked = (ws["lower"] & ~ok).any(dim=0)     # any earlier k in the way
+        return active & ~blocked
+
+    def _capture_wave(self, body, ws, forest, gen):
+        """Warm up + capture `body` as a CUDA graph. The warm-up EXECUTES
+        (mutating the window state and vl), the capture only records, so
+        the caller resets the per-round state afterwards."""
+        g = torch.cuda.CUDAGraph()
+        if gen is not None:
+            g.register_generator_state(gen)
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                body()
+        torch.cuda.current_stream().wait_stream(s)
+        with torch.cuda.graph(g):
+            body()
+        forest.f["vl"].zero_()
+        return g
+
+    def _select_round(self, forest, ws, body, graph, n_waves):
+        """One simulation per root, wave-staggered (root at chain offset
+        s starts at wave 2s) so every cross-root virtual-loss read happens
+        after the deposit the sequential order would have made. Runs the
+        fixed wave count in blocks of WAVE_BLOCK with one early-exit check
+        per block (the only host syncs)."""
+        ws["cur"].copy_(ws["root_ids"])
+        ws["depth"].zero_()
+        ws["active"].fill_(True)
+        ws["left_at"].fill_(self.ON_CHAIN)
+        ws["path"].fill_(-1)
+        ws["path"][:, 0] = ws["root_ids"]
+        ws["wave"].zero_()
+        block = self.WAVE_BLOCK
+        for _ in range(0, n_waves, block):
+            for _ in range(block):
+                if graph is not None:
+                    graph.replay()
+                else:
+                    body()
+            if not bool(ws["active"].any()):
+                break
+        return ws["path"], ws["depth"] + 1
 
     # ---- backup (expand_selected's drain, in root order) --------------
 
@@ -979,6 +1062,7 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         R, D = path.shape
         rows = torch.arange(R, device=dev)
         valid = torch.arange(D, device=dev).unsqueeze(0) < plen.unsqueeze(1)
+        max_len = int(plen.max())                         # host sync 1
         leaf = path[rows, plen - 1]
         lv = torch.where(f["done"][leaf], torch.zeros_like(f["evalue"][leaf]),
                          f["evalue"][leaf])
@@ -989,45 +1073,44 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         contrib = torch.zeros(R, D, dtype=torch.float64, device=dev)
         contrib_t = torch.zeros(R, D, dtype=torch.uint8, device=dev)
         bv, bvt = lv, lvt
-        d = torch.full_like(bv, discount)
-        dt = torch.zeros_like(bvt)
-        for h in range(D):
+        for h in range(max_len):
             i = plen - 1 - h
             ok = i >= 0
-            if not bool(ok.any()):
-                break
             ii = i.clamp(min=0)
             node = path[rows, ii]
-            contrib[rows[ok], ii[ok]] = bv[ok]
-            contrib_t[rows[ok], ii[ok]] = bvt[ok]
-            prod, prodt = _tb(_MUL, d, dt, bv, bvt)
+            contrib[rows, ii] = torch.where(ok, bv, contrib[rows, ii])
+            contrib_t[rows, ii] = torch.where(ok, bvt, contrib_t[rows, ii])
+            prod, prodt = _tbw(_MUL, bv, bvt, discount)
             nb, nbt = _tb(_ADD, f["reward"][node], f["reward_t"][node], prod, prodt)
             bv = torch.where(ok, nb, bv)
             bvt = torch.where(ok, nbt, bvt)
         # Rank of each (root, path node) among the roots (ascending) whose
         # paths contain that node: the sequential drain applies root k's
         # increment k-th, and each root's range update reads the value
-        # right after its own increment.
-        jj, ii = valid.nonzero(as_tuple=True)
-        nodes = path[jj, ii]
-        key = nodes * R + jj
+        # right after its own increment. Fixed shapes: invalid entries
+        # get unique keys past every real one.
+        flat_node = path.reshape(-1)
+        flat_j = rows.unsqueeze(1).expand(R, D).reshape(-1)
+        flat_valid = valid.reshape(-1)
+        pos = torch.arange(R * D, device=dev)
+        key = torch.where(flat_valid, flat_node * R + flat_j,
+                          (forest.capacity + 1) * R + pos)
         order = torch.argsort(key)
-        sn = nodes[order]
-        is_start = torch.ones_like(sn, dtype=torch.bool)
-        is_start[1:] = sn[1:] != sn[:-1]
+        sk = key[order]
+        is_start = torch.ones_like(sk, dtype=torch.bool)
+        is_start[1:] = (sk[1:] // R) != (sk[:-1] // R)
         gid = torch.cumsum(is_start.long(), dim=0) - 1
-        pos = torch.arange(sn.numel(), device=dev)
-        first = torch.zeros(int(gid[-1]) + 1, dtype=torch.long, device=dev)
-        first[gid[is_start]] = pos[is_start]
+        first = torch.full((R * D,), R * D, dtype=torch.long, device=dev)
+        first.scatter_reduce_(0, gid, pos, reduce="amin")
         rank_sorted = pos - first[gid]
         rank = torch.empty_like(rank_sorted)
         rank[order] = rank_sorted
-        rank_mat = torch.full((R, D), -1, dtype=torch.long, device=dev)
-        rank_mat[jj, ii] = rank
+        rank_mat = torch.where(flat_valid, rank, torch.full_like(rank, -1)).view(R, D)
+        max_rank = int(rank_mat.max())                     # host sync 2
         post_w = torch.zeros(R, D, dtype=torch.float64, device=dev)
         post_wt = torch.zeros(R, D, dtype=torch.uint8, device=dev)
         post_v = torch.zeros(R, D, dtype=torch.float64, device=dev)
-        for rho in range(int(rank.max()) + 1):
+        for rho in range(max_rank + 1):
             sel = rank_mat == rho
             nd = path[sel]
             w, wt = _tb(_ADD, f["wsum"][nd], f["wsum_t"][nd], contrib[sel],
@@ -1039,28 +1122,41 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
             post_wt[sel] = wt
             post_v[sel] = f["visit"][nd]
         # Range updates: every path node except the root, leaf first,
-        # composite r + discount * q_post, typed max()/min() replacement.
-        for h in range(D):
+        # composite r + discount * q_post, typed max()/min() replacement,
+        # written IN PLACE (the selection graph reads these buffers).
+        for h in range(max_len):
             i = plen - 1 - h
             ok = i >= 1
-            if not bool(ok.any()):
-                break
             ii = i.clamp(min=0)
             node = path[rows, ii]
-            q, qt = _tb(_DIV, post_w[rows, ii], post_wt[rows, ii],
-                        post_v[rows, ii].clamp(min=1), dt)
-            prod, prodt = _tb(_MUL, d, dt, q, qt)
+            q, qt = _tbw(_DIV, post_w[rows, ii], post_wt[rows, ii],
+                         post_v[rows, ii].clamp(min=1))
+            prod, prodt = _tbw(_MUL, q, qt, discount)
             upd, updt = _tb(_ADD, f["reward"][node], f["reward_t"][node],
                             prod, prodt)
             gt = ok & _tc(_GT, upd, updt, st["maxv"], st["maxt"])
-            st["maxv"] = torch.where(gt, upd, st["maxv"])
-            st["maxt"] = torch.where(gt, updt, st["maxt"])
+            st["maxv"].copy_(torch.where(gt, upd, st["maxv"]))
+            st["maxt"].copy_(torch.where(gt, updt, st["maxt"]))
             lt = ok & _tc(_LT, upd, updt, st["minv"], st["mint"])
-            st["minv"] = torch.where(lt, upd, st["minv"])
-            st["mint"] = torch.where(lt, updt, st["mint"])
+            st["minv"].copy_(torch.where(lt, upd, st["minv"]))
+            st["mint"].copy_(torch.where(lt, updt, st["mint"]))
         f["vl"].zero_()
 
     # ---- one communal window -----------------------------------------
+
+    WAVE_BLOCK = 8   # waves between early-exit checks (host syncs)
+    ON_CHAIN = 1 << 40   # left_at sentinel: the root is still on the chain
+
+    def _stagger(self, roots):
+        """The STATIC wave-count bound: 2 * (chain index - the tree's first
+        root index). By CHAIN OFFSET, not window slot: root k reaches root
+        j's region only after i_j - i_k chain steps, and the ordering
+        proof needs the stagger to grow with that distance (audit F1).
+        _ready's adaptive rule never needs more waves than this."""
+        first = {}
+        for t, i in roots:
+            first.setdefault(t, i)
+        return [2 * (i - first[t]) for t, i in roots]
 
     def search_window(self, forest, roots, num_simulations=None, c_puct=None,
                       discount=None, max_depth=None, tie_break="first",
@@ -1069,7 +1165,10 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         mean tree 0). Returns {(tree, idx): (policy [A] np.float64,
         root_value float, has_policy bool, raw_counts [A] np.int64)};
         raw_counts are the root children's visit counts BEFORE the
-        bookkeeping subtraction (the sequential node.visit_count)."""
+        bookkeeping subtraction (the sequential node.visit_count).
+
+        generator: tie-break RNG for tie_break="random" (a CUDA generator
+        on CUDA; None = the device's default generator)."""
         assert not muzero.USE_GUMBEL_SEARCH, (
             "VectorizedCommunalPUCT is PUCT-only; the sequential engine "
             "falls back to per-root searches under USE_GUMBEL_SEARCH -- "
@@ -1087,8 +1186,6 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         R = len(roots)
         if R == 0:
             return {}
-        forest.ensure_capacity(forest.count + R * (sims + 1) * A)
-        f = forest.f
         for t, i in roots:
             assert 0 <= i < forest.length[t], f"root {i} outside tree {t}"
             # A released span can never be searched again: its imagined
@@ -1098,105 +1195,119 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
             assert i > forest.released[t], (
                 f"root {i} of tree {t} lies in the released span "
                 f"(<= {forest.released[t]}); windows must advance")
+        forest.ensure_capacity(forest.count + R * (sims + 1) * A)
+        f = forest.f
         root_ids = torch.tensor([forest.node_id(t, i) for t, i in roots],
                                 dtype=torch.long, device=dev)
-        # Stagger by CHAIN OFFSET within the tree, NOT by window slot: root
-        # k reaches root j's region only after i_j - i_k chain steps, so
-        # the wave proof needs the stagger to grow with that distance.
-        # Slot-based stagger was only correct for contiguous windows;
-        # gapped ones (guarded steps) put two roots on one node in one
-        # wave (audit F1, DESIGN.md).
-        first = {}
-        for t, i in roots:
-            first.setdefault(t, i)
-        slots = torch.tensor([i - first[t] for t, i in roots],
-                             dtype=torch.long, device=dev)
+        slots2 = torch.tensor(self._stagger(roots), dtype=torch.long, device=dev)
+        n_waves = int(slots2.max()) + max_depth + 1
+        rows = torch.arange(R, device=dev)
+        arangeA = torch.arange(A, device=dev).unsqueeze(0)
 
         # 1. Expand the unexpanded roots in one batch (index order;
         #    batch_expand_nodes drops the terminal ones).
-        exp = f["expanded"][root_ids].tolist()
-        dn = f["done"][root_ids].tolist()
-        to_expand = [int(rid) for rid, e, d in zip(root_ids.tolist(), exp, dn)
-                     if not e and not d]
-        self._expand(forest, torch.tensor(to_expand, dtype=torch.long, device=dev))
+        need = (~f["expanded"][root_ids]) & (~f["done"][root_ids])
+        self._expand(forest, root_ids[need])
 
-        # 2. Per root in index order: noise (RNG order preserved), then
-        #    seed its MinMaxStats from its children in dict order.
+        # 2. Per root in index order: Dirichlet noise through the real
+        #    add_dirichlet_noise on the same float32 row (one download,
+        #    numpy RNG consumed in root order, one upload), then seed each
+        #    root's MinMaxStats from its children in dict order.
         alpha = float(muzero.DIRICHLET_ALPHA)
+        rows_np = f["policy"][root_ids].cpu().numpy()
+        types_np = f["policy_t"][root_ids].cpu().numpy()
+        noisy_rows = np.empty((R, A), dtype=np.float64)
+        noisy_t = np.empty(R, dtype=np.uint8)
+        for j in range(R):
+            row = rows_np[j].astype(np.float32) if types_np[j] == F32 else rows_np[j]
+            noisy = np.asarray(muzero.add_dirichlet_noise(
+                row, epsilon=epsilon, alpha=alpha))
+            noisy_rows[j] = noisy
+            noisy_t[j] = F32 if noisy.dtype == np.float32 else F64
+        f["policy"][root_ids] = torch.as_tensor(noisy_rows, device=dev)
+        ptype = torch.as_tensor(noisy_t, device=dev)
+        f["policy_t"][root_ids] = ptype
+        ch = f["children"][root_ids]                                 # [R,A]
+        has = ch >= 0
+        f["prior"][ch[has]] = f["policy"][root_ids][has]
+        f["prior_t"][ch[has]] = ptype.unsqueeze(1).expand(R, A)[has]
+        beh = f["beh"][root_ids]
         st = {"minv": torch.full((R,), float("inf"), dtype=torch.float64, device=dev),
               "maxv": torch.full((R,), float("-inf"), dtype=torch.float64, device=dev),
               "mint": torch.zeros(R, dtype=torch.uint8, device=dev),
               "maxt": torch.zeros(R, dtype=torch.uint8, device=dev)}
-        for rid in root_ids.tolist():
-            row = f["policy"][rid]
-            if int(f["policy_t"][rid]) == F32:
-                row_np = row.float().cpu().numpy()
-            else:
-                row_np = row.cpu().numpy()
-            noisy = np.asarray(muzero.add_dirichlet_noise(
-                row_np, epsilon=epsilon, alpha=alpha))
-            ptype = F32 if noisy.dtype == np.float32 else F64
-            f["policy"][rid] = torch.as_tensor(noisy, dtype=torch.float64, device=dev)
-            f["policy_t"][rid] = ptype
-            ch = f["children"][rid]
-            has = ch >= 0
-            f["prior"][ch[has]] = f["policy"][rid][has]
-            f["prior_t"][ch[has]] = ptype
-        beh = f["beh"][root_ids]
-        arangeA = torch.arange(A, device=dev)
-        rows = torch.arange(R, device=dev)
         # dict order of a root's children: the gameplay child (if any)
         # first, then imagined children by action.
-        others = arangeA.unsqueeze(0).expand(R, A)
+        others = arangeA.expand(R, A)
         keyed = torch.where(others == beh.unsqueeze(1), torch.zeros_like(others),
                             others + 1)
         dict_order = keyed.argsort(dim=1)                          # [R,A]
         for k in range(A):
             a = dict_order[:, k]
-            ch = f["children"][root_ids, a]
-            ok = ch >= 0
-            if not bool(ok.any()):
-                continue
-            comp, compt = self._composite(f, ch.clamp(min=0), discount)
+            chk = f["children"][root_ids, a]
+            ok = chk >= 0
+            comp, compt = self._composite(f, chk.clamp(min=0), discount)
             gt = ok & _tc(_GT, comp, compt, st["maxv"], st["maxt"])
-            st["maxv"] = torch.where(gt, comp, st["maxv"])
-            st["maxt"] = torch.where(gt, compt, st["maxt"])
+            st["maxv"].copy_(torch.where(gt, comp, st["maxv"]))
+            st["maxt"].copy_(torch.where(gt, compt, st["maxt"]))
             lt = ok & _tc(_LT, comp, compt, st["minv"], st["mint"])
-            st["minv"] = torch.where(lt, comp, st["minv"])
-            st["mint"] = torch.where(lt, compt, st["mint"])
+            st["minv"].copy_(torch.where(lt, comp, st["minv"]))
+            st["mint"].copy_(torch.where(lt, compt, st["mint"]))
 
-        # 3. Rounds: select (staggered lockstep) -> expand unique
+        # 3. Window state buffers (static addresses for the wave graph).
+        tree_t = torch.tensor([t for t, _ in roots], dtype=torch.long, device=dev)
+        cidx_t = torch.tensor([i for _, i in roots], dtype=torch.long, device=dev)
+        ws = {"root_ids": root_ids, "slots2": slots2, "roots": roots,
+              "cidx": cidx_t,
+              # lower[k, j]: k precedes j in the SAME tree (sequential order)
+              "lower": (rows.unsqueeze(1) < rows.unsqueeze(0))
+              & (tree_t.unsqueeze(1) == tree_t.unsqueeze(0)),
+              "left_at": torch.full((R,), self.ON_CHAIN, dtype=torch.long,
+                                    device=dev),
+              "cur": root_ids.clone(),
+              "depth": torch.zeros(R, dtype=torch.long, device=dev),
+              "active": torch.ones(R, dtype=torch.bool, device=dev),
+              "path": torch.full((R, max_depth + 1), -1, dtype=torch.long,
+                                 device=dev),
+              "wave": torch.zeros((), dtype=torch.long, device=dev),
+              "arangeA": arangeA,
+              "cp32": torch.tensor(c_puct, dtype=torch.float32, device=dev),
+              "floor": float(muzero.MINMAX_RANGE_FLOOR)}
+        ws["path"][:, 0] = root_ids
+        body = lambda: self._wave_body(forest, ws, st, c_puct, discount,
+                                       max_depth, tie_break, generator)
+        graph = None
+        if dev.type == "cuda" and USE_CUDA_GRAPHS:
+            graph = self._capture_wave(body, ws, forest, generator)
+
+        # 4. Rounds: select (staggered lockstep) -> expand unique
         #    leaves in root order -> back up in root order.
         for _ in range(sims):
-            path, plen = self._select_round(forest, root_ids, slots, st,
-                                            c_puct, discount, max_depth,
-                                            tie_break, generator)
-            leaf_ids = path[rows, plen - 1]
-            leaves = leaf_ids.tolist()
-            exp = f["expanded"][leaf_ids].tolist()
-            dn = f["done"][leaf_ids].tolist()
-            seen, uniq = set(), []
-            for leaf, e, d in zip(leaves, exp, dn):
-                if leaf in seen:
-                    continue
-                seen.add(leaf)
-                if not e and not d:
-                    uniq.append(leaf)
-            self._expand(forest, torch.tensor(uniq, dtype=torch.long, device=dev))
+            path, plen = self._select_round(forest, ws, body, graph, n_waves)
+            leaf = ws["cur"]
+            need = (~f["expanded"][leaf]) & (~f["done"][leaf])
+            # first-occurrence order among the leaves that need expanding
+            uniq, inv = torch.unique(leaf, return_inverse=True)   # host sync
+            first = torch.full((uniq.numel(),), R, dtype=torch.long, device=dev)
+            first.scatter_reduce_(0, inv, rows, reduce="amin")
+            need_u = torch.zeros(uniq.numel(), dtype=torch.bool, device=dev)
+            need_u[inv[need]] = True
+            sel = need_u.nonzero().squeeze(1)                       # host sync
+            pids = uniq[sel][torch.argsort(first[sel])]
+            self._expand(forest, pids)
             self._backup_round(forest, path, plen, st, discount)
 
-        # 4. Readout.
+        # 5. Readout.
         ch = f["children"][root_ids]                                # [R,A]
         has = ch >= 0
         raw = torch.where(has, f["visit"][ch.clamp(min=0)],
                           torch.zeros_like(f["visit"][ch.clamp(min=0)]))
         counts = raw
         if chain_seeded:
-            book = (arangeA.unsqueeze(0) == beh.unsqueeze(1)) & has
+            book = (arangeA == beh.unsqueeze(1)) & has
             counts = raw - book.double()
-        rv, _ = _tb(_DIV, f["wsum"][root_ids], f["wsum_t"][root_ids],
-                    f["visit"][root_ids].clamp(min=1),
-                    torch.zeros_like(f["wsum_t"][root_ids]))
+        rv, _ = _tbw(_DIV, f["wsum"][root_ids], f["wsum_t"][root_ids],
+                     f["visit"][root_ids].clamp(min=1))
         rv = torch.where(f["visit"][root_ids] > 0, rv, torch.zeros_like(rv))
         raw_np = raw.cpu().numpy()
         counts_np = counts.cpu().numpy()

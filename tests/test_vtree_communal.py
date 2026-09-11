@@ -363,12 +363,8 @@ def test_intra_round_order_is_load_bearing(monkeypatch):
     """Pure lockstep (every root at wave 0) drops the cross-root virtual
     loss the sequential index-ordered selection leaves on shared chain
     nodes; visit counts then differ."""
-    orig = VectorizedCommunalPUCT._select_round
-
-    def lockstep(self, forest, root_ids, slots, *args):
-        return orig(self, forest, root_ids, torch.zeros_like(slots), *args)
-
-    monkeypatch.setattr(VectorizedCommunalPUCT, "_select_round", lockstep)
+    monkeypatch.setattr(VectorizedCommunalPUCT, "_ready",
+                        lambda self, ws: ws["active"])
     hits = 0
     for seed, L, windows, sims in ((2, 10, [[0, 1, 2, 3]], 12),
                                    (3, 12, [[0, 1, 2, 3], [4, 5, 6, 7]], 10),
@@ -377,6 +373,43 @@ def test_intra_round_order_is_load_bearing(monkeypatch):
         hits += _diverges(helper, engine, make_traj(seed, L, seed != 12),
                           windows, sims)
     assert hits > 0, "removing the stagger must break parity somewhere"
+
+
+def test_slot_stagger_is_wrong_for_gapped_windows(monkeypatch):
+    """Audit F1's reproduction as a standing control: the ORIGINAL rule
+    (stagger by window slot) must diverge on a gapped window at
+    production shape, so the chain-offset rule is load-bearing."""
+    def by_slot(self, ws):
+        if "slot2" not in ws:
+            seen, out = {}, []
+            for t, _ in ws["roots"]:
+                out.append(2 * seen.get(t, 0))
+                seen[t] = seen.get(t, 0) + 1
+            ws["slot2"] = torch.tensor(out, device=ws["active"].device)
+        return ws["active"] & (ws["slot2"] <= ws["wave"])
+
+    monkeypatch.setattr(VectorizedCommunalPUCT, "_ready", by_slot)
+    hits = 0
+    for seed in (70, 78):
+        helper, engine = build_world(monkeypatch, noise=True, horizon=5,
+                                     max_depth=50)
+        hits += _diverges(helper, engine, make_traj(seed, 40, True),
+                          [list(range(0, 32, 2))], 50)
+    assert hits > 0, "slot-based stagger must break a gapped window"
+
+
+def test_static_chain_offset_stagger_is_also_exact(monkeypatch):
+    """The static chain-offset stagger (root j at wave d + 2*(i_j - i_0))
+    is the proof's special case of _ready; pin that it is itself exact
+    on gapped and contiguous windows (it bounds the wave count)."""
+    def static(self, ws):
+        return ws["active"] & (ws["slots2"] <= ws["wave"])
+
+    monkeypatch.setattr(VectorizedCommunalPUCT, "_ready", static)
+    for windows in ([list(range(0, 32, 2))], [list(range(4, 20))]):
+        traj = make_traj(77, 40, True)
+        run_both(monkeypatch, traj, windows, sims=20, noise=True, horizon=5,
+                 max_depth=50)
 
 
 def test_type_faithful_arithmetic_is_load_bearing(monkeypatch):
