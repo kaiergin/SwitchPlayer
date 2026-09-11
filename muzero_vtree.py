@@ -51,8 +51,10 @@ zero-init every final head, which makes all values a shared constant
 and would leave the score arithmetic untested).
 
 Scope (v1): fresh-root acting/refresh searches -- the act_search shape.
-Chain trees (communal refresh) and Gumbel are out of scope; the
-sequential engine remains authoritative for both.
+v2 (VectorizedCommunalPUCT, below) adds the COMMUNAL chain-tree refresh
+(create_tree_from_game + run_communal_mcts, archfix's topology) with its
+own bitwise parity gate (tests/test_vtree_communal.py); Gumbel stays out
+of scope and the sequential engine remains authoritative for it.
 """
 import numpy as np
 import torch
