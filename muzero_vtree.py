@@ -711,11 +711,15 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
       (no task ever suspends), so root j's descent sees the virtual loss
       that roots < j deposited THIS round on shared nodes along the chain
       -- root j-k standing on root j's depth-d node at its own depth d+k.
-      This engine reproduces that with a WAVE-STAGGERED lockstep: root
-      slot j starts at wave 2j; at wave w root j is at depth w-2j, so
-      every earlier root's deposit that root j can read was made in an
-      earlier wave, and no two roots read/write the same node in one wave
-      (proof in DESIGN.md). Selections never see same-round backups.
+      This engine reproduces that with a lockstep of masked WAVES under
+      the readiness rule of _ready: root j (chain index i_j) at depth d
+      steps only once every earlier same-tree root k has stopped, left
+      the chain before i_j, or passed depth d + (i_j - i_k) -- so every
+      deposit root j can read was made in an earlier wave, no two roots
+      touch one node in one wave, and later roots never contaminate
+      earlier ones (proof in DESIGN.md; the static chain-offset stagger
+      is its special case and wave-count bound). Selections never see
+      same-round backups. On CUDA the wave body is a captured graph.
     * Expansion: unique unexpanded, non-terminal leaves in root order,
       one dynamics/prediction/value-prefix batch (the sequential engine
       chunks at 40 leaves; a window of <= 40 roots is one chunk, so the

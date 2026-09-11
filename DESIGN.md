@@ -72,17 +72,49 @@ then drains `expand_selected`. The selection coroutines never suspend
    child first, then imagined by action); `random.choice` tie-breaks use
    the same dict order.
 
-**Wave-staggered lockstep** reproduces (1) without serializing roots:
-root slot *j* starts at wave *2j*; at wave *w* it takes its depth
-`d = w - 2j` step. Root *j* at depth *d* needs root *j-k*'s depth-`d+k`
-step (the deposit on the child it will score); that step ran at wave
-`d + k + 2(j-k) = d + 2j - k < d + 2j`. Root *j*'s deposit at depth *d*
-lands on a node root *j-k* reads at its depth `d+k` step... which is
-wave `d + 2j - k` -- earlier -- so later roots never contaminate
-earlier ones. Two roots in one wave never touch the same node: root *j*
-at depth *d* and root *j'* at depth *d'* stand on the same node only if
-`d + (j - j') = d'`, i.e. `w - 2j + j - j' = w - 2j'`, i.e. `j = j'`.
-Waves per round: at most `2(W-1) + MAX_DEPTH`.
+A caveat the parity gate stands on (audit round 1): this ordering is a
+property of asyncio internals -- `Lock.acquire` on an uncontended lock
+and `Queue.put` on an unbounded queue return without suspending. Any
+future `await` inside `selection_task_no_expand` that does suspend
+would interleave the roots' descents and silently change archfix's
+target semantics; the gate (`tests/test_vtree_communal.py`) would fail
+on the multi-root scenarios and is the alarm.
+
+**The ordering rule** (`_ready`) reproduces (1) without serializing
+roots. Let the window's roots of one tree sit at chain indices
+`i_0 < i_1 < ...`. Root *k* can only reach root *j*'s region (the subtree
+of chain node `i_j`) by walking `i_j - i_k` gameplay edges first, so it
+stands on root *j*'s depth-*d* node at its own depth `d + (i_j - i_k)`;
+that is the step at which it deposits on the child root *j* will score,
+and the step at which it reads the child root *j* would deposit on. Root
+*j* at depth *d* may therefore step in a wave iff for every earlier
+same-tree root *k*: *k* has stopped, or *k* left the chain at an index
+`< i_j` (its imagined subtree is disjoint from root *j*'s region -- a
+root that left at an index `>= i_j` is INSIDE the region and still
+counts), or `depth_k > d + (i_j - i_k)` (it has passed that step).
+Readiness is evaluated from the state at the start of the wave. Two
+roots stepping in one wave never touch the same node: *k* on *j*'s
+depth-*d* node would be at depth exactly `d + (i_j - i_k)`, which the
+rule excludes. Deposits from later roots never reach earlier roots'
+reads for the same reason.
+
+The **static chain-offset stagger** -- root *j* takes its depth-*d* step
+at wave `d + 2(i_j - i_0)` -- is a special case: root *k*'s depth
+`d + (i_j - i_k)` step ran at wave `d + 2 i_j - i_k - i_0 - ... =
+d + 2(i_j - i_0) - (i_j - i_k)`, earlier by exactly the chain distance.
+It bounds the wave count (`2(i_last - i_0) + MAX_DEPTH`) and is pinned
+as exact by its own test. The original version staggered by WINDOW SLOT
+(root *j* at wave `d + 2j`), which is only correct for contiguous
+windows: with gaps (`REFRESH_NO_SHARPEN_GUARD`'s guarded records) root
+*j-k*'s deposit lands at wave `d + (i_j - i_{j-k}) + 2(j-k)`, not
+earlier than root *j*'s read whenever `i_j - i_{j-k} >= 2k`, and two
+roots scored one node in one wave (audit F1; reproduced by
+`test_slot_stagger_is_wrong_for_gapped_windows`). The adaptive rule is
+never later than the static one (induction on waves: root *k* completes
+its blocking step by wave `d + i_j + i_k - 2 i_0`, which is `< d +
+2(i_j - i_0)`), and measured 24 waves per round against the static
+bound of 81 on the production shape, because roots that take an
+imagined action at the root leave every later root's region at once.
 
 **Rank-ordered backups** reproduce (2): per round, for every (root, path
 node) pair compute the rank of that root among the roots whose paths
@@ -127,38 +159,85 @@ but the two engines are now pinned to each other at the bit level; any
   is 16.
 * Multi-trajectory forests batch several trees' windows in the same waves
   (exact on the all-ties tree; real heads see the batch-shape wobble).
-  The integration path runs one trajectory per call, matching
-  `_search_traj_communal`; batching trajectories is the throughput lever
-  still on the table.
-* Speed at T=1 (one trajectory per forest): NO gain over the sequential
-  engine. Measured on CPU with the test harness's tiny nets, 2 windows
-  x 16 roots x 50 sims x MAX_DEPTH 50 with real noise: sequential
-  2.23 s, vectorized 3.96 s (bitwise identical targets). Profile of the
-  vectorized run: ~53% network forwards (identical batches to the
-  sequential engine's), ~41% the wave loop (`_select_round`,
-  ~115 small tensor ops per wave, `2(W-1)+depth` waves per round). The
-  sequential engine's Python selection is cheaper than that at 16
-  roots, and on a GPU every one of those ops is a launch, so T=1 on GPU
-  is expected to be SLOWER than the sequential engine (unmeasured: the
-  GPU was reserved for the production run). The throughput lever is
-  `muzero.VTREE_COMMUNAL_TRAJS` (default 1): trajectories per forest.
-  The wave loop's cost is nearly independent of how many trees it
-  serves, so a group of G trajectories costs about one trajectory's
-  wall time (throughput ~xG) at the price of batch-shape numerics
-  (~1e-3 value wobble, visit counts empirically stable) and forest
-  memory (~13 KB per stored position for chain latent + LSTM slots,
-  plus `G*W*(sims+1)*A` window slots). `refresh_sweep`,
-  `refresh_targets_vtree` and `refresh_trajs` group their candidates
-  (`_refresh_trajs_vtree`); `refresh_saturate` stays one at a time
-  (it polls the actor between trajectories by design). The arm
-  `effzero-repro-vtree-communal` inherits the default 1 -- exact
-  targets, no speedup; a `VTREE_COMMUNAL_TRAJS: 8`-`16` variant is the
-  speed test, with the wobble caveat.
-* Further wave-loop savings not taken (parity-neutral, for the audit
-  round to weigh): one device sync per wave (`active.any()`) and per
-  backup hop; the typed ops compute both precisions every time (a
-  WEAK-only fast path would halve them where no F32 scalar is live);
-  CUDA graphs / torch.compile over a fixed wave count.
+  `VTREE_COMMUNAL_TRAJS` (default 1) is that knob; see Speed below.
+* Re-searching a released span (`search_window` asserts `idx >
+  released[t]`): the sequential engine would also find those nodes'
+  latents gone. Rewards must be Python floats/ints or `np.floating`
+  (`np.integer` is a strong scalar under NEP 50 and is refused).
+### Speed (audit F2) -- measured, RTX 4070 shared with a live run
+
+Production shape: default nets (128x6x6 latents, value-prefix hidden
+512, the repro arm's 16-channel / FC-32 prefix head), A=6, 50 sims,
+MAX_DEPTH 50, 16-root contiguous windows, prefix on, noise on, random
+tie-breaks; 2 windows per trajectory; positions/s over the whole call.
+
+| engine                          | round-1 audit | after F2 | after F2 + adaptive readiness |
+|---------------------------------|--------------:|---------:|------------------------------:|
+| sequential `run_communal_mcts`  |   33.0 pos/s  |  33.0    |  32.1                          |
+| vectorized `VTREE_COMMUNAL_TRAJS=1` |  3.6 (0.11x) | 16.6 (0.50x) | **18.8 (0.59x)**           |
+| `VTREE_COMMUNAL_TRAJS=8`        |  24.9 (0.75x) | 97.8 (2.96x) | **110.7 (3.4x)**            |
+| `VTREE_COMMUNAL_TRAJS=16`       |  44.9 (1.36x) | 153.2 (4.64x) | **169.5 (5.3x)**           |
+
+(The "round-1 audit" column is this box's re-measurement of the
+reviewed commit with the same script; the auditor's own run of that
+commit read 0.83-0.95 s/window sequential vs 5.8-6.0 s vectorized --
+same ratios.) What changed: the selection wave is one fixed-shape
+masked body for all roots with no host syncs, captured once per window
+as a CUDA graph and replayed in blocks of `WAVE_BLOCK` (one early-exit
+sync per block); adaptive readiness cut the executed waves from ~50-81
+to ~24 per round; the per-window noise application is one download and
+one upload (numpy RNG still consumed per root in index order); leaf
+dedup runs on the device; the backup's two path folds are bounded by
+the round's longest path (two syncs) with fixed-shape ranks and
+in-place MinMaxStats writes. Eager and graph paths are bitwise
+identical on the GPU, and the sequential and vectorized engines agree
+at 1e-12 on the GPU under deterministic cuDNN (benchmark "check" mode).
+
+**TRAJS=1 does not reach parity, and the floor is understood.** Section
+timing of one TRAJS=1 window (100 rounds, 1.72 s): backup 43% (two
+sequential path folds of ~20 hops at ~30-55 tiny kernels each, launched
+eagerly: ~7 ms/round), selection 28% (24 waves x 0.20 ms graph replay:
+~140 kernels per wave, dominated by the typed two-precision
+arithmetic), network expansion 23% (the same batches the sequential
+engine runs), other 6%. The sequential engine's Python does the
+equivalent bookkeeping in ~0.3 s/window. Levers NOT taken, each a real
+refactor: a fixed-loop CUDA graph for the backup executes MORE kernels
+than the dynamic loops (51 hops instead of ~20), so it does not pay;
+caching backup graphs per (path length, max rank) across windows needs
+call-invariant buffers (padded root count, no forest growth mid-call);
+kernel fusion (`torch.compile`/inductor) needs Triton, which this
+Windows venv does not have. `VTREE_COMMUNAL_TRAJS` is the working
+lever: the wave and backup costs are nearly independent of how many
+trees they serve, so 8 trajectories per forest give 3.4x the sequential
+engine and 16 give 5.3x, at the price of batch-shape numerics (~1e-3
+value wobble, visit counts empirically stable) and memory (below).
+`refresh_sweep`, `refresh_targets_vtree` and `refresh_trajs` group
+their candidates (`_refresh_trajs_vtree`); `refresh_saturate` stays one
+at a time (it polls the actor between trajectories by design). The arm
+`effzero-repro-vtree-communal` inherits the default 1 -- exact targets,
+0.59x the sequential engine's speed; a `VTREE_COMMUNAL_TRAJS: 8` variant
+is the speed test, with the wobble caveat.
+
+### Memory (audit F3)
+
+Per node at production geometry: latent `128*6*6*4 = 18,432 B`, LSTM
+state `2*512*4 = 4,096 B`, scalars ~200 B -- **~22.7 KB** (the first
+draft's "~13 KB" assumed 64 latent channels). Chain rows carry unused
+LSTM slots (chain nodes never hold state); that is 18% of the row and
+was left for simplicity. A forest reserves `chain + 1.5 * G * W *
+(sims+1) * A` rows up front, compacts IN PLACE at every release
+(capacity never shrinks; only the kept rows pass through a temporary),
+and grows by x1.25 only if the carry past a window exceeds the reserve
+-- the one moment two tables coexist; `test_forest_allocates_once_and_
+never_shrinks` pins "at most one growth" over a 10-window sequence.
+Each trajectory's `evaluate()` latents are copied into the forest and
+dropped before the next trajectory is evaluated. Measured peak
+allocated (2 windows, 40-position trajectories): TRAJS=1 0.22 GB, 8
+1.47 GB, 16 2.90 GB -- no transient double table any more (the reviewed
+commit peaked at ~5.7 GB for TRAJS=16). For production-length
+trajectories add the chain: ~3000 positions x 22.7 KB = 68 MB each, so
+TRAJS=8 ~1.9 GB and TRAJS=16 ~4.0 GB steady. On the shared 12 GB GPU,
+8 is the sensible group.
 
 ### Integration
 
