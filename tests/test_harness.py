@@ -74,6 +74,7 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-communal-entropyrefresh",
                         "effzero-repro-vtree-refresh",
                         "effzero-repro-vtree-communal",
+                        "effzero-repro-vtree-communal8",
                         "effzero-repro-vtree-saturate",
                         "effzero-repro-vtree-sat-stale",
                         "effzero-repro-vtree-sat-guard",

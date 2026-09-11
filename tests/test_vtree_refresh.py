@@ -176,6 +176,19 @@ def test_vtree_communal_arm_is_one_flag_from_archfix():
         assert arm[key] == base[key], f"unexpected drift on {key}"
 
 
+def test_vtree_communal8_arm_is_one_knob_from_the_exact_arm():
+    """effzero-repro-vtree-communal8: the exact arm plus ONLY
+    VTREE_COMMUNAL_TRAJS=8 (and its own _doc) -- the speed configuration."""
+    base = ablation.ARMS["effzero-repro-vtree-communal"]
+    arm = ablation.ARMS["effzero-repro-vtree-communal8"]
+    assert arm["VTREE_COMMUNAL_TRAJS"] == 8
+    assert "VTREE_COMMUNAL_TRAJS" not in base
+    delta = {k: v for k, v in arm.items()
+             if k != "_doc" and base.get(k, object()) != v}
+    assert delta == {"VTREE_COMMUNAL_TRAJS": 8}
+    assert set(base) - set(arm) == set()
+
+
 def test_vtree_arm_derivation():
     base = ablation.ARMS["effzero-repro-refresh5x-communal"]
     arm = ablation.ARMS["effzero-repro-vtree-refresh"]

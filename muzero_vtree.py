@@ -374,7 +374,15 @@ WEAK, F32, F64 = 0, 1, 2
 def _scalar_type(x):
     """Type code of a Python/NumPy scalar as the sequential engine holds it."""
     if isinstance(x, np.floating):
-        return F32 if x.dtype == np.float32 else F64
+        if x.dtype == np.float32:
+            return F32
+        if x.dtype == np.float64:
+            return F64
+        # np.float16 / np.longdouble are strong at THEIR precision, not
+        # float64; no record path produces them (eval_obs rows are
+        # float32, clip_reward returns float()). Refuse rather than
+        # mistype (audit round 2 nit).
+        raise TypeError(f"unsupported NumPy float scalar {x!r} ({x.dtype})")
     if isinstance(x, np.integer):
         # NEP 50: a NumPy integer scalar is STRONG (int64 + float ->
         # float64), unlike a Python int. Not produced by any record path
@@ -754,10 +762,15 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
 
     Multi-tree: the flat table takes any number of trajectories; roots
     from different trees never share nodes and run in the same waves
-    (slot = position within the tree's window). The integration path
-    runs one trajectory per call (matching _search_traj_communal);
-    batching trajectories changes network batch shapes (the documented
-    ~1e-3 value wobble) and is the throughput lever left for later.
+    (_ready's ordering is per tree). muzero.VTREE_COMMUNAL_TRAJS (default
+    1 = one trajectory per forest, the sequential engine's exact batch
+    shapes) groups trajectories per forest for throughput (3.4x the
+    sequential engine at 8, 5.3x at 16 on the RTX 4070); the group
+    changes the network batch shapes, and the communal tree cascades
+    that wobble: measured at G=8 vs G=1 (noise off, tie-first,
+    deterministic cuDNN) ~4% of roots' visit counts flip, root values
+    shift by a median 3e-3 with a tail to ~2 where a shared-tree path
+    changed. See DESIGN.md.
     """
 
     # ---- trajectory evaluation (eval_obs, batch 32) --------------------
@@ -1036,11 +1049,13 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         return g
 
     def _select_round(self, forest, ws, body, graph, n_waves):
-        """One simulation per root, wave-staggered (root at chain offset
-        s starts at wave 2s) so every cross-root virtual-loss read happens
-        after the deposit the sequential order would have made. Runs the
-        fixed wave count in blocks of WAVE_BLOCK with one early-exit check
-        per block (the only host syncs)."""
+        """One simulation per root in masked waves under _ready's rule
+        (root j steps once every earlier same-tree root has stopped, left
+        the chain before i_j, or passed depth d + (i_j - i_k)), so every
+        cross-root virtual-loss read happens after the deposit the
+        sequential order would have made. Runs at most n_waves (the
+        static chain-offset bound) in blocks of WAVE_BLOCK with one
+        early-exit check per block (the only host syncs)."""
         ws["cur"].copy_(ws["root_ids"])
         ws["depth"].zero_()
         ws["active"].fill_(True)

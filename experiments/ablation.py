@@ -607,6 +607,26 @@ ARMS["effzero-repro-vtree-communal"] = {
             "pong-archfix-2026-08-30.",
 }
 
+# Speed configuration of the arm above (2026-09-11, audit round 2): the
+# same communal target semantics with 8 trajectories per forest.
+ARMS["effzero-repro-vtree-communal8"] = {
+    **ARMS["effzero-repro-vtree-communal"],
+    "VTREE_COMMUNAL_TRAJS": 8,
+    "_doc": "effzero-repro-vtree-communal with VTREE_COMMUNAL_TRAJS=8: "
+            "archfix's communal target semantics at ~3.4x the sequential "
+            "engine's refresh throughput (measured 109-111 vs 32 pos/s "
+            "on the RTX 4070, production-shaped nets, 16-root windows, 50 "
+            "sims). NOT bitwise vs the sequential engine: eight chain "
+            "trees share each network batch, and the communal tree "
+            "cascades the batch-shape wobble -- measured G=8 vs G=1 "
+            "(noise off, tie-first, deterministic cuDNN): ~4% of roots' "
+            "visit counts flip, root values shift by a median 3e-3 with a "
+            "tail to ~2 where a shared-tree path changed. ~1.9 GB steady "
+            "at production chain length (~4.3 GB if a forest growth "
+            "triggers). Run with archfix's exact command; control: "
+            "pong-archfix-2026-08-30 and the exact arm.",
+}
+
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
 # archfix's exact refresh SELECTION semantics -- staleness rotation,
 # always-replace, no guard. Deltas vs archfix: parallel stack, fresh-

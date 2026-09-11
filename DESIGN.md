@@ -112,9 +112,10 @@ roots scored one node in one wave (audit F1; reproduced by
 `test_slot_stagger_is_wrong_for_gapped_windows`). The adaptive rule is
 never later than the static one (induction on waves: root *k* completes
 its blocking step by wave `d + i_j + i_k - 2 i_0`, which is `< d +
-2(i_j - i_0)`), and measured 24 waves per round against the static
-bound of 81 on the production shape, because roots that take an
-imagined action at the root leave every later root's region at once.
+2(i_j - i_0)`), and executed 24 waves per round (the WAVE_BLOCK-padded
+count; the last ACTIVE wave was <= 23) against the static bound of 81
+on the production shape, because roots that take an imagined action at
+the root leave every later root's region at once.
 
 **Rank-ordered backups** reproduce (2): per round, for every (root, path
 node) pair compute the rank of that root among the roots whose paths
@@ -209,8 +210,16 @@ kernel fusion (`torch.compile`/inductor) needs Triton, which this
 Windows venv does not have. `VTREE_COMMUNAL_TRAJS` is the working
 lever: the wave and backup costs are nearly independent of how many
 trees they serve, so 8 trajectories per forest give 3.4x the sequential
-engine and 16 give 5.3x, at the price of batch-shape numerics (~1e-3
-value wobble, visit counts empirically stable) and memory (below).
+engine and 16 give 5.3x, at the price of batch-shape numerics and
+memory (below). The wobble is NOT v1's "counts stable" regime: the
+communal tree cascades a single flipped selection through shared
+statistics. Measured G=8 vs G=1 on the GPU (noise off, tie-first,
+deterministic cuDNN, 256 roots): 96.1% of roots keep identical visit
+counts, their root values shifting by a median 3.3e-3 (tail to 1.5
+where a neighbour's path changed); 3.9% of roots flip counts (value
+shift median 0.26, max 2.1). G=16 (512 roots): 3.5% flips, same
+magnitudes. So `VTREE_COMMUNAL_TRAJS > 1` is archfix's target
+SEMANTICS at search-noise-floor fidelity, not bitwise.
 `refresh_sweep`, `refresh_targets_vtree` and `refresh_trajs` group
 their candidates (`_refresh_trajs_vtree`); `refresh_saturate` stays one
 at a time (it polls the actor between trajectories by design). The arm
@@ -227,17 +236,22 @@ LSTM slots (chain nodes never hold state); that is 18% of the row and
 was left for simplicity. A forest reserves `chain + 1.5 * G * W *
 (sims+1) * A` rows up front, compacts IN PLACE at every release
 (capacity never shrinks; only the kept rows pass through a temporary),
-and grows by x1.25 only if the carry past a window exceeds the reserve
--- the one moment two tables coexist; `test_forest_allocates_once_and_
+and grows by x1.25 only if the carry past a window exceeds the 0.5x
+slack of one window's bound -- the one moment two tables coexist:
+growth allocates the 1.25x table while the old one is still alive, a
+transient of 2.25x the steady table. `test_forest_allocates_once_and_
 never_shrinks` pins "at most one growth" over a 10-window sequence.
 Each trajectory's `evaluate()` latents are copied into the forest and
 dropped before the next trajectory is evaluated. Measured peak
 allocated (2 windows, 40-position trajectories): TRAJS=1 0.22 GB, 8
-1.47 GB, 16 2.90 GB -- no transient double table any more (the reviewed
-commit peaked at ~5.7 GB for TRAJS=16). For production-length
-trajectories add the chain: ~3000 positions x 22.7 KB = 68 MB each, so
-TRAJS=8 ~1.9 GB and TRAJS=16 ~4.0 GB steady. On the shared 12 GB GPU,
-8 is the sensible group.
+1.47 GB, 16 2.90 GB -- no double table at release any more (the
+reviewed commit peaked at ~5.7 GB for TRAJS=16). Projection at
+production chain length (~3000 positions x 22.7 KB = 68 MB per
+trajectory on top of the window reserve): steady TRAJS=8 ~1.9 GB,
+TRAJS=16 ~3.8 GB; IF a growth triggers, the transient is ~4.3 GB at
+TRAJS=8 and ~8.5 GB at TRAJS=16 (the new 1.25x table alone ~4.7 GB).
+Next to a live run's ~4.5 GB, TRAJS=16's growth transient exceeds the
+12 GB card; on the shared GPU, 8 is the sensible group.
 
 ### Integration
 

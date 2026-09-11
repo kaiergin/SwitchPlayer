@@ -396,10 +396,12 @@ VTREE_REFRESH_BATCH = 256
 # forest: the sequential engine's exact batch shapes (the parity
 # condition), but no throughput gain over it (the wave loop costs as
 # much as its Python at 16 roots). Larger groups amortize the wave
-# loop across trajectories (~x group throughput) at the cost of the
-# documented batch-shape numerics (~1e-3 value wobble, visit counts
-# empirically stable) and forest memory (chain latents + LSTM slots
-# per stored position, ~13 KB each).
+# loop across trajectories (~x group throughput; 3.4x the sequential
+# engine at 8, 5.3x at 16 on the RTX 4070) at the cost of batch-shape
+# numerics the communal tree cascades (measured G=8 vs 1: ~4% of
+# roots' visit counts flip, values shift by a median 3e-3, tail ~2;
+# DESIGN.md) and forest memory (~22.7 KB per node at production
+# geometry; growth transient 2.25x -- 8 fits beside a live run).
 VTREE_COMMUNAL_TRAJS = 1
 # Saturation refresh (2026-09-02, Kai): instead of a fixed quota every
 # POLICY_REFRESH_EVERY iterations, the driver refreshes AS MUCH AS FITS

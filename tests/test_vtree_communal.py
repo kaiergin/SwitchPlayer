@@ -349,14 +349,15 @@ def test_neutral_chain_subtracts_nothing(monkeypatch):
 # Negative controls: the gate must FAIL when the reproduced order or the
 # type-faithful arithmetic is removed -- otherwise it tests nothing.
 # --------------------------------------------------------------------------
-def _diverges(helper, engine, traj, windows, sims):
+def _divergence(helper, engine, traj, windows, sims):
+    """(counts_differ, values_differ) between the two engines. Engine-
+    internal errors propagate -- a control must diverge on the SEARCH,
+    not on an assertion inside the engine (audit round 2)."""
     seq, raw = sequential_windows(helper, traj, windows, sims)
     vec, _ = vectorized_windows(engine, traj, windows, sims)
-    try:
-        assert_parity(seq, raw, vec)
-    except AssertionError:
-        return True
-    return False
+    counts_differ = any(vec[i][3].tolist() != raw[i] for i in seq)
+    values_differ = any(abs(float(seq[i][1]) - vec[i][1]) > 1e-12 for i in seq)
+    return counts_differ, values_differ
 
 
 def test_intra_round_order_is_load_bearing(monkeypatch):
@@ -370,9 +371,11 @@ def test_intra_round_order_is_load_bearing(monkeypatch):
                                    (3, 12, [[0, 1, 2, 3], [4, 5, 6, 7]], 10),
                                    (12, 12, [list(range(4, 12))], 16)):
         helper, engine = build_world(monkeypatch)
-        hits += _diverges(helper, engine, make_traj(seed, L, seed != 12),
-                          windows, sims)
-    assert hits > 0, "removing the stagger must break parity somewhere"
+        counts_differ, _ = _divergence(helper, engine,
+                                       make_traj(seed, L, seed != 12),
+                                       windows, sims)
+        hits += counts_differ
+    assert hits > 0, "removing the stagger must change visit counts somewhere"
 
 
 def test_slot_stagger_is_wrong_for_gapped_windows(monkeypatch):
@@ -389,13 +392,15 @@ def test_slot_stagger_is_wrong_for_gapped_windows(monkeypatch):
         return ws["active"] & (ws["slot2"] <= ws["wave"])
 
     monkeypatch.setattr(VectorizedCommunalPUCT, "_ready", by_slot)
-    hits = 0
-    for seed in (70, 78):
+    # Seeds verified to diverge on VISIT COUNTS under the slot rule
+    # (78: 2/16 roots, 75: 1/16); seeds 70-73, 76, 79 do not, and 74/77
+    # diverge on values only -- so each seed here must flip counts.
+    for seed in (78, 75):
         helper, engine = build_world(monkeypatch, noise=True, horizon=5,
                                      max_depth=50)
-        hits += _diverges(helper, engine, make_traj(seed, 40, True),
-                          [list(range(0, 32, 2))], 50)
-    assert hits > 0, "slot-based stagger must break a gapped window"
+        counts_differ, _ = _divergence(helper, engine, make_traj(seed, 40, True),
+                                       [list(range(0, 32, 2))], 50)
+        assert counts_differ, f"seed {seed}: slot stagger must flip counts"
 
 
 def test_static_chain_offset_stagger_is_also_exact(monkeypatch):
@@ -419,8 +424,12 @@ def test_type_faithful_arithmetic_is_load_bearing(monkeypatch):
     monkeypatch.setattr(muzero_vtree, "_tb",
                         lambda op, a, ta, b, tb: (op(a, b), torch.maximum(ta, tb)))
     monkeypatch.setattr(muzero_vtree, "_tc", lambda op, a, ta, b, tb: op(a, b))
+    monkeypatch.setattr(muzero_vtree, "_tbw", lambda op, a, ta, b: (op(a, b), ta))
+    monkeypatch.setattr(muzero_vtree, "_tcw", lambda op, a, ta, b: op(a, b))
     helper, engine = build_world(monkeypatch)
-    assert _diverges(helper, engine, make_traj(2, 10, True), [[0, 1, 2, 3]], 12)
+    _, values_differ = _divergence(helper, engine, make_traj(2, 10, True),
+                                   [[0, 1, 2, 3]], 12)
+    assert values_differ, "float64-only arithmetic must move root values"
 
 
 # --------------------------------------------------------------------------
