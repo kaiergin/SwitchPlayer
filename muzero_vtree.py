@@ -378,10 +378,12 @@ def _scalar_type(x):
             return F32
         if x.dtype == np.float64:
             return F64
-        # np.float16 / np.longdouble are strong at THEIR precision, not
-        # float64; no record path produces them (eval_obs rows are
-        # float32, clip_reward returns float()). Refuse rather than
-        # mistype (audit round 2 nit).
+        # Any other np.floating (np.float16; np.longdouble where it is
+        # the 80/128-bit type -- on this Windows venv it aliases float64
+        # and lands in the branch above) is strong at ITS precision, not
+        # float64. No record path produces one (eval_obs rows are
+        # float32, clip_reward returns float()); refuse rather than
+        # mistype. Accepted: Python float/int/bool, np.float32, np.float64.
         raise TypeError(f"unsupported NumPy float scalar {x!r} ({x.dtype})")
     if isinstance(x, np.integer):
         # NEP 50: a NumPy integer scalar is STRONG (int64 + float ->
@@ -627,7 +629,8 @@ class ChainForest:
         for r in rewards:
             assert isinstance(r, (int, float, np.floating)) and not isinstance(
                 r, np.integer), f"reward {r!r} ({type(r).__name__}): stored " \
-                "rewards must be Python floats/ints or np.floating (audit F4)"
+                "rewards must be Python float/int/bool, np.float32 or " \
+                "np.float64 (audit F4)"
         rtypes = [_scalar_type(r) for r in rewards]
         f["reward"][ids] = torch.as_tensor(
             np.asarray([float(r) for r in rewards], dtype=np.float64), device=dev)
@@ -768,9 +771,10 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
     sequential engine at 8, 5.3x at 16 on the RTX 4070); the group
     changes the network batch shapes, and the communal tree cascades
     that wobble: measured at G=8 vs G=1 (noise off, tie-first,
-    deterministic cuDNN) ~4% of roots' visit counts flip, root values
-    shift by a median 3e-3 with a tail to ~2 where a shared-tree path
-    changed. See DESIGN.md.
+    deterministic cuDNN) ~96% of roots keep identical visit counts with
+    root values shifting by a median 3e-3 (tail to 1.5 where a
+    neighbour's path changed), and ~4% of roots flip counts with values
+    shifting by a median 0.26, max 2.1. See DESIGN.md.
     """
 
     # ---- trajectory evaluation (eval_obs, batch 32) --------------------

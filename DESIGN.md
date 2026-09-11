@@ -14,7 +14,8 @@ what that required.
 ### Tensor layout (`ChainForest`)
 
 One flat node table per forest (any number of trajectories; the
-integration runs one). Chain nodes of tree *t* sit at ids
+integration groups `muzero.VTREE_COMMUNAL_TRAJS` per forest, default 1
+-- see Speed). Chain nodes of tree *t* sit at ids
 `base[t] .. base[t]+L-1` in trajectory order, pre-linked by the behaviour
 actions (`children[k, a_k] = k+1`, `beh[k] = a_k`); imagined nodes are
 appended by expansion. Per node: `parent`, `children[A]`, `tree`, `cidx`
@@ -163,8 +164,12 @@ but the two engines are now pinned to each other at the bit level; any
   `VTREE_COMMUNAL_TRAJS` (default 1) is that knob; see Speed below.
 * Re-searching a released span (`search_window` asserts `idx >
   released[t]`): the sequential engine would also find those nodes'
-  latents gone. Rewards must be Python floats/ints or `np.floating`
-  (`np.integer` is a strong scalar under NEP 50 and is refused).
+  latents gone. Accepted reward scalars are exactly Python `float`,
+  `int`, `bool` (weak), `np.float32` (F32) and `np.float64` (F64;
+  `np.longdouble` aliases it on this Windows venv, so it is accepted
+  here and refused only where it is the 80/128-bit type).
+  `np.integer` (strong under NEP 50) and `np.float16` are refused
+  (`_scalar_type` raises; `append_chain` asserts).
 ### Speed (audit F2) -- measured, RTX 4070 shared with a live run
 
 Production shape: default nets (128x6x6 latents, value-prefix hidden
@@ -224,8 +229,11 @@ SEMANTICS at search-noise-floor fidelity, not bitwise.
 their candidates (`_refresh_trajs_vtree`); `refresh_saturate` stays one
 at a time (it polls the actor between trajectories by design). The arm
 `effzero-repro-vtree-communal` inherits the default 1 -- exact targets,
-0.59x the sequential engine's speed; a `VTREE_COMMUNAL_TRAJS: 8` variant
-is the speed test, with the wobble caveat.
+0.59x the sequential engine's speed; the arm
+`effzero-repro-vtree-communal8` (= that arm + `VTREE_COMMUNAL_TRAJS: 8`,
+pinned by `tests/test_vtree_refresh.py::
+test_vtree_communal8_arm_is_one_knob_from_the_exact_arm`) is the speed
+configuration, with the wobble caveat above.
 
 ### Memory (audit F3)
 
@@ -236,10 +244,10 @@ LSTM slots (chain nodes never hold state); that is 18% of the row and
 was left for simplicity. A forest reserves `chain + 1.5 * G * W *
 (sims+1) * A` rows up front, compacts IN PLACE at every release
 (capacity never shrinks; only the kept rows pass through a temporary),
-and grows by x1.25 only if the carry past a window exceeds the 0.5x
-slack of one window's bound -- the one moment two tables coexist:
-growth allocates the 1.25x table while the old one is still alive, a
-transient of 2.25x the steady table. `test_forest_allocates_once_and_
+and grows -- to `max(needed, 1.25 x capacity)` -- only if the carry past
+a window exceeds the 0.5x slack of one window's bound; that is the one
+moment two tables coexist: growth allocates the new table while the
+old one is still alive, a transient of up to 2.25x the steady table. `test_forest_allocates_once_and_
 never_shrinks` pins "at most one growth" over a 10-window sequence.
 Each trajectory's `evaluate()` latents are copied into the forest and
 dropped before the next trajectory is evaluated. Measured peak
@@ -262,7 +270,13 @@ else v1. `Run._refresh_traj_vtree` routes a trajectory through
 `COMMUNAL_WINDOW_ROOTS`, release after each) under the communal flag and
 is byte-identical otherwise; application is `_apply_refresh` in both
 cases, so every caller (`refresh_targets_vtree`, `refresh_saturate`,
-`refresh_sweep`, `refresh_trajs`) inherits the topology switch. The arm
-`effzero-repro-vtree-communal` is archfix's recipe with only
-`REFRESH_VTREE: True` (pinned by
-`test_vtree_communal_arm_is_one_flag_from_archfix`).
+`refresh_sweep`, `refresh_trajs`) inherits the topology switch; the
+grouping callers (`refresh_targets_vtree`, `refresh_sweep`,
+`refresh_trajs`) hand `VTREE_COMMUNAL_TRAJS` trajectories per forest to
+`_refresh_trajs_communal`. The arm `effzero-repro-vtree-communal` is
+archfix's recipe with only `REFRESH_VTREE: True` (pinned by
+`tests/test_vtree_refresh.py::test_vtree_communal_arm_is_one_flag_from_
+archfix`); `effzero-repro-vtree-communal8` adds only
+`VTREE_COMMUNAL_TRAJS: 8` (pinned by `tests/test_vtree_refresh.py::
+test_vtree_communal8_arm_is_one_knob_from_the_exact_arm`). Both are in
+`tests/test_harness.py`'s augmentation allowlist.

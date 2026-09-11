@@ -473,7 +473,7 @@ def test_rewards_must_not_be_numpy_integers(monkeypatch):
     lat, pol, val = engine.evaluate(traj["obs"])
     bad = dict(latents=lat, policies=pol, values=val, actions=traj["actions"],
                rewards=[np.int64(1)] * 4, terminated=True)
-    with pytest.raises(AssertionError, match="np.floating"):
+    with pytest.raises(AssertionError, match="np.float32 or np.float64"):
         engine.build([bad])
     with pytest.raises(TypeError):
         muzero_vtree._scalar_type(np.int64(1))
