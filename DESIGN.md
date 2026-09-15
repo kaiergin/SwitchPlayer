@@ -290,3 +290,62 @@ test_vtree_communal8_arm_is_one_knob_from_the_exact_arm`). Both are in
   `BOOTSTRAP_CACHE` False: archfix's recipe at 3x refresh coverage, run sequentially.
 - The scheduled-quota refresh paths (`refresh_targets`, `refresh_targets_vtree`) now
   record refresh accounting (`_note_quota_stats`) so quota rows carry refresh volume.
+
+
+### Edge visits (2026-09-15): the successor root's own budget
+
+Found answering Kai's "do the searches of roots n-1, n, n+1 affect each
+other's policies?" Chain node n+1 IS node n's child for the behaviour
+action (`create_tree_from_game` links `prev.children[a] = next`;
+`append_chain` likewise), and `backup_simulation` / `_backup_round`
+increment `visit_count` on EVERY path node, the search root included.
+So while root n+1 spends its S simulations in the same window, node n's
+behaviour child gains S visits that no selection at node n ever made,
+and the legacy readout (counts minus one bookkeeping visit) read them
+out; legacy PUCT also let them shrink that child's exploration bonus.
+
+Measured on r12's live checkpoint (sequential engine, window 16, S=50,
+`benchmarks/probes/probe_window_attrib.py`, every count attributed to
+the root that backed it up, max attribution error 0.0): a root's readout
+averages 167 counts -- 50 own, 65 traversals by earlier roots of the
+window (70% on the behaviour action; 0 at slot 0, peaking ~90 at slot
+8), 5 persisted from previous windows (18 at slot 0, ~0 past slot 8),
+and 50 successor root visits at slots 0-14 (0 at slot 15, whose
+successor waits in the next window). Behaviour-action mass 0.60-0.75 at
+slots 0-14 vs 0.12 at slot 15; the root's OWN 50 simulations put 41% on
+the behaviour action on average and 11% at slot 15 (at slots 0-14 the
+behaviour child's Q is the successor's 50 search backups, at slot 15 the
+one-visit Monte-Carlo anchor -- the value side of the same asymmetry,
+left communal by design). archfix trained on these targets.
+
+`COMMUNAL_EDGE_VISITS` (default False = archfix's semantics, every
+archived run): nodes count `root_visits` (`rootvis` in the forest;
+backups that started there; the chain seeding passes `count_root=False`),
+PUCT scores on EDGE visits `visit_count - root_visits` (total, the u
+denominator, the virtual-loss clamp's n) and `run_communal_mcts`'s
+readout baseline adds the behaviour child's root visits; the vectorized
+engine mirrors both (`_child_scores` under `use_edge`, readout). Node
+values stay `value_sum / visit_count` over every backup through the
+node. Parity gate holds in both settings
+(`tests/test_vtree_communal.py::test_edge_visits_*`); flag off is
+bit-identical to before. Arm `effzero-repro-vtree-communal8-r12-edge` =
+r12 + the flag (pinned in `tests/test_vtree_refresh.py`).
+
+Flag ON on the same checkpoint (`benchmarks/probes/probe_edge_anatomy.py`,
+iter 28): the readout is exactly the edge counts (asserted per root);
+behaviour-argmax targets fall from 87% to 73% -- the level of independent
+per-root searches (window-1 71%, fresh-root 77%) -- while behaviour MASS
+only moves 0.65 -> 0.61, because the root's own simulations now flood
+the behaviour child (41% -> 55% of own visits; the +50 no longer shrinks
+its exploration bonus while its Q is still the successor's 50 search
+backups). Slot 15 is unchanged at 0.12 mass / 13% argmax: its successor
+is unsearched, so the behaviour child carries only the one-visit
+Monte-Carlo anchor -- a 16-periodic target discontinuity that the
+accounting fix does not touch. Searching the successor too (window 16
+plus one lookahead root, `probe_edge_followups.py`) lifts slot 15 only
+to 0.19 / 19%, so an unsearched successor is NOT the main cause; the
+cause is the last root's position in the concurrent round (open --
+`probe_edge_slot15.py` variants). Vectorized (TRAJS=1) vs sequential on
+real GPU weights, same trajectory and seeds: 96.5% of roots within
+1e-12 with the flag on, 97.2% with it off (the CPU gate is bitwise; the
+residue is GPU kernel nondeterminism, not the flag).

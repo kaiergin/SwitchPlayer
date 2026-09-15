@@ -659,6 +659,25 @@ ARMS["effzero-repro-vtree-communal8-r12"] = {
             "2026-09-11 (-11.4), pong-archfix-seq-s1-2026-09-13 (-14.0).",
 }
 
+# Edge-visit arm (2026-09-15, Kai): r12's recipe with COMMUNAL_EDGE_VISITS
+# on -- PUCT and the readout count only selections that crossed the
+# parent->child edge, so root n+1's own simulation budget no longer lands
+# on root n's behaviour action (legacy: a floor of about half the target
+# mass on the behaviour action at 15 of 16 window slots, measured on
+# r12's checkpoint -- the largest single self-imitation term in
+# archfix-class targets). Everything else identical to r12. Run
+# SEQUENTIAL (no --ray).
+ARMS["effzero-repro-vtree-communal8-r12-edge"] = {
+    **ARMS["effzero-repro-vtree-communal8-r12"],
+    "COMMUNAL_EDGE_VISITS": True,
+    "_doc": "effzero-repro-vtree-communal8-r12 with COMMUNAL_EDGE_VISITS "
+            "True: communal PUCT and readout use edge visits (visit_count "
+            "- root_visits), removing the successor root's simulation "
+            "budget from each root's behaviour-action count. Single delta "
+            "vs r12. Controls: pong-r12-2026-09-14 (legacy readout), "
+            "pong-archfix-2026-08-30 (+17.1 @90).",
+}
+
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
 # archfix's exact refresh SELECTION semantics -- staleness rotation,
 # always-replace, no guard. Deltas vs archfix: parallel stack, fresh-
@@ -1134,7 +1153,9 @@ class Run:
         searches. The chain is SEEDED (create_tree_from_game with
         seed_values=True, restored 2026-08-30): the Monte-Carlo value
         backup anchors each behaviour child with its realized return, and
-        readout subtracts the one bookkeeping visit. Neutral chains
+        readout subtracts the one bookkeeping visit (plus, under
+        COMMUNAL_EDGE_VISITS, the behaviour child's own root visits --
+        the successor's search budget). Neutral chains
         (2026-08-27..30) let the early value head alone steer every
         re-search; at tiny-buffer refresh coverage that rewrote most of
         the buffer's targets flatter each cycle. Expansions along the

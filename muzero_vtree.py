@@ -464,6 +464,9 @@ class ChainForest:
                                FIRST (chain link precedes expansion), and
                                expansion keeps it instead of re-creating
       visit, wsum(+t)          MCTS statistics; vl the in-round virtual loss
+      rootvis                  backups that STARTED at the node -- its own
+                               root visits, which its parent's edge count
+                               excludes under COMMUNAL_EDGE_VISITS
       reward(+t), prior(+t)    edge reward INTO the node, PUCT prior
       policy[A](+t per row)    the node's own policy (F32 from the net,
                                F64 once Dirichlet-noised as a root)
@@ -508,6 +511,7 @@ class ChainForest:
             "tree": ((), lg, -1), "cidx": ((), lg, -1), "owner": ((), lg, -1),
             "beh": ((), lg, -1),
             "visit": ((), f64, 0.0), "wsum": ((), f64, 0.0),
+            "rootvis": ((), f64, 0.0),   # backups that started here
             "wsum_t": ((), u8, WEAK),
             "reward": ((), f64, 0.0), "reward_t": ((), u8, WEAK),
             "prior": ((), f64, 0.0), "prior_t": ((), u8, WEAK),
@@ -742,7 +746,10 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
       the sequential loop does, every path node except the root, leaf
       first. Virtual loss clears with the round.
     * Readout: visit fractions minus exactly one bookkeeping visit on the
-      behaviour child (chain_seeded), root q as the value.
+      behaviour child (chain_seeded) -- and, under COMMUNAL_EDGE_VISITS,
+      minus that child's own root visits (rootvis), with PUCT on edge
+      visits (visit - rootvis) as selection_task_no_expand's `edge` --
+      root q as the value.
 
     TYPE-FAITHFUL ARITHMETIC. Under NumPy 2 the sequential engine mixes
     np.float32 scalars (chain nodes' eval_obs values and priors) with
@@ -887,6 +894,7 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
                                        f["owner"][pexp])
         f["beh"][flat] = -1
         f["visit"][flat] = 0.0
+        f["rootvis"][flat] = 0.0     # rows may be recycled (audit F1)
         f["wsum"][flat] = 0.0
         f["wsum_t"][flat] = WEAK
         f["reward"][flat] = edge.reshape(-1)
@@ -936,6 +944,10 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         capturable."""
         ch = f["children"][n].clamp(min=0)                  # [R,A]
         v = f["visit"][ch]
+        if self.use_edge:
+            # Edge visits (COMMUNAL_EDGE_VISITS): a chain child's own root
+            # visits crossed no edge. _composite keeps the communal value.
+            v = v - f["rootvis"][ch]
         vl = f["vl"][ch]
         comp, compt = self._composite(f, ch, discount)
         minv = st["minv"].unsqueeze(1)
@@ -1144,6 +1156,12 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
             post_w[sel] = w
             post_wt[sel] = wt
             post_v[sel] = f["visit"][nd]
+        # Root visits: every row's path[0] is its root and each root backs
+        # up exactly once per round (COMMUNAL_EDGE_VISITS); index_add_ so a
+        # duplicated root would count twice, as the sequential engine's
+        # double search does, rather than once.
+        f["rootvis"].index_add_(0, path[:, 0], torch.ones(
+            path.shape[0], dtype=torch.float64, device=dev))
         # Range updates: every path node except the root, leaf first,
         # composite r + discount * q_post, typed max()/min() replacement,
         # written IN PLACE (the selection graph reads these buffers).
@@ -1168,6 +1186,7 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
     # ---- one communal window -----------------------------------------
 
     WAVE_BLOCK = 8   # waves between early-exit checks (host syncs)
+    use_edge = False   # per search_window, from muzero.COMMUNAL_EDGE_VISITS
     ON_CHAIN = 1 << 40   # left_at sentinel: the root is still on the chain
 
     def _stagger(self, roots):
@@ -1203,6 +1222,7 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         max_depth = int(muzero.MAX_DEPTH if max_depth is None else max_depth)
         assert max_depth >= 1, "max_depth=0 forbids leaving the root"
         self.use_prefix = bool(muzero.USE_VALUE_PREFIX_IN_TREE)
+        self.use_edge = bool(muzero.COMMUNAL_EDGE_VISITS)
         A, dev = self.A, self.device
         roots = sorted((r if isinstance(r, tuple) else (0, int(r)))
                        for r in roots)
@@ -1329,6 +1349,11 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         if chain_seeded:
             book = (arangeA == beh.unsqueeze(1)) & has
             counts = raw - book.double()
+        if self.use_edge:
+            # The behaviour child's own root visits (COMMUNAL_EDGE_VISITS);
+            # rootvis is nonzero only on chain nodes.
+            counts = counts - torch.where(
+                has, f["rootvis"][ch.clamp(min=0)], torch.zeros_like(raw))
         rv, _ = _tbw(_DIV, f["wsum"][root_ids], f["wsum_t"][root_ids],
                      f["visit"][root_ids].clamp(min=1))
         rv = torch.where(f["visit"][root_ids] > 0, rv, torch.zeros_like(rv))
