@@ -340,12 +340,28 @@ the behaviour child (41% -> 55% of own visits; the +50 no longer shrinks
 its exploration bonus while its Q is still the successor's 50 search
 backups). Slot 15 is unchanged at 0.12 mass / 13% argmax: its successor
 is unsearched, so the behaviour child carries only the one-visit
-Monte-Carlo anchor -- a 16-periodic target discontinuity that the
-accounting fix does not touch. Searching the successor too (window 16
-plus one lookahead root, `probe_edge_followups.py`) lifts slot 15 only
-to 0.19 / 19%, so an unsearched successor is NOT the main cause; the
-cause is the last root's position in the concurrent round (open --
-`probe_edge_slot15.py` variants). Vectorized (TRAJS=1) vs sequential on
-real GPU weights, same trajectory and seeds: 96.5% of roots within
+Monte-Carlo anchor. RESOLVED (probes `probe_edge_slot15/offset/
+records/crossrun/replay.py`): the cliff sits on the absolute RECORD
+index (15, 31, ...), not on the window slot -- it survives window 8 and
+32, reversed selection order, no root noise, a lookahead root (0.19)
+and re-searching the trajectory sliced at offsets 1-3 -- because the
+target network's own prior has learned it: p(stored action | obs) is
+0.24 at those records vs 0.60-0.71 elsewhere, with values, anchors,
+rewards, actions and frame stacks identical across positions and the
+episode replaying bit-exactly in the emulator. The origin IS the
+window boundary: every communal run's stored targets carry the dip at
+its window period and nowhere else -- window-16 runs (r12, poolval-6w,
+poolval8) at 16k+15 (argmax==action 0.42 vs 0.86), the pre-2026-08-30
+window-8 runs (arch1, communal3) at 8k+7 (0.40 vs 0.78), and none of
+the nine fresh-root / non-communal runs (ratio 0.96-1.05). Mechanism:
+the last root of a window is the one root without the successor's +S
+behaviour counts; at ~50x buffer reuse the policy head memorizes the
+relatively anti-behaviour target per record, the next refresh's prior
+carries it, and the loop polarizes those records (r12 refresh: 0.12
+mass). The edge-visit flag removes the +S term that creates the
+asymmetry; a residual value-side asymmetry (the last root's behaviour
+child is the one-visit anchor, its neighbours' are searched) remains
+and is measurable only from scratch. Vectorized (TRAJS=1) vs sequential
+on real GPU weights, same trajectory and seeds: 96.5% of roots within
 1e-12 with the flag on, 97.2% with it off (the CPU gate is bitwise; the
 residue is GPU kernel nondeterminism, not the flag).

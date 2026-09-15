@@ -1,0 +1,53 @@
+crashprobe: no replay
+pong-arch1-2026-08-29 [effzero-repro-refresh5x-communal] records 30363, trajs 21, steps 96000
+   argmax==action by i%16: 0.80 0.79 0.78 0.79 0.79 0.79 0.77 0.40 0.77 0.78 0.78 0.80 0.79 0.77 0.79 0.40   slot15/others 0.53
+   argmax==action by i%8 : 0.78 0.78 0.78 0.79 0.79 0.78 0.78 0.40   slot7/others 0.51
+pong-archfix-2026-08-30: no replay
+pong-archfix-ray-2026-09-11: no replay
+pong-archfix-seq-s1-2026-09-13: no replay
+pong-async-s1-2026-09-06: no replay
+pong-communal-2026-08-24: no replay
+pong-communal2-2026-08-27: no replay
+pong-communal3-2026-08-29 [effzero-repro-refresh5x-communal] records 30672, trajs 16, steps 19000
+   argmax==action by i%16: 0.79 0.80 0.79 0.80 0.80 0.80 0.79 0.42 0.80 0.79 0.78 0.81 0.79 0.81 0.79 0.43   slot15/others 0.56
+   argmax==action by i%8 : 0.80 0.80 0.79 0.80 0.80 0.80 0.79 0.43   slot7/others 0.54
+pong-keepnew-s1-2026-09-07: no replay
+pong-keepnew90-2026-09-08 [effzero-repro-async-keepnew] records 29355, trajs 14, steps 176000
+   argmax==action by i%16: 0.51 0.49 0.51 0.49 0.50 0.49 0.50 0.50 0.50 0.51 0.51 0.51 0.51 0.51 0.50 0.51   slot15/others 1.02
+   argmax==action by i%8 : 0.51 0.50 0.51 0.50 0.51 0.50 0.50 0.51   slot7/others 1.01
+pong-r12-2026-09-14 [effzero-repro-vtree-communal8-r12] records 30634, trajs 27, steps 56000
+   argmax==action by i%16: 0.90 0.88 0.88 0.87 0.86 0.86 0.86 0.87 0.86 0.86 0.86 0.85 0.85 0.84 0.83 0.42   slot15/others 0.49
+   argmax==action by i%8 : 0.88 0.87 0.87 0.86 0.85 0.85 0.85 0.65   slot7/others 0.75
+pong-refresh5x-2026-08-20: no replay
+pong-refresh5x-cont-aborted-2026-08-20 [effzero-repro-refresh5x] records 10233, trajs 10, steps 20000
+   argmax==action by i%16: 0.33 0.29 0.29 0.26 0.28 0.30 0.28 0.28 0.29 0.28 0.28 0.25 0.30 0.31 0.28 0.29   slot15/others 1.02
+   argmax==action by i%8 : 0.31 0.29 0.28 0.26 0.29 0.30 0.28 0.28   slot7/others 0.99
+pong-satguard-s1-2026-09-05 [effzero-repro-vtree-sat-guard] records 30609, trajs 15, steps 68000
+   argmax==action by i%16: 0.62 0.63 0.62 0.63 0.63 0.62 0.63 0.64 0.64 0.64 0.63 0.64 0.61 0.61 0.61 0.62   slot15/others 0.99
+   argmax==action by i%8 : 0.63 0.64 0.62 0.63 0.62 0.62 0.62 0.63   slot7/others 1.01
+pong-satstale-2026-09-02 [effzero-repro-vtree-sat-stale] records 30091, trajs 13, steps 100000
+   argmax==action by i%16: 0.49 0.49 0.49 0.50 0.48 0.47 0.48 0.49 0.50 0.51 0.50 0.50 0.49 0.48 0.46 0.48   slot15/others 0.98
+   argmax==action by i%8 : 0.49 0.50 0.49 0.50 0.49 0.48 0.47 0.49   slot7/others 0.99
+pong-satstale-s1-2026-09-04: no replay
+pong-searchfix-2026-08-23 [effzero-repro-refresh5x] records 23990, trajs 20, steps 40000
+   argmax==action by i%16: 0.39 0.37 0.40 0.38 0.38 0.37 0.38 0.37 0.39 0.38 0.39 0.38 0.37 0.37 0.39 0.38   slot15/others 1.01
+   argmax==action by i%8 : 0.39 0.37 0.40 0.38 0.37 0.37 0.39 0.38   slot7/others 0.99
+pong-throttle-s1-2026-09-07 [effzero-repro-async-throttle] records 24358, trajs 18, steps 52000
+   argmax==action by i%16: 0.32 0.34 0.35 0.36 0.35 0.36 0.35 0.35 0.36 0.36 0.37 0.34 0.36 0.32 0.35 0.35   slot15/others 0.99
+   argmax==action by i%8 : 0.34 0.35 0.36 0.35 0.35 0.34 0.35 0.35   slot7/others 0.99
+pong-vsat-2026-09-03 [effzero-repro-vtree-saturate] records 8925, trajs 10, steps 20000
+   argmax==action by i%16: 0.35 0.35 0.35 0.36 0.36 0.36 0.37 0.39 0.36 0.37 0.35 0.36 0.38 0.35 0.35 0.34   slot15/others 0.96
+   argmax==action by i%8 : 0.36 0.36 0.35 0.36 0.37 0.35 0.36 0.37   slot7/others 1.03
+pong-vsat2-2026-09-03 [effzero-repro-vtree-saturate] records 29567, trajs 18, steps 100000
+   argmax==action by i%16: 0.42 0.45 0.44 0.42 0.43 0.44 0.42 0.43 0.45 0.45 0.44 0.43 0.43 0.44 0.44 0.46   slot15/others 1.05
+   argmax==action by i%8 : 0.44 0.45 0.44 0.42 0.43 0.44 0.43 0.44   slot7/others 1.01
+pong-vtree-2026-09-02 [effzero-repro-vtree-refresh] records 28350, trajs 26, steps 52000
+   argmax==action by i%16: 0.36 0.34 0.33 0.33 0.34 0.35 0.35 0.36 0.38 0.32 0.36 0.35 0.34 0.35 0.36 0.36   slot15/others 1.03
+   argmax==action by i%8 : 0.37 0.33 0.35 0.34 0.34 0.35 0.35 0.36   slot7/others 1.04
+poolval-6w-oldcode-2026-09-01 [effzero-repro-refresh5x-communal] records 21013, trajs 24, steps 8000
+   argmax==action by i%16: 0.69 0.70 0.70 0.71 0.71 0.71 0.69 0.69 0.69 0.70 0.70 0.70 0.70 0.71 0.71 0.42   slot15/others 0.60
+   argmax==action by i%8 : 0.69 0.70 0.70 0.71 0.71 0.71 0.70 0.56   slot7/others 0.79
+poolval8-2026-09-01 [effzero-repro-refresh5x-communal] records 30539, trajs 33, steps 12000
+   argmax==action by i%16: 0.58 0.58 0.59 0.58 0.58 0.57 0.59 0.59 0.60 0.57 0.58 0.58 0.58 0.59 0.58 0.52   slot15/others 0.88
+   argmax==action by i%8 : 0.59 0.58 0.58 0.58 0.58 0.58 0.58 0.55   slot7/others 0.95
+DONE
