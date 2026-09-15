@@ -161,6 +161,34 @@ def test_cpu_actor_cli_gates():
                          None, use_ray=True, cpu_actor=True, ray_workers=4)
 
 
+def test_vtree_communal_arm_is_one_flag_from_archfix():
+    """effzero-repro-vtree-communal: archfix's recipe with ONLY
+    REFRESH_VTREE flipped (plus its own _doc). Any other delta would
+    confound 'archfix's targets at vtree speed'."""
+    base = ablation.ARMS["effzero-repro-refresh5x-communal"]
+    arm = ablation.ARMS["effzero-repro-vtree-communal"]
+    assert arm["REFRESH_VTREE"] is True
+    assert arm["USE_COMMUNAL_REANALYSIS"] is True
+    assert "REFRESH_VTREE" not in base
+    for key in set(base) | set(arm):
+        if key in ("REFRESH_VTREE", "_doc"):
+            continue
+        assert arm[key] == base[key], f"unexpected drift on {key}"
+
+
+def test_vtree_communal8_arm_is_one_knob_from_the_exact_arm():
+    """effzero-repro-vtree-communal8: the exact arm plus ONLY
+    VTREE_COMMUNAL_TRAJS=8 (and its own _doc) -- the speed configuration."""
+    base = ablation.ARMS["effzero-repro-vtree-communal"]
+    arm = ablation.ARMS["effzero-repro-vtree-communal8"]
+    assert arm["VTREE_COMMUNAL_TRAJS"] == 8
+    assert "VTREE_COMMUNAL_TRAJS" not in base
+    delta = {k: v for k, v in arm.items()
+             if k != "_doc" and base.get(k, object()) != v}
+    assert delta == {"VTREE_COMMUNAL_TRAJS": 8}
+    assert set(base) - set(arm) == set()
+
+
 def test_vtree_arm_derivation():
     base = ablation.ARMS["effzero-repro-refresh5x-communal"]
     arm = ablation.ARMS["effzero-repro-vtree-refresh"]

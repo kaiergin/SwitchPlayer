@@ -387,6 +387,23 @@ REFRESH_OFFLOAD = False
 # are the SAME code as every other refresh path.
 REFRESH_VTREE = False
 VTREE_REFRESH_BATCH = 256
+# vtree v2 (2026-09-11): with USE_COMMUNAL_REANALYSIS the vectorized
+# refresh runs archfix's communal chain-tree search (muzero_vtree.
+# VectorizedCommunalPUCT, parity-gated bitwise against
+# run_communal_mcts). This many trajectories share one forest per
+# call -- their chain trees advance windows in lockstep and the network
+# batch is formed across all their roots. 1 = one trajectory per
+# forest: the sequential engine's exact batch shapes (the parity
+# condition), but no throughput gain over it (the wave loop costs as
+# much as its Python at 16 roots). Larger groups amortize the wave
+# loop across trajectories (~x group throughput; 3.4x the sequential
+# engine at 8, 5.3x at 16 on the RTX 4070) at the cost of batch-shape
+# numerics the communal tree cascades (measured G=8 vs 1: ~96% of
+# roots keep identical visit counts, values shifting by a median 3e-3,
+# tail 1.5; ~4% flip counts, values shifting by a median 0.26, max
+# 2.1; DESIGN.md) and forest memory (~22.7 KB per node at production
+# geometry; growth transient 2.25x -- 8 fits beside a live run).
+VTREE_COMMUNAL_TRAJS = 1
 # Saturation refresh (2026-09-02, Kai): instead of a fixed quota every
 # POLICY_REFRESH_EVERY iterations, the driver refreshes AS MUCH AS FITS
 # in the slack while the CPU environment actor plays -- one candidate

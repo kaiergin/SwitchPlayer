@@ -581,6 +581,54 @@ ARMS["effzero-repro-vtree-refresh"] = {
             "deltas = refresh topology+coverage, actor device).",
 }
 
+# vtree v2 arm (2026-09-11): archfix's EXACT recipe with the refresh
+# search moved onto the vectorized COMMUNAL engine -- one flag away.
+# The 2026-09-11 in-situ probe showed fresh-root and communal targets
+# disagree on the best action ~42% of the time (communal flatter, H
+# 0.89 vs 0.74); no fresh-root arm reproduced archfix's endpoint, and
+# that topology difference is the leading suspect. This arm keeps the
+# communal topology (seeded chain, COMMUNAL_WINDOW_ROOTS lockstep,
+# communal statistics, bookkeeping visit subtracted; parity-gated
+# bitwise against run_communal_mcts in tests/test_vtree_communal.py)
+# and changes NOTHING else: rotation candidates, COUNT 4 per 2 iters,
+# no entropy priority, no guard, sequential 50-sim acting.
+ARMS["effzero-repro-vtree-communal"] = {
+    **ARMS["effzero-repro-refresh5x-communal"],
+    "REFRESH_VTREE": True,
+    "_doc": "effzero-repro-refresh5x-communal with ONLY REFRESH_VTREE "
+            "on: the same communal refresh (shared seeded chain tree, "
+            "16-root windows, communal statistics) computed by the v2 "
+            "vectorized engine on the trainer's device against the "
+            "lagged target model, parity-gated bitwise against the "
+            "sequential engine. Everything else is archfix's recipe. "
+            "Run with archfix's exact command (sequential mode; --ray "
+            "--cpu-actor is the phase-4 speed variant, whose deltas then "
+            "also include the actor device). Control: "
+            "pong-archfix-2026-08-30.",
+}
+
+# Speed configuration of the arm above (2026-09-11, audit round 2): the
+# same communal target semantics with 8 trajectories per forest.
+ARMS["effzero-repro-vtree-communal8"] = {
+    **ARMS["effzero-repro-vtree-communal"],
+    "VTREE_COMMUNAL_TRAJS": 8,
+    "_doc": "effzero-repro-vtree-communal with VTREE_COMMUNAL_TRAJS=8: "
+            "archfix's communal target semantics at ~3.4x the sequential "
+            "engine's refresh throughput (measured 109-111 vs 32 pos/s "
+            "on the RTX 4070, production-shaped nets, 16-root windows, 50 "
+            "sims). NOT bitwise vs the sequential engine: eight chain "
+            "trees share each network batch, and the communal tree "
+            "cascades the batch-shape wobble -- measured G=8 vs G=1 "
+            "(noise off, tie-first, deterministic cuDNN): ~96% of roots "
+            "keep identical visit counts, their root values shifting by a "
+            "median 3e-3 (tail to 1.5 where a neighbour's path changed); "
+            "~4% of roots flip counts, values shifting by a median 0.26, "
+            "max 2.1. ~1.9 GB steady "
+            "at production chain length (~4.3 GB if a forest growth "
+            "triggers). Run with archfix's exact command; control: "
+            "pong-archfix-2026-08-30 and the exact arm.",
+}
+
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
 # archfix's exact refresh SELECTION semantics -- staleness rotation,
 # always-replace, no guard. Deltas vs archfix: parallel stack, fresh-
@@ -1281,15 +1329,22 @@ class Run:
             return
         now = self.trainer.training_steps
         engine = self._vtree_engine()
-        for ti in candidates:
-            self._refresh_traj_vtree(self.replay[ti], engine, now)
+        self._refresh_trajs_vtree([self.replay[ti] for ti in candidates],
+                                  engine, now)
 
     def _vtree_engine(self):
         """The vectorized engine over the CURRENT lagged target nets;
-        cheap to construct (wraps existing modules, allocates nothing)."""
+        cheap to construct (wraps existing modules, allocates nothing).
+        Under USE_COMMUNAL_REANALYSIS the v2 communal engine (a
+        VectorizedPUCT subclass whose fresh-root search() is the v1
+        method itself); otherwise v1, so the fresh-root path is
+        untouched."""
         self.trainer._ensure_target_model()
         import muzero_vtree
-        return muzero_vtree.VectorizedPUCT(
+        cls = (muzero_vtree.VectorizedCommunalPUCT
+               if muzero.USE_COMMUNAL_REANALYSIS
+               else muzero_vtree.VectorizedPUCT)
+        return cls(
             {"representation": self.trainer.target_representation,
              "dynamics": self.trainer.target_dynamics,
              "prediction": self.trainer.target_prediction,
@@ -1300,7 +1355,17 @@ class Run:
         """Search-and-apply ONE trajectory's eligible steps in batched
         waves. The unit of work for both the scheduled quota and the
         saturation loop; application is the shared _apply_refresh (a
-        no-eligible trajectory still rotates)."""
+        no-eligible trajectory still rotates).
+
+        Topology per the arm: USE_COMMUNAL_REANALYSIS routes through the
+        v2 communal engine -- ONE shared seeded chain tree for the
+        trajectory, the eligible positions processed window by window
+        (COMMUNAL_WINDOW_ROOTS, ascending, release after each), exactly
+        _search_traj_communal's drive of the sequential engine (parity
+        gate: tests/test_vtree_communal.py). Otherwise the v1 fresh-root
+        waves, byte-identical to before."""
+        if muzero.USE_COMMUNAL_REANALYSIS:
+            return self._refresh_trajs_communal([traj], engine, now)[0]
         idxs = self._eligible_indices(traj)
         results = {}
         batch = max(1, int(muzero.VTREE_REFRESH_BATCH))
@@ -1316,6 +1381,51 @@ class Run:
                               float(val))
         self._apply_refresh(traj, results, now)
         return len(idxs)  # positions searched (accounting)
+
+    def _refresh_trajs_vtree(self, trajs, engine, now):
+        """Search-and-apply a LIST of trajectories; returns positions
+        searched per trajectory. Fresh-root: _refresh_traj_vtree one at
+        a time (unchanged). Communal: groups of VTREE_COMMUNAL_TRAJS
+        trajectories share one forest (see muzero's constant)."""
+        if muzero.USE_COMMUNAL_REANALYSIS:
+            return self._refresh_trajs_communal(trajs, engine, now)
+        return [self._refresh_traj_vtree(t, engine, now) for t in trajs]
+
+    def _refresh_trajs_communal(self, trajs, engine, now):
+        """The communal vectorized search for a list of trajectories,
+        applied per trajectory through _apply_refresh. Each trajectory
+        is ONE shared seeded chain tree searched window by window
+        (COMMUNAL_WINDOW_ROOTS, ascending, release after each) --
+        _search_traj_communal's drive of the sequential engine, parity-
+        gated in tests/test_vtree_communal.py. VTREE_COMMUNAL_TRAJS
+        trajectories per forest advance their windows in lockstep. (The
+        sequential communal path falls back to per-root searches under
+        Gumbel; the engine asserts instead -- loud.)"""
+        out = []
+        group = max(1, int(muzero.VTREE_COMMUNAL_TRAJS))
+        for g0 in range(0, len(trajs), group):
+            chunk = trajs[g0:g0 + group]
+            idx_lists = [self._eligible_indices(t) for t in chunk]
+            searchable = [(t, ix) for t, ix in zip(chunk, idx_lists) if ix]
+            got = []
+            if searchable:
+                got = engine.search_trajectories(
+                    [{"obs": [r["obs"] for r in t],
+                      "actions": [r["action"] for r in t],
+                      "rewards": [r["reward"] for r in t],
+                      "terminated": not t[-1].get("truncated", False)}
+                     for t, _ in searchable],
+                    [ix for _, ix in searchable],
+                    num_simulations=muzero.ACT_SEARCH_SIMS,
+                    c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                    tie_break="random")
+            found = {id(t): g for (t, _), g in zip(searchable, got)}
+            for t, ix in zip(chunk, idx_lists):
+                results = {i: (np.asarray(pol, dtype=np.float64), float(val))
+                           for i, (pol, val) in found.get(id(t), {}).items()}
+                self._apply_refresh(t, results, now)
+                out.append(len(ix))
+        return out
 
     def refresh_saturate(self, acting_ready, floor=1):
         """Kai's saturation refresh (REFRESH_SATURATE): refresh one
@@ -1385,8 +1495,7 @@ class Run:
         engine = self._vtree_engine()
         done = steps = 0
         now = self.trainer.training_steps
-        for traj in trajs:
-            got = self._refresh_traj_vtree(traj, engine, now)
+        for got in self._refresh_trajs_vtree(list(trajs), engine, now):
             steps += got
             if got > 0:
                 done += 1
@@ -1405,9 +1514,11 @@ class Run:
             return 0
         engine = self._vtree_engine()
         done = steps = 0
-        for ci in self._refresh_candidates(count):
-            now = self.trainer.training_steps
-            got = self._refresh_traj_vtree(self.replay[ci], engine, now)
+        # training_steps cannot move within this call (the loop is the
+        # mutex), so one stamp serves every candidate.
+        now = self.trainer.training_steps
+        trajs = [self.replay[ci] for ci in self._refresh_candidates(count)]
+        for got in self._refresh_trajs_vtree(trajs, engine, now):
             steps += got
             if got > 0:
                 done += 1
