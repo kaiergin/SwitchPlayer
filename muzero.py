@@ -479,6 +479,14 @@ ASYNC_MIN_TRAIN_PER_ENV_STEP = 0.0
 # the PER lag for a ~0-10% return.
 TRAIN_PREFETCH = False
 TRAIN_PREFETCH_DEPTH = 2
+# Bootstrap value cache toggle (2026-09-14). Off = every tail is
+# forwarded every step, exactly the pre-53161e22 builder (archfix's
+# path). The cache is identity within a target-sync window up to
+# chunk-composition numerics, but it is the ONE code delta between
+# archfix (+17.1, cache off) and both non-crossing replications
+# (cache on), so experiments meant to be comparable to archfix set
+# it off via the arm until that confound is closed.
+BOOTSTRAP_CACHE = True
 
 
 def visit_softmax_temperature(training_steps):
@@ -2679,10 +2687,17 @@ class TrainingHelper:
             # the same class of wobble the uncached chunked forward
             # already had from batch to batch.
             stamp = self._target_synced_at
-            cache = getattr(self, "_boot_cache", None)
-            if cache is None or getattr(self, "_boot_cache_stamp", None) != stamp:
-                cache = self._boot_cache = {}
-                self._boot_cache_stamp = stamp
+            if not BOOTSTRAP_CACHE:
+                # Per-call scratch: every key misses, nothing is retained
+                # across steps -- the uncached builder's exact behaviour.
+                cache = {}
+                self._boot_cache = None
+            else:
+                cache = getattr(self, "_boot_cache", None)
+                if (cache is None
+                        or getattr(self, "_boot_cache_stamp", None) != stamp):
+                    cache = self._boot_cache = {}
+                    self._boot_cache_stamp = stamp
             keys = list(pending)
             miss = [k for k in keys if k not in cache]
             self.boot_cache_hits = getattr(self, "boot_cache_hits", 0) + (len(keys) - len(miss))

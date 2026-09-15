@@ -280,3 +280,13 @@ archfix`); `effzero-repro-vtree-communal8` adds only
 `VTREE_COMMUNAL_TRAJS: 8` (pinned by `tests/test_vtree_refresh.py::
 test_vtree_communal8_arm_is_one_knob_from_the_exact_arm`). Both are in
 `tests/test_harness.py`'s augmentation allowlist.
+
+
+### Main-tree additions after the merge (2026-09-14)
+
+- `muzero.BOOTSTRAP_CACHE` (default True) toggles the target-model bootstrap value
+  cache in `finish_batch_paper`; off reproduces the pre-cache builder bit-for-bit.
+- Arm `effzero-repro-vtree-communal8-r12` = communal8 + `POLICY_REFRESH_COUNT` 12 +
+  `BOOTSTRAP_CACHE` False: archfix's recipe at 3x refresh coverage, run sequentially.
+- The scheduled-quota refresh paths (`refresh_targets`, `refresh_targets_vtree`) now
+  record refresh accounting (`_note_quota_stats`) so quota rows carry refresh volume.

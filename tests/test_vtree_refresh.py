@@ -202,3 +202,19 @@ def test_vtree_arm_derivation():
         if key in changed:
             continue
         assert arm[key] == base[key], f"unexpected drift on {key}"
+
+
+def test_vtree_communal8_r12_arm_is_rate_and_cache_only():
+    """The higher-refresh-rate arm changes exactly the refresh count and
+    switches the bootstrap cache off relative to communal8; vs archfix's
+    arm it is engine (vtree, TRAJS 8) + rate + cache-off, nothing else."""
+    import muzero
+    r12 = ablation.ARMS["effzero-repro-vtree-communal8-r12"]
+    c8 = ablation.ARMS["effzero-repro-vtree-communal8"]
+    af = ablation.ARMS["effzero-repro-refresh5x-communal"]
+    d8 = {k: v for k, v in r12.items() if k != "_doc" and c8.get(k) != v}
+    assert d8 == {"POLICY_REFRESH_COUNT": 12, "BOOTSTRAP_CACHE": False}
+    daf = {k: v for k, v in r12.items() if k != "_doc" and af.get(k) != v}
+    assert daf == {"REFRESH_VTREE": True, "VTREE_COMMUNAL_TRAJS": 8,
+                   "POLICY_REFRESH_COUNT": 12, "BOOTSTRAP_CACHE": False}
+    assert hasattr(muzero, "BOOTSTRAP_CACHE") and muzero.BOOTSTRAP_CACHE is True

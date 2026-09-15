@@ -629,6 +629,36 @@ ARMS["effzero-repro-vtree-communal8"] = {
             "pong-archfix-2026-08-30 and the exact arm.",
 }
 
+# Higher-refresh-rate arm (2026-09-14, Kai): archfix's recipe with the
+# communal vtree engine at TRAJS=8 paying for THREE TIMES archfix's
+# refresh coverage at roughly archfix's refresh wall clock (3.4x engine
+# throughput; COUNT 4 -> 12 per 2 iterations). Coverage by phase: the
+# mid-run buffer (~20 trajs of 1500-2000 steps) turns over every ~3-4
+# iterations instead of ~10; LATE, with episodes near the 3000 cap,
+# the 31,250-transition buffer holds only ~10-13 trajectories, so
+# COUNT 12 refreshes the ENTIRE buffer every cadence (rotation
+# degenerates to whole-buffer, grouped e.g. 8+3) -- audit B2. The
+# intended variable is the refresh RATE; the engine swap is its enabler
+# (archfix-class targets, ~4% of roots perturbed below search noise).
+# BOOTSTRAP_CACHE is OFF so the value-target builder is archfix's exact
+# path: the cache was the one code delta between archfix (+17.1) and
+# both non-crossing replications, and this run must not carry it.
+# Question: does 3x refresh make the late consolidation MORE CONSISTENT
+# (archfix crossed 1 run in 3 at 1x)? Run SEQUENTIAL (no --ray).
+ARMS["effzero-repro-vtree-communal8-r12"] = {
+    **ARMS["effzero-repro-vtree-communal8"],
+    "POLICY_REFRESH_COUNT": 12,
+    "BOOTSTRAP_CACHE": False,
+    "_doc": "effzero-repro-vtree-communal8 with POLICY_REFRESH_COUNT 12 "
+            "(3x archfix's 4 per 2 iterations, bought by the vectorized "
+            "communal engine's ~3.4x throughput) and BOOTSTRAP_CACHE off "
+            "(archfix's exact value-target builder). Deltas vs archfix's "
+            "arm: REFRESH_VTREE, VTREE_COMMUNAL_TRAJS 8, POLICY_REFRESH_"
+            "COUNT 12, BOOTSTRAP_CACHE False. Run sequential. Controls: "
+            "pong-archfix-2026-08-30 (+17.1 @90), pong-archfix-ray-"
+            "2026-09-11 (-11.4), pong-archfix-seq-s1-2026-09-13 (-14.0).",
+}
+
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
 # archfix's exact refresh SELECTION semantics -- staleness rotation,
 # always-replace, no guard. Deltas vs archfix: parallel stack, fresh-
@@ -865,9 +895,6 @@ def build_networks(spec):
                                                transform=transform).to(DEVICE),
         projector=muzero.build_projector().to(DEVICE),
     )
-
-
-import contextlib
 
 
 @contextlib.contextmanager
@@ -1302,13 +1329,17 @@ class Run:
             nm.prediction = self.trainer.target_prediction
             nm.dynamics = self.trainer.target_dynamics
             nm.value_prefix = self.trainer.target_value_prefix
+            got = []
             for ti in candidates:
                 traj = self.replay[ti]
-                results = self._search_traj(traj, self._eligible_indices(traj))
+                idxs = self._eligible_indices(traj)
+                results = self._search_traj(traj, idxs)
                 self._apply_refresh(traj, results, now)
+                got.append(len(idxs))
         finally:
             (nm.representation, nm.prediction,
              nm.dynamics, nm.value_prefix) = saved
+        self._note_quota_stats(got)
 
     def refresh_targets_vtree(self, count):
         """Phase-4 refresh (REFRESH_VTREE): fresh-root VECTORIZED
@@ -1329,8 +1360,14 @@ class Run:
             return
         now = self.trainer.training_steps
         engine = self._vtree_engine()
-        self._refresh_trajs_vtree([self.replay[ti] for ti in candidates],
-                                  engine, now)
+        got = self._refresh_trajs_vtree(
+            [self.replay[ti] for ti in candidates], engine, now)
+        # Accounting (2026-09-14): the quota path never wrote the refresh
+        # counters the saturate/sweep paths do, so quota rows carried no
+        # refresh volume -- and volume is the variable the r12 arm tests.
+        # Same keys and the same per-call *_last_iter semantics as
+        # refresh_saturate.
+        self._note_quota_stats(got)
 
     def _vtree_engine(self):
         """The vectorized engine over the CURRENT lagged target nets;
@@ -1524,6 +1561,21 @@ class Run:
                 done += 1
         self._note_sweep_stats(done, steps)
         return done
+
+    def _note_quota_stats(self, positions_per_traj):
+        """Refresh accounting for the scheduled-quota paths (sequential
+        refresh_targets and refresh_targets_vtree): per-call *_last_iter
+        values and cumulative totals, the keys refresh_saturate writes,
+        so quota rows are comparable to saturate/sweep rows."""
+        steps = int(sum(positions_per_traj))
+        done = int(sum(1 for g in positions_per_traj if g > 0))
+        stats = getattr(self, "_refresh_offload_stats", None) or {}
+        self._refresh_offload_stats = {
+            "refresh_applied": stats.get("refresh_applied", 0) + done,
+            "refresh_last_iter": done,
+            "refresh_steps_total": stats.get("refresh_steps_total", 0)
+            + steps,
+            "refresh_steps_last_iter": steps}
 
     def _note_sweep_stats(self, done, steps):
         """Accumulate into the SAME keys refresh_saturate writes;

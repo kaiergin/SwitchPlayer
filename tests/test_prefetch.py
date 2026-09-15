@@ -269,3 +269,29 @@ def test_worker_death_with_full_queue_raises_instead_of_hanging(world, monkeypat
         pf.next()                   # must not block forever
     assert time.time() - t0 < 10
     pf.close()
+
+
+def test_bootstrap_cache_toggle_off_never_retains(world, monkeypatch):
+    """BOOTSTRAP_CACHE=False must forward every tail every call (all
+    misses, nothing retained) and produce the same values as the cached
+    path to batch-shape numerics."""
+    trainer = world
+    replay = _replay(n=3)
+    trainer.training_steps = 500
+    trainer._ensure_target_model()
+    np.random.seed(33)
+    a = trainer.assemble_batch_paper(replay, 8, 3, ACTIONS)
+    assert a["pending"]
+    monkeypatch.setattr(muzero, "BOOTSTRAP_CACHE", True)
+    trainer.invalidate_bootstrap_cache()
+    cached = trainer.finish_batch_paper(copy.deepcopy(a))
+    monkeypatch.setattr(muzero, "BOOTSTRAP_CACHE", False)
+    trainer.boot_cache_hits = trainer.boot_cache_misses = 0
+    off1 = trainer.finish_batch_paper(copy.deepcopy(a))
+    off2 = trainer.finish_batch_paper(copy.deepcopy(a))
+    assert trainer.boot_cache_hits == 0
+    assert trainer.boot_cache_misses == 2 * len(a["pending"])
+    assert trainer._boot_cache is None
+    np.testing.assert_allclose(off1["target_value"], cached["target_value"],
+                               rtol=0, atol=1e-5)
+    np.testing.assert_array_equal(off1["target_value"], off2["target_value"])

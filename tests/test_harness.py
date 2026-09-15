@@ -80,7 +80,8 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-vtree-sat-guard",
                         "effzero-repro-async-fresh",
                         "effzero-repro-async-throttle",
-                        "effzero-repro-async-keepnew"):
+                        "effzero-repro-async-keepnew",
+                        "effzero-repro-vtree-communal8-r12"):
             assert spec["USE_AUGMENTATION"] is False, name
 
 
