@@ -1,0 +1,83 @@
+A.L.E: Arcade Learning Environment (version 0.12.0+0706845)
+[Powered by Stella]
+collected 160 states from archfix-prior
+collected 160 states from control-prior
+collected 120 states from random
+usable states 438; pixel-distinct futures at k=1..5: [0.747, 0.744, 0.747, 0.747, 0.747]
+  archfix-prior: 160 states
+  control-prior: 160 states
+  random: 118 states
+
+### archfix s0 @90  (final return +17.1)
+  k:                        1       2       3       4       5
+  latent disc acc       0.432   0.600   0.697   0.691   0.669   (chance 0.333)
+  pred err ||g-true||   8.478   8.615   8.648   8.710   8.706
+  true action spread    3.024   5.484   5.829   6.222   6.416   (distance between the 3 true futures)
+  pred action spread    4.805   5.810   6.364   6.648   6.789   (distance between the 3 predicted futures)
+  true motion           4.615   6.276   7.177   7.838   8.221   (root -> true_k)
+  projection: mean cos between DIFFERENT states 0.179; eff. rank proj 19.8/1024  latent 129.3  dyn-latent 114.1   latent norm 8.62
+
+### checkD s0 @90  (final return -11.4)
+  k:                        1       2       3       4       5
+  latent disc acc       0.391   0.481   0.535   0.543   0.565   (chance 0.333)
+  pred err ||g-true||  10.649  10.781  10.803  10.827  10.832
+  true action spread    3.672   6.345   7.058   7.505   7.615   (distance between the 3 true futures)
+  pred action spread    6.556   7.500   8.008   8.328   8.576   (distance between the 3 predicted futures)
+  true motion           5.819   7.896   9.015   9.746  10.200   (root -> true_k)
+  projection: mean cos between DIFFERENT states 0.941; eff. rank proj 8.4/1024  latent 136.9  dyn-latent 106.2   latent norm 10.67
+
+### control s1 @90  (final return -14.0)
+  k:                        1       2       3       4       5
+  latent disc acc       0.388   0.445   0.488   0.491   0.490   (chance 0.333)
+  pred err ||g-true||  10.173  10.386  10.428  10.421  10.428
+  true action spread    3.539   6.848   7.634   7.861   7.788   (distance between the 3 true futures)
+  pred action spread    5.123   6.219   6.766   7.025   7.170   (distance between the 3 predicted futures)
+  true motion           5.449   7.656   9.025   9.857  10.345   (root -> true_k)
+  projection: mean cos between DIFFERENT states 0.400; eff. rank proj 18.8/1024  latent 113.6  dyn-latent 116.7   latent norm 10.74
+
+### r12 s0 @90  (final return -11.4)
+  k:                        1       2       3       4       5
+  latent disc acc       0.371   0.424   0.452   0.459   0.454   (chance 0.333)
+  pred err ||g-true||  10.522  10.693  10.759  10.798  10.892
+  true action spread    3.344   6.106   6.772   7.210   7.446   (distance between the 3 true futures)
+  pred action spread    6.384   7.285   7.792   8.106   8.333   (distance between the 3 predicted futures)
+  true motion           5.489   7.432   8.672   9.396   9.924   (root -> true_k)
+  projection: mean cos between DIFFERENT states 0.933; eff. rank proj 5.8/1024  latent 134.8  dyn-latent 101.3   latent norm 10.44
+
+### keepnew90 @87  (final return -9.6)
+  k:                        1       2       3       4       5
+  latent disc acc       0.374   0.425   0.433   0.455   0.492   (chance 0.333)
+  pred err ||g-true||  10.364  10.459  10.522  10.570  10.629
+  true action spread    2.851   5.525   6.323   6.504   6.734   (distance between the 3 true futures)
+  pred action spread    6.318   7.191   7.695   8.062   8.363   (distance between the 3 predicted futures)
+  true motion           5.055   7.174   8.371   9.137   9.653   (root -> true_k)
+  projection: mean cos between DIFFERENT states 0.982; eff. rank proj 4.7/1024  latent 134.9  dyn-latent 105.2   latent norm 9.91
+
+### vsat ckpt @10  (final return -19.0)
+  k:                        1       2       3       4       5
+  latent disc acc       0.399   0.495   0.536   0.537   0.503   (chance 0.333)
+  pred err ||g-true||  12.334  12.574  12.702  12.862  12.921
+  true action spread    3.950   7.215   7.911   8.207   8.454   (distance between the 3 true futures)
+  pred action spread    8.562   9.980  10.789  11.282  11.579   (distance between the 3 predicted futures)
+  true motion           6.244   8.802  10.294  11.106  11.519   (root -> true_k)
+  projection: mean cos between DIFFERENT states 0.054; eff. rank proj 45.2/1024  latent 91.4  dyn-latent 92.6   latent norm 12.17
+
+### vtree ckpt @26  (final return -18.9)
+  k:                        1       2       3       4       5
+  latent disc acc       0.384   0.467   0.517   0.522   0.524   (chance 0.333)
+  pred err ||g-true||  11.346  11.472  11.460  11.518  11.578
+  true action spread    3.963   6.768   7.306   7.569   7.829   (distance between the 3 true futures)
+  pred action spread    7.460   8.800   9.352   9.758  10.037   (distance between the 3 predicted futures)
+  true motion           6.119   8.069   9.138   9.885  10.427   (root -> true_k)
+  projection: mean cos between DIFFERENT states 0.887; eff. rank proj 8.4/1024  latent 118.7  dyn-latent 111.2   latent norm 11.00
+
+### arch1 ckpt @48  (final return -15.3)
+  k:                        1       2       3       4       5
+  latent disc acc       0.373   0.457   0.476   0.510   0.504   (chance 0.333)
+  pred err ||g-true||  12.085  12.212  12.268  12.342  12.314
+  true action spread    3.661   6.701   7.282   8.004   8.266   (distance between the 3 true futures)
+  pred action spread    8.006   9.323   9.937  10.306  10.527   (distance between the 3 predicted futures)
+  true motion           6.094   8.237   9.546  10.423  10.972   (root -> true_k)
+  projection: mean cos between DIFFERENT states 0.954; eff. rank proj 5.1/1024  latent 129.1  dyn-latent 118.6   latent norm 11.35
+
+DONE

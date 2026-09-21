@@ -1,0 +1,152 @@
+=== pong-vsat-2026-09-03  iter 10  env_steps 8925  trajs 10
+  born       0  len   853  ret   -21  act NOOP/UP/DOWN 0.36/0.33/0.31  H3(marg) 1.096  mean H3(target) 0.664
+  born    2000  len   820  ret   -21  act NOOP/UP/DOWN 0.43/0.21/0.36  H3(marg) 1.056  mean H3(target) 0.705
+  born    4000  len   822  ret   -21  act NOOP/UP/DOWN 0.31/0.26/0.43  H3(marg) 1.076  mean H3(target) 0.749
+  born    6000  len   907  ret   -21  act NOOP/UP/DOWN 0.34/0.27/0.38  H3(marg) 1.090  mean H3(target) 0.685
+  born    8000  len   987  ret   -20  act NOOP/UP/DOWN 0.38/0.23/0.39  H3(marg) 1.074  mean H3(target) 0.748
+  born   10000  len   943  ret   -21  act NOOP/UP/DOWN 0.36/0.30/0.35  H3(marg) 1.096  mean H3(target) 0.753
+  born   12000  len   820  ret   -21  act NOOP/UP/DOWN 0.36/0.29/0.36  H3(marg) 1.094  mean H3(target) 0.757
+  born   14000  len   938  ret   -20  act NOOP/UP/DOWN 0.33/0.33/0.35  H3(marg) 1.098  mean H3(target) 0.788
+  born   16000  len  1010  ret   -20  act NOOP/UP/DOWN 0.35/0.29/0.35  H3(marg) 1.095  mean H3(target) 0.778
+  born   18000  len   835  ret   -20  act NOOP/UP/DOWN 0.15/0.12/0.73  H3(marg) 0.775  mean H3(target) 0.638
+  BUFFER: NOOP/UP/DOWN 0.338/0.265/0.397  H3 1.085 (max 1.099)  mean per-step H3(target) 0.728  mean hold 1.71 steps
+=== pong-vtree-2026-09-02  iter 26  env_steps 28350  trajs 26
+  born       0  len   853  ret   -21  act NOOP/UP/DOWN 0.36/0.33/0.31  H3(marg) 1.096  mean H3(target) 0.631
+  born    2000  len   852  ret   -21  act NOOP/UP/DOWN 0.21/0.31/0.48  H3(marg) 1.045  mean H3(target) 0.821
+  born    4000  len  1052  ret   -19  act NOOP/UP/DOWN 0.34/0.30/0.36  H3(marg) 1.096  mean H3(target) 0.745
+  born    6000  len   902  ret   -20  act NOOP/UP/DOWN 0.42/0.23/0.35  H3(marg) 1.071  mean H3(target) 0.777
+  born    8000  len   853  ret   -21  act NOOP/UP/DOWN 0.29/0.29/0.42  H3(marg) 1.081  mean H3(target) 0.737
+  born   10000  len   885  ret   -21  act NOOP/UP/DOWN 0.36/0.29/0.35  H3(marg) 1.094  mean H3(target) 0.754
+  born   12000  len  1197  ret   -19  act NOOP/UP/DOWN 0.34/0.30/0.36  H3(marg) 1.096  mean H3(target) 0.738
+  born   14000  len   945  ret   -21  act NOOP/UP/DOWN 0.32/0.28/0.41  H3(marg) 1.086  mean H3(target) 0.745
+  born   16000  len   991  ret   -21  act NOOP/UP/DOWN 0.30/0.28/0.41  H3(marg) 1.085  mean H3(target) 0.726
+  born   18000  len  1086  ret   -20  act NOOP/UP/DOWN 0.35/0.26/0.39  H3(marg) 1.086  mean H3(target) 0.728
+  born   20000  len  1098  ret   -19  act NOOP/UP/DOWN 0.28/0.31/0.41  H3(marg) 1.084  mean H3(target) 0.740
+  born   22000  len  1229  ret   -20  act NOOP/UP/DOWN 0.30/0.31/0.39  H3(marg) 1.091  mean H3(target) 0.747
+  born   24000  len  1281  ret   -18  act NOOP/UP/DOWN 0.30/0.34/0.36  H3(marg) 1.095  mean H3(target) 0.749
+  born   26000  len   982  ret   -20  act NOOP/UP/DOWN 0.29/0.33/0.38  H3(marg) 1.094  mean H3(target) 0.772
+  born   28000  len  1145  ret   -19  act NOOP/UP/DOWN 0.34/0.29/0.37  H3(marg) 1.094  mean H3(target) 0.735
+  born   30000  len  1036  ret   -20  act NOOP/UP/DOWN 0.33/0.30/0.37  H3(marg) 1.095  mean H3(target) 0.759
+  born   32000  len  1223  ret   -18  act NOOP/UP/DOWN 0.33/0.28/0.39  H3(marg) 1.089  mean H3(target) 0.748
+  born   34000  len  1217  ret   -18  act NOOP/UP/DOWN 0.30/0.34/0.36  H3(marg) 1.095  mean H3(target) 0.771
+  born   36000  len  1400  ret   -19  act NOOP/UP/DOWN 0.31/0.29/0.40  H3(marg) 1.088  mean H3(target) 0.716
+  born   38000  len  1158  ret   -20  act NOOP/UP/DOWN 0.32/0.32/0.36  H3(marg) 1.097  mean H3(target) 0.710
+  born   40000  len  1098  ret   -18  act NOOP/UP/DOWN 0.31/0.31/0.38  H3(marg) 1.094  mean H3(target) 0.654
+  born   42000  len  1035  ret   -19  act NOOP/UP/DOWN 0.30/0.27/0.42  H3(marg) 1.080  mean H3(target) 0.714
+  born   44000  len  1266  ret   -20  act NOOP/UP/DOWN 0.28/0.29/0.42  H3(marg) 1.081  mean H3(target) 0.658
+  born   46000  len  1217  ret   -17  act NOOP/UP/DOWN 0.29/0.31/0.40  H3(marg) 1.088  mean H3(target) 0.707
+  born   48000  len  1246  ret   -18  act NOOP/UP/DOWN 0.28/0.29/0.43  H3(marg) 1.078  mean H3(target) 0.707
+  born   50000  len  1129  ret   -19  act NOOP/UP/DOWN 0.31/0.32/0.38  H3(marg) 1.095  mean H3(target) 0.768
+  BUFFER: NOOP/UP/DOWN 0.313/0.300/0.387  H3 1.092 (max 1.099)  mean per-step H3(target) 0.732  mean hold 1.70 steps
+=== pong-throttle-s1-2026-09-07  iter 26  env_steps 47235  trajs 18
+  born       0  len   929  ret   -20  act NOOP/UP/DOWN 0.36/0.33/0.32  H3(marg) 1.097  mean H3(target) 0.514
+  born    3200  len   840  ret   -21  act NOOP/UP/DOWN 0.27/0.29/0.44  H3(marg) 1.074  mean H3(target) 0.519
+  born    4600  len   941  ret   -21  act NOOP/UP/DOWN 0.23/0.39/0.38  H3(marg) 1.073  mean H3(target) 0.523
+  born    6000  len  1008  ret   -20  act NOOP/UP/DOWN 0.29/0.35/0.36  H3(marg) 1.094  mean H3(target) 0.527
+  born    9000  len  1102  ret   -19  act NOOP/UP/DOWN 0.30/0.33/0.37  H3(marg) 1.094  mean H3(target) 0.539
+  born   12000  len   878  ret   -21  act NOOP/UP/DOWN 0.32/0.36/0.32  H3(marg) 1.097  mean H3(target) 0.514
+  born   13200  len  1127  ret   -21  act NOOP/UP/DOWN 0.32/0.38/0.30  H3(marg) 1.093  mean H3(target) 0.522
+  born   14700  len  1295  ret   -19  act NOOP/UP/DOWN 0.36/0.33/0.32  H3(marg) 1.097  mean H3(target) 0.535
+  born   18000  len  1106  ret   -19  act NOOP/UP/DOWN 0.35/0.36/0.29  H3(marg) 1.094  mean H3(target) 0.495
+  born   20000  len  1308  ret   -19  act NOOP/UP/DOWN 0.33/0.38/0.30  H3(marg) 1.094  mean H3(target) 0.540
+  born   23400  len  1420  ret   -21  act NOOP/UP/DOWN 0.32/0.40/0.28  H3(marg) 1.088  mean H3(target) 0.517
+  born   27100  len  1531  ret   -19  act NOOP/UP/DOWN 0.32/0.37/0.31  H3(marg) 1.096  mean H3(target) 0.532
+  born   28900  len  2043  ret   -12  act NOOP/UP/DOWN 0.32/0.40/0.28  H3(marg) 1.087  mean H3(target) 0.578
+  born   33700  len  1607  ret   -18  act NOOP/UP/DOWN 0.30/0.40/0.31  H3(marg) 1.089  mean H3(target) 0.597
+  born   37500  len  1874  ret   -15  act NOOP/UP/DOWN 0.30/0.39/0.31  H3(marg) 1.091  mean H3(target) 0.572
+  born   40000  len  1556  ret   -17  act NOOP/UP/DOWN 0.28/0.42/0.30  H3(marg) 1.082  mean H3(target) 0.568
+  born   43500  len  1899  ret   -16  act NOOP/UP/DOWN 0.29/0.41/0.30  H3(marg) 1.086  mean H3(target) 0.610
+  born   49300  len  1912  ret   -13  act NOOP/UP/DOWN 0.28/0.41/0.31  H3(marg) 1.085  mean H3(target) 0.673
+  BUFFER: NOOP/UP/DOWN 0.306/0.379/0.315  H3 1.094 (max 1.099)  mean per-step H3(target) 0.558  mean hold 1.82 steps
+=== pong-satguard-s1-2026-09-05  iter 34  env_steps 50417  trajs 15
+  born   38000  len  1366  ret   -19  act NOOP/UP/DOWN 0.35/0.28/0.37  H3(marg) 1.092  mean H3(target) 0.485
+  born   40000  len  1775  ret   -20  act NOOP/UP/DOWN 0.32/0.35/0.33  H3(marg) 1.098  mean H3(target) 0.498
+  born   42000  len  1709  ret   -19  act NOOP/UP/DOWN 0.32/0.34/0.33  H3(marg) 1.098  mean H3(target) 0.483
+  born   44000  len  1726  ret   -18  act NOOP/UP/DOWN 0.35/0.30/0.36  H3(marg) 1.096  mean H3(target) 0.506
+  born   46000  len  1621  ret   -19  act NOOP/UP/DOWN 0.37/0.29/0.34  H3(marg) 1.095  mean H3(target) 0.488
+  born   48000  len  1929  ret   -17  act NOOP/UP/DOWN 0.37/0.31/0.32  H3(marg) 1.095  mean H3(target) 0.502
+  born   50000  len  2127  ret   -17  act NOOP/UP/DOWN 0.35/0.31/0.34  H3(marg) 1.097  mean H3(target) 0.499
+  born   52000  len  1904  ret   -19  act NOOP/UP/DOWN 0.38/0.31/0.31  H3(marg) 1.094  mean H3(target) 0.500
+  born   54000  len  2603  ret   -16  act NOOP/UP/DOWN 0.36/0.33/0.31  H3(marg) 1.097  mean H3(target) 0.490
+  born   56000  len  2195  ret   -15  act NOOP/UP/DOWN 0.37/0.30/0.33  H3(marg) 1.095  mean H3(target) 0.513
+  born   58000  len  2478  ret   -20  act NOOP/UP/DOWN 0.38/0.31/0.31  H3(marg) 1.094  mean H3(target) 0.531
+  born   60000  len  2051  ret   -18  act NOOP/UP/DOWN 0.41/0.29/0.31  H3(marg) 1.086  mean H3(target) 0.558
+  born   62000  len  2458  ret   -16  act NOOP/UP/DOWN 0.35/0.32/0.32  H3(marg) 1.098  mean H3(target) 0.565
+  born   64000  len  2220  ret   -19  act NOOP/UP/DOWN 0.37/0.31/0.32  H3(marg) 1.095  mean H3(target) 0.581
+  born   66000  len  2462  ret   -18  act NOOP/UP/DOWN 0.38/0.30/0.32  H3(marg) 1.093  mean H3(target) 0.617
+  BUFFER: NOOP/UP/DOWN 0.364/0.310/0.326  H3 1.096 (max 1.099)  mean per-step H3(target) 0.525  mean hold 2.23 steps
+=== pong-arch1-2026-08-29  iter 48  env_steps 62066  trajs 21
+  born   54000  len  1509  ret   -17  act NOOP/UP/DOWN 0.27/0.38/0.35  H3(marg) 1.088  mean H3(target) 0.758
+  born   56000  len  1235  ret   -21  act NOOP/UP/DOWN 0.32/0.33/0.35  H3(marg) 1.098  mean H3(target) 0.756
+  born   58000  len  1426  ret   -17  act NOOP/UP/DOWN 0.30/0.35/0.34  H3(marg) 1.097  mean H3(target) 0.823
+  born   60000  len  1470  ret   -18  act NOOP/UP/DOWN 0.29/0.36/0.35  H3(marg) 1.095  mean H3(target) 0.826
+  born   62000  len  1508  ret   -18  act NOOP/UP/DOWN 0.35/0.34/0.31  H3(marg) 1.098  mean H3(target) 0.818
+  born   64000  len  1127  ret   -20  act NOOP/UP/DOWN 0.30/0.36/0.34  H3(marg) 1.095  mean H3(target) 0.811
+  born   66000  len  1526  ret   -16  act NOOP/UP/DOWN 0.32/0.34/0.33  H3(marg) 1.098  mean H3(target) 0.823
+  born   68000  len  1353  ret   -18  act NOOP/UP/DOWN 0.31/0.35/0.34  H3(marg) 1.098  mean H3(target) 0.823
+  born   70000  len  1807  ret   -15  act NOOP/UP/DOWN 0.33/0.33/0.34  H3(marg) 1.098  mean H3(target) 0.824
+  born   72000  len  1515  ret   -16  act NOOP/UP/DOWN 0.33/0.33/0.34  H3(marg) 1.099  mean H3(target) 0.820
+  born   74000  len  1470  ret   -18  act NOOP/UP/DOWN 0.30/0.37/0.33  H3(marg) 1.095  mean H3(target) 0.816
+  born   76000  len  1462  ret   -20  act NOOP/UP/DOWN 0.31/0.36/0.33  H3(marg) 1.097  mean H3(target) 0.833
+  born   78000  len  1190  ret   -20  act NOOP/UP/DOWN 0.34/0.34/0.32  H3(marg) 1.098  mean H3(target) 0.820
+  born   80000  len  1244  ret   -20  act NOOP/UP/DOWN 0.27/0.37/0.35  H3(marg) 1.090  mean H3(target) 0.922
+  born   82000  len  1621  ret   -16  act NOOP/UP/DOWN 0.32/0.35/0.33  H3(marg) 1.098  mean H3(target) 0.935
+  born   84000  len  1653  ret   -15  act NOOP/UP/DOWN 0.30/0.36/0.34  H3(marg) 1.096  mean H3(target) 0.933
+  born   86000  len  1282  ret   -21  act NOOP/UP/DOWN 0.33/0.33/0.34  H3(marg) 1.099  mean H3(target) 0.940
+  born   88000  len  1306  ret   -19  act NOOP/UP/DOWN 0.31/0.34/0.36  H3(marg) 1.097  mean H3(target) 0.933
+  born   90000  len  1473  ret   -17  act NOOP/UP/DOWN 0.30/0.36/0.34  H3(marg) 1.095  mean H3(target) 0.938
+  born   92000  len  1638  ret   -15  act NOOP/UP/DOWN 0.33/0.35/0.32  H3(marg) 1.098  mean H3(target) 0.948
+  born   94000  len  1569  ret   -17  act NOOP/UP/DOWN 0.29/0.34/0.36  H3(marg) 1.095  mean H3(target) 0.952
+  BUFFER: NOOP/UP/DOWN 0.311/0.350/0.339  H3 1.097 (max 1.099)  mean per-step H3(target) 0.861  mean hold 1.61 steps
+=== pong-satstale-2026-09-02  iter 50  env_steps 86986  trajs 13
+  born   74000  len  2041  ret   -15  act NOOP/UP/DOWN 0.35/0.32/0.34  H3(marg) 1.098  mean H3(target) 0.634
+  born   76000  len  2215  ret   -11  act NOOP/UP/DOWN 0.30/0.35/0.35  H3(marg) 1.097  mean H3(target) 0.625
+  born   78000  len  2253  ret   -10  act NOOP/UP/DOWN 0.34/0.32/0.34  H3(marg) 1.098  mean H3(target) 0.644
+  born   80000  len  2337  ret    -9  act NOOP/UP/DOWN 0.33/0.33/0.34  H3(marg) 1.099  mean H3(target) 0.660
+  born   82000  len  2426  ret   -13  act NOOP/UP/DOWN 0.34/0.32/0.34  H3(marg) 1.098  mean H3(target) 0.645
+  born   84000  len  2379  ret    -9  act NOOP/UP/DOWN 0.34/0.33/0.34  H3(marg) 1.098  mean H3(target) 0.662
+  born   86000  len  1626  ret   -16  act NOOP/UP/DOWN 0.34/0.35/0.30  H3(marg) 1.096  mean H3(target) 0.671
+  born   88000  len  2169  ret   -12  act NOOP/UP/DOWN 0.34/0.31/0.35  H3(marg) 1.097  mean H3(target) 0.684
+  born   90000  len  3001  ret    -3  act NOOP/UP/DOWN 0.33/0.33/0.34  H3(marg) 1.098  mean H3(target) 0.693
+  born   92000  len  2434  ret   -12  act NOOP/UP/DOWN 0.34/0.31/0.35  H3(marg) 1.098  mean H3(target) 0.688
+  born   94000  len  2589  ret   +10  act NOOP/UP/DOWN 0.35/0.29/0.35  H3(marg) 1.095  mean H3(target) 0.714
+  born   96000  len  2773  ret    -8  act NOOP/UP/DOWN 0.33/0.33/0.34  H3(marg) 1.098  mean H3(target) 0.726
+  born   98000  len  1860  ret   +17  act NOOP/UP/DOWN 0.40/0.29/0.32  H3(marg) 1.089  mean H3(target) 0.712
+  BUFFER: NOOP/UP/DOWN 0.339/0.321/0.340  H3 1.098 (max 1.099)  mean per-step H3(target) 0.675  mean hold 1.73 steps
+=== pong-vsat2-2026-09-03  iter 50  env_steps 63496  trajs 18
+  born   64000  len  1663  ret   -17  act NOOP/UP/DOWN 0.36/0.30/0.34  H3(marg) 1.096  mean H3(target) 0.650
+  born   66000  len  1478  ret   -18  act NOOP/UP/DOWN 0.35/0.29/0.37  H3(marg) 1.093  mean H3(target) 0.671
+  born   68000  len  1447  ret   -15  act NOOP/UP/DOWN 0.35/0.28/0.37  H3(marg) 1.092  mean H3(target) 0.649
+  born   70000  len  1761  ret   -17  act NOOP/UP/DOWN 0.38/0.27/0.35  H3(marg) 1.088  mean H3(target) 0.672
+  born   72000  len  1689  ret   -17  act NOOP/UP/DOWN 0.35/0.29/0.36  H3(marg) 1.094  mean H3(target) 0.671
+  born   74000  len  1564  ret   -17  act NOOP/UP/DOWN 0.34/0.29/0.36  H3(marg) 1.095  mean H3(target) 0.660
+  born   76000  len  1724  ret   -17  act NOOP/UP/DOWN 0.32/0.31/0.37  H3(marg) 1.096  mean H3(target) 0.671
+  born   78000  len  1592  ret   -18  act NOOP/UP/DOWN 0.36/0.29/0.35  H3(marg) 1.095  mean H3(target) 0.674
+  born   80000  len  1492  ret   -20  act NOOP/UP/DOWN 0.37/0.28/0.35  H3(marg) 1.091  mean H3(target) 0.669
+  born   82000  len  1819  ret   -15  act NOOP/UP/DOWN 0.31/0.32/0.37  H3(marg) 1.095  mean H3(target) 0.660
+  born   84000  len  1907  ret   -15  act NOOP/UP/DOWN 0.33/0.31/0.35  H3(marg) 1.097  mean H3(target) 0.675
+  born   86000  len  1656  ret   -17  act NOOP/UP/DOWN 0.38/0.27/0.35  H3(marg) 1.088  mean H3(target) 0.685
+  born   88000  len  1326  ret   -16  act NOOP/UP/DOWN 0.34/0.29/0.37  H3(marg) 1.093  mean H3(target) 0.686
+  born   90000  len  1581  ret   -14  act NOOP/UP/DOWN 0.35/0.29/0.36  H3(marg) 1.094  mean H3(target) 0.677
+  born   92000  len  1810  ret   -18  act NOOP/UP/DOWN 0.34/0.29/0.38  H3(marg) 1.092  mean H3(target) 0.710
+  born   94000  len  1435  ret   -19  act NOOP/UP/DOWN 0.38/0.25/0.37  H3(marg) 1.082  mean H3(target) 0.681
+  born   96000  len  1911  ret   -17  act NOOP/UP/DOWN 0.38/0.24/0.39  H3(marg) 1.076  mean H3(target) 0.722
+  born   98000  len  1730  ret   -16  act NOOP/UP/DOWN 0.38/0.28/0.34  H3(marg) 1.091  mean H3(target) 0.747
+  BUFFER: NOOP/UP/DOWN 0.354/0.285/0.361  H3 1.093 (max 1.099)  mean per-step H3(target) 0.680  mean hold 1.82 steps
+=== pong-keepnew90-2026-09-08  iter 88  env_steps 212670  trajs 14
+  born  114300  len  2392  ret   -11  act NOOP/UP/DOWN 0.27/0.34/0.38  H3(marg) 1.089  mean H3(target) 0.493
+  born  118000  len  1459  ret   -18  act NOOP/UP/DOWN 0.23/0.39/0.38  H3(marg) 1.073  mean H3(target) 0.506
+  born  121700  len  2576  ret    -9  act NOOP/UP/DOWN 0.28/0.34/0.38  H3(marg) 1.091  mean H3(target) 0.520
+  born  127300  len  2067  ret   -16  act NOOP/UP/DOWN 0.29/0.32/0.39  H3(marg) 1.090  mean H3(target) 0.493
+  born  132000  len  2000  ret   -15  act NOOP/UP/DOWN 0.26/0.34/0.40  H3(marg) 1.084  mean H3(target) 0.504
+  born  140000  len  2186  ret   -11  act NOOP/UP/DOWN 0.27/0.37/0.37  H3(marg) 1.088  mean H3(target) 0.505
+  born  143500  len  2012  ret   -16  act NOOP/UP/DOWN 0.28/0.33/0.39  H3(marg) 1.088  mean H3(target) 0.509
+  born  147000  len  1721  ret   -18  act NOOP/UP/DOWN 0.26/0.34/0.40  H3(marg) 1.085  mean H3(target) 0.500
+  born  152000  len  2134  ret   -16  act NOOP/UP/DOWN 0.28/0.36/0.36  H3(marg) 1.092  mean H3(target) 0.509
+  born  155700  len  2545  ret   -11  act NOOP/UP/DOWN 0.28/0.34/0.38  H3(marg) 1.090  mean H3(target) 0.528
+  born  160000  len  1798  ret   -13  act NOOP/UP/DOWN 0.29/0.33/0.38  H3(marg) 1.093  mean H3(target) 0.525
+  born  164000  len  2347  ret   -11  act NOOP/UP/DOWN 0.26/0.33/0.41  H3(marg) 1.081  mean H3(target) 0.563
+  born  168000  len  2096  ret   -18  act NOOP/UP/DOWN 0.31/0.29/0.40  H3(marg) 1.088  mean H3(target) 0.595
+  born  173800  len  2036  ret   -14  act NOOP/UP/DOWN 0.34/0.28/0.38  H3(marg) 1.091  mean H3(target) 0.656
+  BUFFER: NOOP/UP/DOWN 0.279/0.334/0.387  H3 1.090 (max 1.099)  mean per-step H3(target) 0.530  mean hold 2.04 steps
+DONE
