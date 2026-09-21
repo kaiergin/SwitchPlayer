@@ -678,6 +678,28 @@ ARMS["effzero-repro-vtree-communal8-r12-edge"] = {
             "pong-archfix-2026-08-30 (+17.1 @90).",
 }
 
+# Edge visits at archfix's EXACT recipe (2026-09-21, Kai): the literal
+# archfix arm -- sequential communal engine (no REFRESH_VTREE), coverage
+# 4 per 2 iterations, bootstrap cache OFF (archfix predates the cache and
+# the module default is on) -- with COMMUNAL_EDGE_VISITS the single
+# training delta. Three archfix-recipe runs are its controls instead of
+# r12's one. Run SEQUENTIAL (no --ray), with --snapshot-weights so the
+# counterfactual-dynamics probes can time projector collapse.
+ARMS["effzero-repro-refresh5x-communal-edge"] = {
+    **ARMS["effzero-repro-refresh5x-communal"],
+    "COMMUNAL_EDGE_VISITS": True,
+    "BOOTSTRAP_CACHE": False,
+    "_doc": "effzero-repro-refresh5x-communal (archfix) with "
+            "COMMUNAL_EDGE_VISITS True and BOOTSTRAP_CACHE False (archfix's "
+            "exact value-target builder): communal PUCT and readout count "
+            "edge visits, so the successor root's simulation budget no "
+            "longer lands on each root's behaviour action. Run sequential "
+            "with archfix's command plus --snapshot-weights. Controls: "
+            "pong-archfix-2026-08-30 (+17.1 @90, seed 0), pong-archfix-ray-"
+            "2026-09-11 (-11.4, seed 0), pong-archfix-seq-s1-2026-09-13 "
+            "(-14.0, seed 1).",
+}
+
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
 # archfix's exact refresh SELECTION semantics -- staleness rotation,
 # always-replace, no guard. Deltas vs archfix: parallel stack, fresh-
@@ -1684,6 +1706,7 @@ class Run:
         K = muzero.UNROLL_STEPS
         errs = {"per_step": 0.0, "prefix": 0.0, "control": 0.0, "value": 0.0,
                 "value_control": 0.0, "policy_entropy": 0.0, "policy_maxp": 0.0}
+        projs = []
         if self.replay:
             with torch.no_grad():
                 for _ in range(batches):
@@ -1695,6 +1718,10 @@ class Run:
                     truth = muzero.discounted_prefix_targets(rews, discount=1.0)
 
                     latent = self.trainer.representation(obs[:, 0])
+                    # Target-branch projection of the SAME root latents:
+                    # no extra sampling, no RNG draw, eval-mode BN.
+                    projs.append(self.trainer.projector(
+                        latent, with_prediction=False).float().cpu())
                     policy_logits, value, _ = self.trainer.prediction(latent)
                     errs["value"] += (value.squeeze(-1) - tval[:, 0]).abs().mean().item()
                     errs["value_control"] += tval[:, 0].abs().mean().item()
@@ -1716,6 +1743,8 @@ class Run:
                     errs["prefix"] += (prefix - tgt).abs().mean().item()
                     errs["control"] += tgt.abs().mean().item()
             errs = {k: v / batches for k, v in errs.items()}
+            errs.update(projector_collapse_stats(self.trainer.projector,
+                                                 torch.cat(projs)))
 
         # Search-target flatness, straight from the last recorded episode
         # (2026-08-30 re-audit): policy_entropy above is the HEAD's entropy
@@ -1740,6 +1769,67 @@ NET_NAMES = ("representation", "dynamics", "prediction", "value_prefix",
              "projector")
 OPT_NAMES = ("rep_optimizer", "dyn_optimizer", "pred_optimizer",
              "prefix_optimizer", "proj_optimizer")
+
+
+def projector_collapse_stats(projector, proj):
+    """Dimensional-collapse panel for the SimSiam projector (2026-09-21).
+
+    The counterfactual-dynamics probes found the projection space shrunk to
+    ~5-8 effective dimensions in most plateau runs, with about a third of
+    the head's final BatchNorm gammas dead -- the consistency loss, the
+    densest signal teaching the dynamics, then carries little. archfix
+    (+17.1) kept ~20; an iter-10 model ~45. Those numbers were over a
+    438-state probe set; here the rank is over the diagnostics' buffer
+    samples, so read the TREND within a run, not the absolute level.
+
+    proj_erank: exp(entropy) of the normalized squared singular values of
+    the centered projections (1 = everything on one line).
+    proj_dead_frac: fraction of the final BatchNorm's |gamma| < 0.01.
+
+    Non-finite projections log NaN rather than raise: svdvals throws on
+    NaN/inf, and a logging panel must never kill (and, on resume,
+    crash-loop) a run whose rows used to record the same state."""
+    bns = [m for m in projector.projection
+           if isinstance(m, torch.nn.BatchNorm1d)]
+    dead = round(float((bns[-1].weight.detach().abs() < 0.01).float().mean()), 3)
+    if not bool(torch.isfinite(proj).all()):
+        return {"proj_erank": float("nan"), "proj_dead_frac": dead}
+    x = proj.double()
+    x = x - x.mean(0, keepdim=True)
+    s = torch.linalg.svdvals(x) ** 2
+    if float(s.sum()) > 0:
+        p = s / s.sum()
+        p = p[p > 0]
+        erank = float(torch.exp(-(p * p.log()).sum()))
+    else:
+        erank = 0.0   # every sample identical: no spread at all
+    return {"proj_erank": round(erank, 2), "proj_dead_frac": dead}
+
+
+def weights_blob(run, arm, seed, spec):
+    """A run_one weights file's contents. The final weights and the
+    --snapshot-weights snapshots share it, so every probe loads either."""
+    return {"arm": arm, "seed": seed,
+            "spec": {k: v for k, v in spec.items()},
+            "training_steps": run.trainer.training_steps,
+            **{n: getattr(run.trainer, n).state_dict() for n in NET_NAMES}}
+
+
+def save_weight_snapshot(run, arm, seed, spec, it):
+    """--snapshot-weights: the nets at eval row `it`, in the weights-file
+    format plus the row's iteration. Completed runs otherwise keep only
+    their final weights, and the collapse-timing question needs mid-run
+    models (2026-09-21). Atomic: a kill mid-write leaves the previous file
+    or none, never a torn one. A resumed run replays the rows after its
+    checkpoint, so their snapshots are overwritten by the surviving
+    timeline, matching the jsonl."""
+    d = RESULTS / f"snapshots{TAG}-{arm}-seed{seed}"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"weights-iter{it:03d}.pth"
+    tmp = d / f"weights-iter{it:03d}.pth.tmp"
+    torch.save({**weights_blob(run, arm, seed, spec), "iteration": it}, tmp)
+    os.replace(tmp, path)
+    return path
 
 
 def async_admit(floor, training_steps, admitted_env, ep_steps,
@@ -2671,7 +2761,7 @@ class RayPipeline:
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
             checkpoint_every=10, resume=False, overwrite=False,
             init_weights=None, use_ray=False, ray_workers=0,
-            cpu_actor=False):
+            cpu_actor=False, snapshot_weights=False):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         if use_ray:
             ray_scope_gate(spec)
@@ -2951,19 +3041,11 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                           f"x{muzero.LR_DECAY_FACTOR} at u {v}", flush=True)
                 if v == iterations:
                     ckpt = RESULTS / f"weights{TAG}-{arm}-seed{seed}.pth"
-                    torch.save({
-                        "arm": arm, "seed": seed,
-                        "spec": {k: val for k, val in spec.items()},
-                        "training_steps": run.trainer.training_steps,
-                        "representation":
-                            run.trainer.representation.state_dict(),
-                        "dynamics": run.trainer.dynamics.state_dict(),
-                        "prediction": run.trainer.prediction.state_dict(),
-                        "value_prefix": run.trainer.value_prefix.state_dict(),
-                        "projector": run.trainer.projector.state_dict(),
-                    }, ckpt)
+                    torch.save(weights_blob(run, arm, seed, spec), ckpt)
                     print(f"  saved {ckpt.name}", flush=True)
                 if (eval_every and v % eval_every == 0) or v == iterations:
+                    if snapshot_weights:
+                        save_weight_snapshot(run, arm, seed, spec, v)
                     pipeline.drain_eval()
                     diag = run.evaluate_diagnostics()
                     # The phase-5 spec's required per-row realized ratio.
@@ -3162,21 +3244,18 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 # 4.9 hours of training because nothing here wrote them out,
                 # which made it impossible to watch an agent afterwards or to
                 # resume from one.
+                # The projector rides along (weights_blob) for future warm
+                # starts: a FRESH projector's consistency gradients helped
+                # scramble continuation attempt 1.
                 ckpt = RESULTS / f"weights{TAG}-{arm}-seed{seed}.pth"
-                torch.save({
-                    "arm": arm, "seed": seed, "spec": {k: v for k, v in spec.items()},
-                    "training_steps": run.trainer.training_steps,
-                    "representation": run.trainer.representation.state_dict(),
-                    "dynamics": run.trainer.dynamics.state_dict(),
-                    "prediction": run.trainer.prediction.state_dict(),
-                    "value_prefix": run.trainer.value_prefix.state_dict(),
-                    # For future warm starts: a FRESH projector's consistency
-                    # gradients helped scramble continuation attempt 1.
-                    "projector": run.trainer.projector.state_dict(),
-                }, ckpt)
+                torch.save(weights_blob(run, arm, seed, spec), ckpt)
                 print(f"  saved {ckpt.name}", flush=True)
 
             if (eval_every and it % eval_every == 0) or it == iterations:
+                if snapshot_weights:
+                    # W_it: the weights this row's diagnostics and (in
+                    # --ray, the eval actor's synced copy) episodes see.
+                    save_weight_snapshot(run, arm, seed, spec, it)
                 if pipeline:
                     # Any previous late row first, so rows stay file-ordered.
                     pipeline.drain_eval()
@@ -3385,6 +3464,12 @@ def main():
                          "iteration collects N episodes (one per worker); "
                          "--episodes-per-iter is superseded. Requires "
                          "--ray. 0 = the validated single-actor pipeline.")
+    ap.add_argument("--snapshot-weights", action="store_true",
+                    help="also save the nets at every eval row, to "
+                         "RESULTS/snapshots<TAG>-<arm>-seed<N>/"
+                         "weights-iterNNN.pth (weights-file format, ~50 MB "
+                         "each) -- mid-run models for offline probes. "
+                         "Read-only: training is unaffected.")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
     if args.resume and args.overwrite:
@@ -3448,7 +3533,8 @@ def main():
                         resume=args.resume, overwrite=args.overwrite,
                         init_weights=args.init_weights, use_ray=args.ray,
                         ray_workers=args.ray_workers,
-                        cpu_actor=args.cpu_actor)
+                        cpu_actor=args.cpu_actor,
+                        snapshot_weights=args.snapshot_weights)
     plot(out, RESULTS)
 
 

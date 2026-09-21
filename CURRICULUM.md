@@ -615,6 +615,46 @@ both sharpening and redirection as progress and cannot freeze a
 correctable collapse. Candidate replacement if/when the guard ships in
 anger.
 
+### Campaign record, 2026-09-11 .. 09-21 (archfix replication, edge visits, collapse probes)
+
+- ARCHFIX IS 1 IN 4. The recipe's four runs at iter 90: +17.1 (archfix,
+  seed 0) / -11.4 (check D, same recipe on the Ray stack, seed 0) / -14.0
+  (sequential control, seed 1) / -11.4 (r12: 3x refresh coverage via the
+  vectorized communal engine). All reach a -8..-15 plateau by iter 40-60;
+  only archfix broke out (+3/+16/+17.1 at 80/85/90). The parallel stack is
+  exonerated, and 3x refresh volume did not buy consistency. Single-seed
+  verdicts cannot resolve arm effects smaller than this spread: run >= 2
+  seeds per arm.
+- EDGE VISITS (DESIGN.md "Edge visits", flag COMMUNAL_EDGE_VISITS): in the
+  communal chain tree, root n+1's own simulations were counted on root n's
+  behaviour action. The result was a ~50% behaviour-mass floor in 15/16 of
+  every communal target, and an anti-behaviour cliff at the window's last
+  slot that the policy memorizes. archfix trained on these targets too.
+- EARLY-COLLAPSE HYPOTHESIS (Kai, 09-21): does heavy early refresh with a
+  weak model collapse policy diversity, so the dynamics never learns?
+  Probed (benchmarks/probes/probe_buffer_diversity.py,
+  probe_counterfactual_dynamics.py, probe_counterfactual_latent.py + logs).
+  NOT supported: every buffer, from iter 10 (whole history) through iter
+  88 and including the saturation arms, uses NOOP/UP/DOWN near-uniformly
+  (3-way entropy >= 1.085 of 1.099). The iter-10 model already tells its
+  actions apart (emulator-branched counterfactuals). Rarely-chosen actions
+  are modelled within 5-10 points of favoured ones. FOUND INSTEAD: the
+  SimSiam projector dimensionally collapses in 5 of 7 non-winning models
+  (effective rank 5-8 vs ~20 archfix, 45 at iter 10; ~1/3 of final-BN
+  gammas dead), and archfix has the most action-aware dynamics in both
+  projection and raw latent space. This is correlational (n=1 winner), and
+  control s1 plateaued without collapse. Augmentation is already on in
+  this lineage. Candidate fixes if snapshots show collapse leads the
+  plateau: a variance/covariance hinge on projector outputs, or the lagged
+  target nets as a BYOL-style consistency target.
+- EDGE RUN (launched 09-21): arm effzero-repro-refresh5x-communal-edge =
+  archfix's exact arm + COMMUNAL_EDGE_VISITS + BOOTSTRAP_CACHE off,
+  sequential, seeds 0 and 1 concurrently (pong-edge-s{0,1}-2026-09-21,
+  benchmarks/supervisors/supervise_edge.py). --snapshot-weights keeps the
+  nets at every eval row, and rows now carry proj_erank / proj_dead_frac,
+  so collapse onset can be timed against the plateau. Controls: the three
+  archfix-recipe runs above.
+
 ## Carried decisions from the repro line
 
 Tiny buffer + live refresh direction; entropy-based refresh priority is
