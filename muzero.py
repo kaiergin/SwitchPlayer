@@ -46,8 +46,30 @@ MAX_DEPTH = 8
 # visits the same way). The chain backup's bookkeeping visit is still
 # subtracted -- it is a value-warming device, not search traffic, and
 # unsubtracted it nudges every policy target toward the behaviour action.
+# (COMMUNAL_EDGE_VISITS below also removes the behaviour child's own ROOT
+# visits, which this legacy readout counts as if they were traffic.)
 # PUCT only; with USE_GUMBEL_SEARCH on, reanalysis falls back to sequential.
 USE_COMMUNAL_REANALYSIS = False
+# Edge-visit accounting for the communal window (2026-09-15, from Kai's
+# "does root n+1's search affect root n's policy?" question). The chain
+# node n+1 IS node n's child for the behaviour action, and
+# backup_simulation increments EVERY path node's visit_count, the search
+# root included -- so while root n+1 spends its S simulations, node n's
+# behaviour child gains S visits that no selection at node n ever made.
+# Legacy (False, archfix's semantics) reads them out and lets them shrink
+# the behaviour child's exploration bonus during root n's own search.
+# Measured on r12's checkpoint (window 16, S=50): slots 0-14 of every
+# window read ~50 successor root visits on the behaviour action, a floor
+# of about half the target's mass; slot 15, whose successor waits in the
+# next window, none. True: every node also counts its ROOT visits
+# (root_visits), and both PUCT and the readout use EDGE visits,
+# visit_count - root_visits -- selections that actually crossed the
+# parent->child edge, MCTS's N(s,a). Node VALUES stay communal (Q over
+# every backup through the node, root n+1's own included). The
+# vectorized engine mirrors the flag; the parity gate holds either way.
+# PUCT only, like the communal window itself: the Gumbel paths (per-root,
+# ascending, never concurrent) keep raw visit counts.
+COMMUNAL_EDGE_VISITS = False
 # 16, raised from 8 on 2026-08-30 (Kai): probe on arch1@96k weights, 150
 # positions, 2 noise seeds -- width-16 targets differ from width-8 by
 # LESS than width-8's own noise floor (cross-KL 0.172 vs 0.222) at
@@ -668,6 +690,10 @@ class MCTSNode:
         self.prefix_len = prefix_len
         self.children = {}              # dict: action -> child node
         self.visit_count = 0
+        # Backups that STARTED here (this node as a search root). A chain
+        # node is also its predecessor's behaviour child, so its parent's
+        # edge count is visit_count - root_visits (COMMUNAL_EDGE_VISITS).
+        self.root_visits = 0
         self.value_sum = 0.0
         self.id = uuid.uuid4()
         self.done = False
@@ -1544,7 +1570,8 @@ class MCTSHelper:
     # -----------------------------
     # Backup Phase: Propagate the leaf value up the simulation path.
     # -----------------------------
-    def backup_simulation(self, path, leaf_value, discount=None, min_max_stats=None):
+    def backup_simulation(self, path, leaf_value, discount=None, min_max_stats=None,
+                          count_root=True):
         # Resolved at call time, not baked into the signature: create_tree_from_game
         # calls this without a discount, so a hardcoded default silently pinned the
         # Monte Carlo value targets to 0.997 no matter what DISCOUNT was set to.
@@ -1552,6 +1579,11 @@ class MCTSHelper:
         discount = DISCOUNT if discount is None else discount
         backup_value = leaf_value
         last = len(path) - 1
+        if count_root and path:
+            # The root's own visit crossed no edge into it (see
+            # COMMUNAL_EDGE_VISITS). The chain seeding passes False: its
+            # visits are bookkeeping, not a search.
+            path[0].root_visits += 1
         for i, n in enumerate(reversed(path)):
             n.visit_count += 1
             n.value_sum += backup_value
@@ -1610,7 +1642,7 @@ class MCTSHelper:
         # bootstraps the network's value instead.
         if seed_values:
             leaf_value = 0.0 if terminated else (path[-1].expanded_value or 0.0)
-            self.backup_simulation(path, leaf_value)
+            self.backup_simulation(path, leaf_value, count_root=False)
         self.current_trajectory = path
     
     # DIRICHLET_ALPHA defaults 0.25, MuZero's Atari setting (EfficientZero
@@ -1640,16 +1672,21 @@ class MCTSHelper:
         max_depth = MAX_DEPTH if max_depth is None else max_depth
         stats = self.min_max_stats if min_max_stats is None else min_max_stats
         node = self.current_trajectory[index]
+        # Edge visits: selections that crossed the parent->child edge.
+        # Legacy also counts a chain child's own ROOT visits (see
+        # COMMUNAL_EDGE_VISITS); values (q_value) stay communal.
+        edge = ((lambda c: c.visit_count - c.root_visits) if COMMUNAL_EDGE_VISITS
+                else (lambda c: c.visit_count))
         path = []
         while len(path) < max_depth:
             if not node.is_expanded or node.done:
                 break  # leaf: either not yet expanded, or terminal
             path.append(node)
-            total_visits = sum(child.visit_count + child.virtual_loss for child in node.children.values())
+            total_visits = sum(edge(child) + child.virtual_loss for child in node.children.values())
             best_score = -float('inf')
             best_candidates = []  # List to store (action, child) pairs with highest score.
             for a, child in node.children.items():
-                u = c_puct * child.prior * np.sqrt(total_visits) / (1 + child.visit_count + child.virtual_loss)
+                u = c_puct * child.prior * np.sqrt(total_visits) / (1 + edge(child) + child.virtual_loss)
                 # Score the edge as r + discount * V(child) -- the paper's
                 # Q(s,a). q_value() alone is the value from the child ONWARD:
                 # backup folds the edge reward into the parent's statistics, so
@@ -1681,7 +1718,7 @@ class MCTSHelper:
                     # scaling it toward 0 would be a bonus, so min() holds it
                     # at its own score instead -- no penalty, never a boost
                     # (2026-08-30 re-audit).
-                    n = max(child.visit_count, 1)
+                    n = max(edge(child), 1)
                     score = min(score, score * n / (n + child.virtual_loss))
                 score += u
                 if score > best_score:
@@ -1890,7 +1927,11 @@ class MCTSHelper:
         is read out rather than baseline-subtracted; only the chain backup's
         bookkeeping visit (one per gameplay child, from
         create_tree_from_game, allocated by no search) is removed from the
-        policy target. Roots are NOT released here -- concurrent neighbours
+        policy target -- and, under COMMUNAL_EDGE_VISITS, so are the
+        behaviour child's own ROOT visits: that child is the next chain
+        node, whose search in this window incremented its visit_count
+        once per simulation without ever crossing this root's edge.
+        Roots are NOT released here -- concurrent neighbours
         may still descend through them; the caller frees the whole span with
         release_span once the window is done.
 
@@ -1930,6 +1971,10 @@ class MCTSHelper:
             # such visit -- subtracting would undercount real traffic.
             bookkeeping = ({a: 1 for a, child in root.children.items()
                             if child.is_gameplay} if chain_seeded else {})
+            if COMMUNAL_EDGE_VISITS:
+                for a, child in root.children.items():
+                    if child.is_gameplay:
+                        bookkeeping[a] = bookkeeping.get(a, 0) + child.root_visits
             results[idx] = self.drop_non_gameplay_children_and_compute_improvements(
                 idx, baseline=bookkeeping, release=False)
         return results

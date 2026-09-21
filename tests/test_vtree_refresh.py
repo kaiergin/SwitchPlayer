@@ -218,3 +218,15 @@ def test_vtree_communal8_r12_arm_is_rate_and_cache_only():
     assert daf == {"REFRESH_VTREE": True, "VTREE_COMMUNAL_TRAJS": 8,
                    "POLICY_REFRESH_COUNT": 12, "BOOTSTRAP_CACHE": False}
     assert hasattr(muzero, "BOOTSTRAP_CACHE") and muzero.BOOTSTRAP_CACHE is True
+
+
+def test_vtree_communal8_r12_edge_arm_is_one_flag_from_r12():
+    """The edge-visit arm is exactly r12 + COMMUNAL_EDGE_VISITS; the flag
+    defaults off, so every archived communal run keeps its semantics."""
+    import muzero
+    edge = ablation.ARMS["effzero-repro-vtree-communal8-r12-edge"]
+    r12 = ablation.ARMS["effzero-repro-vtree-communal8-r12"]
+    d = {k: v for k, v in edge.items() if k != "_doc" and r12.get(k) != v}
+    assert d == {"COMMUNAL_EDGE_VISITS": True}
+    assert "COMMUNAL_EDGE_VISITS" not in r12
+    assert muzero.COMMUNAL_EDGE_VISITS is False

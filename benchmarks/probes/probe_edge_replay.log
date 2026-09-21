@@ -1,0 +1,9 @@
+A.L.E: Arcade Learning Environment (version 0.12.0+0706845)
+[Powered by Stella]
+traj 0: len 888, noops 1, first frame mismatch at none (0 total), reward mismatches 0 []
+   frame-mismatch rate by slot: 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00
+traj 1: len 847, noops 2, first frame mismatch at [8, 9, 10, 11, 12] (757 total), reward mismatches 40 [57, 64, 92, 99, 127]
+   frame-mismatch rate by slot: 1.00 0.98 0.98 0.98 0.98 0.98 0.98 0.98 1.00 1.00 1.00 1.00 1.00 1.00 1.00 1.00
+traj 2: len 841, noops 2, first frame mismatch at [12, 13, 14, 15, 16] (829 total), reward mismatches 41 [61, 64, 96, 99, 131]
+   frame-mismatch rate by slot: 1.00 0.98 0.98 0.98 0.98 0.98 0.98 0.98 0.98 0.98 0.98 0.98 1.00 1.00 1.00 1.00
+DONE

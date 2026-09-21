@@ -1,0 +1,15 @@
+A.L.E: Arcade Learning Environment (version 0.12.0+0706845)
+[Powered by Stella]
+ckpt iter 28; S = 50, window = 16
+(1) flag on: plain 16-root windows vs 16 + one lookahead root (searched, not read out)
+ pos     plain: beh_mass argmax=beh   H   |  lookahead: beh_mass argmax=beh   H   |  d(root value)
+   0          0.693    0.862   0.727 |            0.587    0.807   0.961 |  -0.049
+   1          0.679    0.844   0.768 |            0.675    0.826   0.758 |  -0.017
+   2          0.703    0.844   0.716 |            0.696    0.826   0.693 |  +0.006
+  12          0.562    0.648   0.921 |            0.575    0.694   0.907 |  +0.018
+  13          0.526    0.685   0.914 |            0.536    0.676   0.904 |  +0.020
+  14          0.532    0.710   0.953 |            0.549    0.738   0.932 |  +0.023
+  15          0.124    0.131   0.827 |            0.190    0.187   0.900 |  +0.026
+ ALL          0.605    0.728   0.781 |            0.606    0.731   0.789 |  +0.009
+(2) flag OFF control, TRAJS=1 vectorized vs sequential, 887 roots: within 1e-12 on 862/887 (0.972), max |dpol| 3.74e-02, max |dvalue| 3.78e-02
+DONE

@@ -793,3 +793,155 @@ def test_vtree_engine_class_follows_the_communal_flag(monkeypatch):
     assert type(run._vtree_engine()) is muzero_vtree.VectorizedPUCT
     monkeypatch.setattr(muzero, "USE_COMMUNAL_REANALYSIS", True)
     assert type(run._vtree_engine()) is VectorizedCommunalPUCT
+
+
+# --------------------------------------------------------------------------
+# COMMUNAL_EDGE_VISITS (2026-09-15): the successor root's own budget
+# --------------------------------------------------------------------------
+def test_edge_visits_parity_is_exact_at_the_production_window(monkeypatch):
+    """The gate holds with the flag on: both engines run PUCT on edge
+    visits and subtract the behaviour child's root visits at readout."""
+    monkeypatch.setattr(muzero, "COMMUNAL_EDGE_VISITS", True)
+    traj = make_traj(11, 40, True)
+    windows = [list(range(0, 16)), list(range(16, 32)), list(range(32, 39))]
+    run_both(monkeypatch, traj, windows, sims=12)
+
+
+def test_edge_visits_parity_with_root_noise(monkeypatch):
+    monkeypatch.setattr(muzero, "COMMUNAL_EDGE_VISITS", True)
+    traj = make_traj(13, 30, False)
+    windows = [list(range(2, 18)), list(range(18, 30))]
+    run_both(monkeypatch, traj, windows, sims=10, noise=True)
+
+
+def test_edge_visits_remove_the_successor_root_budget(monkeypatch):
+    """Legacy: root n's behaviour-action count carries root n+1's whole
+    simulation budget -- node n+1 IS node n's behaviour child and every
+    backup increments its own root. Flag on: root_visits == sims on each
+    searched root, and the readout equals visits - bookkeeping -
+    root_visits, recomputed by hand off the tree."""
+    traj = make_traj(12, 24, True)
+    window = list(range(4, 20))
+    sims = 9
+    helper, _ = build_world(monkeypatch, noise=True)
+    seq, raw = sequential_windows(helper, traj, [window], sims)
+    for idx in window[:-1]:
+        beh = traj["actions"][idx]
+        # the bookkeeping visit + the successor's sims root visits, before
+        # a single selection at node idx
+        assert raw[idx][beh] >= sims + 1, idx
+    monkeypatch.setattr(muzero, "COMMUNAL_EDGE_VISITS", True)
+    helper, _ = build_world(monkeypatch, noise=True)
+    np.random.seed(5)
+    L = len(traj["actions"])
+    evaluated = helper.eval_obs([(traj["obs"][i], traj["actions"][i],
+                                  traj["rewards"][i]) for i in range(L)])
+    helper.create_tree_from_game(evaluated, terminated=True, seed_values=True)
+    assert all(n.root_visits == 0 for n in helper.current_trajectory), \
+        "the chain seeding is bookkeeping, not a search"
+    res = asyncio.run(helper.run_communal_mcts(
+        window, num_simulations=sims, c_puct=C_PUCT, discount=DISCOUNT,
+        chain_seeded=True))
+    for idx in window:
+        root = helper.current_trajectory[idx]
+        assert root.root_visits == sims, idx
+        beh = traj["actions"][idx]
+        succ = root.children[beh]
+        assert succ is helper.current_trajectory[idx + 1]
+        assert succ.root_visits == (sims if idx + 1 in window else 0), idx
+        expect = np.array([
+            (root.children[a].visit_count
+             - ((1 + root.children[a].root_visits)
+                if root.children[a].is_gameplay else 0))
+            if a in root.children else 0 for a in range(ACTIONS)], dtype=float)
+        assert expect.min() >= 0
+        pol, _, has = res[idx]
+        assert has
+        assert np.allclose(pol, expect / expect.sum(), rtol=0, atol=1e-12), idx
+    helper.current_trajectory = None
+
+
+def test_edge_visits_default_off_keeps_legacy(monkeypatch):
+    """Flag off (the default every archived run used): root_visits still
+    accrues -- sims per searched root -- but nothing reads it: the readout
+    subtracts exactly one bookkeeping visit, so the legacy target carries
+    the successor's whole simulation budget on the behaviour action."""
+    assert muzero.COMMUNAL_EDGE_VISITS is False
+    traj = make_traj(14, 20, True)
+    window = list(range(0, 16))
+    sims = 7
+    helper, _ = build_world(monkeypatch)
+    np.random.seed(5)
+    L = len(traj["actions"])
+    evaluated = helper.eval_obs([(traj["obs"][i], traj["actions"][i],
+                                  traj["rewards"][i]) for i in range(L)])
+    helper.create_tree_from_game(evaluated, terminated=True, seed_values=True)
+    res = asyncio.run(helper.run_communal_mcts(
+        window, num_simulations=sims, c_puct=C_PUCT, discount=DISCOUNT,
+        chain_seeded=True))
+    for idx in window:
+        root = helper.current_trajectory[idx]
+        assert root.root_visits == sims, idx
+        beh = traj["actions"][idx]
+        counts = np.array([root.children[a].visit_count if a in root.children
+                           else 0 for a in range(ACTIONS)], dtype=float)
+        counts[beh] -= 1
+        assert np.allclose(res[idx][0], counts / counts.sum(), rtol=0,
+                           atol=1e-12), idx
+        if idx + 1 in window:
+            assert root.children[beh].visit_count >= sims + 1, idx
+    helper.current_trajectory = None
+
+
+def test_edge_visits_change_the_search_not_just_the_readout(monkeypatch):
+    """Negative control for the selection-side claim: the flag removes
+    the successor's sims from the behaviour child's u-term denominator,
+    so the TREE (raw visit counts, before any readout) must differ from
+    legacy at some root of the same window under the same seeds."""
+    traj = make_traj(15, 24, True)
+    window = list(range(2, 18))
+    helper, _ = build_world(monkeypatch, noise=True)
+    _, raw_off = sequential_windows(helper, traj, [window], sims=10)
+    monkeypatch.setattr(muzero, "COMMUNAL_EDGE_VISITS", True)
+    helper, _ = build_world(monkeypatch, noise=True)
+    _, raw_on = sequential_windows(helper, traj, [window], sims=10)
+    assert any(raw_on[i] != raw_off[i] for i in window), \
+        "edge-visit PUCT must reallocate at least one simulation"
+
+
+def test_edge_visits_select_on_edge_counts(monkeypatch):
+    """Unit pin on selection_task_no_expand. A behaviour child carrying
+    50 successor root visits (visit 51, root_visits 50) against an
+    imagined sibling (visit 1), equal priors. Legacy: the +50 crushes the
+    behaviour child's exploration term (u 0.09 vs 2.25), so the imagined
+    child wins despite a far lower Q. Flag on: edge counts 1 vs 1, equal
+    u, the higher Q -- the behaviour child -- wins."""
+    helper, _ = build_world(monkeypatch)
+
+    def tree():
+        root = muzero.MCTSNode(latent=None, prior=1.0)
+        root.is_expanded = True
+        gp = muzero.MCTSNode(latent=None, prior=0.5, reward=0.0,
+                             is_gameplay=True)
+        gp.visit_count, gp.root_visits, gp.value_sum = 51, 50, 51 * 0.8
+        im = muzero.MCTSNode(latent=None, prior=0.5, reward=0.0)
+        im.visit_count, im.value_sum = 1, 0.2
+        root.children = {0: gp, 1: im}
+        helper.current_trajectory = [root]
+        stats = muzero.MinMaxStats()
+        stats.update(0.0)
+        stats.update(1.0)
+        return root, gp, im, stats
+
+    def chosen():
+        root, gp, im, stats = tree()
+        asyncio.run(helper.selection_task_no_expand(
+            0, c_puct=1.25, discount=0.99, min_max_stats=stats))
+        leaf, path = helper.selection_results.get_nowait()
+        assert path == [root, leaf]
+        return "gameplay" if leaf is gp else "imagined"
+
+    assert chosen() == "imagined"
+    monkeypatch.setattr(muzero, "COMMUNAL_EDGE_VISITS", True)
+    assert chosen() == "gameplay"
+    helper.current_trajectory = None
