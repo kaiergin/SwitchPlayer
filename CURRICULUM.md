@@ -615,6 +615,100 @@ both sharpening and redirection as progress and cannot freeze a
 correctable collapse. Candidate replacement if/when the guard ships in
 anger.
 
+### Future experiment — search-based value estimation (EZ-V2 SVE; Kai, 2026-09-21; designed, not built)
+
+WHAT IT IS (verified against arXiv 2403.00564 and the released code, 2026-09-21):
+the value target for STALE samples is the search's root value, i.e. the
+empirical mean of the N bootstrapped estimates
+V̂_n = Σ_{t<H(n)} γ^t r̂_t + γ^{H(n)} V̂(ŝ_{H(n)}). This is exactly our
+`node.q_value()` at a root. Mixed target (released code, ez/agents/base.py):
+- before `start_use_mix_training_steps` (3e4 training steps): the TD target
+  everywhere;
+- after it: TD for samples among the newest `mixed_value_threshold` (5e3)
+  transitions, and the search value otherwise. The choice is made per
+  sampled root and applied to all unroll positions.
+- The paper states T1 = 4e4 and T2 = 2e4. The code wins (the lineage rule).
+- Their search values come from batch-time reanalysis: 16-sim Gumbel through
+  the target model (synced every 200 steps), at every unroll position. That
+  costs them nothing extra, because they already re-search every position
+  for policy targets.
+- Their SVE ablations are DMC-only (Reacher Hard 795 vs 591 with TD;
+  Cartpole Swingup Sparse 764 vs 632). There is no Atari ablation, and
+  their README says some Atari results do not reproduce with the released
+  code.
+
+EXPECTATIONS HERE (honest priors):
+- The paper's motivation (stale multi-step TD embeds an old policy's
+  rewards) is WEAK for us. The 31.25k buffer spans only ~10-25 iterations,
+  and Pong's rewards are sparse, so a 5-step TD target is mostly
+  γ^5 · v_target(s_{t+5}). The old policy's influence is 5 decisions of path.
+- What SVE might still buy: the value of the SEARCH (improved) policy,
+  averaged over 50 imagined paths, instead of one bootstrap read. That means
+  lower variance and faster propagation of policy improvement into V.
+- Risk: at T2 = 5k, SVE sets ~84% of our value targets, and those lose their
+  link to real rewards (the search sees only predicted rewards). Our
+  2026-09-21 probes found plateau runs' dynamics weakly action-aware, with
+  the projector collapsed. There, SVE ≈ the value net echoing itself; the
+  paper itself warns that model error amplifies SVE error. Read the edge
+  run's proj_erank before trusting any SVE result.
+
+DESIGN (flag-gated, default off; build on a worktree branch `sve`, because
+the live runs execute from the main working tree):
+- `VALUE_TARGET_MODE` "td" (default = today, bit-identical) | "mixed", plus
+  `SVE_START_TRAIN_STEPS` (3e4) and `SVE_FRESH_TRANSITIONS` (5e3).
+- Freshness = transition recency counted from the FIFO buffer's end, per
+  sampled root (EZ-V2's buffer-index rule), in prepare_batch_paper.
+  Terminal padding stays 0; truncated tails keep today's handling.
+- SVE SOURCE, stage 1 = the STORED root_value: written by the acting search
+  (online net, with root noise) and overwritten by every refresh (lagged
+  target net, communal root value). It needs zero extra compute. Its gap vs
+  EZ-V2: our values can be up to ~refresh-rotation-period old, not ≤200
+  steps. Stamp `root_value_step` on every write so the age is measurable.
+- SVE SOURCE, stage 2 (only if stage 1 shows signal, or stored-value age is
+  the suspect) = batch-time fresh-root search through the target nets at 16
+  sims, cached per target sync keyed (id(traj), pos). This is the
+  BOOTSTRAP_CACHE machinery with a search in place of the value-head
+  forward, restricted to SVE-masked positions. Estimated +0.2-0.5 s/step
+  (1.3-2x wall clock); measure before committing.
+- Priorities need no change: the writeback uses target_value[:, 0], so SVE
+  samples get |v − SVE| automatically.
+- Row diagnostics:
+  - sve_frac: share of value targets taken from search;
+  - sve_td_gap: mean |SVE − TD| where SVE is used. ~0 means SVE is a no-op;
+  - sve_td_bias: mean SVE − TD. Positive means optimistic;
+  - sve_value_age: training steps since the stored value was written.
+- Tests:
+  - "td" batches bitwise identical to today's, values and RNG;
+  - the mask pinned (T1 gate, fresh window at a trajectory boundary, padding
+    and truncated tails);
+  - every test counterfactual-checked (the lineage rule).
+
+STAGE 0 PROBE (before building; run on CPU so the live runs keep the GPU):
+use arch1 @48 (archfix's arm, with buffer and target nets) and keepnew90
+@88. On stale positions, compare three values:
+- the trainer's TD target;
+- the stored root_value;
+- a FRESH search value (target nets, 50 and 16 sims, no noise).
+On the newest trajectories, score all three against the realized
+discounted return. Questions:
+1. Is |SVE − TD| big enough to matter?
+2. How much does stored staleness cost versus a fresh search (stage 1 vs
+   stage 2)?
+3. Which estimate is closest to realized returns where they are nearly
+   on-policy?
+If the gap is tiny, or SVE is further from realized returns than TD, stop
+here.
+
+RUN: the best recipe after the edge pair reports (archfix + edge if the fix
+helps, archfix otherwise) + VALUE_TARGET_MODE mixed. Seeds 0 and 1
+concurrently, sequential, --snapshot-weights. Pre-registered reads:
+- mechanism: sve_td_gap clearly nonzero, and sve_frac ≈ 0.8 after iter 15;
+- outcome: mean return over iters 40-75 versus the same-seed controls, plus
+  crossings at 75-90. Both seeds crossing is strong evidence; one crossing
+  is weak (~44% at the old 1-in-4 rate);
+- stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
+  after T1 (a self-echo blow-up).
+
 ### Campaign record, 2026-09-11 .. 09-21 (archfix replication, edge visits, collapse probes)
 
 - ARCHFIX IS 1 IN 4. The recipe's four runs at iter 90: +17.1 (archfix,
@@ -642,11 +736,27 @@ anger.
   SimSiam projector dimensionally collapses in 5 of 7 non-winning models
   (effective rank 5-8 vs ~20 archfix, 45 at iter 10; ~1/3 of final-BN
   gammas dead), and archfix has the most action-aware dynamics in both
-  projection and raw latent space. This is correlational (n=1 winner), and
-  control s1 plateaued without collapse. Augmentation is already on in
-  this lineage. Candidate fixes if snapshots show collapse leads the
-  plateau: a variance/covariance hinge on projector outputs, or the lagged
-  target nets as a BYOL-style consistency target.
+  projection and raw latent space. This is correlational (n=1 winner).
+  Augmentation is already on in this lineage. Candidate fixes if snapshots
+  show collapse leads the plateau: a variance/covariance hinge on projector
+  outputs, or the lagged target nets as a BYOL-style consistency target.
+- CORRECTION 09-22 (benchmarks/probes/probe_erank_artifact.py + log): the
+  ranks above were EVAL-mode projections. BatchNorm running stats lag the
+  batches, so eval mode understates collapse. Measured with batch
+  statistics, as the consistency loss sees it:
+  - FINALS: archfix 23.5; check D 4.6, control s1 4.5, r12 3.2. So control
+    s1 IS collapsed, and collapse separates the one winner from all three
+    non-winners.
+  - EARLY COLLAPSE IS UNIVERSAL: 53 at vsat @10, then 1.9-2.8 in every
+    mid-run checkpoint (vtree @26, throttle @26, satguard @34, arch1 @48,
+    satstale @50) and in both edge seeds by iter 15-20.
+  - The raw latent never collapses (rank 83-126, rising).
+  - Reading: archfix recovered from, or escaped, a collapse that every run
+    goes through by iter ~20. Recovery-then-breakout vs breakout-then-
+    recovery is untestable without its snapshots. The edge run's snapshots
+    can time it if either seed breaks out.
+  - The rows' proj_erank (eval mode) lags. For analysis, use batch
+    statistics on the snapshots.
 - EDGE RUN (launched 09-21): arm effzero-repro-refresh5x-communal-edge =
   archfix's exact arm + COMMUNAL_EDGE_VISITS + BOOTSTRAP_CACHE off,
   sequential, seeds 0 and 1 concurrently (pong-edge-s{0,1}-2026-09-21,

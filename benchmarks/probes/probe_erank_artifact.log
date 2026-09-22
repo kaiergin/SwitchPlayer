@@ -1,0 +1,20 @@
+A.L.E: Arcade Learning Environment (version 0.12.0+0706845)
+[Powered by Stella]
+states 384
+s1 @10        erank eval  60.88  batch-stats  59.60  latent   83.3  | eval per-dim std: top1 1.42 top2 1.24 median 0.684  | final-BN running_var min 0.302 median 1.33  | dead |g|<0.01 0.000
+s1 @15        erank eval  23.82  batch-stats   2.62  latent   93.0  | eval per-dim std: top1 1.62 top2 1.58 median 0.093  | final-BN running_var min 0.419 median 65.1  | dead |g|<0.01 0.000
+s1 @20        erank eval   9.28  batch-stats   1.95  latent   99.2  | eval per-dim std: top1 1.39 top2 1.36 median 0.0577  | final-BN running_var min 0.812 median 81.7  | dead |g|<0.01 0.000
+s1 @25        erank eval   1.14  batch-stats   1.49  latent  101.9  | eval per-dim std: top1 2.02 top2 2.01 median 0.935  | final-BN running_var min 0.735 median 80.7  | dead |g|<0.01 0.000
+s0 @10        erank eval  19.68  batch-stats  33.52  latent   82.4  | eval per-dim std: top1 1.59 top2 1.51 median 0.783  | final-BN running_var min 0.368 median 2.04  | dead |g|<0.01 0.000
+s0 @20        erank eval  11.32  batch-stats   2.41  latent   99.2  | eval per-dim std: top1 1.92 top2 1.35 median 0.109  | final-BN running_var min 0.79 median 53.6  | dead |g|<0.01 0.000
+archfix +17.1 erank eval  16.42  batch-stats  23.46  latent  113.0  | eval per-dim std: top1 2.21 top2 1.98 median 0.405  | final-BN running_var min 0.0101 median 0.0616  | dead |g|<0.01 0.022
+checkD -11.4  erank eval   9.17  batch-stats   4.62  latent  125.8  | eval per-dim std: top1 0.462 top2 0.335 median 0.00393  | final-BN running_var min 0.351 median 23.2  | dead |g|<0.01 0.351
+ctrl s1 -14   erank eval  17.91  batch-stats   4.49  latent  102.1  | eval per-dim std: top1 1.43 top2 1.32 median 0.156  | final-BN running_var min 0.0125 median 0.198  | dead |g|<0.01 0.008
+r12 -11.4     erank eval   4.80  batch-stats   3.17  latent  123.6  | eval per-dim std: top1 1.01 top2 0.572 median 0.00754  | final-BN running_var min 0.0887 median 28.4  | dead |g|<0.01 0.334
+vsat ck @10   erank eval  55.90  batch-stats  53.18  latent   84.7  | eval per-dim std: top1 1.34 top2 1.33 median 0.668  | final-BN running_var min 0.467 median 2.18  | dead |g|<0.01 0.000
+vtree ck @26  erank eval   7.25  batch-stats   2.60  latent  108.9  | eval per-dim std: top1 0.952 top2 0.94 median 0.0605  | final-BN running_var min 0.378 median 25.7  | dead |g|<0.01 0.000
+throttle @26  erank eval  12.78  batch-stats   2.81  latent  101.2  | eval per-dim std: top1 1.06 top2 0.999 median 0.0291  | final-BN running_var min 0.535 median 50.7  | dead |g|<0.01 0.000
+satguard @34  erank eval  11.49  batch-stats   2.47  latent  100.6  | eval per-dim std: top1 0.882 top2 0.782 median 0.0428  | final-BN running_var min 0.436 median 34.3  | dead |g|<0.01 0.000
+arch1 ck @48  erank eval   5.79  batch-stats   1.90  latent  117.7  | eval per-dim std: top1 0.806 top2 0.477 median 0.00561  | final-BN running_var min 0.937 median 104  | dead |g|<0.01 0.072
+satstale @50  erank eval   6.97  batch-stats   2.35  latent  100.4  | eval per-dim std: top1 1.11 top2 0.975 median 0.0379  | final-BN running_var min 0.386 median 38.9  | dead |g|<0.01 0.007
+DONE
