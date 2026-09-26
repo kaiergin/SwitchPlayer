@@ -11,6 +11,7 @@ import time
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
 import muzero
 from muzero import (CONSISTENCY_LOSS_WEIGHT, GAME_FPS, LATENT_GRADIENT_SCALE,
@@ -201,6 +202,76 @@ def test_augmentation_stays_in_valid_range():
     out = muzero.augment_observations(torch.rand(4, 2, 3, 8, 8))
     assert out.min().item() >= 0.0
     assert out.max().item() <= 1.0
+
+
+def _shared_draw_reference(obs, shift, intensity):
+    """augment_observations as it was before AUG_INDEPENDENT_TARGETS
+    (459740f1), verbatim, to pin the default path bitwise, RNG included."""
+    B, T, C, H, W = obs.shape
+    flat = obs.reshape(B * T, C, H, W)
+    padded = F.pad(flat, (shift, shift, shift, shift), mode="replicate")
+    out = torch.empty_like(flat)
+    dx = torch.randint(0, 2 * shift + 1, (B,))
+    dy = torch.randint(0, 2 * shift + 1, (B,))
+    for b in range(B):
+        rows = slice(int(dy[b]), int(dy[b]) + H)
+        cols = slice(int(dx[b]), int(dx[b]) + W)
+        out[b * T:(b + 1) * T] = padded[b * T:(b + 1) * T, :, rows, cols]
+    out = out.view(B, T, C, H, W)
+    if intensity:
+        scale = 1.0 + intensity * torch.randn(
+            B, 1, 1, 1, 1, device=obs.device).clamp_(-2.0, 2.0)
+        out = out * scale
+    return out.clamp_(0.0, 1.0)
+
+
+def test_shared_draw_is_the_default_and_bitwise_unchanged():
+    """Every archived arm runs the default; it must reproduce the original
+    function exactly, outputs and RNG stream both."""
+    assert muzero.AUG_INDEPENDENT_TARGETS is False
+    obs = torch.rand(6, 6, 3, 12, 12)
+    torch.manual_seed(7)
+    want = _shared_draw_reference(obs, 4, 0.05)
+    after_want = torch.rand(3)
+    torch.manual_seed(7)
+    got = muzero.augment_observations(obs, shift=4, intensity=0.05)
+    after_got = torch.rand(3)
+    assert torch.equal(got, want)
+    assert torch.equal(after_got, after_want)
+
+
+def test_independent_draws_decouple_root_from_targets():
+    """EfficientZero's layout: the root has its own draw, the targets share
+    another. Identical steps in, so any root/target difference is the draw."""
+    torch.manual_seed(0)
+    obs = torch.rand(16, 1, 2, 10, 10).repeat(1, 4, 1, 1, 1)
+    out = muzero.augment_observations(obs, shift=2, intensity=0.0,
+                                      independent_targets=True)
+    assert out.shape == obs.shape
+    for t in range(2, 4):
+        assert torch.equal(out[:, 1], out[:, t]), "targets must share one draw"
+    differs = (out[:, 0] != out[:, 1]).reshape(16, -1).any(dim=1)
+    assert differs.sum() >= 8, f"root matched the targets in {16 - differs.sum()}/16 samples"
+    # Intensity is drawn independently too.
+    torch.manual_seed(0)
+    out = muzero.augment_observations(obs, shift=0, intensity=0.05,
+                                      independent_targets=True)
+    ratio = (out[:, 0] / out[:, 1].clamp_min(1e-6)).reshape(16, -1)
+    assert ((ratio - 1).abs().max(dim=1).values > 1e-4).sum() >= 8
+
+
+def test_independent_flag_is_read_at_call_time():
+    """Arms set muzero.AUG_INDEPENDENT_TARGETS through arm_config; the default
+    argument must read the module global at call time, not capture it."""
+    obs = torch.rand(16, 1, 2, 10, 10).repeat(1, 3, 1, 1, 1)
+    saved = muzero.AUG_INDEPENDENT_TARGETS
+    try:
+        muzero.AUG_INDEPENDENT_TARGETS = True
+        torch.manual_seed(0)
+        out = muzero.augment_observations(obs, shift=2, intensity=0.0)
+    finally:
+        muzero.AUG_INDEPENDENT_TARGETS = saved
+    assert (out[:, 0] != out[:, 1]).reshape(16, -1).any(dim=1).sum() >= 8
 
 
 def test_augmentation_flag_is_read_at_call_time():

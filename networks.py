@@ -68,8 +68,13 @@ class RepresentationNetwork(nn.Module):
     small spatial sizes rather than large ones.
     """
 
-    def __init__(self, input_channels=3, latent_channels=128, trunk_blocks=2):
+    def __init__(self, input_channels=3, latent_channels=128, trunk_blocks=2,
+                 renormalize=True):
         super(RepresentationNetwork, self).__init__()
+        # Appendix G min-max scaling of the emitted latent. A plain attribute,
+        # not a buffer: weight files stay interchangeable. EfficientZero's
+        # Atari config runs without it (muzero.LATENT_RENORMALIZE).
+        self.renormalize_output = renormalize
         self.relu = nn.ReLU(inplace=False)
         c1, c2 = max(latent_channels // 4, 8), max(latent_channels // 2, 16)
 
@@ -107,7 +112,8 @@ class RepresentationNetwork(nn.Module):
         for block in self.trunk:
             x = block(x)
         # latent state of shape (batch, latent_channels, 6, 6), scaled to [0,1]
-        return renormalize(x)
+        # unless renormalization is off
+        return renormalize(x) if self.renormalize_output else x
 
 # The support and the encode/decode pair live in scalar_categorical, so the
 # transform applied to targets and the one undone on predictions cannot drift
@@ -213,8 +219,9 @@ class DynamicsNetwork(nn.Module):
 
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
                  pool=(6, 6), transform=True, blocks=2, action_encoding="embed",
-                 reward_channels=32):
+                 reward_channels=32, renormalize=True):
         super(DynamicsNetwork, self).__init__()
+        self.renormalize_output = renormalize   # see RepresentationNetwork
         # See PredictionNetwork: must match the encode side's transform flag.
         self.transform = transform
         self.pool = pool
@@ -275,7 +282,8 @@ class DynamicsNetwork(nn.Module):
             x = block(x)
         # Appendix G scaling on the emitted state; the reward branch below
         # reads the same renormalized latent every other head will see.
-        x = renormalize(x)
+        if self.renormalize_output:
+            x = renormalize(x)
         next_latent = x
 
         # Reward branch:

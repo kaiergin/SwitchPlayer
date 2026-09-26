@@ -34,6 +34,21 @@ def test_edge_arm_is_archfix_plus_exactly_two_flags():
     assert not edge.get("REFRESH_VTREE") and edge["USE_COMMUNAL_REANALYSIS"]
 
 
+def test_augfix_arm_is_edge_plus_exactly_the_augmentation_flag():
+    edge = ablation.ARMS["effzero-repro-refresh5x-communal-edge"]
+    fix = ablation.ARMS["effzero-repro-refresh5x-communal-edge-augfix"]
+    delta = {k for k in set(edge) | set(fix)
+             if k != "_doc" and edge.get(k, "<absent>") != fix.get(k, "<absent>")}
+    assert delta == {"AUG_INDEPENDENT_TARGETS"}
+    # A real delta against the module default the edge pair ran under.
+    assert fix["AUG_INDEPENDENT_TARGETS"] is True
+    assert muzero.AUG_INDEPENDENT_TARGETS is False
+    assert fix["USE_AUGMENTATION"] is True
+    with ablation.arm_config("effzero-repro-refresh5x-communal-edge-augfix"):
+        assert muzero.AUG_INDEPENDENT_TARGETS is True
+    assert muzero.AUG_INDEPENDENT_TARGETS is False
+
+
 def test_projector_collapse_stats_measure_spread_and_dead_gammas():
     torch.manual_seed(0)
     proj_net = muzero.build_projector()

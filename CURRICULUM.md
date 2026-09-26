@@ -617,6 +617,14 @@ anger.
 
 ### Future experiment — search-based value estimation (EZ-V2 SVE; Kai, 2026-09-21; designed, not built)
 
+DECISION (Kai, 2026-09-24): fresh window T2 = 2e4 transitions (the paper's
+value), not the released code's 5e3. Our stored search values are staler
+than EZ-V2's batch-time reanalysis (our refresh is less complete), so SVE is
+applied only to the oldest samples. With the 31,250-transition buffer that is
+~36% of value targets once the buffer is full (11,250 / 31,250), not ~84%.
+SVE is the next arm after the edge pair. T1 (start step: code 3e4 vs paper
+4e4) and whether to run the stage-0 probe first are still open.
+
 WHAT IT IS (verified against arXiv 2403.00564 and the released code, 2026-09-21):
 the value target for STALE samples is the search's root value, i.e. the
 empirical mean of the N bootstrapped estimates
@@ -655,7 +663,7 @@ EXPECTATIONS HERE (honest priors):
 DESIGN (flag-gated, default off; build on a worktree branch `sve`, because
 the live runs execute from the main working tree):
 - `VALUE_TARGET_MODE` "td" (default = today, bit-identical) | "mixed", plus
-  `SVE_START_TRAIN_STEPS` (3e4) and `SVE_FRESH_TRANSITIONS` (5e3).
+  `SVE_START_TRAIN_STEPS` (3e4) and `SVE_FRESH_TRANSITIONS` (2e4; Kai 2026-09-24).
 - Freshness = transition recency counted from the FIFO buffer's end, per
   sampled root (EZ-V2's buffer-index rule), in prepare_batch_paper.
   Terminal padding stays 0; truncated tails keep today's handling.
@@ -702,12 +710,45 @@ here.
 RUN: the best recipe after the edge pair reports (archfix + edge if the fix
 helps, archfix otherwise) + VALUE_TARGET_MODE mixed. Seeds 0 and 1
 concurrently, sequential, --snapshot-weights. Pre-registered reads:
-- mechanism: sve_td_gap clearly nonzero, and sve_frac ≈ 0.8 after iter 15;
+- mechanism: sve_td_gap clearly nonzero, and sve_frac ≈ 0.36 after iter 15 (T2 = 2e4);
 - outcome: mean return over iters 40-75 versus the same-seed controls, plus
   crossings at 75-90. Both seeds crossing is strong evidence; one crossing
   is weak (~44% at the old 1-in-4 rate);
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
+
+### Campaign record, 2026-09-22 .. 09-26 (edge pair, fidelity audit, the faithful run)
+
+- EDGE PAIR FINAL (iter 90): s0 −8.0, s1 −9.0. Both beat the three non-winning
+  archfix-recipe runs (−11.4/−14.0/−11.4), no breakout. Both projectors
+  collapsed (batch-stat rank ~2 by iter 15; 33-48% dead final-BN gammas).
+- COLLAPSE MECHANISM (probe_shift_collapse): augment_observations shared ONE
+  shift/intensity draw between the online root and the SimSiam targets, so the
+  shift was the one feature the consistency loss could always match. Collapsed
+  projectors encoded 83-85% shift, 2-5% game state. EfficientZero's released
+  code draws root and targets independently (core/train.py:73-75).
+- FIDELITY AUDIT (two fresh agents, then two more on the fix): verified
+  deviations from EfficientZero's released code -- shared augmentation draw,
+  AdamW 3e-4 instead of SGD 0.2/0.9/1e-4 with a 1000-step warmup, gradient
+  placement (their whole loss x1/K incl. step 0; hook halves heads too),
+  min-max latent renormalisation (their Atari config: off), no consistency
+  mask past trajectory ends, clamp after intensity jitter. All ported as
+  default-off flags; arm effzero-repro-refresh5x-communal-edge-faithful turns
+  them all on (plus a non-finite-gradient skip, their AMP scaler's behaviour).
+  tests/test_effzero_fidelity.py: every flag mutation-checked.
+- THE FAITHFUL RUN (pong-faithful-s{0,1}-2026-09-24, sequential, seeds 0/1,
+  rows = mean of 8 eval games): no projector collapse in either seed (rank
+  41-85 throughout, 99% game state, one-step action discrimination 0.8-0.99
+  vs ~0.54 in every earlier model). Scores: s0 −13.2/−4.1/−1.4/+18.25/+21.0
+  at iters 25/35/50/55/65; s1 −11.4/−9.1/−1.4/+11.75/+19.0. At iter 55
+  (~101k env steps, the Atari-100k budget) the 2-seed mean is +15.0 vs
+  EfficientZero's published 20.1. Both seeds ~+18.5 at iter 80. Archfix
+  needed ~150k steps for +17.1 and was 1 in 4; this recipe is 2 for 2.
+- OPEN: transient BN-statistics dips (eval-mode running stats drift from the
+  network's activations; prior flattens; s0 −20.2 at iter 30, −19.1 at 45;
+  both recovered within one row). Model is fine under batch statistics
+  (probe_prior_bn_mismatch). Every dip so far falls at a schedule boundary
+  (horizon decay ~iter 27, visit temperature at 45 and 67.5). Unverified.
 
 ### Campaign record, 2026-09-11 .. 09-21 (archfix replication, edge visits, collapse probes)
 

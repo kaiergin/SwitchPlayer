@@ -700,6 +700,61 @@ ARMS["effzero-repro-refresh5x-communal-edge"] = {
             "(-14.0, seed 1).",
 }
 
+# Augmentation fidelity fix (2026-09-24, Kai; audit finding H1): the edge arm
+# with the online root and the SimSiam targets augmented by INDEPENDENT draws,
+# as EfficientZero's released code does. The single delta against the edge
+# pair, whose per-eval snapshots time the collapse (batch-stat projector rank
+# 34-55 at iter 10 -> 2.5-3.8 at iter 15, both seeds), so the readout is
+# probe_counterfactual_edge / probe_shift_collapse on this arm's snapshots at
+# iters 15-30, not the return at 90. Same seeds, same command.
+ARMS["effzero-repro-refresh5x-communal-edge-augfix"] = {
+    **ARMS["effzero-repro-refresh5x-communal-edge"],
+    "AUG_INDEPENDENT_TARGETS": True,
+    "_doc": "effzero-repro-refresh5x-communal-edge with "
+            "AUG_INDEPENDENT_TARGETS True: the online root and the SimSiam "
+            "targets get independent shift/intensity draws (EfficientZero "
+            "core/train.py:73-75) instead of one shared draw, which let the "
+            "consistency loss match on the shift (collapsed projectors "
+            "encoded 83-85% shift, probe_shift_collapse). Run with the edge "
+            "command. Controls: pong-edge-s0/s1-2026-09-21 (same seeds, "
+            "per-eval snapshots).",
+}
+
+# EfficientZero-fidelity bundle (2026-09-24, Kai: apply every verified
+# deviation from the 09-24 audit at once, audit, run). The edge arm plus:
+# independent augmentation draws and no clamp (H1, L2), EfficientZero's
+# optimizer -- SGD lr 0.2, momentum 0.9, coupled weight decay 1e-4, 1000-step
+# linear warmup, constant after (H2) -- their gradient placement (M2, coupled
+# to SGD: without it step 0 would take 5x their step), the consistency mask
+# past trajectory ends (L1), and no latent min-max renormalisation (M1).
+# Plus a safety net: skip non-finite gradient steps (their AMP GradScaler
+# does; in fp32 one NaN step would poison weights and momentum for good).
+# Deliberately NOT included: AMP, 64 channels, PER-off, affine=False
+# (SimSiam's, not EfficientZero's). A reproduction question, not an
+# attribution one: if it helps, bisect only if needed. Kill early on loss
+# divergence/NaN, or on a batch-stat projector collapse by iters 15-20 like
+# the edge pair's.
+ARMS["effzero-repro-refresh5x-communal-edge-faithful"] = {
+    **ARMS["effzero-repro-refresh5x-communal-edge"],
+    "AUG_INDEPENDENT_TARGETS": True,
+    "AUG_CLAMP": False,
+    "OPTIMIZER": "sgd",
+    "LEARNING_RATE": 0.2,
+    "LR_WARMUP_STEPS": 1000,
+    "EFFZERO_LOSS_SCALING": True,
+    "CONSISTENCY_MASK_PADDING": True,
+    "LATENT_RENORMALIZE": False,
+    "SKIP_NONFINITE_GRAD_STEPS": True,
+    "_doc": "effzero-repro-refresh5x-communal-edge with every verified "
+            "deviation from EfficientZero's released code closed: "
+            "independent root/target augmentation, no clamp, SGD 0.2 / "
+            "momentum 0.9 / wd 1e-4 with a 1000-step warmup, whole-loss 1/K "
+            "and pre-head 0.5 gradient hook, consistency masked past "
+            "trajectory ends, no latent renormalisation; non-finite gradient "
+            "steps skipped (their AMP scaler's behaviour). Run with the edge "
+            "command. Controls: pong-edge-s0/s1-2026-09-21.",
+}
+
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
 # archfix's exact refresh SELECTION semantics -- staleness rotation,
 # always-replace, no guard. Deltas vs archfix: parallel stack, fresh-
@@ -2214,6 +2269,16 @@ def load_init_weights(trainer, path, arm=None):
     quickly). Strict loads: an architecture mismatch must fail loudly, not
     silently skip tensors. Returns the file's recorded training_steps."""
     state = _read_checkpoint(pathlib.Path(path))
+    # Latent renormalisation is a plain attribute, invisible to a strict
+    # state_dict load: a file trained with the other setting would load
+    # cleanly and then run under the wrong latent scaling. Files predating
+    # the flag were all trained with it on.
+    file_renorm = (state.get("spec") or {}).get("LATENT_RENORMALIZE", True)
+    live_renorm = getattr(trainer.representation, "renormalize_output", True)
+    if file_renorm != live_renorm:
+        raise SystemExit(
+            f"{path}: trained with LATENT_RENORMALIZE={file_renorm}, but this "
+            f"arm runs {live_renorm}")
     for name in ("representation", "dynamics", "prediction", "value_prefix"):
         if name not in state:
             raise SystemExit(f"{path}: not a run_one weights file "

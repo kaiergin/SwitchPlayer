@@ -209,6 +209,34 @@ CONSISTENCY_LOSS_WEIGHT = 2.0   # EfficientZero's setting for its SimSiam loss
 USE_AUGMENTATION = True
 AUG_SHIFT = 4          # replicate-pad then random crop, DrQ's +/-4 pixels
 AUG_INTENSITY = 0.05   # multiplicative intensity jitter, clamped at 2 sigma
+# EfficientZero's released code augments the online root and the SimSiam
+# targets with INDEPENDENT draws (core/train.py:73-75: obs_batch and
+# obs_target_batch go through config.transform separately; the targets share
+# one draw among themselves). Off = this repo's original shared draw, kept as
+# the default so every archived arm keeps its meaning. With a shared draw the
+# shift is perfectly predictable from online to target, and the collapsed
+# projectors of the edge runs mostly encode it (2026-09-24,
+# benchmarks/probes/probe_shift_collapse.log: 83-85% of s0's projection
+# variance is the shift, 2-5% the game state).
+AUG_INDEPENDENT_TARGETS = False
+# Clamp augmented observations to [0, 1]. EfficientZero's Intensity does not
+# (core/dataset.py); True keeps this repo's original behaviour.
+AUG_CLAMP = True
+# EfficientZero's gradient placement (core/train.py:139,167,264): the WHOLE
+# weighted loss, step 0 included, is scaled by 1/K, and each dynamics output's
+# gradient is halved via a hook -- which halves this step's heads too, so a
+# step-k loss reaches the representation at 0.5^k / K. False = this repo's
+# MuZero-pseudocode placement: step 0 unscaled, the halving applied after the
+# step's heads (0.5^(k-1) / K). Loss VALUES are identical either way; only
+# gradients differ, which matters most under SGD (Adam ignores overall scale).
+EFFZERO_LOSS_SCALING = False
+# Multiply the consistency loss by a real-position mask, zeroing unroll steps
+# past a trajectory's end (EfficientZero multiplies it by mask_batch,
+# core/train.py:158). Needs the paper batch's "real_mask".
+CONSISTENCY_MASK_PADDING = False
+# Min-max renormalise every emitted latent (MuZero appendix G). EfficientZero's
+# Atari config leaves it off (state_norm=False, core/config.py:57).
+LATENT_RENORMALIZE = True
 # Gradient flowing back through each recurrent dynamics step is halved, so it
 # does not compound across the unroll.
 LATENT_GRADIENT_SCALE = 0.5
@@ -815,14 +843,31 @@ def discounted_prefix_targets(rewards, discount=None):
     return torch.cat([torch.zeros_like(rewards[:, :1]), prefix], dim=1)
 
 
-def augment_observations(obs, shift=None, intensity=None):
+def augment_observations(obs, shift=None, intensity=None, independent_targets=None):
     """DrQ-style random shift + intensity jitter for training batches.
 
-    One draw per SAMPLE, shared by every unroll step within it: the SimSiam
-    target must live in the same shifted frame as the online branch, or the
-    consistency loss would be asked to predict the augmentation noise.
-    Independent draws across samples. obs: (B, T, C, H, W) float in [0, 1].
+    obs: (B, T, C, H, W) float in [0, 1]; step 0 is the online root, steps
+    1..T-1 the SimSiam targets. Independent draws across samples.
+
+    independent_targets False (the original behaviour): one draw per sample,
+    shared by every step. Its rationale was that the target must live in the
+    same shifted frame as the online branch, but that makes the shift the one
+    feature the consistency loss can always match, and collapsed projectors
+    encode little else (see AUG_INDEPENDENT_TARGETS).
+    independent_targets True (EfficientZero's released code): the root gets
+    its own draw and the targets share a second one, so the consistency loss
+    has to be invariant to the augmentation.
     """
+    independent_targets = (AUG_INDEPENDENT_TARGETS if independent_targets is None
+                           else independent_targets)
+    if independent_targets and obs.shape[1] > 1:
+        return torch.cat([_augment_shared(obs[:, :1], shift, intensity),
+                          _augment_shared(obs[:, 1:], shift, intensity)], dim=1)
+    return _augment_shared(obs, shift, intensity)
+
+
+def _augment_shared(obs, shift=None, intensity=None):
+    """One (shift, intensity) draw per sample, shared by all T steps."""
     shift = AUG_SHIFT if shift is None else shift
     intensity = AUG_INTENSITY if intensity is None else intensity
     B, T, C, H, W = obs.shape
@@ -840,7 +885,7 @@ def augment_observations(obs, shift=None, intensity=None):
         scale = 1.0 + intensity * torch.randn(
             B, 1, 1, 1, 1, device=obs.device).clamp_(-2.0, 2.0)
         out = out * scale
-    return out.clamp_(0.0, 1.0)
+    return out.clamp_(0.0, 1.0) if AUG_CLAMP else out
 
 
 def consistency_loss(online, target, weights=None):
@@ -926,6 +971,23 @@ MAX_GRAD_NORM = 5.0
 # to anchor a fraction to, so it ignores these.
 LR_DECAY_AT = None
 LR_DECAY_FACTOR = 0.1
+# "adamw" (this repo's default) or "sgd" -- EfficientZero's released optimizer:
+# optim.SGD(lr=0.2, momentum=0.9, weight_decay=1e-4) over every parameter,
+# BN affines and biases included (core/train.py:348). The repo's earlier SGD
+# trial ran at lr 1e-4, 2000x below theirs.
+OPTIMIZER = "adamw"
+SGD_MOMENTUM = 0.9
+# Linear lr warmup from 0 over this many training steps, applied inside
+# train_step (EfficientZero: lr_warm_up 0.01 x 100k = 1000 steps,
+# core/train.py:30-41). 0 disables. Only the warmup is ported: their x0.1 decay
+# lands at step 101k, inside their final 20k no-collection steps, so their
+# runs trained at a constant lr while collecting data.
+LR_WARMUP_STEPS = 0
+# Skip any update whose clipped gradient norm is NaN/Inf instead of applying
+# it (the check costs one device sync per step, hence opt-in). EfficientZero
+# trains under AMP, whose GradScaler skips such steps; in fp32 one bad step
+# would otherwise corrupt every weight and momentum buffer permanently.
+SKIP_NONFINITE_GRAD_STEPS = False
 
 
 def decay_optimizer_lr(optimizers, factor):
@@ -940,9 +1002,27 @@ def make_optimizer(params):
     Ray -- is fixed above. SGD at 1e-4 was slow enough that the value prefix head
     could not converge inside a benchmark run (benchmarks/RESULTS.md). AdamW so
     the papers' 1e-4 weight decay is decoupled rather than folded into the
-    adaptive gradient.
+    adaptive gradient. OPTIMIZER "sgd" builds EfficientZero's instead.
     """
+    if OPTIMIZER == "sgd":
+        return optim.SGD(params, lr=LEARNING_RATE, momentum=SGD_MOMENTUM,
+                         weight_decay=WEIGHT_DECAY)
+    if OPTIMIZER != "adamw":
+        raise ValueError(f"unknown OPTIMIZER {OPTIMIZER!r}")
     return optim.AdamW(params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+
+def apply_lr_warmup(optimizers, training_steps):
+    """EfficientZero's adjust_lr warmup: lr = LEARNING_RATE * step / warm for
+    step < warm, then LEARNING_RATE. Touches the optimizers only up to and
+    including the boundary step, so any later lr change (LR_DECAY_AT) is left
+    alone."""
+    if not LR_WARMUP_STEPS or training_steps > LR_WARMUP_STEPS:
+        return
+    lr = LEARNING_RATE * min(1.0, training_steps / LR_WARMUP_STEPS)
+    for opt in optimizers:
+        for group in opt.param_groups:
+            group["lr"] = lr
 
 LOG_DIR = "logs"
 
@@ -1061,7 +1141,8 @@ class StorageManager:
 def build_representation(input_channels=12):
     return RepresentationNetwork(input_channels=input_channels,
                                  latent_channels=LATENT_CHANNELS,
-                                 trunk_blocks=REP_TRUNK_BLOCKS)
+                                 trunk_blocks=REP_TRUNK_BLOCKS,
+                                 renormalize=LATENT_RENORMALIZE)
 
 
 def build_dynamics(action_space, support_size=None, num_bins=None, transform=True):
@@ -1072,7 +1153,8 @@ def build_dynamics(action_space, support_size=None, num_bins=None, transform=Tru
                            transform=transform,
                            blocks=DYN_BLOCKS,
                            action_encoding=ACTION_ENCODING,
-                           reward_channels=REWARD_HEAD_CHANNELS)
+                           reward_channels=REWARD_HEAD_CHANNELS,
+                           renormalize=LATENT_RENORMALIZE)
 
 
 def build_prediction(action_space, support_size=None, num_bins=None, transform=True):
@@ -2364,13 +2446,29 @@ class TrainingHelper:
                 return per_sample.mean()
             return (per_sample * is_weights).mean()
         
+        # EfficientZero's consistency mask (CONSISTENCY_MASK_PADDING): unroll
+        # positions past the trajectory's end contribute no consistency loss.
+        real_mask = None
+        if CONSISTENCY_MASK_PADDING:
+            if "real_mask" not in batch:
+                raise KeyError("CONSISTENCY_MASK_PADDING needs the paper "
+                               "batch's real_mask; this batch has none")
+            real_mask = torch.tensor(np.asarray(batch["real_mask"]),
+                                     dtype=torch.float32, device=self.device)
+
+        # Linear lr warmup (LR_WARMUP_STEPS; a no-op when 0 or past it).
+        apply_lr_warmup((self.rep_optimizer, self.pred_optimizer,
+                         self.dyn_optimizer, self.prefix_optimizer,
+                         self.proj_optimizer),
+                        getattr(self, "training_steps", 0))
+
         # Zero out the gradients for all optimizers.
         self.rep_optimizer.zero_grad()
         self.pred_optimizer.zero_grad()
         self.dyn_optimizer.zero_grad()
         self.prefix_optimizer.zero_grad()
         self.proj_optimizer.zero_grad()
-        
+
         total_loss = 0.0
 
         # ---------------------
@@ -2407,8 +2505,12 @@ class TrainingHelper:
             transform=USE_H_TRANSFORM)
         value_ce_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1)
         value_loss_0 = wmean(value_ce_0)
-        total_loss += (POLICY_LOSS_WEIGHT * policy_loss_0
-                       + VALUE_LOSS_WEIGHT * value_loss_0)
+        step0_loss = (POLICY_LOSS_WEIGHT * policy_loss_0
+                      + VALUE_LOSS_WEIGHT * value_loss_0)
+        if EFFZERO_LOSS_SCALING:
+            # EfficientZero scales the whole loss, step 0 included, by 1/K.
+            step0_loss = scale_gradient(step0_loss, 1.0 / unroll_steps)
+        total_loss += step0_loss
 
         # ---------------------
         # Unroll for each subsequent step
@@ -2416,6 +2518,12 @@ class TrainingHelper:
         for i in range(1, unroll_steps + 1):
             # Use the action from the previous step to roll forward the latent state.
             latent, _, reward_logits = self.dynamics(latent, actions[:, i - 1])
+            if EFFZERO_LOSS_SCALING:
+                # EfficientZero's hidden_state hook: halves ALL gradient into
+                # this latent, this step's heads included (the per-step reward
+                # head reads the pre-return latent inside dynamics and is not
+                # halved; REWARD_LOSS_WEIGHT is 0 in the paper arms).
+                latent = scale_gradient(latent, LATENT_GRADIENT_SCALE)
             # SimSiam consistency (EfficientZero 4.1), replacing plain latent
             # MSE. Online branch: the dynamics-predicted latent through
             # projection AND prediction. Target branch: the representation of
@@ -2426,8 +2534,12 @@ class TrainingHelper:
                 true_latent = self.representation(obs[:, i])
                 target_proj = self.projector(true_latent, with_prediction=False)
             online_proj = self.projector(latent, with_prediction=True)
+            cons_weights = is_weights
+            if real_mask is not None:
+                cons_weights = (real_mask[:, i] if is_weights is None
+                                else is_weights * real_mask[:, i])
             latent_loss = consistency_loss(online_proj, target_proj,
-                                           weights=is_weights)
+                                           weights=cons_weights)
             
             # Loss for reward prediction. (reward[0] not used since it is reward for entering obs)
             reward_loss = wmean(-torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1))
@@ -2468,20 +2580,37 @@ class TrainingHelper:
             # also scaled the representation's output on step one, so every
             # unrolled loss -- including the whole SimSiam consistency signal
             # -- reached the representation at half the specified strength:
-            # 0.5^k instead of 0.5^(k-1).
-            latent = scale_gradient(latent, LATENT_GRADIENT_SCALE)
+            # 0.5^k instead of 0.5^(k-1). (EFFZERO_LOSS_SCALING reinstates
+            # 0.5^k deliberately: it is what EfficientZero's code does.)
+            if not EFFZERO_LOSS_SCALING:
+                latent = scale_gradient(latent, LATENT_GRADIENT_SCALE)
 
         # Backpropagate the total loss.
         total_loss.backward()
 
         # One global norm across every module, EfficientZero's max_grad_norm=5.
-        torch.nn.utils.clip_grad_norm_(
+        grad_norm = torch.nn.utils.clip_grad_norm_(
             itertools.chain(self.representation.parameters(),
                             self.dynamics.parameters(),
                             self.prediction.parameters(),
                             self.value_prefix.parameters(),
                             self.projector.parameters()),
             MAX_GRAD_NORM)
+        if SKIP_NONFINITE_GRAD_STEPS and not torch.isfinite(grad_norm):
+            # A NaN/Inf norm has just scaled every gradient by NaN; stepping
+            # would poison the weights and SGD momentum for good (and the
+            # resume checkpoint with them). Skip the update and the priority
+            # writeback, as EfficientZero's AMP GradScaler skips such steps.
+            # BN running statistics updated by this forward are not undone.
+            self.nonfinite_skips = getattr(self, "nonfinite_skips", 0) + 1
+            print(f"  [nonfinite] grad norm {float(grad_norm)} at training "
+                  f"step {getattr(self, 'training_steps', '?')}: update skipped "
+                  f"({self.nonfinite_skips} so far)", flush=True)
+            for opt in (self.rep_optimizer, self.dyn_optimizer,
+                        self.prefix_optimizer, self.pred_optimizer,
+                        self.proj_optimizer):
+                opt.zero_grad()
+            return total_loss.item()
 
         # Step the optimizers.
         self.rep_optimizer.step()
@@ -2544,7 +2673,8 @@ class TrainingHelper:
             latent = self.representation.conv4.out_channels
             self.target_representation = RepresentationNetwork(
                 input_channels=12, latent_channels=latent,
-                trunk_blocks=len(self.representation.trunk)).to(self.device)
+                trunk_blocks=len(self.representation.trunk),
+                renormalize=self.representation.renormalize_output).to(self.device)
             self.target_prediction = PredictionNetwork(
                 latent_channels=latent, action_space=self.action_space,
                 support_size=self.prediction.support_size,
@@ -2560,7 +2690,8 @@ class TrainingHelper:
                 transform=self.dynamics.transform,
                 blocks=len(self.dynamics.blocks),
                 action_encoding=self.dynamics.action_encoding,
-                reward_channels=self.dynamics.reward_channels).to(self.device)
+                reward_channels=self.dynamics.reward_channels,
+                renormalize=self.dynamics.renormalize_output).to(self.device)
             self.target_value_prefix = ValuePrefixNetwork(
                 latent_channels=self.value_prefix.conv.in_channels,
                 hidden_size=self.value_prefix.hidden_size,
@@ -2643,6 +2774,7 @@ class TrainingHelper:
         pending = {}
         batch_obs, batch_actions, batch_rewards = [], [], []
         batch_policy, batch_value, batch_has, refs = [], [], [], []
+        batch_real = []
         for flat in chosen:
             traj, start = roots[flat]
             refs.append(traj[start])
@@ -2651,8 +2783,12 @@ class TrainingHelper:
             L = len(traj)
             obs, actions, rewards = [], [], []
             pols, vals, has = [], [], []
+            real = []
             for step in range(unroll_steps + 1):
                 pos = start + step
+                # A real position (not padding past the trajectory's end):
+                # EfficientZero's mask_batch, for CONSISTENCY_MASK_PADDING.
+                real.append(pos < L)
                 if pos < L:
                     t = traj[pos]
                     obs.append(t["obs"])
@@ -2699,11 +2835,12 @@ class TrainingHelper:
             batch_policy.append(pols)
             batch_value.append(vals)
             batch_has.append(has)
+            batch_real.append(real)
 
         return {"pending": pending, "weights": weights, "refs": refs,
                 "use_tm": use_tm, "obs": batch_obs, "actions": batch_actions,
                 "rewards": batch_rewards, "policy": batch_policy,
-                "value": batch_value, "has": batch_has}
+                "value": batch_value, "has": batch_has, "real": batch_real}
 
     def finish_batch_paper(self, a):
         """Main-thread half: the target-model bootstrap forward (CUDA,
@@ -2771,6 +2908,7 @@ class TrainingHelper:
             "target_policy": np.array(batch_policy),
             "target_value": np.array(batch_value),
             "has_policy_target": np.array(batch_has),
+            "real_mask": np.array(a["real"]),
             "is_weights": weights.astype(np.float32),
             "sample_refs": refs,
         }
