@@ -85,7 +85,8 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-vtree-communal8-r12-edge",
                         "effzero-repro-refresh5x-communal-edge",
                         "effzero-repro-refresh5x-communal-edge-augfix",
-                        "effzero-repro-refresh5x-communal-edge-faithful"):
+                        "effzero-repro-refresh5x-communal-edge-faithful",
+                        "effzero-repro-faithful-prioract"):
             assert spec["USE_AUGMENTATION"] is False, name
 
 
@@ -178,10 +179,15 @@ def test_every_arm_override_targets_a_real_muzero_global(ablation):
 
 def test_paper_targets_arms_also_search_act(ablation):
     """PAPER_TARGETS consumes 5-field search records; an arm setting it
-    without USE_SEARCH_ACTING would crash at its first reanalyse."""
+    without USE_SEARCH_ACTING would crash at its first reanalyse -- unless
+    BIRTH_SEARCH supplies the records (policy-only acting), in which case
+    it must NOT also search-act (birth_search_gate refuses the mix)."""
     for name, spec in ablation.ARMS.items():
         if spec.get("PAPER_TARGETS"):
-            assert spec.get("USE_SEARCH_ACTING"), name
+            if spec.get("BIRTH_SEARCH"):
+                assert not spec.get("USE_SEARCH_ACTING"), name
+            else:
+                assert spec.get("USE_SEARCH_ACTING"), name
 
 
 def test_paper_targets_rejects_recordless_trajectories(ablation):

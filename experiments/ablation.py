@@ -26,6 +26,7 @@ Design notes, mostly learned the hard way (see benchmarks/RESULTS.md):
 import argparse
 import asyncio
 import contextlib
+import copy
 import json
 import os
 import pathlib
@@ -755,6 +756,37 @@ ARMS["effzero-repro-refresh5x-communal-edge-faithful"] = {
             "command. Controls: pong-edge-s0/s1-2026-09-21.",
 }
 
+# Policy-only acting on the parallel stack (2026-09-26, Kai): the faithful
+# arm with (1) the vectorized COMMUNAL GPU re-search (the vtree-communal8
+# pair of flags: same communal semantics as the faithful run at ~3.4x the
+# throughput; ~4% of roots flip counts vs the sequential engine, below the
+# search's own repeat noise), (2) POLICY-ONLY acting -- the actor samples
+# the prior at the staged temperature, and every new game is searched once
+# on arrival through the ONLINE nets (BIRTH_SEARCH: the targets the acting
+# search would have recorded), and (3) ReDo every 1000 steps at tau 0.025.
+# Eval is then the prior's argmax (policy-only), the number the Switch
+# would see. Run with --ray --cpu-actor, one seed. A bundle by design (Kai):
+# if it fails, the bisect starts with search acting on this stack.
+ARMS["effzero-repro-faithful-prioract"] = {
+    **ARMS["effzero-repro-refresh5x-communal-edge-faithful"],
+    "REFRESH_VTREE": True,
+    "VTREE_COMMUNAL_TRAJS": 8,
+    "USE_SEARCH_ACTING": False,
+    "BIRTH_SEARCH": True,
+    "PRIOR_ACT_STAGED_TEMP": True,
+    "REDO_EVERY": 1000,
+    "REDO_TAU": 0.025,
+    "REDO_NETS": ("representation", "dynamics", "prediction", "value_prefix"),
+    "_doc": "effzero-repro-refresh5x-communal-edge-faithful with the "
+            "vectorized communal re-search (REFRESH_VTREE, "
+            "VTREE_COMMUNAL_TRAJS 8), policy-only acting (prior sampled at "
+            "the staged temperature; every new game searched once on "
+            "arrival through the online nets -- BIRTH_SEARCH), policy-only "
+            "eval, and ReDo (every 1000 steps, tau 0.025, projector "
+            "excluded). Run with "
+            "--ray --cpu-actor. Control: pong-faithful-s0-2026-09-24.",
+}
+
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
 # archfix's exact refresh SELECTION semantics -- staleness rotation,
 # always-replace, no guard. Deltas vs archfix: parallel stack, fresh-
@@ -1097,6 +1129,77 @@ class Run:
                     self.trainer.projector):
             net.train(training)
 
+    def redo_step(self):
+        """One ReDo pass (redo.py): score every recyclable unit on a fresh
+        UNIFORM replay sample of REDO_BATCH unroll windows (root obs + the
+        next UNROLL_STEPS stored actions; no augmentation, no PER) and
+        recycle the tau-dormant ones in the live nets. The sample and the
+        reinit draws come from generators keyed on (seed, training step), so
+        a pass is reproducible across a resume and never touches the global
+        numpy/torch streams. Returns units recycled."""
+        import redo
+        steps = self.trainer.training_steps
+        rng = np.random.default_rng((self.seed, steps, 0x7ED0))
+        K = muzero.UNROLL_STEPS
+        # Valid window starts: K real actions after the root (the final
+        # record's action is a placeholder, never a real one).
+        starts = [(ti, len(t) - 1 - K) for ti, t in enumerate(self.replay)
+                  if len(t) - 1 - K >= 0]
+        if not starts:
+            return 0
+        sizes = np.array([n + 1 for _, n in starts], dtype=np.int64)
+        picks = rng.choice(int(sizes.sum()), size=int(muzero.REDO_BATCH))
+        bounds = np.cumsum(sizes)
+        obs, acts = [], []
+        for p in picks:
+            k = int(np.searchsorted(bounds, p, side="right"))
+            ti = starts[k][0]
+            i = int(p - (bounds[k] - sizes[k]))
+            traj = self.replay[ti]
+            obs.append(traj[i]["obs"])
+            acts.append([traj[i + j]["action"] for j in range(K)])
+        dev = self.trainer.device
+        obs = torch.tensor(np.stack(obs), dtype=torch.float32, device=dev) / 255.0
+        acts = torch.tensor(np.asarray(acts), dtype=torch.long, device=dev)
+        nets = {n: getattr(self.trainer, n) for n in redo.ALL_NETS}
+        units = redo.recyclable_units(nets, include=tuple(muzero.REDO_NETS))
+        scores, raw, inputs = redo.dormancy_stats(nets, obs, acts, units)
+        # Re-dormancy of LAST pass's recycled units (the official code's
+        # intersected_dead_neurons_with_last_reset): high = recycled units
+        # die again, i.e. ReDo is churning rather than restoring.
+        last = getattr(self, "_redo_last_plan", None) or {}
+        tau = float(muzero.REDO_TAU)
+        again = sum(int((scores[u][idx] <= tau).sum())
+                    for u, idx in last.items() if u in scores)
+        was = sum(len(idx) for u, idx in last.items() if u in scores)
+        gen = torch.Generator().manual_seed(
+            int(np.random.default_rng((self.seed, steps, 0x7ED1)).integers(2**62)))
+        opts = [getattr(self.trainer, n) for n in OPT_NAMES]
+        plan = redo.recycle(nets, opts, scores, tau, gen, raw=raw,
+                            inputs=inputs)
+        self._redo_last_plan = plan
+        recycled = sum(len(v) for v in plan.values())
+        total = sum(s.numel() for s in scores.values())
+        by_net = {n: sum(len(v) for u, v in plan.items() if u.net == n)
+                  for n in muzero.REDO_NETS}
+        prev = getattr(self, "_redo_stats", None) or {}
+        self._redo_stats = {
+            "redo_recycled_total": prev.get("redo_recycled_total", 0) + recycled,
+            # Since the previous eval row (zeroed by evaluate_diagnostics):
+            # a row spans ~10 passes at eval-every 5, so _last alone would
+            # show one pass in ten (round-1 audit LOW-1).
+            "redo_recycled_window": prev.get("redo_recycled_window", 0) + recycled,
+            "redo_recycled_last": recycled,
+            "redo_last_by_net": by_net,
+            "redo_by_net_window": {
+                n: prev.get("redo_by_net_window", {}).get(n, 0) + by_net[n]
+                for n in by_net},
+            "redo_redormant_frac_last": (round(again / was, 4) if was
+                                         else None),
+            "redo_units": total,
+            "redo_dormant_frac_last": round(recycled / max(1, total), 4)}
+        return recycled
+
     # -- self-play ---------------------------------------------------------
     def play_episode(self, greedy=False, cap=None):
         cap = EPISODE_CAP if cap is None else cap
@@ -1124,7 +1227,10 @@ class Run:
                 else:
                     # Acting-side exploration floor, mirroring gameplay_process.
                     # Read per step so an arm override applies; identity at 1.0.
-                    t = muzero.ACTING_TEMPERATURE
+                    # PRIOR_ACT_STAGED_TEMP: the search's staged schedule,
+                    # keyed on the same counter act_search reads.
+                    t = muzero.prior_acting_temperature(getattr(
+                        self.searcher.network_manager, "training_steps", 0))
                     if t != 1.0:
                         policy = policy ** (1.0 / t)
                         policy = policy / policy.sum()
@@ -1173,7 +1279,8 @@ class Run:
         return traj, total, steps, terminated
 
     # -- re-analysis -------------------------------------------------------
-    def paper_targets(self, traj, terminated, born_step=None):
+    def paper_targets(self, traj, terminated, born_step=None,
+                      birth_nets=None):
         """Paper data path: every step already carries its acting-search
         policy and root value. Store the target ingredients (values are
         computed at BATCH time under the age-adjusted horizon), the birth
@@ -1182,14 +1289,24 @@ class Run:
         born_step: explicit birth stamp for callers that collect a
         trajectory AFTER further training happened (--ray's pipeline
         passes the request-time count so the 4.3 age matches the
-        sequential harness exactly); default is the live counter."""
-        if len(traj[0]) != 5:
-            raise ValueError(
-                "PAPER_TARGETS requires USE_SEARCH_ACTING: trajectories must "
-                "carry per-step search records (5 fields), got "
-                f"{len(traj[0])}")
+        sequential harness exactly); default is the live counter.
+
+        BIRTH_SEARCH: policy-only acting records carry no search (3
+        fields); _birth_search supplies the per-step policy and root value
+        the acting search would have recorded, before anything below reads
+        them. birth_nets: the nets the ACTOR played with, when they are
+        not the live ones (--ray's pipelined collect runs after the next
+        training block; see RayPipeline.request)."""
         born = (self.trainer.training_steps if born_step is None
                 else born_step)
+        birth = muzero.BIRTH_SEARCH and len(traj[0]) == 3
+        if birth:
+            traj = self._birth_search(traj, terminated, nets=birth_nets)
+        if len(traj[0]) != 5:
+            raise ValueError(
+                "PAPER_TARGETS requires USE_SEARCH_ACTING (or BIRTH_SEARCH): "
+                "trajectories must carry per-step search records (5 fields), "
+                f"got {len(traj[0])}")
         out = []
         for i, (obs, action, reward, pol, val) in enumerate(traj):
             # The terminal record of a TERMINATED episode carried no search
@@ -1207,6 +1324,8 @@ class Run:
             z0 = muzero.paper_value_target(out, idx, muzero.TD_STEPS,
                                            muzero.DISCOUNT)
             t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
+        if birth:
+            self._note_behaviour(out[:-1], born)
         pols = [t["target_policy"] for t in out if t["has_policy_target"]]
         # Unreachable-empty from every current caller (play_episode always
         # yields >= 1 policy-carrying record; cap 0 keeps its greedy tail
@@ -1219,6 +1338,127 @@ class Run:
         else:
             self._fresh_target_H = None
         return out
+
+    def _birth_search(self, traj, terminated, nets=None):
+        """BIRTH_SEARCH: give a policy-only trajectory (3-field records) the
+        per-step (policy, root value) its acting search would have recorded,
+        returning 5-field records for paper_targets.
+
+        Same search as act_search on the acting path: fresh-root PUCT,
+        ACT_SEARCH_SIMS, root noise on every acted step, a GREEDY search on a
+        truncated tail, uniform/0 on a terminated tail -- vectorized through
+        muzero_vtree (parity-gated against the sequential engine) over the
+        ONLINE nets in eval mode, the nets the actor would have searched
+        with. Policies are raw visit fractions and values root q-values, the
+        act_search contract. Accounting in self._birth_stats.
+
+        nets: default the live trainer nets (sequential mode, where the
+        actor IS the live nets). --ray passes the request-time snapshot the
+        actor was synced with, so the targets never come from weights the
+        actor did not play with (round-1 audit HIGH-1)."""
+        import muzero_vtree
+        t0 = time.time()
+        if nets is None:
+            nets = {"representation": self.trainer.representation,
+                    "dynamics": self.trainer.dynamics,
+                    "prediction": self.trainer.prediction,
+                    "value_prefix": self.trainer.value_prefix}
+        modes = {k: n.training for k, n in nets.items()}
+        for n in nets.values():
+            n.eval()
+        try:
+            engine = muzero_vtree.VectorizedPUCT(nets, ACTIONS,
+                                                 self.trainer.device)
+            n_acted = len(traj) - 1
+            pols = [None] * len(traj)
+            vals = [0.0] * len(traj)
+            batch = max(1, int(muzero.VTREE_REFRESH_BATCH))
+            for w0 in range(0, n_acted, batch):
+                idx = range(w0, min(w0 + batch, n_acted))
+                obs = np.stack([traj[i][0] for i in idx])
+                p, v, _ = engine.search(
+                    obs, num_simulations=muzero.ACT_SEARCH_SIMS,
+                    c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                    root_noise=True)
+                for i, pi, vi in zip(idx, p, v):
+                    pols[i], vals[i] = np.asarray(pi, dtype=np.float64), float(vi)
+            tail = len(traj) - 1
+            if terminated:
+                pols[tail], vals[tail] = np.ones(ACTIONS) / ACTIONS, 0.0
+            else:
+                p, v, _ = engine.search(
+                    np.stack([traj[tail][0]]),
+                    num_simulations=muzero.ACT_SEARCH_SIMS,
+                    c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                    root_noise=False)
+                pols[tail] = np.asarray(p[0], dtype=np.float64)
+                vals[tail] = float(v[0])
+            # The prior the actor sampled from (same nets, same /255
+            # preprocessing as initial_inference), for the behaviour
+            # diagnostics paper_targets logs (round-2 design audit).
+            priors = []
+            with torch.no_grad():
+                for w0 in range(0, n_acted, batch):
+                    x = torch.tensor(
+                        np.stack([traj[i][0] for i in
+                                  range(w0, min(w0 + batch, n_acted))]),
+                        dtype=torch.float32, device=self.trainer.device) / 255.0
+                    logits, _, _ = nets["prediction"](nets["representation"](x))
+                    priors.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
+            self._birth_priors = (np.concatenate(priors) if priors
+                                  else np.zeros((0, ACTIONS)))
+        finally:
+            for k, n in nets.items():
+                n.train(modes[k])
+        stats = getattr(self, "_birth_stats", None) or {}
+        searched = n_acted + (0 if terminated else 1)
+        self._birth_stats = {
+            "birth_positions_total": stats.get("birth_positions_total", 0)
+            + searched,
+            "birth_positions_window": stats.get("birth_positions_window", 0)
+            + searched,
+            "birth_positions_last": searched,
+            "birth_search_s_last": round(time.time() - t0, 2)}
+        return [(o, a, r, pols[i], vals[i])
+                for i, (o, a, r) in enumerate(traj)]
+
+    def _note_behaviour(self, acted, born):
+        """Behaviour diagnostics for policy-only acting, accumulated per row
+        (round-1 fidelity + round-2 design audits): how the prior-sampled
+        actions relate to what search would have done, and the exploration
+        actually applied. `acted` are the episode's acted records (their
+        target_policy is the birth search's), `born` the actor's step
+        count. Emitted and reset by _merge_row_stats."""
+        priors = getattr(self, "_birth_priors", None)
+        if priors is None or len(priors) != len(acted) or not acted:
+            return
+        T = float(muzero.prior_acting_temperature(born))
+        tgt = np.stack([t["target_policy"] for t in acted])
+        act = np.array([int(t["action"]) for t in acted])
+        q = np.clip(priors.astype(np.float64), 1e-12, None)
+        qT = q ** (1.0 / T)
+        qT /= qT.sum(axis=1, keepdims=True)
+        p_act = tgt[np.arange(len(act)), act]
+        w = getattr(self, "_beh_window", None) or {"n": 0, "sums": {},
+                                                    "counts": [0] * ACTIONS}
+        add = {
+            "act_agree": float((tgt.argmax(1) == act).sum()),
+            "act_prob": float(p_act.sum()),
+            "prior_agree": float((q.argmax(1) == tgt.argmax(1)).sum()),
+            "kl_target_prior": float(np.sum(
+                tgt * (np.log(np.clip(tgt, 1e-12, None)) - np.log(q)))),
+            "H_act": float(-(qT * np.log(np.clip(qT, 1e-12, None))).sum()),
+            "prior_maxp": float(q.max(1).sum()),
+            "rare_rate": float((p_act < 0.05).sum()),
+            "T": T * len(act),               # step-weighted mean per row
+        }
+        for k, v in add.items():
+            w["sums"][k] = w["sums"].get(k, 0.0) + v
+        w["n"] += len(act)
+        w["counts"] = [c + int(n) for c, n in zip(
+            w["counts"], np.bincount(act, minlength=ACTIONS))]
+        w["Ts"] = sorted(set(w.get("Ts", [])) | {T})
+        self._beh_window = w
 
     def _search_traj_communal(self, traj, indices):
         """Communal refresh search (USE_COMMUNAL_REANALYSIS): re-search a
@@ -1696,9 +1936,11 @@ class Run:
             stats["refresh_last_iter"] = 0
             stats["refresh_steps_last_iter"] = 0
 
-    def reanalyse(self, traj, terminated=True, born_step=None):
+    def reanalyse(self, traj, terminated=True, born_step=None,
+                  birth_nets=None):
         if muzero.PAPER_TARGETS:
-            return self.paper_targets(traj, terminated, born_step=born_step)
+            return self.paper_targets(traj, terminated, born_step=born_step,
+                                      birth_nets=birth_nets)
         evaluated = self.searcher.eval_obs(traj)
         self.searcher.create_tree_from_game(evaluated, terminated=terminated)
         searched = self.searcher.select_reanalysis_indices(len(evaluated))
@@ -1816,8 +2058,40 @@ class Run:
         stats = getattr(self, "_refresh_offload_stats", None)
         if stats:
             errs.update(stats)
+        # BIRTH_SEARCH and ReDo accounting (2026-09-26), same pattern.
+        self._merge_row_stats(errs)
 
         return errs
+
+    def _merge_row_stats(self, errs):
+        """Copy the BIRTH_SEARCH / ReDo counters into a row and restart
+        their per-row windows; emit the per-row behaviour means
+        (beh_*) and training-step means (step_*, ReDo pre/post grad
+        norms)."""
+        for name, window in (("_birth_stats", "birth_positions_window"),
+                             ("_redo_stats", "redo_recycled_window")):
+            stats = getattr(self, name, None)
+            if stats:
+                errs.update(stats)
+                stats[window] = 0          # the window restarts per row
+                if name == "_redo_stats":
+                    stats["redo_by_net_window"] = {}
+        w = getattr(self, "_beh_window", None)
+        if w and w["n"]:
+            for k, v in w["sums"].items():
+                errs[f"beh_{k}"] = round(v / w["n"], 4)
+            errs["beh_action_counts"] = list(w["counts"])
+            errs["beh_T_values"] = list(w.get("Ts", []))
+            self._beh_window = None
+        st = getattr(self, "_step_window", None)
+        if st and st["n"]:
+            errs["step_loss_mean"] = round(st["loss"] / st["n"], 4)
+            errs["step_nonfinite"] = st.get("nonfinite", 0)
+            errs["step_grad_norm_mean"] = round(st["gn"] / st["n"], 4)
+            if st["passes"]:
+                errs["redo_gn_pre20"] = round(st["pre"] / st["passes"], 4)
+                errs["redo_gn_post20"] = round(st["post"] / st["passes"], 4)
+            self._step_window = None
 
 
 NET_NAMES = ("representation", "dynamics", "prediction", "value_prefix",
@@ -1960,6 +2234,19 @@ def save_run_checkpoint(run, path, meta):
             "synced_at": run.trainer._target_synced_at,
         })
     state["env_steps"] = run.env_steps
+    # BIRTH_SEARCH / ReDo row counters (round-1 audit LOW-1): cumulative
+    # totals must survive a resume. Written only when present, so every
+    # other arm's checkpoint head is unchanged.
+    diag = {k: dict(getattr(run, k)) for k in ("_birth_stats", "_redo_stats")
+            if getattr(run, k, None)}
+    plan = getattr(run, "_redo_last_plan", None)
+    if plan:
+        # The re-dormancy baseline (round-2 audit LOW-2), as plain tuples.
+        diag["_redo_last_plan"] = [
+            ((u.net, u.producer, u.norm, u.consumer, u.hw, u.consumer_attr),
+             list(idx)) for u, idx in plan.items()]
+    if diag:
+        state["diag_stats"] = diag
     state["rng"] = {
         "np": np.random.get_state(),
         "py": random.getstate(),
@@ -2041,6 +2328,12 @@ def load_run_checkpoint(run, path, expect):
     run.replay = state["replay"]
     run.env_steps = state["env_steps"]
     run.trainer.training_steps = state["training_steps"]
+    for k, v in (state.get("diag_stats") or {}).items():
+        if k == "_redo_last_plan":
+            import redo
+            run._redo_last_plan = {redo.Unit(*f): list(idx) for f, idx in v}
+        else:
+            setattr(run, k, dict(v))
     np.random.set_state(state["rng"]["np"])
     random.setstate(state["rng"]["py"])
     torch.set_rng_state(state["rng"]["torch"])
@@ -2374,6 +2667,81 @@ def ray_scope_gate(spec):
                          "load linear-support weights.")
 
 
+def redo_due(steps):
+    """ReDo's pass schedule: every REDO_EVERY gradient steps, MID-period
+    (REDO_EVERY = 1000: steps 1500, 2500, ..., 179500). Aligned passes
+    (multiples of 1000) landed on every eval row (every 10k steps: each
+    row's eval and snapshot saw a pass from that very step), every
+    checkpoint (a resume then dropped that pass's pre/post grad-norm pair)
+    and the final step (a pass whose only effect was on the saved final
+    weights) -- round-3 audit. The first pass waits a full period, as in
+    the paper."""
+    every = muzero.REDO_EVERY
+    return bool(every) and steps > every and steps % every == every // 2
+
+
+def after_train_step(run):
+    """Per-gradient-step hook, called by every training loop right after the
+    step counter advances. Today: ReDo on its redo_due() schedule, plus the
+    step diagnostics that make ReDo's effect attributable (row-mean loss
+    and pre-clip grad norm; mean grad norm over the 20 steps before vs after
+    each pass -- round-2 design audit). Touches nothing on `run` while ReDo
+    is off, so every other arm is unchanged and test stubs need no new
+    surface."""
+    if not muzero.REDO_EVERY:
+        return
+    last = getattr(run.trainer, "_last_step", None)
+    if last is not None:
+        loss, gn = last[0], float(last[1])
+        w = getattr(run, "_step_window", None) or {
+            "n": 0, "loss": 0.0, "gn": 0.0, "passes": 0, "pre": 0.0,
+            "post": 0.0, "nonfinite": 0}
+        if not (np.isfinite(gn) and np.isfinite(loss)):
+            # A skipped non-finite step (SKIP_NONFINITE_GRAD_STEPS): counted,
+            # never averaged into the row means or the ReDo windows.
+            w["nonfinite"] = w.get("nonfinite", 0) + 1
+            run._step_window = w
+            last = None
+    if last is not None:
+        w["n"] += 1
+        w["loss"] += float(loss)
+        w["gn"] += gn
+        recent = getattr(run, "_gn_recent", [])
+        recent = (recent + [gn])[-20:]
+        run._gn_recent = recent
+        post = getattr(run, "_gn_post", None)
+        if post is not None:
+            post.append(gn)
+            if len(post) == 20:
+                w["passes"] += 1
+                w["pre"] += run._gn_pre
+                w["post"] += float(np.mean(post))
+                run._gn_post = None
+        run._step_window = w
+    if run.replay and redo_due(run.trainer.training_steps):
+        run._gn_pre = float(np.mean(getattr(run, "_gn_recent", []) or [0.0]))
+        run.redo_step()
+        run._gn_post = []
+
+
+def birth_search_gate():
+    """BIRTH_SEARCH's supported regime, checked at startup (before any
+    --overwrite destruction) instead of at the first collect: it replaces
+    the acting search, so it needs the paper data path and policy-only
+    acting, and its engine is PUCT-only."""
+    if not muzero.BIRTH_SEARCH:
+        return
+    if not muzero.PAPER_TARGETS:
+        raise SystemExit("BIRTH_SEARCH requires PAPER_TARGETS: it builds the "
+                         "paper records the acting search would have made")
+    if muzero.USE_SEARCH_ACTING:
+        raise SystemExit("BIRTH_SEARCH replaces the acting search: set "
+                         "USE_SEARCH_ACTING False (policy-only acting)")
+    if muzero.USE_GUMBEL_SEARCH:
+        raise SystemExit("BIRTH_SEARCH's vectorized engine is PUCT-only; a "
+                         "Gumbel arm would silently change the search")
+
+
 def build_env(env_name, frameskip):
     """The lineage's env stack, ONE implementation: raw no-skip env ->
     NoopReset -> MaxAndSkip -> EpisodicLife when the wrapper flag is on,
@@ -2437,6 +2805,11 @@ class RayPipeline:
         self.eval_actor = None
         self.pending_eval = None
         self._states_cache = (None, None)   # (training_steps, state dicts)
+        # BIRTH_SEARCH (round-1 audit HIGH-1): the weights the actor was
+        # synced with, captured at request time, and a driver-side net set
+        # (built once) that the collect-time birth search loads them into.
+        self._birth_states = None
+        self._birth_nets = None
         self.refresh_actor = None           # phase 3a, lazy like eval_actor
         self.pending_refresh = None         # ([(uid, future)], now_stamp)
         self._target_states_cache = (None, None)  # (target sync stamp, dicts)
@@ -2554,6 +2927,26 @@ class RayPipeline:
                 self.seed * 100003 + it * 1009 + e)
                 for e in range(self.episodes_per_iter)]
         self.pending = (futures, self.run.trainer.training_steps)
+        # Under BIRTH_SEARCH the episode's targets must come from the
+        # weights the actor plays with -- the ones just synced -- not the
+        # post-training weights collect() would otherwise see (the pattern
+        # ray_scope_gate refuses for non-paper arms). _states() is keyed on
+        # the step count and returns clones, so this is the synced set.
+        self._birth_states = self._states() if muzero.BIRTH_SEARCH else None
+
+    def _birth_net_set(self, states):
+        """Load `states` into the persistent driver-side birth-search nets
+        (deep copies of the trainer's four nets, so device, geometry and
+        the LATENT_RENORMALIZE attribute match) and return them, eval."""
+        if self._birth_nets is None:
+            self._birth_nets = {
+                n: copy.deepcopy(getattr(self.run.trainer, n))
+                for n in ("representation", "dynamics", "prediction",
+                          "value_prefix")}
+        for n, net in self._birth_nets.items():
+            net.load_state_dict(states[n])
+            net.eval()
+        return self._birth_nets
 
     @staticmethod
     def _own_arrays(record):
@@ -2577,6 +2970,9 @@ class RayPipeline:
         futures, steps_at_request = self.pending
         results = self.ray.get(futures)
         self.pending = None
+        birth_nets = (self._birth_net_set(self._birth_states)
+                      if self._birth_states is not None else None)
+        self._birth_states = None
         # The request-time count flows as an EXPLICIT stamp -- no rewinding
         # of the live trainer counter, so no window in which the two
         # "current step" sources (trainer vs searcher mirror) disagree.
@@ -2591,7 +2987,8 @@ class RayPipeline:
                 continue
             traj = [self._own_arrays(r) for r in traj]
             self.run.replay.append(self.run.reanalyse(
-                traj, terminated=terminated, born_step=steps_at_request))
+                traj, terminated=terminated, born_step=steps_at_request,
+                birth_nets=birth_nets))
             evict_replay(self.run.replay)
 
     def request_eval(self, it, episodes, diagnostics, write_row, elapsed_at):
@@ -2830,6 +3227,18 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         if use_ray:
             ray_scope_gate(spec)
+        birth_search_gate()
+        if muzero.REDO_EVERY:
+            # Fail at startup -- before any --overwrite deletion (round-2
+            # audit LOW-3) and not at step REDO_EVERY: import redo and
+            # validate its layer map against nets built exactly as this arm
+            # builds them. (Consumes RNG, but Run() reseeds and a resume
+            # restores the checkpointed streams.)
+            import redo
+            probe = build_networks(spec)
+            redo.recyclable_units({n: probe[n] for n in redo.ALL_NETS},
+                                  include=tuple(muzero.REDO_NETS))
+            del probe
         if ray_workers and not use_ray:
             raise SystemExit("--ray-workers requires --ray")
         if cpu_actor and not use_ray:
@@ -3168,6 +3577,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                         for _ in range(chunk):
                             asyncio.run(run.trainer.train_step(next_batch()))
                             run.trainer.training_steps += 1
+                            after_train_step(run)
                     run.set_train_mode(False)
                     owed += (len(run.replay) * chunk
                              / muzero.ASYNC_SWEEP_TRAIN_STEPS)
@@ -3236,6 +3646,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                             consistency_base, run.trainer.training_steps)
                     asyncio.run(run.trainer.train_step(next_batch()))
                     run.trainer.training_steps += 1
+                    after_train_step(run)
             run.set_train_mode(False)
 
             if (pipeline and muzero.REFRESH_SATURATE

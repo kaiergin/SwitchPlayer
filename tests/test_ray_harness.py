@@ -204,3 +204,22 @@ def test_worker_pool_through_a_real_cluster(local_ray):
         # Search-acting records are 5-field (paper mode).
         assert len(traj[0]) == 5
         assert isinstance(terminated, bool)
+
+
+def test_cpu_actor_builds_nets_under_the_arms_renormalize_setting(local_ray):
+    """LATENT_RENORMALIZE is a plain attribute, NOT in the state_dicts the
+    driver ships: the CPU actor's nets get it only from the actor's own
+    override application before construction (2026-09-26 audit hazard)."""
+    import ray_actors
+    actor_cls = local_ray.remote(ray_actors.SelfPlayActor)
+    for flag in (False, True):
+        actor = actor_cls.remote(
+            {"LATENT_RENORMALIZE": flag, "PRIOR_ACT_STAGED_TEMP": True,
+             "USE_ATARI_WRAPPERS": False, "USE_SEARCH_ACTING": False},
+            6, seed=0,
+            schedule={"TEMPERATURE_TOTAL_STEPS": 1000,
+                      "OFFPOLICY_DECAY_STEPS": 300},
+            env_name="Pong-v4", frameskip=30, episode_cap=8, force_cpu=True)
+        assert local_ray.get(actor.renormalize_flags.remote()) == (flag, flag)
+        assert local_ray.get(
+            actor.get_constant.remote("PRIOR_ACT_STAGED_TEMP")) is True

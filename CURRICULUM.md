@@ -717,6 +717,121 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment -- policy-only acting on the parallel stack (Kai, 2026-09-26; built, audit pending)
+
+ARM effzero-repro-faithful-prioract, run with --ray --cpu-actor, seed 0,
+90 iterations, archfix's command otherwise. Deltas vs the faithful arm:
+- VECTORIZED COMMUNAL RE-SEARCH (REFRESH_VTREE, VTREE_COMMUNAL_TRAJS 8):
+  same communal semantics and coverage (4 trajectories / 2 iterations) at
+  ~3.4x throughput; ~4% of roots flip visit counts vs the sequential engine,
+  below the search's own repeat noise. Communal kept (not fresh-root) so the
+  re-search semantics match the faithful run.
+- POLICY-ONLY ACTING (USE_SEARCH_ACTING False, PRIOR_ACT_STAGED_TEMP): the
+  CPU actor samples prior^(1/T), T on the papers' staged schedule (1.0 /
+  0.5 / 0.25). Eval becomes the prior's argmax -- the number the Switch
+  would see (and no more slow CPU search eval).
+- BIRTH_SEARCH: every new game is searched ONCE on arrival, on the GPU,
+  through the weights the ACTOR PLAYED WITH (online, not the lagged target
+  model -- re-stamping newcomers with it was the keepnew-era poison; under
+  --ray the collect runs after the next training block, so the pipeline
+  snapshots the synced weights at request time -- round-1 audit HIGH-1),
+  fresh-root, root noise on acted steps, greedy truncated tail -- exactly
+  the records the acting search would have made. Cost ~10-30 s/iteration.
+  Only WHO PICKS THE ACTIONS changes vs search acting.
+- ReDo every 1000 steps, tau 0.025 (redo.py), passes mid-period (1.5k,
+  2.5k, ...: never on an eval row, checkpoint or the final step):
+  single-consumer units only
+  (block-internal convs, representation conv1/conv3, the prediction
+  heads' 1x1 policy/value convs, the value-prefix input conv and hidden
+  FC); the SimSiam
+  PROJECTOR IS EXCLUDED (REDO_NETS; Kai 2026-09-26 -- ~94% of dormant units
+  sit in its hidden layers, so including it would re-randomize most of it
+  every pass); BN channel reset with gamma/beta = the survivors' mean
+  |gamma| / mean beta (the identity made recycled units 7-75x louder and
+  blew the loss up 5-6x for several steps); no-BN head units (policy/
+  value 1x1 convs) keep an unscaled default-init row and get their BIAS
+  solved so their activity equals the median survivor's (norm matching
+  left them dead on arrival; row rescaling at bias 0 inflated them 4-24x
+  into sparse units -- round-2/3 audits; bias-solved rows measure p50
+  1-6x / p99 <= 13x the survivors' norm, held-out activity 0.97-1.03x the
+  target); outgoing weights zeroed; momentum zeroed. Motivation: dormant-unit accumulation under SGD+wd in the
+  faithful run (half the first-layer filters dead in s1 by iter 75).
+  Literature caveat: ReDo was only validated with Adam and without
+  BN/residuals; a 2024 comparison ranked it weakest of the plasticity fixes.
+  Rows log redo_recycled_last/_total and redo_dormant_frac_last.
+- SEQUENTIAL -> --ray --cpu-actor: the actor plays one iteration ahead of
+  training (the pipeline's one semantic delta, data incorporation).
+NOT changed: buffer size (31.25k; EZ keeps all 100k -- a separate test),
+coverage, the optimizer, and every faithful flag.
+EVAL IS NOT LIKE-FOR-LIKE with the control (round-1 audit MEDIUM-1): the
+control's rows are 50-sim search eval; this arm's are the prior's argmax.
+LIKE-FOR-LIKE CONTROL CURVE (computed by the round-1 fidelity audit):
+pong-faithful-s0's snapshots under prior-argmax eval, eval-actor seeds
+(seed*100003 + it*613 + 500000 + e), 8 games each:
+  iter   5  10  15  20   25   30   35   40   45   50   55   60   65   70   75   80   85
+  prior -20.9 -20.6 -19.0 -18.5 -13.8 -20.8 -12.9 -12.1 -19.0 +7.8 +7.9 +6.4 +16.4 +20.6 +9.5 +12.9 +15.8
+  (search eval for reference: -20.1 ... -1.4 @50, +18.3 @55, +21.0 @65,
+  +18.6 @80). Capped rallies are common under prior-argmax (4/8 @50, 5/8
+  @55) and games are near-deterministic across seeds -- read eval_capped
+  and treat 8 games as fewer than 8 samples.
+READOUT (round-2 design audit, HIGH): prior-argmax eval is DETERMINISTIC
+given the NoopReset count and depends mostly on noops mod 4, so an 8-game
+row is ~4-8 distinct games and single rows were off by up to +-6 (control
+iter 75: row +9.5, exact +3.8). The PRIMARY readout is therefore offline:
+benchmarks/probes/probe_exhaustive_eval.py plays every noop count 1..30 per
+snapshot (exact expectation, fixed thread count, ~5.5 min/snapshot CPU;
+records in benchmarks/probes/probe_exhaustive_eval-<run>.jsonl),
+for prioract AND both control seeds (s1 is the seed-spread yardstick; under
+--ray "same seed" shares only the network init, not the episode streams).
+Pre-registered reads (on EXACT means; env_steps reported alongside, since
+prior acting changes episode length):
+  (1) first row with exact mean >= +10 (or >= 3 of the 4 noop phases won);
+  (2) mean exact over rows 60-90 vs the two control seeds:
+        NO WORSE  if >= the lower control seed's mean - 2;
+        WORSE     if more than 8 below BOTH control seeds;
+        otherwise INCONCLUSIVE -> run seed 1 before concluding;
+  (3) the collapse probes at 15-30 (batch-stat rank, shift/state, raw disc);
+  (4) behaviour (per-row means of the acted steps, logged as beh_*):
+      beh_act_agree (sampled action == argmax of the NOISY birth target;
+      round-1 prediction from the control's weights: ~0.34-0.38 at T=1,
+      ~0.46-0.51 at T=0.5, ~0.58-0.62 at T=0.25 -- the search-acting
+      control's own top-1 rate was ~0.47 / 0.61 / 0.70), beh_prior_agree
+      (temperature-free prior argmax vs birth argmax; control ~0.50-0.55),
+      beh_kl_target_prior, beh_H_act and beh_T (step-weighted mean) /
+      beh_T_values (the exploration actually applied), beh_rare_rate,
+      beh_action_counts. Under --ray the birth priors are recomputed on the
+      driver GPU while the actor sampled from a batch-1 CPU forward (cuDNN
+      may use TF32), so beh_prior_agree can flip at near-ties -- a
+      diagnostic-precision caveat, not a behaviour difference;
+  (5) ReDo attribution: redo_recycled_window / redo_by_net_window,
+      redo_gn_pre20 vs redo_gn_post20 (grad-norm burst after passes),
+      step_loss_mean / step_grad_norm_mean. Offline: redo.dormancy_scores on
+      the control snapshots gives dormancy at matched iterations.
+  Per-row windows are not checkpointed: a resume loses at most the partial
+  window in flight (cumulative totals ARE checkpointed).
+EXPLORATION CHANGES MATERIALLY (the variable under test, audit-measured on
+the control's weights): at T=1 prior sampling is MORE random than visit
+sampling (H 1.52 vs 1.32); at T=0.25 it is LESS exploratory (H 0.69 vs
+0.87; rare-action rate 0.5% vs 1.9%) -- the Dirichlet floor is gone. If
+the run stalls late, this is the first suspect.
+Offline follow-up: greedy 50-sim search eval of this arm's snapshots, so
+both arms also have the search number. A failure is ambiguous by design (bundle, one seed): the
+bisect starts with search acting on this stack, then ReDo off.
+Order after it: SVE (redesigned for whichever acting mode survives).
+AUDIT LOOP (Kai: audit before launch): six fresh-eyes rounds, 09-26..09-28.
+Rounds 1-3 found and fixed HIGH/MEDIUM issues (birth-search weight timing,
+BN recycling loudness, no-BN head recycling -> bias solve, readout
+determinism -> exact eval); rounds 4-6 closed clean (no finding above LOW),
+their LOWs fixed and re-audited. Left unfixed on purpose (cosmetic, fail
+safe; fixing would reopen the loop): a JSON manifest that is not an object
+raises in the preflight (nothing launches), and a test-failure reason that
+embeds an object address reprints every preflight poll. The launch is gated
+on benchmarks/supervisors/prioract_manifest.json (sha256 of the audited
+files) plus tests/test_prioract.py passing in the main tree.
+CONTROL CAVEAT for read (2): faithful s1 collapsed late (exact +17.5 @80 ->
+-14.9 @85, all four noop phases lost) -- the control itself is unstable over
+rows 60-90, so read (2) compares against both seeds' full curves.
+
 ### Campaign record, 2026-09-22 .. 09-26 (edge pair, fidelity audit, the faithful run)
 
 - EDGE PAIR FINAL (iter 90): s0 −8.0, s1 −9.0. Both beat the three non-winning

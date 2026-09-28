@@ -322,6 +322,20 @@ GUMBEL_C_SCALE = 0.1
 # ---------------------------------------------------------------------------
 USE_SEARCH_ACTING = False
 ACT_SEARCH_SIMS = 8            # measured ~40% of a 60fps frame at this budget
+# Policy-only acting in PAPER mode (2026-09-26, Kai: the real-time design --
+# no search on the acting path). With BIRTH_SEARCH on (and USE_SEARCH_ACTING
+# off) the actor samples the prior, and every newly collected trajectory is
+# searched ONCE on arrival -- fresh-root, vectorized (muzero_vtree), through
+# the ONLINE nets, root noise on every step and a greedy search on a
+# truncated tail -- exactly the targets the acting search would have
+# recorded. So the only change from search acting is who picked the actions.
+# Off = paper mode requires search acting, as before.
+BIRTH_SEARCH = False
+# Prior-acting exploration: sample prior^(1/T) with T from the papers' staged
+# schedule (visit_softmax_temperature: 1.0 / 0.5 / 0.25 at 50% / 75% of the
+# run) instead of the fixed ACTING_TEMPERATURE. Root noise is a search-only
+# mechanism, so under policy-only acting this is the exploration knob.
+PRIOR_ACT_STAGED_TEMP = False
 # ---------------------------------------------------------------------------
 # Paper-reproduction mode (EfficientZero/MuZero data path), flag-gated like
 # everything else; the shipped product keeps all of these OFF. When the
@@ -550,6 +564,15 @@ def visit_softmax_temperature(training_steps):
     if frac < 0.75:
         return 0.5
     return 0.25
+
+
+
+def prior_acting_temperature(training_steps):
+    """Temperature for policy-only (prior-sampling) acting: the papers'
+    staged schedule under PRIOR_ACT_STAGED_TEMP, else ACTING_TEMPERATURE."""
+    if PRIOR_ACT_STAGED_TEMP:
+        return visit_softmax_temperature(training_steps)
+    return ACTING_TEMPERATURE
 
 
 def paper_horizon(age_steps):
@@ -988,6 +1011,22 @@ LR_WARMUP_STEPS = 0
 # trains under AMP, whose GradScaler skips such steps; in fp32 one bad step
 # would otherwise corrupt every weight and momentum buffer permanently.
 SKIP_NONFINITE_GRAD_STEPS = False
+# ReDo (redo.py; Sokar et al. 2023): every REDO_EVERY gradient steps, score
+# each single-consumer unit's post-ReLU activation on a fresh uniform replay
+# sample of REDO_BATCH windows and recycle those scoring <= REDO_TAU. 0 = off.
+# The paper recycles every 1000 updates with tau 0.025 in its default
+# setting. Motivation: under SGD + coupled weight decay the faithful runs lost
+# ~8% of BN channels and up to half of the first-layer filters by iter 85.
+# Passes land MID-period (experiments/ablation.py redo_due: 1.5k, 2.5k, ...),
+# never on an eval row, a checkpoint or the final step.
+REDO_EVERY = 0
+REDO_TAU = 0.025
+REDO_BATCH = 256
+# Which nets ReDo recycles (redo.ALL_NETS by default). The prioract arm drops
+# the projector: ~94% of dormant units sit in its hidden layers, so including
+# it would re-randomize most of the projector every pass (Kai, 2026-09-26).
+REDO_NETS = ("representation", "dynamics", "prediction", "value_prefix",
+             "projector")
 
 
 def decay_optimizer_lr(optimizers, factor):
@@ -2610,7 +2649,8 @@ class TrainingHelper:
                         self.prefix_optimizer, self.pred_optimizer,
                         self.proj_optimizer):
                 opt.zero_grad()
-            return total_loss.item()
+            self._last_step = (total_loss.item(), grad_norm)
+            return self._last_step[0]
 
         # Step the optimizers.
         self.rep_optimizer.step()
@@ -2629,7 +2669,10 @@ class TrainingHelper:
             for ref, e in zip(batch["sample_refs"], errs):
                 ref["priority"] = float(e) + PER_EPS
 
-        return total_loss.item()
+        # (loss, pre-clip grad norm TENSOR) for harness diagnostics; the norm
+        # stays on-device so arms that never read it pay no sync.
+        self._last_step = (total_loss.item(), grad_norm)
+        return self._last_step[0]
 
     async def training_process(self):
         try:

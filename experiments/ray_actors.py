@@ -108,6 +108,14 @@ class SelfPlayActor:
         nm.training_steps = training_steps
         return training_steps
 
+    def renormalize_flags(self):
+        """The local nets' LATENT_RENORMALIZE state (a plain attribute, not
+        in the shipped state_dicts, so only the actor's own construction-time
+        override sets it); pinned by tests/test_ray_harness.py."""
+        nm = self.searcher.network_manager
+        return (getattr(nm.representation, "renormalize_output", None),
+                getattr(nm.dynamics, "renormalize_output", None))
+
     def play(self, episode_seed):
         """One self-play episode; returns (trajectory, terminated, steps)."""
         self.env.reset(seed=int(episode_seed))
