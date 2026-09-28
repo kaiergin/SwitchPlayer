@@ -624,6 +624,16 @@ applied only to the oldest samples. With the 31,250-transition buffer that is
 ~36% of value targets once the buffer is full (11,250 / 31,250), not ~84%.
 SVE is the next arm after the edge pair. T1 (start step: code 3e4 vs paper
 4e4) and whether to run the stage-0 probe first are still open.
+DECISIONS (Kai, 2026-09-28): SVE is the NEXT RUN, on top of the prioract
+stack (policy-only acting + birth search + ReDo + vectorized re-search).
+T1 = 4e4 training steps (the PAPER's value -- overrides the lineage rule
+here), T2 = 2e4 as decided. Run the stage-0 probe first. Probe material:
+the LIVE prioract run's resume checkpoint (copied, read on CPU) once its
+buffer is full (~iter 25-30) -- its stored root_values are exactly SVE's
+stage-1 source (birth search: online nets with root noise; overwritten by
+refresh: target nets, communal). The arch1/keepnew90 checkpoints named
+below are collapse-era and superseded; the faithful run's buffers are gone
+(completion markers).
 
 WHAT IT IS (verified against arXiv 2403.00564 and the released code, 2026-09-21):
 the value target for STALE samples is the search's root value, i.e. the
@@ -706,6 +716,20 @@ discounted return. Questions:
    on-policy?
 If the gap is tiny, or SVE is further from realized returns than TD, stop
 here.
+PROBE BUILT 2026-09-28: benchmarks/probes/probe_sve_stage0.py (self-checks
+its TD target against the trainer's own batch builder: max |diff| 0 on 64
+roots). Scheduled on a copy of the prioract checkpoint at iter 26 (buffer
+full, stale ~36%). PROPOSED AMENDMENT (written 2026-09-28 BEFORE any
+full-buffer data; pending Kai): on the prioract stack the newest games are
+played by sampling the prior at T = 1 until iter 45, so their realized
+returns measure a far more random policy than the one search values
+estimate -- the "closer to realized returns" test is structurally tilted
+toward TD (the value head is trained on behaviour returns). The iter-8 dry
+run already shows it: TD MAE 0.51 vs 0.58-0.61 for search values, with
+search values 0.15-0.36 more optimistic. Proposed reading: stop only if the
+gap is tiny (SVE would be a no-op); treat the realized-return comparison as
+descriptive, judged by correlation rather than error, and re-probe at
+~iter 70 (T = 0.25, behaviour near greedy) where the tilt is small.
 
 RUN: the best recipe after the edge pair reports (archfix + edge if the fix
 helps, archfix otherwise) + VALUE_TARGET_MODE mixed. Seeds 0 and 1
@@ -831,6 +855,12 @@ files) plus tests/test_prioract.py passing in the main tree.
 CONTROL CAVEAT for read (2): faithful s1 collapsed late (exact +17.5 @80 ->
 -14.9 @85, all four noop phases lost) -- the control itself is unstable over
 rows 60-90, so read (2) compares against both seeds' full curves.
+READ (2) BANDS, fixed 2026-09-28 before any prioract row (control exact
+means over rows 60-90, all seven rows): s0 +12.20, s1 +5.68 -> NO WORSE if the
+prioract mean >= +3.68; WORSE if < -2.32 (more than 8 below both); else
+INCONCLUSIVE -> seed 1. Control exact @90: s0 +13.57, s1 +0.63 (its search
+eval read +11.5 -- the greedy prior only partly recovered from the @85
+collapse).
 
 ### Campaign record, 2026-09-22 .. 09-26 (edge pair, fidelity audit, the faithful run)
 
