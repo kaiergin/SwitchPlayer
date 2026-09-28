@@ -356,6 +356,18 @@ DIRICHLET_ALPHA = 0.25         # search-root noise; EfficientZero uses 0.3
 # None disables. (A fixed 300 shipped first -- ~8x too aggressive on typical
 # runs; caught by the round-5 source verification.)
 OFFPOLICY_DECAY_STEPS = None
+# Search-based value estimation (EfficientZero V2, arXiv 2403.00564, sec. 4.3
+# + released ez/agents/base.py; Kai 2026-09-21/24/28). "td" = today's target
+# everywhere. "mixed": from SVE_START_TRAIN_STEPS on, a sampled window root
+# that is NOT among the newest SVE_FRESH_TRANSITIONS transitions of the FIFO
+# buffer (EZ-V2's buffer-index rule) takes the stored search root value as
+# the value target at every real unroll position of its window, instead of
+# the n-step TD target. Stage 1 of CURRICULUM's design: the stored value
+# (birth search / refresh), no extra search. Kai 2026-09-28: T1 = 4e4 and
+# T2 = 2e4, both the PAPER's values (the released code uses 3e4 / 5e3).
+VALUE_TARGET_MODE = "td"
+SVE_START_TRAIN_STEPS = 40000
+SVE_FRESH_TRANSITIONS = 20000
 # Staged acting temperature on visit counts (papers: 1.0 / 0.5 / 0.25 at
 # 50% / 75% of the run). Requires a planned run length; None (the unbounded
 # pipeline) stays at 1.0. The harness sets it per run.
@@ -2812,6 +2824,33 @@ class TrainingHelper:
         weights = weights / weights.max()
 
         use_tm = USE_TARGET_MODEL
+        # SVE (VALUE_TARGET_MODE "mixed"): a root is STALE when its global
+        # buffer index lies before the newest SVE_FRESH_TRANSITIONS
+        # transitions. The TD target is still assembled for every position
+        # (so the row diagnostics can measure |SVE - TD| and today's batch
+        # is untouched up to that point); finish_batch_paper then swaps
+        # the stale real positions' values for their stored root values.
+        mixed = VALUE_TARGET_MODE == "mixed"
+        sve_on = mixed and ts >= SVE_START_TRAIN_STEPS
+        buf_frac = 0.0
+        if sve_on:
+            # Counted in TRANSITIONS (actions), as EZ-V2's
+            # GameTrajectory.__len__: a trajectory's last record (terminal
+            # or truncated tail) is not one. A root at global transition
+            # index g is stale iff g <= N - T2 -- EZ-V2's
+            # fresh = idx > collected - mixed_value_threshold
+            # (ez/worker/batch_worker.py:704), so the fresh window holds
+            # T2 - 1 transitions (SVE audit r1, fidelity L2).
+            offsets, acc = {}, 0
+            for traj in trajectories:
+                offsets[id(traj)] = acc
+                acc += max(0, len(traj) - 1)
+            sve_cutoff = acc - SVE_FRESH_TRANSITIONS
+            # The buffer's stale share (uniform over transitions): the
+            # reference for sve_frac, which PER shifts either way.
+            buf_frac = min(acc, max(0, sve_cutoff + 1)) / max(1, acc)
+        sve = []                # (row, step, stored value, value age)
+        n_real = 0
         # (traj_id, tail) -> [tail_obs, [(row, step, g), ...]] for the
         # batch-time bootstrap refresh; deduped since windows share tails.
         pending = {}
@@ -2822,8 +2861,13 @@ class TrainingHelper:
             traj, start = roots[flat]
             refs.append(traj[start])
             age = max(0, ts - traj[start].get("born_step", ts))
-            horizon = paper_horizon(age)
+            # EZ-V2 drops EfficientZero's age-shrunk horizon whenever the
+            # mixed target is configured, before T1 too
+            # (ez/worker/batch_worker.py:645-648: delta_td = 0 for
+            # value_target 'mixed'; SVE audit r1, fidelity L1).
+            horizon = TD_STEPS if mixed else paper_horizon(age)
             L = len(traj)
+            stale = sve_on and offsets[id(traj)] + start <= sve_cutoff
             obs, actions, rewards = [], [], []
             pols, vals, has = [], [], []
             real = []
@@ -2850,6 +2894,11 @@ class TrainingHelper:
                     else:
                         vals.append(paper_value_target(traj, pos, horizon, DISCOUNT))
                     has.append(t.get("has_policy_target", True))
+                    n_real += 1
+                    if stale:
+                        vstep = t.get("root_value_step", t.get("born_step", ts))
+                        sve.append((len(batch_value), step,
+                                    float(t["root_value"]), max(0, ts - vstep)))
                     if step < unroll_steps:
                         actions.append(t["action"])
                 else:
@@ -2881,6 +2930,7 @@ class TrainingHelper:
             batch_real.append(real)
 
         return {"pending": pending, "weights": weights, "refs": refs,
+                "sve": (sve, n_real, buf_frac) if mixed else None,
                 "use_tm": use_tm, "obs": batch_obs, "actions": batch_actions,
                 "rewards": batch_rewards, "policy": batch_policy,
                 "value": batch_value, "has": batch_has, "real": batch_real}
@@ -2943,6 +2993,26 @@ class TrainingHelper:
                 val = cache[k]
                 for row, step, g in pending[k][1]:
                     batch_value[row][step] += g * val
+
+        if a.get("sve") is not None:
+            # SVE swap (VALUE_TARGET_MODE "mixed"), after every TD value is
+            # complete, so the diagnostics compare against the exact target
+            # it replaces. Accumulated per row window (Run._merge_row_stats).
+            sve, n_real, buf_frac = a["sve"]
+            w = getattr(self, "_sve_window", None) or {
+                "n_real": 0, "n_sve": 0, "gap": 0.0, "bias": 0.0, "age": 0.0,
+                "batches": 0, "buf": 0.0}
+            w["n_real"] += n_real
+            w["batches"] += 1
+            w["buf"] += buf_frac
+            for row, step, sv, vage in sve:
+                d = sv - batch_value[row][step]
+                w["n_sve"] += 1
+                w["gap"] += abs(d)
+                w["bias"] += d
+                w["age"] += vage
+                batch_value[row][step] = sv
+            self._sve_window = w
 
         return {
             "obs": np.array(batch_obs),

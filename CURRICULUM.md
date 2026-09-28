@@ -638,8 +638,11 @@ below are collapse-era and superseded; the faithful run's buffers are gone
 WHAT IT IS (verified against arXiv 2403.00564 and the released code, 2026-09-21):
 the value target for STALE samples is the search's root value, i.e. the
 empirical mean of the N bootstrapped estimates
-V̂_n = Σ_{t<H(n)} γ^t r̂_t + γ^{H(n)} V̂(ŝ_{H(n)}). This is exactly our
-`node.q_value()` at a root. Mixed target (released code, ez/agents/base.py):
+V̂_n = Σ_{t<H(n)} γ^t r̂_t + γ^{H(n)} V̂(ŝ_{H(n)}). This is close to, not
+exactly, our root q-value: EZ-V2's root mean also includes the root's own
+network value (N+1 terms; ez/mcts/ctree/cnode.cpp), vtree's root_q averages
+the N simulations only, and communal refresh values also carry backups
+that reached the root through the chain (SVE audit r1, fidelity L5). Mixed target (released code, ez/agents/base.py):
 - before `start_use_mix_training_steps` (3e4 training steps): the TD target
   everywhere;
 - after it: TD for samples among the newest `mixed_value_threshold` (5e3)
@@ -731,6 +734,9 @@ gap is tiny (SVE would be a no-op); treat the realized-return comparison as
 descriptive, judged by correlation rather than error, and re-probe at
 ~iter 70 (T = 0.25, behaviour near greedy) where the tilt is small.
 
+SUPERSEDED 2026-09-28 by "Next experiment -- SVE on the prioract stack"
+below (one seed, the prioract stack, T1 = 4e4; its stop rule carried over
+there). Kept for the record:
 RUN: the best recipe after the edge pair reports (archfix + edge if the fix
 helps, archfix otherwise) + VALUE_TARGET_MODE mixed. Seeds 0 and 1
 concurrently, sequential, --snapshot-weights. Pre-registered reads:
@@ -740,6 +746,114 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
   is weak (~44% at the old 1-in-4 rate);
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
+
+### Next experiment -- SVE on the prioract stack (Kai, 2026-09-28; built and audited)
+
+AUDIT LOOP (2026-09-28): round 1 -- EZ-V2 fidelity (clean) + integration (1
+MEDIUM: diagnostics scored against SVE targets -> td_value_targets; LOWs:
+EZ-V2-exact stale boundary in transitions, fixed TD horizon under mixed,
+sve_buffer_frac, mode gate, full manifest re-checked before every launch);
+rounds 2 and 3 closed clean (LOWs fixed: truncated-tail test, superseded
+old plan, stop rule recalibrated against the control, manifest inputs).
+Parity vs 78c29b05 held in every round (td arms bit-identical).
+
+DECISION (Kai, 2026-09-28): the run after prioract is EfficientZero V2's
+search-based value estimation on top of the prioract stack, with the
+paper's T1 = 4e4 training steps and T2 = 2e4 fresh transitions, after the
+stage-0 probe (benchmarks/probes/probe_sve_stage0.py, on a copy of the live
+prioract checkpoint at iter 26).
+
+ARM effzero-repro-faithful-prioract-sve = the prioract arm + exactly
+VALUE_TARGET_MODE "mixed", SVE_START_TRAIN_STEPS 40000, SVE_FRESH_TRANSITIONS
+20000 (tests/test_sve.py pins the delta). Same seed, same launch line
+(--ray --cpu-actor); control: pong-prioract-s0-2026-09-27.
+
+WHAT CHANGES (stage 1 of the design above, stored values, no extra search):
+- From training step 40k (iter 20) on, a sampled window ROOT whose global
+  buffer index lies before the newest 20k transitions (EZ-V2's buffer-index
+  rule, FIFO by trajectory) takes the stored root_value as the value target
+  at EVERY real position of its window; fresh roots and all padding keep
+  the TD target unchanged. Per ROOT, as in the released code.
+- The stored value on this stack: the birth search (online nets at the
+  actor's request-time step, 50 sims, root noise) until the refresh rotation
+  re-searches the position (lagged target nets, communal). Each write is
+  stamped (root_value_step, SVE arms only) for the sve_value_age diagnostic.
+- Effective coverage: 0 until the buffer exceeds 20k transitions (~iter 18
+  on the faithful pace), then up to ~36% of roots once it is full at 31.25k
+  (~iter 25).
+- Fidelity details (SVE audit r1): staleness counts TRANSITIONS, and a
+  root at global transition index g is stale iff g <= N - T2 (EZ-V2's
+  exact comparison: the fresh window holds T2 - 1); under "mixed" the TD
+  horizon is the fixed TD_STEPS for every sample, before T1 too (EZ-V2
+  zeroes delta_td for the mixed target). Inert for TRAINING: the decay
+  needs a record >= 54k steps old, and such records always lie outside the
+  newest 20k transitions (stale -> SVE replaces the TD value). It does
+  touch diagnostics on a slow pace (~1k transitions/iter: the buffer spans
+  ~62k steps): sve_td_gap / bias there compare against horizon-5 TD, while
+  the control, the TD-referenced panel and the refresh priorities use the
+  age-shrunk horizon. Known
+  deviation: the in-progress game is appended only at the block boundary,
+  so the fresh window reaches ~one game (5-12% of T2) further back than
+  EZ-V2's 400-step block pushes.
+- The TD target is still assembled for every position, then swapped, so
+  compute is unchanged and the row diagnostics measure the exact target
+  replaced. The diagnostics panel (value, value_control) is built with TD
+  targets (td_value_targets), so it stays comparable with the prioract run
+  and never enters the SVE window; step_loss_mean is against the TRAINING
+  (mixed) target. Priorities: the batch writeback gives SVE roots |v - SVE| (as
+  EZ-V2); the refresh's priority recompute stays TD-based (an SVE-based one
+  would zero stale positions' priorities and starve them under PER).
+- Other arms: bit-identical (parity vs 78c29b05 on the prioract, faithful
+  and act-temp-1.5 arms: weights, RNG states, rows -- except the wall-clock
+  birth_search_s_last).
+
+ROW DIAGNOSTICS: sve_frac (share of real value targets from search, as
+PER sampled them; 0.0 before T1), sve_buffer_frac (the buffer's stale
+share, uniform over transitions -- the reference for sve_frac), sve_td_gap
+(mean |SVE - TD| where used), sve_td_bias (mean SVE - TD), sve_value_age
+(training steps since the stored value was computed: a birth value is
+stamped with the actor's weights' step; a refresh value with its
+application step, although its target nets lag a further 200-400 steps --
+small against ages of ~1e4). The SVE window is per row and not
+checkpointed, like the other row windows: a resume's first row covers only
+the iterations since the checkpoint (means unbiased).
+
+LAUNCH GATE: benchmarks/supervisors/supervise_sve.py waits for the prioract
+run to finish AND for the release file benchmarks/supervisors/sve_release,
+written by hand once (a) the prioract readout says policy-only acting held
+up (read (2) NO WORSE or INCONCLUSIVE-leaning-positive) and (b) the stage-0
+probe does not say stop. If prioract is WORSE, SVE moves to the search-acting
+stack instead (redesign), not this arm.
+
+PRE-REGISTERED READS (vs the prioract run, exact evals, same seed; Pong
+saturates at +21, so SVE can only show as SPEED or STABILITY):
+  (1) speed: first row with exact >= +10, and first with >= +15;
+  (2) level: mean exact over rows 60-90 (bands as prioract's read (2),
+      recomputed from the prioract + control curves before launch);
+  (3) late stability: number of rows 60-90 with exact < 0 (the faithful
+      control had 1 of 7 in s1);
+  (4) diagnostics: sve_buffer_frac is 0 before T1, then the builder's own
+      max(0, (N - T2 + 1) / N) averaged over the row's batches -- by
+      construction, so it only checks the buffer SIZE (expect ~0.29-0.36
+      once full: the cap counts records and eviction drops whole games), not
+      the stale rule, which the tests pin (brute-forced against an
+      independent enumeration by the round-2 audit). sve_frac is read
+      relative to it (PER shifts it either way); sve_td_gap / bias against
+      the stage-0 probe's prediction; the TD-referenced value error and the
+      collapse probes.
+STOP RULE -> REVIEW WITH KAI (not an automatic kill; replaces the design's
+"value/control doubling", which the SVE audit r3 showed fires on the
+faithful control itself): the TD-referenced `value` (mean |v(s0) - TD z0|
+over the diagnostics panel) above 2x the PRIORACT run's value at the same
+row for 3 consecutive rows after T1 -- a value self-echo would look like
+this. Calibration: between the two faithful seeds on the same recipe the
+same-row ratio reached 6x in single rows but never stayed >= 2x in the
+same direction for even 2 consecutive rows. Context, not a trigger:
+sve_td_bias drifting upward row over row (SVE increasingly optimistic
+against the reward-anchored TD target). The design's other condition (both
+seeds <= -17 at iter 30) is dropped: the faithful control itself was below
+it (exact -20.8 / -18.1 at iter 30).
+One seed: a null or negative result is suggestive only.
 
 ### Next experiment -- policy-only acting on the parallel stack (Kai, 2026-09-26; built, audit pending)
 

@@ -787,6 +787,19 @@ ARMS["effzero-repro-faithful-prioract"] = {
             "--ray --cpu-actor. Control: pong-faithful-s0-2026-09-24.",
 }
 
+ARMS["effzero-repro-faithful-prioract-sve"] = {
+    **ARMS["effzero-repro-faithful-prioract"],
+    "VALUE_TARGET_MODE": "mixed",
+    "SVE_START_TRAIN_STEPS": 40000,
+    "SVE_FRESH_TRANSITIONS": 20000,
+    "_doc": "effzero-repro-faithful-prioract with EfficientZero V2's "
+            "search-based value estimation (stage 1: stored root values): "
+            "from 40k training steps on, window roots outside the newest "
+            "20k transitions take the stored search value as their value "
+            "target (T1 / T2 = the paper's values; Kai 2026-09-28). Run "
+            "with --ray --cpu-actor. Control: pong-prioract-s0-2026-09-27.",
+}
+
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
 # archfix's exact refresh SELECTION semantics -- staleness rotation,
 # always-replace, no guard. Deltas vs archfix: parallel stack, fresh-
@@ -1319,6 +1332,10 @@ class Run:
                         "target_value": float(val),  # for non-paper readers
                         "has_policy_target": has_policy,
                         "born_step": born})
+            if muzero.VALUE_TARGET_MODE == "mixed":
+                # When root_value was computed (the actor's weights' step),
+                # for SVE's sve_value_age diagnostic.
+                out[-1]["root_value_step"] = born
         out[-1]["truncated"] = not terminated
         for idx, t in enumerate(out):
             z0 = muzero.paper_value_target(out, idx, muzero.TD_STEPS,
@@ -1611,11 +1628,19 @@ class Run:
                     t.pop("refresh_no_drop_strikes", None)
             t["target_policy"] = pol
             t["root_value"] = float(val)
+            if muzero.VALUE_TARGET_MODE == "mixed":
+                t["root_value_step"] = now
+        # Priorities stay TD-based even under SVE: "the z the trainer will
+        # compute" for a stale SVE position IS its root value, which would
+        # zero its priority and starve it under PER. The trainer's
+        # writeback (|v - target_value[:, 0]|) gives SVE roots |v - SVE|,
+        # as EfficientZero V2's batch priorities do.
         for idx, t in enumerate(traj):
-            # Priority against the z the trainer will actually compute
-            # for this position: the 4.3 age-shrunk horizon, not the
-            # full TD_STEPS (refresh candidates are the oldest, where
-            # it shrinks most). The bootstrap is the just-refreshed
+            # Priority against the TD z of the 4.3 age-shrunk horizon, not
+            # the full TD_STEPS (refresh candidates are the oldest, where
+            # it shrinks most) -- the z the trainer computes in "td" mode;
+            # under "mixed" the trainer uses TD_STEPS or, for stale roots,
+            # the stored value, and this stays a TD-based proxy (see above). The bootstrap is the just-refreshed
             # stored search value -- MuZero's canonical priority --
             # which tracks, without exactly equaling, the trainer's
             # target-net value-head bootstrap. Recomputed for EVERY
@@ -2007,7 +2032,9 @@ class Run:
         if self.replay:
             with torch.no_grad():
                 for _ in range(batches):
-                    b = asyncio.run(self.trainer.prepare_batch(self.replay, 32, K, ACTIONS))
+                    with td_value_targets():
+                        b = asyncio.run(self.trainer.prepare_batch(
+                            self.replay, 32, K, ACTIONS))
                     obs = torch.tensor(b["obs"], dtype=torch.float32, device=DEVICE) / 255.0
                     acts = torch.tensor(b["actions"], dtype=torch.long, device=DEVICE)
                     rews = torch.tensor(b["rewards"], dtype=torch.float32, device=DEVICE)
@@ -2083,6 +2110,18 @@ class Run:
             errs["beh_action_counts"] = list(w["counts"])
             errs["beh_T_values"] = list(w.get("Ts", []))
             self._beh_window = None
+        sv = getattr(getattr(self, "trainer", None), "_sve_window", None)
+        if sv and sv["n_real"]:
+            # SVE (VALUE_TARGET_MODE "mixed"): share of real value targets
+            # taken from search, and |SVE - TD| / (SVE - TD) / value age
+            # where it was used (CURRICULUM's pre-registered diagnostics).
+            errs["sve_frac"] = round(sv["n_sve"] / sv["n_real"], 4)
+            errs["sve_buffer_frac"] = round(sv["buf"] / sv["batches"], 4)
+            if sv["n_sve"]:
+                errs["sve_td_gap"] = round(sv["gap"] / sv["n_sve"], 4)
+                errs["sve_td_bias"] = round(sv["bias"] / sv["n_sve"], 4)
+                errs["sve_value_age"] = round(sv["age"] / sv["n_sve"], 1)
+            self.trainer._sve_window = None
         st = getattr(self, "_step_window", None)
         if st and st["n"]:
             errs["step_loss_mean"] = round(st["loss"] / st["n"], 4)
@@ -2724,6 +2763,38 @@ def after_train_step(run):
         run._gn_post = []
 
 
+@contextlib.contextmanager
+def td_value_targets():
+    """Batches built inside use the plain TD value target even in an SVE
+    arm. evaluate_diagnostics' prediction-error panel runs under it, so its
+    `value` / `value_control` stay comparable with every td arm and its
+    batches never enter the per-row SVE window (SVE audit r1, M1). The
+    training loss (step_loss_mean) is against the training target."""
+    saved = muzero.VALUE_TARGET_MODE
+    muzero.VALUE_TARGET_MODE = "td"
+    try:
+        yield
+    finally:
+        muzero.VALUE_TARGET_MODE = saved
+
+
+def sve_gate():
+    """VALUE_TARGET_MODE's supported regime, checked at startup (SVE audit
+    r1 L5): any other string would silently train on TD, and "mixed" only
+    exists in the paper batch builder."""
+    if muzero.VALUE_TARGET_MODE not in ("td", "mixed"):
+        raise SystemExit("VALUE_TARGET_MODE must be 'td' or 'mixed', got "
+                         f"{muzero.VALUE_TARGET_MODE!r}")
+    if muzero.VALUE_TARGET_MODE == "mixed" and not muzero.PAPER_TARGETS:
+        raise SystemExit("VALUE_TARGET_MODE 'mixed' requires PAPER_TARGETS "
+                         "(the paper batch builder)")
+    if muzero.VALUE_TARGET_MODE == "mixed" and not (
+            int(muzero.SVE_START_TRAIN_STEPS) >= 0
+            and int(muzero.SVE_FRESH_TRANSITIONS) >= 1):
+        raise SystemExit("SVE needs SVE_START_TRAIN_STEPS >= 0 and "
+                         "SVE_FRESH_TRANSITIONS >= 1")
+
+
 def birth_search_gate():
     """BIRTH_SEARCH's supported regime, checked at startup (before any
     --overwrite destruction) instead of at the first collect: it replaces
@@ -3228,6 +3299,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         if use_ray:
             ray_scope_gate(spec)
         birth_search_gate()
+        sve_gate()
         if muzero.REDO_EVERY:
             # Fail at startup -- before any --overwrite deletion (round-2
             # audit LOW-3) and not at step REDO_EVERY: import redo and

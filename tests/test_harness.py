@@ -86,7 +86,8 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-refresh5x-communal-edge",
                         "effzero-repro-refresh5x-communal-edge-augfix",
                         "effzero-repro-refresh5x-communal-edge-faithful",
-                        "effzero-repro-faithful-prioract"):
+                        "effzero-repro-faithful-prioract",
+                        "effzero-repro-faithful-prioract-sve"):
             assert spec["USE_AUGMENTATION"] is False, name
 
 
