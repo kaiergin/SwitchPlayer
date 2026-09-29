@@ -747,6 +747,37 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- prioract (policy-only acting on the parallel stack), 2026-09-29
+
+pong-prioract-s0-2026-09-27 finished 09-29 10:59 (19.3 h, ~12.9 min/iter).
+EXACT evals (all 30 noop counts), vs the faithful control:
+  iter      45    50    55    60    65    70    75    80    85    90
+  prioract -11.3  -9.7 -12.4  -8.4  -3.4 -20.8  +8.1  -3.0 +11.2 -16.8
+  ctl s0   -19.6 +12.3 +10.0  +6.8 +15.4 +19.8  +3.8 +11.2 +14.8 +13.6
+  ctl s1    -9.1  -8.9  -1.2  -1.7 +14.5 +14.2  +9.6 +17.5 -14.9  +0.6
+READ (2): mean over 60-90 = -4.73 (controls +12.20 / +5.68) -> WORSE
+(pre-registered band < -2.32). READ (1): first row >= +10 at iter 85
+(controls 50 / 65). 22/30 games capped at 60-65 (long rallies, the
+pre-breakout phase the controls also passed through).
+The agent LEARNS to win (+8.1 @75, +11.2 @85, 4/4 phases) but collapses to
+-20.8 @70 and -16.8 @90. probe_prior_bn_mismatch on the snapshots: at both
+collapses the prediction head's BN running variance is ~1.5x the root
+batch variance (1.06-1.12 at the good snapshots) and the eval-mode prior is
+flat (H 1.68 vs 1.51-1.60); @70 the batch-stat prior is much sharper (1.51,
+an eval-BN artefact), @90 it is flat too (1.62, partly real). Same
+signature as the control's s1 @85 collapse (-14.9).
+CONSEQUENCES (pre-registered): SVE is NOT released on this stack (launch
+gate: "if prioract is WORSE, SVE moves to the search-acting stack"); the
+bisect starts with search acting on the parallel stack, then ReDo off.
+One seed: suggestive, not conclusive.
+SVE STAGE-2 COST (measured on the GPU, iter-26 buffer, one 200-step sync
+window through the real batch builder): 10,715 searches in 44 s -> ~400 s
+per 2000-step iteration (~+52% wall clock, not the estimated +14-21%): the
+misses trickle in ~54 per step, so every search call is small. Nearly every
+stale position is searched each window anyway, so an eager per-sync search
+of all stale positions in full 256-batches should cut it ~3x (needs a
+short audit round).
+
 ### Next experiment -- SVE on the prioract stack (Kai, 2026-09-28; built and audited, stage 2 since 09-29)
 
 AUDIT LOOP (2026-09-28): round 1 -- EZ-V2 fidelity (clean) + integration (1
