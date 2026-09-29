@@ -368,6 +368,20 @@ OFFPOLICY_DECAY_STEPS = None
 VALUE_TARGET_MODE = "td"
 SVE_START_TRAIN_STEPS = 40000
 SVE_FRESH_TRANSITIONS = 20000
+# SVE value SOURCE. "stored": the stored root_value (stage 1). "search"
+# (stage 2; Kai 2026-09-29, after the stage-0 probe found stored values
+# ~40k steps old and +0.21 optimistic against a fresh search): a fresh-root
+# PUCT search of the position through the lagged TARGET nets at
+# SVE_SEARCH_SIMS -- EZ-V2's batch-time reanalysis value (their reanalyze
+# model is the target model; 16 sims matched 50 at corr 0.97 in the probe),
+# reported as EZ-V2's root mean over N+1 estimates (the root's own network
+# value + the N simulation backups). Deliberate deviations (SVE stage-2
+# audit): NO root noise -- EZ-V2's reanalysis search is noisy; noise-free
+# is deterministic and cacheable, measured 0.004 above the noisy mean -- and
+# a truncated tail is searched (EZ-V2 treats every chunk end as terminal:
+# 0). Cached per (trajectory, position) until the next target sync.
+SVE_SOURCE = "stored"
+SVE_SEARCH_SIMS = 16
 # Staged acting temperature on visit counts (papers: 1.0 / 0.5 / 0.25 at
 # 50% / 75% of the run). Requires a planned run length; None (the unbounded
 # pipeline) stays at 1.0. The harness sets it per run.
@@ -2849,7 +2863,8 @@ class TrainingHelper:
             # The buffer's stale share (uniform over transitions): the
             # reference for sve_frac, which PER shifts either way.
             buf_frac = min(acc, max(0, sve_cutoff + 1)) / max(1, acc)
-        sve = []                # (row, step, stored value, value age)
+        # (row, step, traj, pos, stored value, stored value's age)
+        sve = []
         n_real = 0
         # (traj_id, tail) -> [tail_obs, [(row, step, g), ...]] for the
         # batch-time bootstrap refresh; deduped since windows share tails.
@@ -2897,7 +2912,7 @@ class TrainingHelper:
                     n_real += 1
                     if stale:
                         vstep = t.get("root_value_step", t.get("born_step", ts))
-                        sve.append((len(batch_value), step,
+                        sve.append((len(batch_value), step, traj, pos,
                                     float(t["root_value"]), max(0, ts - vstep)))
                     if step < unroll_steps:
                         actions.append(t["action"])
@@ -3001,11 +3016,15 @@ class TrainingHelper:
             sve, n_real, buf_frac = a["sve"]
             w = getattr(self, "_sve_window", None) or {
                 "n_real": 0, "n_sve": 0, "gap": 0.0, "bias": 0.0, "age": 0.0,
-                "batches": 0, "buf": 0.0}
+                "batches": 0, "buf": 0.0, "searches": 0, "search_s": 0.0}
             w["n_real"] += n_real
             w["batches"] += 1
             w["buf"] += buf_frac
-            for row, step, sv, vage in sve:
+            searched = (self._sve_search_values(sve, w)
+                        if SVE_SOURCE == "search" and sve else None)
+            for i, (row, step, _traj, _pos, sv, vage) in enumerate(sve):
+                if searched is not None:
+                    sv, vage = searched[i]
                 d = sv - batch_value[row][step]
                 w["n_sve"] += 1
                 w["gap"] += abs(d)
@@ -3031,11 +3050,73 @@ class TrainingHelper:
             replay_buffer, batch_size, unroll_steps, action_space))
 
     def invalidate_bootstrap_cache(self):
-        """Drop cached target-model bootstrap values. Called at every
-        training-block start (the only points where the replay buffer
-        may have changed) -- see finish_batch_paper."""
+        """Drop cached target-model bootstrap values -- and the SVE search
+        cache, keyed the same way. Called at every training-block start
+        (the only points where the replay buffer may have changed) -- see
+        finish_batch_paper."""
         self._boot_cache = None
         self._boot_cache_stamp = None
+        self._sve_cache = None
+        self._sve_cache_stamp = None
+
+    def _sve_search_values(self, sve, w):
+        """Stage-2 SVE values (SVE_SOURCE "search"), one (value, age) per
+        entry of `sve`: a fresh-root PUCT search of each stale position
+        through the lagged TARGET nets at SVE_SEARCH_SIMS, no root noise
+        (a deliberate deviation: EZ-V2's reanalysis search is noisy),
+        deterministic tie-breaks -- the global RNG is never drawn, so the
+        training streams cannot depend on the cache's state (a resume
+        starts it empty). The value is EZ-V2's root mean over N+1
+        estimates, (v(root) + n * q) / (n + 1), n the root's visits
+        (ez/mcts/ctree/cnode.cpp prepare/get_value); vtree's q averages
+        the n simulation backups only. Cached per (id(traj), pos) until the target sync
+        stamp changes, and dropped at every block start like the bootstrap
+        cache (trajectories are never evicted inside a block, so an id()
+        cannot be reused while its entry lives). The terminal record of a
+        TERMINATED trajectory is absorbing: 0, never searched; a truncated
+        tail is searched (deliberate: EZ-V2 zeroes every chunk end). The age is
+        training steps since the sync (the double-buffered weights are one
+        interval older still). Main thread only (finish_batch_paper)."""
+        import muzero_vtree
+        self._ensure_target_model()
+        stamp = self._target_synced_at
+        cache = getattr(self, "_sve_cache", None)
+        if cache is None or getattr(self, "_sve_cache_stamp", None) != stamp:
+            cache = self._sve_cache = {}
+            self._sve_cache_stamp = stamp
+        keys, miss = [], {}
+        for _row, _step, traj, pos, _stored, _age in sve:
+            terminal = pos == len(traj) - 1 and not traj[-1].get("truncated")
+            k = None if terminal else (id(traj), pos)
+            keys.append(k)
+            if k is not None and k not in cache and k not in miss:
+                miss[k] = traj[pos]["obs"]
+        if miss:
+            t0 = time.perf_counter()
+            engine = muzero_vtree.VectorizedPUCT(
+                {"representation": self.target_representation,
+                 "dynamics": self.target_dynamics,
+                 "prediction": self.target_prediction,
+                 "value_prefix": self.target_value_prefix},
+                self.action_space, self.device)
+            todo = list(miss)
+            chunk = max(1, int(VTREE_REFRESH_BATCH))
+            for lo in range(0, len(todo), chunk):
+                part = todo[lo:lo + chunk]
+                obs = np.stack([miss[k] for k in part])
+                _, q, counts = engine.search(
+                    obs, num_simulations=SVE_SEARCH_SIMS, c_puct=C_PUCT,
+                    discount=DISCOUNT, root_noise=False, tie_break="first")
+                _, _, v0 = engine._initial(obs)
+                n = np.asarray(counts, dtype=np.float64).sum(axis=1)
+                vals = (v0.cpu().numpy() + n * np.asarray(q)) / (n + 1.0)
+                for k, v in zip(part, vals):
+                    cache[k] = float(v)
+            w["searches"] += len(todo)
+            w["search_s"] += time.perf_counter() - t0
+        age = max(0, self.training_steps - (stamp if stamp is not None
+                                            else self.training_steps))
+        return [(0.0 if k is None else cache[k], age) for k in keys]
 
     def assemble_batch(self, replay_buffer, batch_size, unroll_steps,
                        action_space, training_steps=None):

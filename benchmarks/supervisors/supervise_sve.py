@@ -1,7 +1,8 @@
 """Search-based value estimation on the prioract stack (Kai, 2026-09-28):
 arm effzero-repro-faithful-prioract-sve on --ray --cpu-actor, ONE seed. The
-single delta vs the prioract run: EfficientZero V2's SVE, stage 1 (stored
-root values) with the paper's T1 = 4e4 training steps and T2 = 2e4 fresh
+single delta vs the prioract run: EfficientZero V2's SVE -- stale value
+targets from a fresh 16-sim search through the target nets (stage 2, Kai
+2026-09-29) -- with the paper's T1 = 4e4 training steps and T2 = 2e4 fresh
 transitions. Design and pre-registered reads: CURRICULUM.md "Next
 experiment -- SVE on the prioract stack".
 
@@ -86,10 +87,12 @@ def emit_new_rows():
                       r.get("beh_kl_target_prior"), r.get("beh_rare_rate"),
                       r.get("beh_action_counts")), flush=True)
             print("      SVE frac %s (buffer %s)  |SVE-TD| %s  bias %s  "
-                  "value age %s  | TD-referenced value %s control %s" % (
+                  "value age %s  searches %s in %ss  | TD-referenced value %s "
+                  "control %s" % (
                       r.get("sve_frac", "n/a"), r.get("sve_buffer_frac", "n/a"),
                       r.get("sve_td_gap", "n/a"),
                       r.get("sve_td_bias", "n/a"), r.get("sve_value_age", "n/a"),
+                      r.get("sve_searches", "n/a"), r.get("sve_search_s", "n/a"),
                       r.get("value", "n/a"), r.get("value_control", "n/a")),
                   flush=True)
         except Exception:

@@ -747,7 +747,7 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
-### Next experiment -- SVE on the prioract stack (Kai, 2026-09-28; built and audited)
+### Next experiment -- SVE on the prioract stack (Kai, 2026-09-28; built and audited, stage 2 since 09-29)
 
 AUDIT LOOP (2026-09-28): round 1 -- EZ-V2 fidelity (clean) + integration (1
 MEDIUM: diagnostics scored against SVE targets -> td_value_targets; LOWs:
@@ -755,7 +755,11 @@ EZ-V2-exact stale boundary in transitions, fixed TD horizon under mixed,
 sve_buffer_frac, mode gate, full manifest re-checked before every launch);
 rounds 2 and 3 closed clean (LOWs fixed: truncated-tail test, superseded
 old plan, stop rule recalibrated against the control, manifest inputs).
-Parity vs 78c29b05 held in every round (td arms bit-identical).
+STAGE 2 (fresh search, 2026-09-29): round 1 -- EZ-V2 fidelity + correctness
+(clean; LOWs fixed: EZ-V2's N+1 root mean, USE_TARGET_MODEL gate, non-
+vacuous real-engine test, deviations documented); round 2 closed clean
+(20 independent mutations caught; root visits == sims verified inside the
+engine). Parity vs 78c29b05 held in every round (td arms bit-identical).
 
 DECISION (Kai, 2026-09-28): the run after prioract is EfficientZero V2's
 search-based value estimation on top of the prioract stack, with the
@@ -765,19 +769,46 @@ prioract checkpoint at iter 26).
 
 ARM effzero-repro-faithful-prioract-sve = the prioract arm + exactly
 VALUE_TARGET_MODE "mixed", SVE_START_TRAIN_STEPS 40000, SVE_FRESH_TRANSITIONS
-20000 (tests/test_sve.py pins the delta). Same seed, same launch line
+20000, SVE_SOURCE "search", SVE_SEARCH_SIMS 16 (tests/test_sve.py pins the
+delta). Same seed, same launch line
 (--ray --cpu-actor); control: pong-prioract-s0-2026-09-27.
 
-WHAT CHANGES (stage 1 of the design above, stored values, no extra search):
+WHAT CHANGES (stage 2 since 2026-09-29 -- SVE_SOURCE "search"; the stage-1
+text below describes the stale rule, which is unchanged):
 - From training step 40k (iter 20) on, a sampled window ROOT whose global
   buffer index lies before the newest 20k transitions (EZ-V2's buffer-index
   rule, FIFO by trajectory) takes the stored root_value as the value target
   at EVERY real position of its window; fresh roots and all padding keep
   the TD target unchanged. Per ROOT, as in the released code.
-- The stored value on this stack: the birth search (online nets at the
-  actor's request-time step, 50 sims, root noise) until the refresh rotation
-  re-searches the position (lagged target nets, communal). Each write is
-  stamped (root_value_step, SVE arms only) for the sve_value_age diagnostic.
+- STAGE 2 value (the arm): at batch time, each stale real position is
+  searched fresh -- fresh-root PUCT (muzero_vtree.VectorizedPUCT) through
+  the lagged TARGET nets, 16 sims, no root noise, deterministic "first"
+  tie-breaks (the global RNG is never drawn, so training streams cannot
+  depend on cache state; a resume starts the cache empty). Cached per
+  (trajectory, position) until the next target sync, and dropped at every
+  block start at the same call as the bootstrap cache (it does NOT follow
+  the BOOTSTRAP_CACHE toggle, which the arm leaves off: the SVE cache is
+  always on). The terminal record of a terminated
+  game is absorbing (0, never searched); a truncated tail is searched.
+  The value is EZ-V2's root mean over N+1 estimates (the root's own network
+  value + the N backups). sve_value_age = steps since the target sync
+  (0-199; the double-buffered weights are one interval older). Cost rows:
+  sve_searches, sve_search_s. Measured cost estimate (stage-2 audit, from
+  the birth search's GPU rate): +14-21% wall clock (~11k positions per
+  sync window); measured directly in the final smoke.
+  EZ-V2 fidelity (stage-2 audit): matches its model (target/reanalyze nets,
+  200-400 steps old), 16 sims, every position of a stale root, discount,
+  value units and the N+1 root mean. Deliberate deviations: no root noise
+  (EZ-V2's reanalysis search is noisy; noise-free is deterministic and
+  cacheable -- measured 0.004 above the noisy value, sd 0.009 between
+  draws), a truncated tail is searched (EZ-V2: 0), and PUCT instead of
+  Gumbel (repo-wide). Not used: EZ-V2 also takes stale roots' POLICY
+  targets from this search -- a possible follow-up, since it is paid for.
+- STAGE 1 value (SVE_SOURCE "stored", kept as an option): the birth search
+  (online nets at the actor's request-time step, 50 sims, root noise) until
+  the refresh rotation re-searches the position (lagged target nets,
+  communal). Each write is stamped (root_value_step, SVE arms only) for the
+  sve_value_age diagnostic.
 - Effective coverage: 0 until the buffer exceeds 20k transitions (~iter 18
   on the faithful pace), then up to ~36% of roots once it is full at 31.25k
   (~iter 25).
@@ -796,8 +827,8 @@ WHAT CHANGES (stage 1 of the design above, stored values, no extra search):
   so the fresh window reaches ~one game (5-12% of T2) further back than
   EZ-V2's 400-step block pushes.
 - The TD target is still assembled for every position, then swapped, so
-  compute is unchanged and the row diagnostics measure the exact target
-  replaced. The diagnostics panel (value, value_control) is built with TD
+  the row diagnostics measure the exact target replaced (stage 2 adds only
+  the searches). The diagnostics panel (value, value_control) is built with TD
   targets (td_value_targets), so it stays comparable with the prioract run
   and never enters the SVE window; step_loss_mean is against the TRAINING
   (mixed) target. Priorities: the batch writeback gives SVE roots |v - SVE| (as
@@ -811,12 +842,43 @@ ROW DIAGNOSTICS: sve_frac (share of real value targets from search, as
 PER sampled them; 0.0 before T1), sve_buffer_frac (the buffer's stale
 share, uniform over transitions -- the reference for sve_frac), sve_td_gap
 (mean |SVE - TD| where used), sve_td_bias (mean SVE - TD), sve_value_age
-(training steps since the stored value was computed: a birth value is
-stamped with the actor's weights' step; a refresh value with its
-application step, although its target nets lag a further 200-400 steps --
-small against ages of ~1e4). The SVE window is per row and not
+(stage 2, the arm: training steps since the target sync, 0-199; stage 1:
+steps since the stored value was computed -- a birth value is stamped with
+the actor's weights' step, a refresh value with its application step,
+although its target nets lag a further 200-400 steps, small against ages
+of ~1e4), sve_searches / sve_search_s (stage 2: searches run, seconds). The SVE window is per row and not
 checkpointed, like the other row windows: a resume's first row covers only
 the iterations since the checkpoint (means unbiased).
+
+STAGE-0 PROBE RESULT (2026-09-28 21:05; prioract checkpoint @26, training
+step 52k, buffer 30,788 transitions, 35% stale; TD self-check exact):
+  STALE (n 2048, data age p50 40k steps; value scale: TD mean -1.66, sd 0.43)
+                    vs TD: bias   MAE   corr
+    stored (stage 1)      +0.36  0.38  0.70
+    fresh50 (target nets) +0.16  0.18  0.85
+    fresh16 (target nets) +0.12  0.15  0.88
+    stored vs fresh50:    +0.21  0.24  0.79   <- staleness
+    fresh16 vs fresh50:   -0.04  0.05  0.97   <- 16 sims suffice
+  NEWEST (n 3788, age p50 4k) vs REALIZED discounted return (mean -0.61):
+    TD bias -0.87 MAE 0.91 corr 0.47 | stored -0.57 0.75 0.27 |
+    fresh50 -0.77 0.86 0.36 | fresh16 -0.79 0.88 0.37
+READING: (1) the gap is NOT tiny -- stage-1 SVE would move 35% of value
+targets by ~0.9 sd, upward. (2) Staleness is most of it: stored values
+(mostly birth searches ~40k steps old; refresh reaches ~2 of ~15 games per
+iteration) sit +0.21 above a fresh search through today's target nets, so
+stage 1 would add a systematic optimism EZ-V2's batch-time values do not
+have (theirs are <= 200-400 steps old). (3) Realized returns on the newest
+games are far ABOVE every estimate (the value function lags an improving
+agent) -- the tilt runs opposite to the one the proposed amendment feared.
+By error the stored value is closest (0.75 vs TD 0.91), by correlation TD
+is best (0.47 vs 0.27): the pre-registered rule does not say stop.
+DECIDED (Kai, 2026-09-29): stage 2 -- a fresh-root 16-sim search through
+the target nets, the EZ-V2-faithful source; cached per target sync (every
+stale position searched at most once per 200 steps: ~11k positions ->
+~12 s per sync window on the vectorized engine, est. +10-20% wall clock;
+measured in the final smoke once the GPU is free). BUILT on the sve branch
+as SVE_SOURCE "search" (SVE_SEARCH_SIMS 16); stage 1 ("stored") kept as a
+tested option.
 
 LAUNCH GATE: benchmarks/supervisors/supervise_sve.py waits for the prioract
 run to finish AND for the release file benchmarks/supervisors/sve_release,
@@ -839,7 +901,10 @@ saturates at +21, so SVE can only show as SPEED or STABILITY):
       the stale rule, which the tests pin (brute-forced against an
       independent enumeration by the round-2 audit). sve_frac is read
       relative to it (PER shifts it either way); sve_td_gap / bias against
-      the stage-0 probe's prediction; the TD-referenced value error and the
+      the stage-0 probe's prediction (its fresh16 row at @26: bias +0.12,
+      MAE 0.15 -- an N-only mean with random tie-breaks; the arm's N+1 root
+      mean sits ~0.006 lower, so predict ~+0.11); the TD-referenced value
+      error and the
       collapse probes.
 STOP RULE -> REVIEW WITH KAI (not an automatic kill; replaces the design's
 "value/control doubling", which the SVE audit r3 showed fires on the

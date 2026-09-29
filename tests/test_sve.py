@@ -32,13 +32,16 @@ def test_arm_is_prioract_plus_exactly_the_sve_flags():
     arm = ablation.ARMS[ARM]
     delta = {k for k in set(base) | set(arm) if base.get(k) != arm.get(k)}
     assert delta == {"VALUE_TARGET_MODE", "SVE_START_TRAIN_STEPS",
-                     "SVE_FRESH_TRANSITIONS", "_doc"}
+                     "SVE_FRESH_TRANSITIONS", "SVE_SOURCE", "SVE_SEARCH_SIMS",
+                     "_doc"}
     assert (arm["VALUE_TARGET_MODE"], arm["SVE_START_TRAIN_STEPS"],
-            arm["SVE_FRESH_TRANSITIONS"]) == ("mixed", 40000, 20000)
+            arm["SVE_FRESH_TRANSITIONS"], arm["SVE_SOURCE"],
+            arm["SVE_SEARCH_SIMS"]) == ("mixed", 40000, 20000, "search", 16)
 
 
 def test_default_is_td():
     assert muzero.VALUE_TARGET_MODE == "td"
+    assert muzero.SVE_SOURCE == "stored"      # stage-1 tests below use it
 
 
 def _buffer():
@@ -457,4 +460,243 @@ def test_sve_gate_rejects_an_empty_fresh_window(monkeypatch):
     spec["SVE_FRESH_TRANSITIONS"] = 0
     monkeypatch.setitem(ablation.ARMS, "sve-variant", spec)
     with pytest.raises(SystemExit, match="SVE_FRESH_TRANSITIONS >= 1"):
+        ablation.run_one("sve-variant", 0, 1, 1, 1, 1, None)
+
+
+
+# --------------------------------------------------------------------------
+# Stage 2: SVE_SOURCE "search" (fresh target-net search at batch time)
+# --------------------------------------------------------------------------
+V0_OFFSET = 1000.0          # the spy's root network value sits this far above q
+
+
+class _SpyEngine:
+    """Stands in for muzero_vtree.VectorizedPUCT: q = obs mean, the root's
+    own network value = q + V0_OFFSET, n = num_simulations root visits, so
+    the N+1 root mean is q + V0_OFFSET / (n + 1). Records every call."""
+    made, calls = [], []
+
+    def __init__(self, nets, action_space, device):
+        _SpyEngine.made.append((nets, action_space, device))
+
+    @staticmethod
+    def _q(obs):
+        return np.asarray(obs, dtype=np.float64).reshape(len(obs), -1).mean(1)
+
+    def search(self, obs, **kw):
+        import time as _t
+        _t.sleep(0.002)
+        _SpyEngine.calls.append((len(obs), kw))
+        counts = np.zeros((len(obs), ACTIONS))
+        counts[:, 0] = kw["num_simulations"]
+        return None, self._q(obs), counts
+
+    def _initial(self, obs):
+        return None, None, torch.tensor(self._q(obs) + V0_OFFSET)
+
+
+def _search_setup(monkeypatch, fresh=4, replay=None):
+    import muzero_vtree
+    _SpyEngine.made, _SpyEngine.calls = [], []
+    monkeypatch.setattr(muzero_vtree, "VectorizedPUCT", _SpyEngine)
+    monkeypatch.setattr(muzero, "PER_ENABLED", False)
+    monkeypatch.setattr(muzero, "USE_TARGET_MODEL", False)
+    monkeypatch.setattr(muzero, "VALUE_TARGET_MODE", "mixed")
+    monkeypatch.setattr(muzero, "SVE_SOURCE", "search")
+    monkeypatch.setattr(muzero, "SVE_SEARCH_SIMS", 16)
+    monkeypatch.setattr(muzero, "SVE_START_TRAIN_STEPS", 0)
+    monkeypatch.setattr(muzero, "SVE_FRESH_TRANSITIONS", fresh)
+    replay = replay or _buffer()
+    for ti, traj in enumerate(replay):
+        for p, t in enumerate(traj):
+            t["obs"] = np.full((2,), 10 * ti + p, dtype=np.uint8)
+    trainer = make_trainer()
+    trainer.training_steps = 100
+    trainer._ensure_target_model()
+    trainer._target_synced_at = 60          # value age = 100 - 60 = 40
+    return trainer, replay
+
+
+def _spy_value(ti, pos):
+    return 10 * ti + pos + V0_OFFSET / 17.0      # n = 16 root visits
+
+
+def test_search_source_takes_fresh_target_net_values(monkeypatch):
+    """Stale real positions get the N+1 root mean of a search of their own
+    obs; the terminal record is 0 and never searched; fresh roots keep TD;
+    the engine runs on the TARGET nets with the configured sims, no noise,
+    deterministic tie-breaks, in VTREE_REFRESH_BATCH chunks; the value age
+    is steps since the target sync."""
+    monkeypatch.setattr(muzero, "VTREE_REFRESH_BATCH", 2)
+    trainer, replay = _search_setup(monkeypatch)
+    td, roots_td, _ = _batch(trainer, replay, "td", ts=100)
+    trainer._sve_window = None
+    np.random.seed(0)
+    mx = trainer.prepare_batch_paper(replay, 9, K, ACTIONS)
+    where = {id(t): (ti, p) for ti, traj in enumerate(replay)
+             for p, t in enumerate(traj)}
+    roots = [where[id(r)] for r in mx["sample_refs"]]
+    assert roots == roots_td
+    for row, (ti, p) in enumerate(roots):
+        stale = ti < 2                                   # g <= 5 (T2 = 4)
+        for step in range(K + 1):
+            pos = p + step
+            got = mx["target_value"][row, step]
+            if stale and pos < len(replay[ti]):
+                want = 0.0 if pos == len(replay[ti]) - 1 else _spy_value(ti, pos)
+                assert got == pytest.approx(want, abs=1e-9), (ti, p, step)
+            else:
+                assert got == td["target_value"][row, step]
+    nets, A, dev = _SpyEngine.made[0]
+    assert nets["representation"] is trainer.target_representation
+    assert nets["dynamics"] is trainer.target_dynamics
+    assert nets["prediction"] is trainer.target_prediction
+    assert nets["value_prefix"] is trainer.target_value_prefix
+    for n, kw in _SpyEngine.calls:
+        assert n <= 2                                    # chunked
+        assert kw["num_simulations"] == 16 and kw["root_noise"] is False
+        assert kw["tie_break"] == "first"
+        assert kw["c_puct"] == muzero.C_PUCT and kw["discount"] == muzero.DISCOUNT
+    # every distinct stale non-terminal position, once: a0-2, b0-2
+    assert sum(n for n, _ in _SpyEngine.calls) == 6
+    assert len(_SpyEngine.calls) == 3
+    w = trainer._sve_window
+    assert w["age"] / w["n_sve"] == pytest.approx(40.0)
+    assert w["search_s"] > 0
+
+
+def test_search_source_searches_a_truncated_tail(monkeypatch):
+    """A truncated tail is a genuine state: searched, not zeroed (EZ-V2
+    would give it 0 -- a documented deviation)."""
+    trunc = fake_paper_traj([0.0, 1.0, 0.0, 1.0], [1.0, 2.0, 3.0, 4.0],
+                            truncated=True)
+    c = fake_paper_traj([0.0, 0.0, 1.0, 1.0], [31.0, 32.0, 33.0, 0.0])
+    trainer, replay = _search_setup(monkeypatch, fresh=3, replay=[trunc, c])
+    np.random.seed(0)
+    mx = trainer.prepare_batch_paper(replay, 5, K, ACTIONS)
+    where = {id(t): (ti, p) for ti, traj in enumerate(replay)
+             for p, t in enumerate(traj)}
+    tails = [row for row, r in enumerate(mx["sample_refs"])
+             if where[id(r)] == (0, 1)]            # root 1: window 1..3
+    assert tails
+    for row in tails:
+        assert mx["target_value"][row, 2] == pytest.approx(_spy_value(0, 3))
+
+
+def test_search_cache_lives_until_the_next_sync_or_block(monkeypatch):
+    trainer, replay = _search_setup(monkeypatch)
+    trainer._sve_window = None
+    np.random.seed(0)
+    trainer.prepare_batch_paper(replay, 9, K, ACTIONS)
+    first = sum(n for n, _ in _SpyEngine.calls)
+    np.random.seed(1)
+    trainer.prepare_batch_paper(replay, 9, K, ACTIONS)
+    assert sum(n for n, _ in _SpyEngine.calls) == first      # all cached
+    trainer._target_synced_at = 80
+    np.random.seed(2)
+    trainer.prepare_batch_paper(replay, 9, K, ACTIONS)
+    assert sum(n for n, _ in _SpyEngine.calls) == 2 * first  # new sync
+    trainer.invalidate_bootstrap_cache()
+    assert trainer._sve_cache is None
+    w = trainer._sve_window
+    assert w["searches"] == 2 * first and w["search_s"] > 0
+    run = make_run()
+    run.trainer = trainer
+    row = {}
+    run._merge_row_stats(row)
+    assert row["sve_searches"] == 2 * first and row["sve_search_s"] >= 0
+
+
+def test_search_source_real_engine_at_the_arms_tree_config(monkeypatch):
+    """The real engine, heads de-zeroed (fresh heads return one constant for
+    every state), online nets perturbed away from the target nets, the
+    arm's tree config (value prefix in the tree, PER, target model): each
+    swapped value equals EZ-V2's N+1 root mean of a direct TARGET-net
+    search of THAT position, values differ across positions and from an
+    online-net search, and the batch draws nothing from torch's global
+    RNG."""
+    import muzero_vtree
+    from tests.test_vtree import dezero_heads
+    monkeypatch.setattr(muzero, "PER_ENABLED", True)
+    monkeypatch.setattr(muzero, "USE_TARGET_MODEL", True)
+    monkeypatch.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", True)
+    monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)   # the arm's PUCT
+    monkeypatch.setattr(muzero, "VALUE_TARGET_MODE", "mixed")
+    monkeypatch.setattr(muzero, "SVE_SOURCE", "search")
+    monkeypatch.setattr(muzero, "SVE_SEARCH_SIMS", 8)
+    monkeypatch.setattr(muzero, "SVE_START_TRAIN_STEPS", 0)
+    monkeypatch.setattr(muzero, "SVE_FRESH_TRANSITIONS", 4)
+    torch.manual_seed(0)
+    trainer = make_trainer()
+    online = {"prediction": trainer.prediction, "dynamics": trainer.dynamics,
+              "value_prefix": trainer.value_prefix}
+    dezero_heads(online, seed=5)
+    trainer.training_steps = 100
+    trainer._ensure_target_model()            # target := these weights
+    with torch.no_grad():                     # online now differs
+        for prm in trainer.prediction.parameters():
+            prm.add_(0.3 * torch.randn_like(prm))
+    rng = np.random.default_rng(0)
+    replay = _buffer()
+    for traj in replay:
+        for t in traj:
+            t["obs"] = rng.integers(0, 255, (12, *muzero.IMAGE_RESHAPE),
+                                    dtype=np.uint8)
+    np.random.seed(0)
+    t_rng = torch.get_rng_state()
+    mx = trainer.prepare_batch_paper(replay, 9, K, ACTIONS)
+    assert torch.equal(t_rng, torch.get_rng_state())
+
+    def n1_mean(nets, obs):
+        eng = muzero_vtree.VectorizedPUCT(nets, ACTIONS, trainer.device)
+        _, q, counts = eng.search(obs, num_simulations=8, c_puct=muzero.C_PUCT,
+                                  discount=muzero.DISCOUNT, root_noise=False,
+                                  tie_break="first")
+        _, _, v0 = eng._initial(obs)
+        n = counts.sum(axis=1)
+        return (v0.cpu().numpy() + n * q) / (n + 1)
+
+    target = {"representation": trainer.target_representation,
+              "dynamics": trainer.target_dynamics,
+              "prediction": trainer.target_prediction,
+              "value_prefix": trainer.target_value_prefix}
+    live = {"representation": trainer.representation,
+            "dynamics": trainer.dynamics, "prediction": trainer.prediction,
+            "value_prefix": trainer.value_prefix}
+    stale_pos = [(ti, p) for ti in (0, 1) for p in range(3)]
+    obs = np.stack([replay[ti][p]["obs"] for ti, p in stale_pos])
+    for net in live.values():
+        net.eval()
+    want = dict(zip(stale_pos, n1_mean(target, obs)))
+    other = dict(zip(stale_pos, n1_mean(live, obs)))
+    spread = max(want.values()) - min(want.values())
+    tol = 1e-4 * spread + 1e-6
+    assert spread > 1e-3                                   # non-degenerate
+    assert max(abs(want[k] - other[k]) for k in want) > 100 * tol
+    where = {id(t): (ti, p) for ti, traj in enumerate(replay)
+             for p, t in enumerate(traj)}
+    checked = 0
+    for row, r in enumerate(mx["sample_refs"]):
+        ti, p = where[id(r)]
+        for step in range(K + 1):
+            if (ti, p + step) in want and ti < 2:
+                assert abs(mx["target_value"][row, step] - want[(ti, p + step)]) <= tol
+                checked += 1
+    assert checked > 0
+
+
+@pytest.mark.parametrize("key,value,pattern", [
+    ("SVE_SOURCE", "fresh", "SVE_SOURCE must be"),
+    ("SVE_SEARCH_SIMS", 0, "SVE_SEARCH_SIMS >= 1"),
+    ("USE_GUMBEL_SEARCH", True, "PUCT"),
+    ("USE_TARGET_MODEL", False, "requires USE_TARGET_MODEL"),
+])
+def test_sve_gate_validates_the_source(monkeypatch, key, value, pattern):
+    spec = dict(ablation.ARMS[ARM])
+    spec[key] = value
+    if key == "USE_GUMBEL_SEARCH":
+        spec["BIRTH_SEARCH"] = False          # isolate the SVE gate
+        spec["USE_SEARCH_ACTING"] = True
+    monkeypatch.setitem(ablation.ARMS, "sve-variant", spec)
+    with pytest.raises(SystemExit, match=pattern):
         ablation.run_one("sve-variant", 0, 1, 1, 1, 1, None)

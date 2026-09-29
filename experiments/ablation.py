@@ -792,12 +792,15 @@ ARMS["effzero-repro-faithful-prioract-sve"] = {
     "VALUE_TARGET_MODE": "mixed",
     "SVE_START_TRAIN_STEPS": 40000,
     "SVE_FRESH_TRANSITIONS": 20000,
+    "SVE_SOURCE": "search",
+    "SVE_SEARCH_SIMS": 16,
     "_doc": "effzero-repro-faithful-prioract with EfficientZero V2's "
-            "search-based value estimation (stage 1: stored root values): "
-            "from 40k training steps on, window roots outside the newest "
-            "20k transitions take the stored search value as their value "
-            "target (T1 / T2 = the paper's values; Kai 2026-09-28). Run "
-            "with --ray --cpu-actor. Control: pong-prioract-s0-2026-09-27.",
+            "search-based value estimation: from 40k training steps on, "
+            "window roots outside the newest 20k transitions take a fresh "
+            "16-sim search through the target nets as their value target "
+            "(T1 / T2 = the paper's values, Kai 2026-09-28; batch-time "
+            "fresh search, Kai 2026-09-29). Run with --ray --cpu-actor. "
+            "Control: pong-prioract-s0-2026-09-27.",
 }
 
 # Staged-attribution arm (2026-09-02, Kai): saturation coverage with
@@ -2117,6 +2120,11 @@ class Run:
             # where it was used (CURRICULUM's pre-registered diagnostics).
             errs["sve_frac"] = round(sv["n_sve"] / sv["n_real"], 4)
             errs["sve_buffer_frac"] = round(sv["buf"] / sv["batches"], 4)
+            if sv.get("searches"):
+                # Stage 2 cost: fresh searches run (cache misses) and their
+                # wall-clock seconds in this row's window.
+                errs["sve_searches"] = sv["searches"]
+                errs["sve_search_s"] = round(sv["search_s"], 1)
             if sv["n_sve"]:
                 errs["sve_td_gap"] = round(sv["gap"] / sv["n_sve"], 4)
                 errs["sve_td_bias"] = round(sv["bias"] / sv["n_sve"], 4)
@@ -2793,6 +2801,19 @@ def sve_gate():
             and int(muzero.SVE_FRESH_TRANSITIONS) >= 1):
         raise SystemExit("SVE needs SVE_START_TRAIN_STEPS >= 0 and "
                          "SVE_FRESH_TRANSITIONS >= 1")
+    if muzero.VALUE_TARGET_MODE == "mixed":
+        if muzero.SVE_SOURCE not in ("stored", "search"):
+            raise SystemExit("SVE_SOURCE must be 'stored' or 'search', got "
+                             f"{muzero.SVE_SOURCE!r}")
+        if muzero.SVE_SOURCE == "search" and (
+                int(muzero.SVE_SEARCH_SIMS) < 1 or muzero.USE_GUMBEL_SEARCH):
+            raise SystemExit("SVE_SOURCE 'search' needs SVE_SEARCH_SIMS >= 1 "
+                             "and PUCT (the vectorized engine is PUCT-only)")
+        if muzero.SVE_SOURCE == "search" and not muzero.USE_TARGET_MODEL:
+            # Without it the target nets would be built lazily at the first
+            # stale batch (a mid-run torch RNG draw) and first "lag" nothing.
+            raise SystemExit("SVE_SOURCE 'search' requires USE_TARGET_MODEL "
+                             "(it searches through the lagged target nets)")
 
 
 def birth_search_gate():
