@@ -382,6 +382,13 @@ SVE_FRESH_TRANSITIONS = 20000
 # 0). Cached per (trajectory, position) until the next target sync.
 SVE_SOURCE = "stored"
 SVE_SEARCH_SIMS = 16
+# Greedy (eval) episodes act on the prior's argmax even in a search-acting
+# PAPER arm, whose eval otherwise searches (the papers evaluate with
+# search). For the search-acting bisect on the --cpu-actor stack (Kai
+# 2026-09-29): 8 CPU-searched eval games of up to 3000 steps take over an
+# hour per row, and the pre-registered readout is the exact PRIOR-ARGMAX
+# eval anyway (probe_exhaustive_eval) -- so the in-run rows match it.
+EVAL_PRIOR_ONLY = False
 # Staged acting temperature on visit counts (papers: 1.0 / 0.5 / 0.25 at
 # 50% / 75% of the run). Requires a planned run length; None (the unbounded
 # pipeline) stays at 1.0. The harness sets it per run.

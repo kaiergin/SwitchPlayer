@@ -787,6 +787,22 @@ ARMS["effzero-repro-faithful-prioract"] = {
             "--ray --cpu-actor. Control: pong-faithful-s0-2026-09-24.",
 }
 
+ARMS["effzero-repro-faithful-searchact"] = {
+    **ARMS["effzero-repro-faithful-prioract"],
+    "USE_SEARCH_ACTING": True,
+    "BIRTH_SEARCH": False,
+    "PRIOR_ACT_STAGED_TEMP": False,
+    "EVAL_PRIOR_ONLY": True,
+    "_doc": "The prioract bisect's first step (Kai 2026-09-29, after "
+            "prioract read WORSE): the prioract stack -- vectorized "
+            "communal re-search, --ray --cpu-actor, ReDo -- with SEARCH "
+            "acting restored (the CPU actor's 50-sim search with root noise "
+            "and staged visit temperature records the targets; no birth "
+            "search). In-run eval is the prior's argmax (EVAL_PRIOR_ONLY), "
+            "matching the exact-eval readout. Controls: "
+            "pong-prioract-s0-2026-09-27 and pong-faithful-s0/s1-2026-09-24.",
+}
+
 ARMS["effzero-repro-faithful-prioract-sve"] = {
     **ARMS["effzero-repro-faithful-prioract"],
     "VALUE_TARGET_MODE": "mixed",
@@ -1222,9 +1238,13 @@ class Run:
         obs, _ = self.env.reset()
         stack = initial_frame_stack(preprocess_frame(obs, IMAGE_RESHAPE))
         traj, prev_reward, total, done, steps = [], 0.0, 0.0, False, 0
+        # EVAL_PRIOR_ONLY: a greedy episode never searches (per step or
+        # tail) and records plain 3-field steps, as a non-search arm's.
+        prior_eval = greedy and muzero.EVAL_PRIOR_ONLY
         while not done and steps < cap:
             stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
-            if muzero.USE_SEARCH_ACTING and (not greedy or muzero.PAPER_TARGETS):
+            if muzero.USE_SEARCH_ACTING and not prior_eval and (
+                    not greedy or muzero.PAPER_TARGETS):
                 # Search acting: one search per step during self-play. Greedy
                 # EVAL searches only in paper mode (the papers evaluate with
                 # search); non-paper search-acting arms keep their documented
@@ -1275,7 +1295,7 @@ class Run:
             # eval windows starting wherever self-play left off.
             self.env.was_real_done = True
         final_stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
-        if muzero.USE_SEARCH_ACTING and muzero.PAPER_TARGETS:
+        if muzero.USE_SEARCH_ACTING and muzero.PAPER_TARGETS and not prior_eval:
             # The terminal record needs a stored root value for the paper
             # value targets: 0 at a true terminal; a truncated tail gets one
             # greedy search on the final observation.

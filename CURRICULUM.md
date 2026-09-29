@@ -747,6 +747,68 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment -- search acting on the parallel stack (the prioract bisect, step 1; Kai, 2026-09-29)
+
+DECISION (Kai, 2026-09-29, after prioract read WORSE): run the
+pre-registered bisect -- the prioract stack with SEARCH acting restored,
+ReDo kept on -- and, in parallel, the BN-recalibration probe (option B).
+ARM effzero-repro-faithful-searchact = the prioract arm with exactly
+USE_SEARCH_ACTING True, BIRTH_SEARCH False, PRIOR_ACT_STAGED_TEMP False,
+EVAL_PRIOR_ONLY True (tests/test_searchact.py pins the delta). One seed
+(0), --ray --cpu-actor, 90 x 2000 steps, snapshots every 5 iterations.
+WHAT IT ISOLATES vs prioract: who picks the actions and how they explore --
+the CPU actor's 50-sim search with root noise and the staged VISIT
+temperature records the targets while playing (the records birth search
+reproduced after the fact), instead of sampling the prior at the staged
+temperature. Everything else is prioract's: vectorized communal
+re-search, the CPU actor one iteration stale, ReDo (projector excluded),
+the faithful flags, the 31.25k buffer.
+vs the faithful control: the parallel stack (pipelined CPU actor),
+vectorized communal re-search, ReDo, and prior-argmax in-run eval
+(EVAL_PRIOR_ONLY: the control evaluated with search in-run; the exact
+readout below is prior-argmax for every run).
+EVAL_PRIOR_ONLY (new flag, default off): greedy episodes act on the
+prior's argmax and record plain 3-field steps, tail included, even in a
+search-acting paper arm; self-play still searches. Needed because 8
+CPU-searched eval games of up to 3000 steps take > 1 h per row, and
+snapshots are written only on eval rows.
+RISK: CPU search acting is ~0.25 s/step (check D) -> ~10 min per
+2000-3000-step episode, about one iteration's training time: the actor may
+set the pace (iteration time is logged; prioract ran 12.9 min/iter).
+PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90, same bands as
+prioract's, fixed from the faithful control before any row):
+  (1) first SUCCESS row: exact >= +10 or >= 3 of the 4 noop phases won --
+      prioract's own read (1) definition (control 50 / 65; prioract 75:
+      +8.1 with 3/4 phases; first exact >= +10 at 85);
+  (2) mean exact over rows 60-90: NO WORSE >= +3.68, WORSE < -2.32, else
+      INCONCLUSIVE (control +12.20 / +5.68, prioract -4.73);
+  (3) collapses: rows AFTER the run's first success row (read 1) with
+      exact < 0 -- pre-breakout rows are not collapses (control s0 0 of 8
+      rows after 50; s1 1 of 5 after 65 (@85); prioract 2 of 3 after 75
+      (@80 -3.0, @90 -16.8)), and the BN-variance ratio at each;
+  (4) iteration time (acting-bound?) -- launched only after the
+      CPU-heavy recalibration probes finish, so no other load overlaps;
+      the supervisor prints elapsed_s and min/iter per row.
+INTERPRETATION (actions, with hedged labels -- prioract's WORSE is one
+seed, the two control seeds differ by 6.5 points and one collapse row
+moves a 7-row mean by ~4-5): NO WORSE -> consistent with the stack and
+ReDo being fine and policy-only acting (prior-sampled exploration / birth
+search) having hurt prioract; SVE then runs on THIS stack (a searchact-sve
+arm, re-derived). WORSE -> consistent with the stack or ReDo: step 2 is
+ReDo off; if that is still WORSE, step 3 splits the pipelined data lag
+(sequential acting) from the vectorized re-search. INCONCLUSIVE -> seed 1.
+The BN-recalibration probe (option B) is read alongside: if recalibrated
+BN statistics rescue the collapsed snapshots, recalibration joins every
+later arm as a stabilizer, whatever this run says.
+SECONDARY READOUT (pre-registered 2026-09-29, before any row of this run,
+after the probe showed recalibration rescues collapses): the same reads (1)
+and (2) on BN-RECALIBRATED exact evals (probe_bn_recal_eval.py, the common
+calibration set = prioract @85's greedy frames at noops 1-4), computed
+identically for this run, prioract and both control seeds (rows 60-90).
+The PRIMARY verdict stays the un-recalibrated read (2); the secondary one
+says whether a difference survives once the eval-mode BN artefact is
+removed from every run alike.
+
 ### RESULT -- prioract (policy-only acting on the parallel stack), 2026-09-29
 
 pong-prioract-s0-2026-09-27 finished 09-29 10:59 (19.3 h, ~12.9 min/iter).
@@ -756,8 +818,12 @@ EXACT evals (all 30 noop counts), vs the faithful control:
   ctl s0   -19.6 +12.3 +10.0  +6.8 +15.4 +19.8  +3.8 +11.2 +14.8 +13.6
   ctl s1    -9.1  -8.9  -1.2  -1.7 +14.5 +14.2  +9.6 +17.5 -14.9  +0.6
 READ (2): mean over 60-90 = -4.73 (controls +12.20 / +5.68) -> WORSE
-(pre-registered band < -2.32). READ (1): first row >= +10 at iter 85
-(controls 50 / 65). 22/30 games capped at 60-65 (long rallies, the
+(pre-registered band < -2.32). READ (1), as pre-registered (exact >= +10
+or >= 3 of 4 phases won): iter 75 (+8.1, 3/4) vs controls 50 / 65; the
+first exact >= +10 is iter 85 (corrected 09-29, bisect audit r1). Under
+read (3)'s definition (rows after the first success) prioract's collapses
+are @80 (-3.0) and @90 (-16.8); @70 (-20.8) precedes its first success. The
+BN-variance ratios below were measured at @65/@70/@75/@85/@90 (not @80). 22/30 games capped at 60-65 (long rallies, the
 pre-breakout phase the controls also passed through).
 The agent LEARNS to win (+8.1 @75, +11.2 @85, 4/4 phases) but collapses to
 -20.8 @70 and -16.8 @90. probe_prior_bn_mismatch on the snapshots: at both
