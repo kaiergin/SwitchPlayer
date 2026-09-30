@@ -803,6 +803,41 @@ ARMS["effzero-repro-faithful-searchact"] = {
             "pong-prioract-s0-2026-09-27 and pong-faithful-s0/s1-2026-09-24.",
 }
 
+# The factorization after the bisect read WORSE (Kai, 2026-09-30): two
+# concurrent runs that split the parallel-stack suspects. Their flags are
+# IDENTICAL (tests/test_factor.py pins it): the only difference between
+# them is the launch mode -- --ray --cpu-actor (pipelined CPU actor) vs
+# sequential. With searchact and the faithful control:
+#   ReDo:                 searchact  vs  searchact-noredo
+#   pipelined acting:     searchact-noredo  vs  seqvtree
+#   vectorized re-search: seqvtree  vs  the faithful control
+ARMS["effzero-repro-faithful-searchact-noredo"] = {
+    **ARMS["effzero-repro-faithful-searchact"],
+    "REDO_EVERY": 0,
+    "STEP_DIAGNOSTICS": True,
+    "_launch": {"ray": True, "cpu_actor": True},
+    "_doc": "effzero-repro-faithful-searchact with ReDo OFF (bisect step "
+            "2; step diagnostics kept on). Launch pinned: --ray "
+            "--cpu-actor. Controls: pong-searchact-s0-2026-09-29 (ReDo on) "
+            "and effzero-repro-faithful-seqvtree (same flags, sequential).",
+}
+
+ARMS["effzero-repro-faithful-seqvtree"] = {
+    **ARMS["effzero-repro-refresh5x-communal-edge-faithful"],
+    "REFRESH_VTREE": True,
+    "VTREE_COMMUNAL_TRAJS": 8,
+    "EVAL_PRIOR_ONLY": True,
+    "STEP_DIAGNOSTICS": True,
+    "_launch": {"ray": False},
+    "_doc": "The faithful control with the vectorized communal re-search "
+            "(REFRESH_VTREE; VTREE_COMMUNAL_TRAJS 8, i.e. every refreshed "
+            "trajectory -- POLICY_REFRESH_COUNT = 4 -- in one forest) and "
+            "prior-argmax in-run eval (EVAL_PRIOR_ONLY), no ReDo, step "
+            "diagnostics on -- bisect step 3. Launch pinned: SEQUENTIAL "
+            "(no --ray). Controls: pong-faithful-s0/s1-2026-09-24 and "
+            "effzero-repro-faithful-searchact-noredo.",
+}
+
 ARMS["effzero-repro-faithful-prioract-sve"] = {
     **ARMS["effzero-repro-faithful-prioract"],
     "VALUE_TARGET_MODE": "mixed",
@@ -2755,7 +2790,7 @@ def after_train_step(run):
     each pass -- round-2 design audit). Touches nothing on `run` while ReDo
     is off, so every other arm is unchanged and test stubs need no new
     surface."""
-    if not muzero.REDO_EVERY:
+    if not (muzero.REDO_EVERY or muzero.STEP_DIAGNOSTICS):
         return
     last = getattr(run.trainer, "_last_step", None)
     if last is not None:
@@ -2804,6 +2839,21 @@ def td_value_targets():
         yield
     finally:
         muzero.VALUE_TARGET_MODE = saved
+
+
+def launch_gate(spec, use_ray, cpu_actor):
+    """An arm may pin its launch mode (`_launch`): the factorization arms'
+    ONLY difference is the launch mode, so a hand relaunch in the wrong mode
+    must fail loudly instead of resuming a different experiment (factor
+    audit r1 L3). Arms without `_launch` are unaffected."""
+    want = spec.get("_launch")
+    if not want:
+        return
+    have = {"ray": bool(use_ray), "cpu_actor": bool(cpu_actor)}
+    bad = {k: (v, have.get(k)) for k, v in want.items() if have.get(k) != v}
+    if bad:
+        raise SystemExit(f"this arm pins its launch mode {want}; got "
+                         f"{have} -- relaunch with the arm's own flags")
 
 
 def sve_gate():
@@ -3339,6 +3389,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
         if use_ray:
             ray_scope_gate(spec)
+        launch_gate(spec, use_ray, cpu_actor)
         birth_search_gate()
         sve_gate()
         if muzero.REDO_EVERY:

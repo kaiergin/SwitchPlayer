@@ -747,6 +747,78 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment -- the factorization (bisect steps 2+3 at once; Kai, 2026-09-30)
+
+DECISION (Kai, 2026-09-30): after searchact read WORSE, run the two
+remaining bisect steps CONCURRENTLY, one seed each (0):
+  noredo   = effzero-repro-faithful-searchact-noredo, --ray --cpu-actor:
+             searchact with ReDo OFF;
+  seqvtree = effzero-repro-faithful-seqvtree, SEQUENTIAL: the faithful
+             control + the vectorized communal re-search + prior-argmax
+             in-run eval, no ReDo.
+Both keep STEP_DIAGNOSTICS on (row loss / grad-norm series without ReDo)
+and PIN their launch mode (`_launch`, launch_gate: a relaunch in the wrong
+mode fails at startup). Their effective flags are IDENTICAL apart from the
+inert REDO_NETS (tests/test_factor.py); the difference is the LAUNCH MODE,
+which bundles: the one-iteration data lag (and eviction lag) of the
+pipelined actor, CPU-actor search numerics, and the actor's own RNG regime
+(seeded per run, not checkpointed; sequential restores its streams). With
+the two finished runs this splits the suspects:
+  ReDo                  searchact (-11.37)  vs  noredo
+  launch mode           noredo              vs  seqvtree
+  vectorized re-search  seqvtree            vs  faithful control (+12.20/+5.68)
+(The vectorized re-search groups the POLICY_REFRESH_COUNT = 4 refreshed
+trajectories per forest, so VTREE_COMMUNAL_TRAJS 8 acts as 4 -- in prioract
+and searchact too; the "~4% of roots" figure was measured at 8 vs 1.)
+EVAL_PRIOR_ONLY on seqvtree: the control's in-run SEARCH eval sat on the
+sequential critical path; the readout is the offline exact eval either
+way, and eval does not feed training (a reseed of the RNG streams: the
+control's search eval drew np.random every step).
+CONCURRENCY (factor audit r1 M2; the faithful pair did NOT use the vtree
+engine): measured peak torch-reserved GPU memory per driver process at
+production shape (iter-26 buffer, batch 256 training + the vectorized
+refresh): 4.64 GiB each (4.04 training, +0.6 refresh); + ~0.4 GiB CUDA
+context each + ~1.2 GiB desktop -> ~11.3 of 11.99 GiB (nvidia-smi's
+12,282 MiB), tight; late-run games (2.5-3k steps) grow the forest by
+~0.13 GiB per process and the eval concatenation adds ~0.05-0.1 ->
+~11.5-11.7 GiB projected over rows 60-90 (factor audit r2). PAUSE RULE
+(checked by a background monitor sampling every 10 min): pause seqvtree
+(its resume restores every stream exactly; resume it after noredo) if
+nvidia-smi memory.used >= 12,000 MiB on 3 consecutive readings, OR host
+commit free < 2 GB on 3 consecutive readings, OR either run's iteration
+time exceeds 2.5x its early pace for 2 consecutive rows (a Windows
+driver spill; past runs grew at most 1.73x). Iteration times are
+compared only between these two runs.
+PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90, the SAME bands
+as prioract / searchact, fixed from the faithful control):
+  per run: (1) first success row (exact >= +10 or >= 3/4 phases won);
+  (2) mean exact over rows 60-90: NO WORSE >= +3.68, WORSE < -2.32, else
+  INCONCLUSIVE; (3) collapses after the first success; secondary: the same
+  on BN-recalibrated exact evals (common calibration set).
+INTERPRETATION -- the full matrix (rows noredo, columns seqvtree; single
+seeds, labels hedged "consistent with"):
+                 seqvtree NO WORSE      seqvtree INCONCL.      seqvtree WORSE
+  noredo NO W.   ReDo hurt searchact;   ReDo hurt; seqvtree    CONTRADICTION under
+                 stack fine without it  seed 1 to confirm      identical flags: seed
+                 -> SVE on the parallel the stack              noise or pipelining
+                 stack (no ReDo)                               HELPS -> seed 1 of
+                                                               both, no attribution
+  noredo INCONC. launch mode suspect;   both unclear ->        re-search or ReDo
+                 noredo seed 1 first    seed 1 of both         suspect; seqvtree
+                                                               seed 1 first
+  noredo WORSE   LAUNCH MODE hurts      launch mode suspect,   VECTORIZED RE-SEARCH
+                 (lag / CPU actor);     re-search partly       hurts (both WORSE):
+                 re-search exonerated;  (seqvtree below the    next seqvtree with
+                 ReDo UNIDENTIFIED      control); seqvtree     VTREE_COMMUNAL_TRAJS
+                 (both of its runs at   seed 1 first           1 (bit-identical to
+                 the WORSE floor) ->                           the sequential engine)
+                 SVE on the sequential                         BEFORE any SVE run
+                 stack (+vtree)
+  When a cell names two actions, the seed-1 run comes first; in the
+  (WORSE, WORSE) cell the TRAJS-1 run precedes SVE.
+SVE waits for this: it goes on whichever stack reads NO WORSE (or on the
+sequential faithful stack if none does).
+
 ### RESULT -- search acting on the parallel stack (bisect step 1), 2026-09-30
 
 pong-searchact-s0-2026-09-29 finished 09-30 13:49 (paused 22:10-23:44 at

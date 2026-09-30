@@ -1053,6 +1053,10 @@ SKIP_NONFINITE_GRAD_STEPS = False
 # Passes land MID-period (experiments/ablation.py redo_due: 1.5k, 2.5k, ...),
 # never on an eval row, a checkpoint or the final step.
 REDO_EVERY = 0
+# Row step diagnostics (mean loss / pre-clip grad norm per row) WITHOUT ReDo
+# (factor audit r1 L4): after_train_step records them whenever ReDo is on or
+# this is set; reading them draws no RNG and changes no update.
+STEP_DIAGNOSTICS = False
 REDO_TAU = 0.025
 REDO_BATCH = 256
 # Which nets ReDo recycles (redo.ALL_NETS by default). The prioract arm drops
