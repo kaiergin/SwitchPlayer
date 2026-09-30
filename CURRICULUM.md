@@ -747,6 +747,61 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- search acting on the parallel stack (bisect step 1), 2026-09-30
+
+pong-searchact-s0-2026-09-29 finished 09-30 13:49 (paused 22:10-23:44 at
+the iter-40 checkpoint; ~15-20 min/iter late -- CPU search acting).
+EXACT evals (prior-argmax, all 30 noops) / BN-recalibrated:
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw   -15.3  -13.2  -12.1  -13.2  -11.7   -9.9  -12.2  -10.6  -10.5  -11.5
+  recal                      -10.4  -12.5   -8.7   -9.8  -14.1   -9.5  -10.9
+No noop phase won in any row; 7-9/30 capped at 65-85 (long rallies, no
+breakout).
+READ (1): no success row (control 50 / 65, prioract 75). READ (2): mean
+60-90 = -11.37 -> WORSE (< -2.32); secondary (recalibrated) -10.84, far
+below the controls' +13.94 / +6.76. READ (3): no success, so no collapses.
+READ (4): 11-20 min/iter, rising with game length.
+READING (per the pre-registered matrix): WORSE -> consistent with the
+parallel stack or ReDo, not policy-only acting: search acting did not
+rescue the stack -- it did worse than prioract (single seeds; seed luck
+is large in this campaign, but BOTH parallel-stack runs fall below BOTH
+sequential controls). Shared by the two parallel-stack runs and absent
+from the controls: the pipelined CPU actor (data one iteration late),
+the vectorized communal re-search (8 trajectories), ReDo, and prior-
+argmax in-run eval (inert for learning). Pre-registered next: step 2,
+ReDo off; if still WORSE, step 3 splits the pipelined data lag
+(sequential acting) from the vectorized re-search.
+
+### BN recalibration probe (option B), 2026-09-29 -- post hoc, exploratory
+
+probe_bn_recal_eval.py: representation + prediction BN statistics re-
+estimated from root-only forwards on a COMMON calibration set (prioract
+@85's greedy frames at noops 1-4, 9,226 frames), then the exact eval.
+  iter    prioract raw->recal   ctl s0 raw->recal   ctl s1 raw->recal
+   60       -8.4 ->  -8.0         +6.8 ->  +7.5       -1.7 ->  -0.2
+   65       -3.4 ->  -5.9        +15.4 -> +18.8      +14.5 ->  +7.3
+   70      -20.8 ->  -1.9        +19.8 -> +14.7      +14.2 ->  +4.1
+   75       +8.1 ->  +4.2         +3.8 -> +13.8       +9.6 -> +14.5
+   80       -3.0 ->  +9.3        +11.2 -> +10.1      +17.5 -> +16.3
+   85      +11.2 -> +11.5        +14.8 -> +13.3      -14.9 ->  -0.2
+   90      -16.8 ->  +5.9        +13.6 -> +19.4       +0.6 ->  +5.5
+  mean60-90 -4.73 -> +2.16       +12.20 -> +13.94     +5.68 ->  +6.76
+READING: every collapse/dip is rescued (+10 to +23: prioract @70/@80/@90,
+s1 @85, s0 @75) -- the late-run collapses are mostly the eval-mode BN
+artefact (running stats averaged over unroll depths 0..K; acting sees
+depth 0). On recalibrated evals prioract would read INCONCLUSIVE, not
+WORSE, but it still trails both controls and broke out later. The
+common calibration set is NOT neutral for other agents: some good
+snapshots drop (s1 @65 -7.2, @70 -10.1; s0 @70 -5.1) -- a stabilizer
+should recalibrate each agent on its OWN recent root states. The
+pre-registered prioract verdict (WORSE, un-recalibrated) stands.
+CANDIDATE STABILIZER (next arm after the bisect, needs its own build +
+audit): before each acting/eval weight sync, re-estimate depth-0 BN
+statistics for the acting nets on a batch of recent replay root states.
+
+LAUNCHED 2026-09-29 12:47: pong-searchact-s0-2026-09-29 (commit
+bd5bb0fa, WMI supervisor; preflight passed in the main tree).
+
 ### Next experiment -- search acting on the parallel stack (the prioract bisect, step 1; Kai, 2026-09-29)
 
 DECISION (Kai, 2026-09-29, after prioract read WORSE): run the
