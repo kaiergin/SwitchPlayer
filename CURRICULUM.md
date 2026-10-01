@@ -747,6 +747,22 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- noredo (factorization half 1), 2026-10-01
+
+pong-noredo-s0-2026-09-30 finished 10-01 ~13:50 (run alone after the
+seqvtree pause; ~14-15 min/iter). EXACT / BN-recalibrated:
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw   -12.5   -9.9   -4.9   +0.6   +3.8   +3.4  +12.8  +11.3   +3.9   +5.3
+  recal                       -5.2   +1.2   -1.8   +7.9  +10.1   +2.7  +11.7
+READ (1): first success @65 (+3.8, 3/4 phases) -- control s1's row.
+READ (2): mean 60-90 = +5.86 -> NO WORSE (>= +3.68); recalibrated +3.81.
+READ (3): 0 collapses in 5 rows after the first success.
+REDO COMPARISON (the only flag difference): searchact -11.37 (WORSE, never
+won a phase) vs noredo +5.86 (NO WORSE) -- consistent with ReDo having
+hurt searchact, and plausibly prioract (ReDo on too). noredo matches the
+control's s1 on every read. Single seeds; the matrix cell is completed
+by seqvtree (resumed 10-01 ~14:05 from its iter-8 checkpoint).
+
 ### Next experiment -- the factorization (bisect steps 2+3 at once; Kai, 2026-09-30)
 
 DECISION (Kai, 2026-09-30): after searchact read WORSE, run the two
@@ -816,6 +832,16 @@ seeds, labels hedged "consistent with"):
                  stack (+vtree)
   When a cell names two actions, the seed-1 run comes first; in the
   (WORSE, WORSE) cell the TRAJS-1 run precedes SVE.
+LAUNCHED 2026-09-30 15:17 (commit 2b46acad): pong-noredo-s0-2026-09-30 and
+pong-seqvtree-s0-2026-09-30. PAUSE RULE FIRED 18:39: host commit free
+1.70 / 1.12 / 0.97 GB on three readings (GPU fine at ~9.97 GB used) ->
+seqvtree paused at its iter-8 checkpoint (18:09); commit free recovered
+to 9.08 GB, i.e. the seqvtree tree held ~8 GB of commit. HOST COMMIT (the
+fixed 4.5 GB page file, 36.2 GB limit, desktop apps included) -- not the
+GPU -- is what stops these two running concurrently. seqvtree resumes
+after noredo finishes (relaunch supervise_factor.py seqvtree 0 via WMI;
+its resume restores every stream exactly), unless the page file is
+enlarged first.
 SVE waits for this: it goes on whichever stack reads NO WORSE (or on the
 sequential faithful stack if none does).
 
