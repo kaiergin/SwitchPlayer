@@ -747,6 +747,62 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment -- policy-only acting without ReDo (Kai, 2026-10-01)
+
+DECISION (Kai, 2026-10-01): after the factorization implicated ReDo, test
+policy-based acting again -- the prioract arm with ReDo OFF -- on the
+CPU-only actor if seqvtree shows the CPU actor has no effect. One seed (0).
+ARMS (tests/test_prioract2.py pins every delta):
+  effzero-repro-faithful-prioract-noredo      prioract, REDO_EVERY 0,
+      STEP_DIAGNOSTICS on; launch pinned --ray --cpu-actor;
+  effzero-repro-faithful-prioract-noredo-seq  the same flags, launch
+      pinned SEQUENTIAL (birth search on the live nets).
+ONE launches (supervise_prioract2.py {ray|seq} 0, after seqvtree finishes).
+LAUNCH-MODE RULE (pre-registered 2026-10-01, while seqvtree was at iter
+20 -- before any of its rows 60-90): the RAY variant, UNLESS seqvtree's
+exact mean over rows 60-90 exceeds THRESHOLD = noredo's mean + |s0 - s1|
+(the faithful control seeds' spread), all four means over rows 60-90 from
+the exact-eval records -- 5.8620 + 6.5143 = 12.3763 -- then the SEQ
+variant runs. ENFORCED: supervise_prioract2.py waits for seqvtree's exact
+evals, computes the rule from the records, prints the numbers and refuses
+(exit 2) a variant the rule does not select. Read honestly it is "no
+evidence of an effect", not proof of none: with one seed per arm the
+inferred SD of a run-to-run difference is ~8, so the threshold is ~0.8 SD
+and a real ~5-point sequential advantage would usually not trigger it
+(read 2b then compares within one launch mode, so the conclusion about
+policy-only acting stands either way). For policy-only acting the launch
+mode bundles mainly the one-iteration data lag: the CPU actor only samples
+the prior, and the birth search runs on the driver in both variants. If
+seqvtree FAILS (crash loop), the rule is undecidable and the choice goes
+back to Kai. PROCEDURE (prioract2 audit r2 LOW-A/B): seqvtree's snapshots are
+exact-evaluated only AFTER its run completes -- a snapshot probed while the
+run is live can be overwritten by a resume and leave a stale record, and
+the supervisor's reader keeps the last record per (run, row) without a
+conflict check; a torn record line makes it exit (fails closed, the
+traceback in supervisor.err).
+WHAT IT ISOLATES: vs its search-acting twin on the same stack and launch
+mode (noredo +5.86 for ray; seqvtree for seq) the only effective delta is
+WHO ACTS: the prior sampled at the staged temperature + birth search
+(online request-time weights, root noise) instead of the actor's own
+50-sim search (EVAL_PRIOR_ONLY is inert without search acting). vs prioract
+(-4.73): ReDo off -- for the RAY variant only (the seq variant also
+changes the launch mode vs prioract).
+PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90; secondary:
+the same on BN-recalibrated evals):
+  (1) first success row (exact >= +10 or >= 3/4 phases won);
+  (2) mean exact over rows 60-90 vs the faithful control: NO WORSE >= +3.68,
+      WORSE < -2.32, else INCONCLUSIVE;
+  (2b) vs the search-acting twin: policy-only acting costs no more than the
+      seed spread if mean >= twin mean - 6.5143 (noredo: >= -0.6523);
+  (3) collapses after the first success; (4) behaviour (beh_*: act/prior
+      agreement with the birth search, applied temperature, entropy).
+INTERPRETATION (single seed, hedged): (2) NO WORSE and (2b) within the
+spread -> consistent with policy-only acting being viable on this stack
+(the Switch design) -> SVE on it next. (2) WORSE or (2b) below -> policy-
+only acting costs here even without ReDo; first suspect the exploration
+change (prior sampling: more random than visit sampling at T=1, less at
+T=0.25 -- the dropped Dirichlet floor). Otherwise INCONCLUSIVE -> seed 1.
+
 ### RESULT -- noredo (factorization half 1), 2026-10-01
 
 pong-noredo-s0-2026-09-30 finished 10-01 ~13:50 (run alone after the
@@ -778,7 +834,7 @@ mode fails at startup). Their effective flags are IDENTICAL apart from the
 inert REDO_NETS (tests/test_factor.py); the difference is the LAUNCH MODE,
 which bundles: the one-iteration data lag (and eviction lag) of the
 pipelined actor, CPU-actor search numerics, and the actor's own RNG regime
-(seeded per run, not checkpointed; sequential restores its streams). With
+(seeded per run, not checkpointed; sequential restores its training streams -- the env NoopReset stream restarts from the seed in both). With
 the two finished runs this splits the suspects:
   ReDo                  searchact (-11.37)  vs  noredo
   launch mode           noredo              vs  seqvtree
@@ -799,7 +855,7 @@ context each + ~1.2 GiB desktop -> ~11.3 of 11.99 GiB (nvidia-smi's
 ~0.13 GiB per process and the eval concatenation adds ~0.05-0.1 ->
 ~11.5-11.7 GiB projected over rows 60-90 (factor audit r2). PAUSE RULE
 (checked by a background monitor sampling every 10 min): pause seqvtree
-(its resume restores every stream exactly; resume it after noredo) if
+(its resume restores the training RNG streams (not the env's NoopReset stream, which restarts from the seed -- statistically equivalent, not bit-exact); resume it after noredo) if
 nvidia-smi memory.used >= 12,000 MiB on 3 consecutive readings, OR host
 commit free < 2 GB on 3 consecutive readings, OR either run's iteration
 time exceeds 2.5x its early pace for 2 consecutive rows (a Windows
@@ -840,7 +896,7 @@ to 9.08 GB, i.e. the seqvtree tree held ~8 GB of commit. HOST COMMIT (the
 fixed 4.5 GB page file, 36.2 GB limit, desktop apps included) -- not the
 GPU -- is what stops these two running concurrently. seqvtree resumes
 after noredo finishes (relaunch supervise_factor.py seqvtree 0 via WMI;
-its resume restores every stream exactly), unless the page file is
+its resume restores the training RNG streams (not the env's NoopReset stream, which restarts from the seed -- statistically equivalent, not bit-exact)), unless the page file is
 enlarged first.
 SVE waits for this: it goes on whichever stack reads NO WORSE (or on the
 sequential faithful stack if none does).

@@ -838,6 +838,33 @@ ARMS["effzero-repro-faithful-seqvtree"] = {
             "effzero-repro-faithful-searchact-noredo.",
 }
 
+# Policy-only acting again, WITHOUT ReDo (Kai, 2026-10-01): after the
+# factorization implicated ReDo (searchact -11.37 vs noredo +5.86). Two
+# launch-pinned arms with identical flags; ONE launches, chosen by the
+# pre-registered seqvtree rule in CURRICULUM ("--ray --cpu-actor unless
+# seqvtree beats noredo by more than the control seeds' spread").
+ARMS["effzero-repro-faithful-prioract-noredo"] = {
+    **ARMS["effzero-repro-faithful-prioract"],
+    "REDO_EVERY": 0,
+    "STEP_DIAGNOSTICS": True,
+    "_launch": {"ray": True, "cpu_actor": True},
+    "_doc": "effzero-repro-faithful-prioract with ReDo OFF (step "
+            "diagnostics on): policy-only acting (prior at the staged "
+            "temperature) + birth search, vectorized communal re-search. "
+            "Launch pinned: --ray --cpu-actor. Controls: "
+            "pong-noredo-s0-2026-09-30 (search acting, same stack) and "
+            "pong-prioract-s0-2026-09-27 (ReDo on).",
+}
+
+ARMS["effzero-repro-faithful-prioract-noredo-seq"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo"],
+    "_launch": {"ray": False},
+    "_doc": "effzero-repro-faithful-prioract-noredo launched SEQUENTIALLY "
+            "(birth search on the live nets). Used only if the seqvtree "
+            "rule implicates the pipelined CPU actor. Control: "
+            "pong-seqvtree-s0-2026-09-30 (search acting, sequential).",
+}
+
 ARMS["effzero-repro-faithful-prioract-sve"] = {
     **ARMS["effzero-repro-faithful-prioract"],
     "VALUE_TARGET_MODE": "mixed",
