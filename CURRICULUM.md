@@ -749,57 +749,63 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 
 ### Next experiment -- policy-only acting without ReDo (Kai, 2026-10-01)
 
-DECISION (Kai, 2026-10-01): after the factorization implicated ReDo, test
-policy-based acting again -- the prioract arm with ReDo OFF -- on the
-CPU-only actor if seqvtree shows the CPU actor has no effect. One seed (0).
-ARMS (tests/test_prioract2.py pins every delta):
-  effzero-repro-faithful-prioract-noredo      prioract, REDO_EVERY 0,
-      STEP_DIAGNOSTICS on; launch pinned --ray --cpu-actor;
-  effzero-repro-faithful-prioract-noredo-seq  the same flags, launch
-      pinned SEQUENTIAL (birth search on the live nets).
-ONE launches (supervise_prioract2.py {ray|seq} 0, after seqvtree finishes).
-LAUNCH-MODE RULE (pre-registered 2026-10-01, while seqvtree was at iter
-20 -- before any of its rows 60-90): the RAY variant, UNLESS seqvtree's
-exact mean over rows 60-90 exceeds THRESHOLD = noredo's mean + |s0 - s1|
-(the faithful control seeds' spread), all four means over rows 60-90 from
-the exact-eval records -- 5.8620 + 6.5143 = 12.3763 -- then the SEQ
-variant runs. ENFORCED: supervise_prioract2.py waits for seqvtree's exact
-evals, computes the rule from the records, prints the numbers and refuses
-(exit 2) a variant the rule does not select. Read honestly it is "no
-evidence of an effect", not proof of none: with one seed per arm the
-inferred SD of a run-to-run difference is ~8, so the threshold is ~0.8 SD
-and a real ~5-point sequential advantage would usually not trigger it
-(read 2b then compares within one launch mode, so the conclusion about
-policy-only acting stands either way). For policy-only acting the launch
-mode bundles mainly the one-iteration data lag: the CPU actor only samples
-the prior, and the birth search runs on the driver in both variants. If
-seqvtree FAILS (crash loop), the rule is undecidable and the choice goes
-back to Kai. PROCEDURE (prioract2 audit r2 LOW-A/B): seqvtree's snapshots are
-exact-evaluated only AFTER its run completes -- a snapshot probed while the
-run is live can be overwritten by a resume and leave a stale record, and
-the supervisor's reader keeps the last record per (run, row) without a
-conflict check; a torn record line makes it exit (fails closed, the
-traceback in supervisor.err).
-WHAT IT ISOLATES: vs its search-acting twin on the same stack and launch
-mode (noredo +5.86 for ray; seqvtree for seq) the only effective delta is
-WHO ACTS: the prior sampled at the staged temperature + birth search
-(online request-time weights, root noise) instead of the actor's own
-50-sim search (EVAL_PRIOR_ONLY is inert without search acting). vs prioract
-(-4.73): ReDo off -- for the RAY variant only (the seq variant also
-changes the launch mode vs prioract).
+DECISIONS (Kai, 2026-10-01): after the factorization implicated ReDo, test
+policy-based acting again -- the prioract arm with ReDo OFF -- ALWAYS
+PARALLEL (--ray --cpu-actor: the Switch must act in parallel with training
+anyway), with each finished game added to the buffer at once. Let seqvtree
+finish first (it isolates the batched re-search, which this arm also uses,
+and it is this arm's no-lag search-acting twin). This WITHDRAWS the
+launch-mode rule pre-registered at 9cae34d2 (ray vs seq chosen from
+seqvtree's rows 60-90) before any of those rows existed (seqvtree was at
+row 35): there is no sequential variant any more. Mid-game weight swaps and
+chunked streaming are BACKLOGGED for the Switch (IDEAS_BACKLOG.md): a
+policy-only Pong game takes ~8 s on the CPU actor (3.7 ms/step, measured)
+vs ~13 min of training per iteration, so they would change almost nothing
+here; the whole lag was the finished game waiting for the block to end.
+ARM effzero-repro-faithful-prioract-noredo = prioract + REDO_EVERY 0,
+STEP_DIAGNOSTICS, RAY_EAGER_COLLECT (tests/test_prioract2.py pins it);
+launch pinned --ray --cpu-actor; supervise_prioract2.py ray 0 (waits for
+seqvtree's completion marker).
+RAY_EAGER_COLLECT (new, default off): train_block polls the actor every
+EAGER_POLL_STEPS (10) gradient steps; when the episode is done it closes the
+block, collects (birth search on the request-time weights, append, evict)
+and continues the remaining steps in a fresh block (caches reopened). One
+game per iteration is unchanged (the next is still requested at the
+boundary), so each game joins ~0-40 of the iteration's 2000 steps in
+(its remaining play time rounded up to the 10-step poll grid -- training
+pauses for the birth search, so that adds no steps; a game that finished
+during the boundary's refresh/eval/checkpoint is collected before step 1)
+vs step 1 sequentially -- the sequential harness's freshness with acting
+still parallel. Rows record it: eager_collect_steps, [iteration, offset]
+per eager iteration (offset None = missed the block; primed iterations --
+1 and the first after a resume -- have no entry; not checkpointed, so a
+resumed row lists only post-resume iterations). NOT REPLAYABLE FROM THE
+SEED: where the collect lands depends on wall-clock time. The birth
+search draws torch's global generator on the training device (Dirichlet
+root noise, tie-breaks), which training's augmentation noise also draws,
+so a mid-block collect reorders those draws; numpy's generator (PER batch
+sampling) is not touched by the collect, but every later PER draw sees a
+buffer that changed at a wall-clock-dependent step (statistically
+equivalent; resume was never bit-exact either).
+WHAT IT ISOLATES: vs seqvtree (search acting, sequential, same flags
+otherwise): WHO ACTS -- the prior sampled at the staged temperature + birth
+search instead of the 50-sim acting search -- plus the parallel actor,
+whose lag eager collect removes (residual: the first ~0-40 steps, ~0-15 s,
+of each iteration, and the actor's own RNG regime). vs noredo (+5.86): who
+acts AND the lag. vs prioract (-4.73): ReDo off AND eager collect.
 PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90; secondary:
 the same on BN-recalibrated evals):
   (1) first success row (exact >= +10 or >= 3/4 phases won);
   (2) mean exact over rows 60-90 vs the faithful control: NO WORSE >= +3.68,
       WORSE < -2.32, else INCONCLUSIVE;
-  (2b) vs the search-acting twin: policy-only acting costs no more than the
-      seed spread if mean >= twin mean - 6.5143 (noredo: >= -0.6523);
-  (3) collapses after the first success; (4) behaviour (beh_*: act/prior
-      agreement with the birth search, applied temperature, entropy).
+  (2b) vs seqvtree (the twin): policy-only acting costs no more than the
+      seed spread if mean >= seqvtree's mean - 6.5143 (the faithful control
+      seeds' spread);
+  (3) collapses after the first success; (4) behaviour (beh_*).
 INTERPRETATION (single seed, hedged): (2) NO WORSE and (2b) within the
-spread -> consistent with policy-only acting being viable on this stack
-(the Switch design) -> SVE on it next. (2) WORSE or (2b) below -> policy-
-only acting costs here even without ReDo; first suspect the exploration
+spread -> consistent with policy-only acting being viable (the Switch
+design) -> SVE on this stack next. (2) WORSE or (2b) below -> policy-only
+acting costs even without ReDo and lag; first suspect the exploration
 change (prior sampling: more random than visit sampling at T=1, less at
 T=0.25 -- the dropped Dirichlet floor). Otherwise INCONCLUSIVE -> seed 1.
 

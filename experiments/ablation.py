@@ -838,31 +838,23 @@ ARMS["effzero-repro-faithful-seqvtree"] = {
             "effzero-repro-faithful-searchact-noredo.",
 }
 
-# Policy-only acting again, WITHOUT ReDo (Kai, 2026-10-01): after the
-# factorization implicated ReDo (searchact -11.37 vs noredo +5.86). Two
-# launch-pinned arms with identical flags; ONE launches, chosen by the
-# pre-registered seqvtree rule in CURRICULUM ("--ray --cpu-actor unless
-# seqvtree beats noredo by more than the control seeds' spread").
+# Policy-only acting again, WITHOUT ReDo, always parallel, with each game
+# added to the buffer as soon as it finishes (Kai, 2026-10-01): after the
+# factorization implicated ReDo (searchact -11.37 vs noredo +5.86).
 ARMS["effzero-repro-faithful-prioract-noredo"] = {
     **ARMS["effzero-repro-faithful-prioract"],
     "REDO_EVERY": 0,
     "STEP_DIAGNOSTICS": True,
+    "RAY_EAGER_COLLECT": True,
     "_launch": {"ray": True, "cpu_actor": True},
     "_doc": "effzero-repro-faithful-prioract with ReDo OFF (step "
-            "diagnostics on): policy-only acting (prior at the staged "
-            "temperature) + birth search, vectorized communal re-search. "
-            "Launch pinned: --ray --cpu-actor. Controls: "
-            "pong-noredo-s0-2026-09-30 (search acting, same stack) and "
-            "pong-prioract-s0-2026-09-27 (ReDo on).",
-}
-
-ARMS["effzero-repro-faithful-prioract-noredo-seq"] = {
-    **ARMS["effzero-repro-faithful-prioract-noredo"],
-    "_launch": {"ray": False},
-    "_doc": "effzero-repro-faithful-prioract-noredo launched SEQUENTIALLY "
-            "(birth search on the live nets). Used only if the seqvtree "
-            "rule implicates the pipelined CPU actor. Control: "
-            "pong-seqvtree-s0-2026-09-30 (search acting, sequential).",
+            "diagnostics on) and RAY_EAGER_COLLECT (each game joins the "
+            "buffer as soon as the CPU actor finishes it, mid training "
+            "block -- sequential freshness): policy-only acting (prior at "
+            "the staged temperature) + birth search, vectorized communal "
+            "re-search. Launch pinned: --ray --cpu-actor. Twin: "
+            "pong-seqvtree-s0-2026-09-30 (search acting, no lag); also "
+            "pong-noredo-s0-2026-09-30 and pong-prioract-s0-2026-09-27.",
 }
 
 ARMS["effzero-repro-faithful-prioract-sve"] = {
@@ -1143,6 +1135,85 @@ def train_batches(run, n_steps):
                 run.replay, muzero.TRAINING_BATCHES, muzero.UNROLL_STEPS,
                 ACTIONS))
         yield serial
+
+
+def train_block(run, n_steps, pipeline=None, init_name=None,
+                consistency_base=None, it=None):
+    """One iteration's gradient steps. Default: a single contiguous
+    train_batches block (the unchanged loop). RAY_EAGER_COLLECT with an
+    episode in flight: poll the actor every EAGER_POLL_STEPS steps; when
+    the episode is done, close the block, collect it into the buffer (birth
+    search on the request-time weights, append, evict) and continue the
+    remaining steps in a fresh block -- train_batches reopens, invalidating
+    the id()-keyed caches, so the mid-iteration append never meets a stale
+    cache or an open prefetcher. A game that finished during the previous
+    boundary's work (refresh / eval / checkpoint) is collected before the
+    first step. Each eager iteration records [it, step offset at which its
+    game joined] (offset None: the iteration-end collect took it) in
+    run._eager_window, emitted per row as eager_collect_steps."""
+    eager = (pipeline is not None and muzero.RAY_EAGER_COLLECT
+             and pipeline.pending is not None)
+    if eager:
+        window = getattr(run, "_eager_window", None)
+        if window is None:
+            window = run._eager_window = []
+        window.append([it, None])
+        if pipeline.acting_ready():
+            pipeline.collect()
+            window[-1][1] = 0
+            print(f"  [eager collect] episode joined the buffer 0 of "
+                  f"{n_steps} steps into the iteration", flush=True)
+            eager = False
+    remaining = n_steps
+    while True:
+        done, ready = 0, False
+        with train_batches(run, remaining) as next_batch:
+            for _ in range(remaining):
+                if init_name:
+                    apply_warmstart_lr(
+                        (run.trainer.rep_optimizer, run.trainer.dyn_optimizer,
+                         run.trainer.pred_optimizer,
+                         run.trainer.prefix_optimizer,
+                         run.trainer.proj_optimizer),
+                        run.trainer.training_steps)
+                    apply_warmstart_consistency(
+                        consistency_base, run.trainer.training_steps)
+                asyncio.run(run.trainer.train_step(next_batch()))
+                run.trainer.training_steps += 1
+                after_train_step(run)
+                done += 1
+                if (eager and done < remaining
+                        and done % muzero.EAGER_POLL_STEPS == 0
+                        and pipeline.acting_ready()):
+                    ready = True
+                    break
+        remaining -= done
+        if not ready:
+            return
+        pipeline.collect()
+        run._eager_window[-1][1] = n_steps - remaining
+        print(f"  [eager collect] episode joined the buffer {n_steps - remaining}"
+              f" of {n_steps} steps into the iteration", flush=True)
+        eager = False
+
+
+def eager_collect_gate(use_ray):
+    """RAY_EAGER_COLLECT's supported regime, checked at startup: the
+    pipelined iteration loop only (not the async driver), no saturation
+    refresh (it fills the gap before collect), no batch prefetcher (an
+    early block close would discard prefetched, RNG-drawn batches)."""
+    if not muzero.RAY_EAGER_COLLECT:
+        return
+    if not use_ray:
+        raise SystemExit("RAY_EAGER_COLLECT needs --ray (there is no "
+                         "in-flight episode in the sequential harness)")
+    if muzero.ASYNC_LOOP or muzero.REFRESH_SATURATE or muzero.TRAIN_PREFETCH:
+        raise SystemExit("RAY_EAGER_COLLECT supports the pipelined iteration "
+                         "loop only: not ASYNC_LOOP, REFRESH_SATURATE or "
+                         "TRAIN_PREFETCH")
+    poll = muzero.EAGER_POLL_STEPS
+    if not (isinstance(poll, int) and not isinstance(poll, bool) and poll >= 1):
+        raise SystemExit(f"EAGER_POLL_STEPS must be an int >= 1, got {poll!r}")
 
 
 def eval_summary(episodes):
@@ -2212,6 +2283,17 @@ class Run:
                 errs["sve_td_bias"] = round(sv["bias"] / sv["n_sve"], 4)
                 errs["sve_value_age"] = round(sv["age"] / sv["n_sve"], 1)
             self.trainer._sve_window = None
+        ew = getattr(self, "_eager_window", None)
+        if ew:
+            # RAY_EAGER_COLLECT: [iteration, step offset at which its game
+            # joined the buffer] per eager iteration in this row (offset
+            # None: it missed the block and the iteration-end collect took
+            # it). Primed iterations (1, and the first after a resume:
+            # nothing in flight) have no entry. Per-row window, NOT
+            # checkpointed (like _beh_window / _step_window): after a
+            # resume the row lists only the post-resume iterations.
+            errs["eager_collect_steps"] = [list(e) for e in ew]
+            self._eager_window = None
         st = getattr(self, "_step_window", None)
         if st and st["n"]:
             errs["step_loss_mean"] = round(st["loss"] / st["n"], 4)
@@ -2954,7 +3036,9 @@ class RayPipeline:
     plays on a Ray actor WHILE the driver trains. Acting-policy staleness
     is IDENTICAL to the sequential harness (episode k plays on
     end-of-(k-1) weights); the one semantic delta is data incorporation,
-    which lags one iteration (episode k first trains in k+1). Refresh,
+    which lags one iteration (episode k first trains in k+1) -- unless
+    RAY_EAGER_COLLECT, where train_block collects it mid-block as soon as
+    the actor is done (it then trains from ~step 10-40 of k). Refresh,
     eval, LR events, and checkpoints all run AFTER collect, so they see
     exactly the buffer state the sequential harness would at that point.
 
@@ -3147,7 +3231,8 @@ class RayPipeline:
 
     def acting_ready(self):
         """Non-blocking: are ALL in-flight episode futures done? The
-        saturation loop polls this between refresh candidates."""
+        saturation loop polls this between refresh candidates, and
+        train_block (RAY_EAGER_COLLECT) between gradient steps."""
         if self.pending is None:
             return True
         futures, _ = self.pending
@@ -3417,6 +3502,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         if use_ray:
             ray_scope_gate(spec)
         launch_gate(spec, use_ray, cpu_actor)
+        eager_collect_gate(use_ray)
         birth_search_gate()
         sve_gate()
         if muzero.REDO_EVERY:
@@ -3822,22 +3908,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             # TRAIN_PREFETCH: batch i+1 assembles on a worker thread while
             # the GPU trains on batch i (bit-identical batch sequence to the
             # serial loop; see muzero.BatchPrefetcher). The prefetcher is
-            # scoped to this contiguous block -- nothing mutates the replay
-            # buffer until it is closed.
-            with train_batches(run, steps_this_iter) as next_batch:
-                for _ in range(steps_this_iter):
-                    if init_name:
-                        apply_warmstart_lr(
-                            (run.trainer.rep_optimizer, run.trainer.dyn_optimizer,
-                             run.trainer.pred_optimizer,
-                             run.trainer.prefix_optimizer,
-                             run.trainer.proj_optimizer),
-                            run.trainer.training_steps)
-                        apply_warmstart_consistency(
-                            consistency_base, run.trainer.training_steps)
-                    asyncio.run(run.trainer.train_step(next_batch()))
-                    run.trainer.training_steps += 1
-                    after_train_step(run)
+            # scoped to each contiguous block -- nothing mutates the replay
+            # buffer while one is open (RAY_EAGER_COLLECT closes the block
+            # before its mid-iteration collect; see train_block).
+            train_block(run, steps_this_iter, pipeline=pipeline,
+                        init_name=init_name, consistency_base=consistency_base,
+                        it=it)
             run.set_train_mode(False)
 
             if (pipeline and muzero.REFRESH_SATURATE
@@ -3868,10 +3944,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 run.refresh_saturate(pipeline.acting_ready, floor=floor)
 
             if pipeline:
-                if not primed_sequential:
+                if not primed_sequential and pipeline.pending is not None:
                     # Episode `it`, played on the actor during the gradient
                     # steps above, joins the buffer BEFORE refresh/eval/
                     # checkpoint -- those see the sequential harness's state.
+                    # (RAY_EAGER_COLLECT may already have collected it mid-
+                    # block; pending is then None.)
                     pipeline.collect()
                 if it < iterations:
                     # No final-iteration sync: nothing plays after the last

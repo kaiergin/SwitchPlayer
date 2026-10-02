@@ -1057,6 +1057,20 @@ REDO_EVERY = 0
 # (factor audit r1 L4): after_train_step records them whenever ReDo is on or
 # this is set; reading them draws no RNG and changes no update.
 STEP_DIAGNOSTICS = False
+# --ray: add the in-flight episode to the buffer as soon as the actor
+# finishes it, MID training block (polled every EAGER_POLL_STEPS steps),
+# instead of after the block (Kai, 2026-10-01). A policy-only game takes
+# ~8 s on the CPU actor vs ~13 min of training per iteration, so the
+# default collect left every finished game waiting a whole iteration; with
+# this the game joins ~0-40 of 2000 steps into the same iteration (its
+# remaining play time rounded up to the 10-step poll grid; training pauses
+# for the birth search) vs step 1 sequentially -- the
+# sequential harness's freshness, with acting still parallel. One game per
+# iteration is unchanged (the next one is still requested at the iteration
+# boundary). Mid-game weight swaps / chunked streaming are backlogged for
+# the Switch (IDEAS_BACKLOG.md).
+RAY_EAGER_COLLECT = False
+EAGER_POLL_STEPS = 10
 REDO_TAU = 0.025
 REDO_BATCH = 256
 # Which nets ReDo recycles (redo.ALL_NETS by default). The prioract arm drops

@@ -91,8 +91,7 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-faithful-searchact",
                         "effzero-repro-faithful-searchact-noredo",
                         "effzero-repro-faithful-seqvtree",
-                        "effzero-repro-faithful-prioract-noredo",
-                        "effzero-repro-faithful-prioract-noredo-seq"):
+                        "effzero-repro-faithful-prioract-noredo"):
             assert spec["USE_AUGMENTATION"] is False, name
 
 

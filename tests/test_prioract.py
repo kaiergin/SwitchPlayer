@@ -704,7 +704,12 @@ def test_both_training_loops_call_after_train_step_after_the_increment():
     import ast
     import inspect
     import textwrap
-    tree = ast.parse(textwrap.dedent(inspect.getsource(ablation.run_one)))
+    run_src = textwrap.dedent(inspect.getsource(ablation.run_one))
+    # The iteration loop's block lives in train_block (2026-10-01); run_one
+    # must still call it.
+    assert "train_block(run, steps_this_iter" in run_src
+    tree = ast.Module(body=[ast.parse(run_src), ast.parse(textwrap.dedent(
+        inspect.getsource(ablation.train_block)))], type_ignores=[])
     hits = 0
     for node in ast.walk(tree):
         body = getattr(node, "body", None)

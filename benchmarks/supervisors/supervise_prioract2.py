@@ -1,12 +1,11 @@
-"""Policy-only acting WITHOUT ReDo (Kai, 2026-10-01): the prioract arm with
-ReDo off, one seed. Two launch-pinned twins with identical flags; the one
-to launch is chosen by the pre-registered seqvtree rule in CURRICULUM.md
-("Next experiment -- policy-only acting without ReDo"):
+"""Policy-only acting WITHOUT ReDo, always parallel, each game added to
+the buffer as soon as it finishes (RAY_EAGER_COLLECT) -- Kai, 2026-10-01.
+One seed, --ray --cpu-actor (pinned by the arm). Design and pre-registered
+reads: CURRICULUM.md "Next experiment -- policy-only acting without ReDo".
+Waits for the seqvtree run's completion marker (GPU and host commit free):
 
-    python benchmarks/supervisors/supervise_prioract2.py ray 0   # --ray --cpu-actor
-    python benchmarks/supervisors/supervise_prioract2.py seq 0   # sequential
+    python benchmarks/supervisors/supervise_prioract2.py ray 0
 
-Waits for the seqvtree run's completion marker (GPU and host commit free).
 Supervisor v2 pattern; a relaunch auto-resumes from the last checkpoint."""
 import json
 import os
@@ -18,7 +17,6 @@ import time
 VARIANTS = {
     "ray": ("effzero-repro-faithful-prioract-noredo", "pong-prioract2",
             ["--ray", "--cpu-actor"]),
-    "seq": ("effzero-repro-faithful-prioract-noredo-seq", "pong-prioract2seq", []),
 }
 WRITE = "--write-manifest" in sys.argv
 VARIANT = "ray" if WRITE else sys.argv[1]
@@ -89,11 +87,12 @@ def emit_new_rows():
                       r.get("step_loss_mean", "n/a"), el, per), flush=True)
             print("      behaviour T %s  H_act %s  maxp %s  act_agree %s  "
                   "prior_agree %s  KL(tgt||prior) %s  rare %s | birth window "
-                  "%s pos" % (
+                  "%s pos | eager [it, step] %s" % (
                       r.get("beh_T"), r.get("beh_H_act"), r.get("beh_prior_maxp"),
                       r.get("beh_act_agree"), r.get("beh_prior_agree"),
                       r.get("beh_kl_target_prior"), r.get("beh_rare_rate"),
-                      r.get("birth_positions_window", "n/a")), flush=True)
+                      r.get("birth_positions_window", "n/a"),
+                      r.get("eager_collect_steps", "n/a")), flush=True)
         except Exception:
             pass
 
@@ -134,45 +133,6 @@ def snapshot(attempt, rc, lifetime):
     gpu = lines[1].split(",")[0].strip() if len(lines) > 1 else "?"
     print(f"DEATH s{SEED} rc={rc} after {lifetime:.0f}s; snapshot -> deaths.log "
           f"(gpu used {gpu})", flush=True)
-
-
-PROBES = os.path.join(REPO, "benchmarks", "probes")
-RULE_ROWS = tuple(range(60, 91, 5))
-RULE_RUNS = {"seqvtree": "pong-seqvtree-s0-2026-09-30",
-             "noredo": "pong-noredo-s0-2026-09-30",
-             "s0": "pong-faithful-s0-2026-09-24",
-             "s1": "pong-faithful-s1-2026-09-24"}
-
-
-def exact_means(probe_dir, runs, rows=RULE_ROWS):
-    """{name: mean exact over `rows`, or None while any row is missing},
-    from every probe_exhaustive_eval*.jsonl in `probe_dir`."""
-    import glob
-    recs = {}
-    for f in sorted(glob.glob(os.path.join(probe_dir, "probe_exhaustive_eval*.jsonl"))):
-        with open(f, encoding="utf-8") as fh:
-            for line in fh:
-                if line.strip():
-                    r = json.loads(line)
-                    recs[(r["run"], r["iteration"])] = r["exact_mean"]
-    out = {}
-    for name, run in runs.items():
-        vals = [recs.get((run, i)) for i in rows]
-        out[name] = None if None in vals else sum(vals) / len(vals)
-    return out
-
-
-def launch_decision(means):
-    """The pre-registered launch-mode rule (CURRICULUM, 2026-10-01): RAY
-    unless seqvtree's mean over rows 60-90 exceeds noredo's by more than the
-    faithful control seeds' spread -- one operative threshold, computed
-    exactly from the records: noredo + |s0 - s1| (12.3763 with today's
-    records). Returns (variant, threshold) or (None, None) while any input
-    is incomplete."""
-    if any(means.get(k) is None for k in ("seqvtree", "noredo", "s0", "s1")):
-        return None, None
-    threshold = means["noredo"] + abs(means["s0"] - means["s1"])
-    return ("seq" if means["seqvtree"] > threshold else "ray"), threshold
 
 
 def _seed_state(ck):
@@ -243,8 +203,9 @@ QUICK = ("import sys; sys.path[:0] = ['.', 'experiments']; "
          f"assert {ARM!r} in ablation.ARMS and hasattr(muzero, 'BIRTH_SEARCH'); "
          "assert hasattr(redo, '_solve_bias') and hasattr(ablation, 'redo_due'); "
          "assert hasattr(muzero, 'EVAL_PRIOR_ONLY'); "
-         "assert all(a in ablation.ARMS for a in ('effzero-repro-faithful-"
-         "prioract-noredo', 'effzero-repro-faithful-prioract-noredo-seq'))")
+         "assert 'effzero-repro-faithful-prioract-noredo' in ablation.ARMS; "
+         "assert hasattr(ablation, 'train_block') and "
+         "hasattr(muzero, 'RAY_EAGER_COLLECT')")
 
 
 def manifest_check():
@@ -311,29 +272,6 @@ while True:
     time.sleep(60)
     waited += 1
 print("seqvtree run complete", flush=True)
-# The launch-mode RULE, enforced (prioract2 audit r1 MEDIUM-1): wait for the
-# seqvtree exact evals (rows 60-90, probe_exhaustive_eval.py), decide, and
-# refuse to launch a variant the rule does not select.
-waited, told = 0, None
-while True:
-    means = exact_means(PROBES, RULE_RUNS)
-    chosen, threshold = launch_decision(means)
-    if chosen is not None:
-        break
-    msg = ("WAITING for the exact evals the launch rule needs (rows 60-90): "
-           + ", ".join(k for k, v in means.items() if v is None))
-    if msg != told or waited % 60 == 0:
-        print(f"{msg} [{waited // 60} h]", flush=True)
-        told = msg
-    time.sleep(60)
-    waited += 1
-print("launch rule: seqvtree %+.4f vs threshold %+.4f (noredo %+.4f + spread "
-      "%.4f) -> %s" % (means["seqvtree"], threshold, means["noredo"],
-                        abs(means["s0"] - means["s1"]), chosen), flush=True)
-if chosen != VARIANT:
-    print(f"ALERT: the pre-registered rule selects '{chosen}', this supervisor "
-          f"is '{VARIANT}' -- NOT launching", flush=True)
-    sys.exit(2)
 polls, told = 0, None
 while True:
     ok, why = preflight()
