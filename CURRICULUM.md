@@ -747,6 +747,47 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- seqvtree (factorization half 2), 2026-10-02
+
+pong-seqvtree-s0-2026-09-30 finished 10-02 18:28 (sequential, run alone
+after its 09-30 pause; ~17-23 min/iter). EXACT / BN-recalibrated (offline
+probes run only after completion):
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw   -14.0  -16.1  -11.3  -15.6  -11.1  -14.3  -11.6   -8.4  -10.4  -14.9
+  recal  -9.9  -13.3  -10.6  -12.8  -12.0  -10.3   -9.3  -10.4  -14.9  -17.2
+READ (1): NO first success (best row -8.4; 0/4 phases won in every raw
+row; recal won 1/4 at @70 and @75).
+READ (2): mean 60-90 = -12.33 -> WORSE (< -2.32); recalibrated -12.41 --
+not the BN eval artifact.
+READ (3): n/a (no success).
+DIAGNOSTICS do not separate it from the runs that broke out: H(pi)
+1.33-1.52, fresh target H 1.20-1.32, proj_erank 36-75, step grad norm
+0.26 -> 0.15 -- all within noredo's and the faithful pair's ranges. It
+simply never broke out (in-run return -17 .. -10 throughout), like
+searchact (-11.37).
+MATRIX CELL (pre-registered): noredo NO WORSE (+5.86) x seqvtree WORSE
+(-12.33) = "CONTRADICTION under identical flags: seed noise or pipelining
+HELPS -> seed 1 of both, no attribution". The two runs' effective flags
+are identical; only the launch mode differs. An 18.2-point gap between
+identical-flag single seeds is ~2.2x the inferred SD of a run-to-run
+difference (~8), and this stack's breakouts are all-or-nothing (archfix
+recipe 1-in-4; non-breakout runs sit at -10 .. -15), so seed noise is a
+live explanation; a pipelining benefit has no known mechanism (the
+pipelined actor's only data effect is a one-iteration LAG). NO
+ATTRIBUTION: neither the vectorized re-search nor the launch mode is
+implicated or exonerated by this pair. The ReDo read (searchact -11.37
+vs noredo +5.86) stands as recorded, but it rests on single seeds too, and
+seqvtree shows a ReDo-off run on this stack can also fail to break out --
+so the ReDo attribution is weaker than it looked.
+PRE-REGISTERED NEXT: seed 1 of BOTH noredo and seqvtree (no SVE until
+then). The GPU is busy with prioract2 (below; launched 18:37 10-02), and
+host commit prevents two runs at once, so their order is Kai's call.
+CONSEQUENCE FOR PRIOACT2's READ (2b): its twin seqvtree sits at the
+no-breakout floor, so (2b) (mean >= seqvtree - 6.5143 = -18.84) can no
+longer discriminate -- read (2) against the faithful control's bands is
+the one that counts. (Recorded post hoc; the pre-registered reads are
+unchanged.)
+
 ### Next experiment -- policy-only acting without ReDo (Kai, 2026-10-01)
 
 DECISIONS (Kai, 2026-10-01): after the factorization implicated ReDo, test
