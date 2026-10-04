@@ -336,6 +336,13 @@ BIRTH_SEARCH = False
 # run) instead of the fixed ACTING_TEMPERATURE. Root noise is a search-only
 # mechanism, so under policy-only acting this is the exploration knob.
 PRIOR_ACT_STAGED_TEMP = False
+# Scale on the prior-acting temperature (Kai, 2026-10-04 -- the temperature
+# arm, CURRICULUM "sharper prior-acting temperature"): prior_acting_
+# temperature returns this times the staged schedule (or ACTING_
+# TEMPERATURE). 1.0 is the identity; 0.5 halves the staged schedule to
+# 0.5 / 0.25 / 0.125. Policy-only acting only (inert under search acting --
+# ablation.prior_temp_gate refuses that mix).
+PRIOR_ACT_TEMP_SCALE = 1.0
 # ---------------------------------------------------------------------------
 # Paper-reproduction mode (EfficientZero/MuZero data path), flag-gated like
 # everything else; the shipped product keeps all of these OFF. When the
@@ -602,10 +609,13 @@ def visit_softmax_temperature(training_steps):
 
 def prior_acting_temperature(training_steps):
     """Temperature for policy-only (prior-sampling) acting: the papers'
-    staged schedule under PRIOR_ACT_STAGED_TEMP, else ACTING_TEMPERATURE."""
+    staged schedule under PRIOR_ACT_STAGED_TEMP, else ACTING_TEMPERATURE --
+    times PRIOR_ACT_TEMP_SCALE (1.0: identity, bit-exact)."""
     if PRIOR_ACT_STAGED_TEMP:
-        return visit_softmax_temperature(training_steps)
-    return ACTING_TEMPERATURE
+        t = visit_softmax_temperature(training_steps)
+    else:
+        t = ACTING_TEMPERATURE
+    return t * PRIOR_ACT_TEMP_SCALE
 
 
 def paper_horizon(age_steps):

@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import copy
 import json
+import math
 import os
 import pathlib
 import pickle
@@ -857,6 +858,22 @@ ARMS["effzero-repro-faithful-prioract-noredo"] = {
             "pong-noredo-s0-2026-09-30 and pong-prioract-s0-2026-09-27.",
 }
 
+# The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
+# CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
+# prioract-noredo with the staged prior-acting schedule halved. Runs only if
+# the trigger fires and seed 1 does not read WORSE (supervise_tempscale.py).
+ARMS["effzero-repro-faithful-prioract-noredo-temp05"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo"],
+    "PRIOR_ACT_TEMP_SCALE": 0.5,
+    "_doc": "effzero-repro-faithful-prioract-noredo with PRIOR_ACT_TEMP_SCALE "
+            "0.5: prior sampled at 0.5 / 0.25 / 0.125 (the staged schedule "
+            "halved, same 50% / 75% breakpoints). Everything else identical "
+            "(--ray --cpu-actor, eager collect, no ReDo). Twin: "
+            "pong-prioract2-s0/s1 (same arm at scale 1.0); reads (1)-(3) "
+            "use the faithful control's bands (pong-faithful-s0/s1-"
+            "2026-09-24).",
+}
+
 ARMS["effzero-repro-faithful-prioract-sve"] = {
     **ARMS["effzero-repro-faithful-prioract"],
     "VALUE_TARGET_MODE": "mixed",
@@ -1214,6 +1231,34 @@ def eager_collect_gate(use_ray):
     poll = muzero.EAGER_POLL_STEPS
     if not (isinstance(poll, int) and not isinstance(poll, bool) and poll >= 1):
         raise SystemExit(f"EAGER_POLL_STEPS must be an int >= 1, got {poll!r}")
+
+
+def prior_temp_gate():
+    """PRIOR_ACT_TEMP_SCALE must be a positive real number, and it only
+    acts under policy-only acting -- under search acting it would be a
+    silently inert knob, so that mix is refused (checked at startup)."""
+    scale = muzero.PRIOR_ACT_TEMP_SCALE
+    if (isinstance(scale, bool) or not isinstance(scale, (int, float))
+            or not scale > 0 or scale != scale or scale == float("inf")):
+        raise SystemExit(f"PRIOR_ACT_TEMP_SCALE must be a finite number > 0, "
+                         f"got {scale!r}")
+    # The sampler raises the float32 prior to 1/T. Its largest entry is
+    # >= 1/ACTIONS, and (1/A)**(1/T) drops below float32's smallest subnormal
+    # (2**-149 = e**-103.28) for T < ln(A)/103.28 -- 0.0173 at Pong's 6
+    # actions, 0.028 at 18 -- giving an all-NaN p and a crash loop (round-1
+    # L3, round-2 L2). Refuse any schedule whose lowest temperature comes
+    # within 20% of that.
+    t_min = scale * (0.25 if muzero.PRIOR_ACT_STAGED_TEMP
+                     else muzero.ACTING_TEMPERATURE)
+    floor = 1.2 * math.log(max(2, ACTIONS)) / 103.28
+    if t_min < floor:
+        raise SystemExit(f"PRIOR_ACT_TEMP_SCALE {scale!r} takes the prior-"
+                         f"acting temperature to {t_min:.4g} (< {floor:.4g} for "
+                         f"{ACTIONS} actions): the float32 prior**(1/T) "
+                         f"underflows")
+    if scale != 1.0 and muzero.USE_SEARCH_ACTING:
+        raise SystemExit("PRIOR_ACT_TEMP_SCALE scales the PRIOR-acting "
+                         "temperature; it is inert under USE_SEARCH_ACTING")
 
 
 def eval_summary(episodes):
@@ -3503,6 +3548,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             ray_scope_gate(spec)
         launch_gate(spec, use_ray, cpu_actor)
         eager_collect_gate(use_ray)
+        prior_temp_gate()
         birth_search_gate()
         sve_gate()
         if muzero.REDO_EVERY:
