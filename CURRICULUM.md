@@ -787,6 +787,13 @@ seed 1's first success (exact >= +10 or >= 3/4 phases) is at iteration
 >= 70 or never -- i.e. seed 1 also needed T=0.25. If seed 1's first
 success is at <= 65 (at T >= 0.5), the "temperature gates the breakout"
 story loses its support -> skip this arm, go to SVE on this stack.
+ENFORCED by supervise_tempscale.py (audit r1 M1: the DIRECTION proviso is
+enforced too): it waits for seed 1's exact evals (rows 45-90) and exits 3
+if seed 1 reads WORSE (mean 60-90 < -2.32: revisit with Kai), 2 if the
+trigger does not fire (first success <= 65: SVE next), 4 on a malformed
+record; otherwise it launches. (Timing note: written at 12:14 10-04, when
+seed 1 had in-run rows @5 and @10 but no exact eval and nothing past
+iter 10 -- none of the rows the trigger and reads use.)
 PRE-REGISTERED READS (seed 0; exact prior-argmax evals, iters 45-90):
   (H) the hypothesis read: first success at <= 65 (the search runs' range)
       -> consistent with acting randomness having delayed the breakout;
