@@ -747,6 +747,40 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- prioract2 (policy-only acting, no ReDo, eager collect), 2026-10-04
+
+pong-prioract2-s0-2026-10-02 (--ray --cpu-actor, RAY_EAGER_COLLECT) ran
+10-02 18:37 -> 10-04 01:28, paused by Kai 10-03 13:35 at the iter-86
+checkpoint and resumed 10-04 00:33 (~13 min/iter; 158,883 env steps at
+iter 90). EXACT / BN-recalibrated (offline; 45-70 exact were run mid-run
+on finished snapshots, the rest after completion):
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw   -13.1   -9.2  -10.7   -6.9  -19.9   -0.0  +12.1   +7.2  +16.4  +16.8
+  won    0/4    0/4    0/4    1/4    0/4    2/4    4/4    3/4    4/4    4/4
+  recal                      -11.5   -7.8   +0.3  +17.4   +5.2  +14.3  +17.2
+READ (1): first success @75 (+12.07, 4/4 phases) -- later than control s0
+(@50) and noredo (@65), like control s1 (@65).
+READ (2): mean 60-90 = +3.6431 -> INCONCLUSIVE, 0.037 below the NO WORSE
+edge (+3.68). Recalibrated (secondary) +5.0143 -> NO WORSE. The raw mean
+carries a full collapse at @65 (all 30 games lost, ~-20; recal -7.8, so
+partly the BN eval artifact) and the late breakout.
+READ (2b): >= seqvtree - 6.5143 -- passes trivially (twin at the floor;
+non-discriminating, as recorded).
+READ (3): 0 collapses in 3 rows after the first success; the final rows
++16.4 / +16.8 (4/4 phases, min game +12 / +14) are the strongest
+end-of-run state in this campaign (control s0 +14.8/+13.6 @85/90, s1
+-14.9/+0.6, noredo +3.9/+5.3). By Atari-100k (~iter 55) it was still
+-10.7 vs control s0 +10.0 -- slower to break out, stronger once it did.
+EAGER COLLECT worked as built: 87 eager iterations recorded (86 lost with
+the per-row window at the pause; 87 primed), every game collected
+mid-block at offset 0-40 (0 x43, 10 x6, 20 x18, 30 x15, 40 x5), never
+missed -- the one-iteration lag of the old parallel runs is gone.
+PRE-REGISTERED INTERPRETATION: (2) INCONCLUSIVE -> seed 1. Not rounded up:
+the band edge is the band edge, and a single seed with a collapse in the
+window is exactly what seed 1 exists for. Kai (10-03) questioned whether
+adding the game 0-40 steps in is "too early"; the sequential control adds
+it at step 0, so this is the control's timing -- open for his view.
+
 ### RESULT -- seqvtree (factorization half 2), 2026-10-02
 
 pong-seqvtree-s0-2026-09-30 finished 10-02 18:28 (sequential, run alone
