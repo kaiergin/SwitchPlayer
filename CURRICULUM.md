@@ -747,6 +747,58 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### DIRECTION + next experiment (pre-registered) -- sharper prior-acting temperature (Kai, 2026-10-04)
+
+DIRECTION (Kai, 2026-10-04): develop from the no-search, fully parallel
+model (policy-only acting on the CPU actor, birth search, eager collect,
+no ReDo) -- the configuration that fits the real-time goal (3.7 ms/move on
+the CPU actor vs ~10 min/game for 50-sim CPU search acting) -- provided it
+converges (seed 1, running, is that check: if it reads WORSE, revisit
+before building further on it). ReDo goes on the BACKBURNER, not deleted:
+no current dormancy problem in the no-ReDo runs (dead frac 0.00-0.01,
+healthy proj_erank), the one comparison points against it, and its real
+use case -- long non-stationary training -- is the Switch's continual
+learning (a cheap dormancy monitor would say when it is needed).
+Recommended to Kai (his call): PARK noredo s1 and seqvtree s1 -- they only
+attribute effects within search-acting stacks; the noredo/seqvtree
+contradiction stays unresolved, acceptable since the chosen stack has its
+own direct evidence (and uses the same vectorized re-search).
+Order on the chosen stack: seed 1 -> this temperature arm (if triggered)
+-> SVE on this stack (built and audited; training-side cost only) -> BN
+recalibration stabilizer -> mid-game swaps/streaming for the Switch.
+
+HYPOTHESIS (from seed 0's behaviour stats, post hoc): prior sampling at a
+given temperature is much noisier than visit sampling, and the breakout is
+gated by how random the acting is. Seed 0 at T=1 acted with H 1.44-1.51
+nats (max 1.79), only ~1/3 of its actions matched the birth search's
+argmax, and the prior's argmax agreed with the search's only ~55% of the
+time. Every run that broke out did so after a temperature drop: the
+search runs at T=0.5 (control s0 @50, s1 @65, noredo @65), both
+policy-acting runs only at T=0.25 (prioract2 @75; prioract ~@75). Single
+seeds; the search runs' acting entropy was not recorded (estimated
+~1.2-1.3 at T=1 from their search targets).
+ARM (to be built and audited on a worktree; merged only after seed 1
+finishes): effzero-repro-faithful-prioract-noredo + PRIOR_ACT_TEMP_SCALE
+0.5 -- the staged prior-acting schedule halved: 0.5 / 0.25 / 0.125 at the
+same breakpoints (50% / 75% of training). New flag, default 1.0 (identity).
+One knob; everything else identical, --ray --cpu-actor, eager collect.
+TRIGGER (decided from seed 1's exact evals, mechanically): RUN this arm if
+seed 1's first success (exact >= +10 or >= 3/4 phases) is at iteration
+>= 70 or never -- i.e. seed 1 also needed T=0.25. If seed 1's first
+success is at <= 65 (at T >= 0.5), the "temperature gates the breakout"
+story loses its support -> skip this arm, go to SVE on this stack.
+PRE-REGISTERED READS (seed 0; exact prior-argmax evals, iters 45-90):
+  (H) the hypothesis read: first success at <= 65 (the search runs' range)
+      -> consistent with acting randomness having delayed the breakout;
+      >= 70 or never -> not supported (search quality, not temperature,
+      would be the suspect);
+  (1)-(3) the standard reads and bands: first success; mean 60-90 vs the
+      faithful control (NO WORSE >= +3.68, WORSE < -2.32); collapses after
+      the first success; secondary: BN-recalibrated.
+  Risk, interpretive only: if it never breaks out with low early acting
+  entropy (beh_H_act), read it as exploration-starved, not as evidence
+  for search acting.
+
 ### RESULT -- prioract2 (policy-only acting, no ReDo, eager collect), 2026-10-04
 
 pong-prioract2-s0-2026-10-02 (--ray --cpu-actor, RAY_EAGER_COLLECT) ran
