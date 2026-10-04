@@ -780,6 +780,11 @@ the band edge is the band edge, and a single seed with a collapse in the
 window is exactly what seed 1 exists for. Kai (10-03) questioned whether
 adding the game 0-40 steps in is "too early"; the sequential control adds
 it at step 0, so this is the control's timing -- open for his view.
+SEED 1 LAUNCHED 2026-10-04 10:17 (Kai: "yes, start seed 1 of this run"):
+supervise_prioract2.py ray 1, same arm and code (fdcf5a55; the audited
+files unchanged since b35af638), results in pong-prioract2-s1-2026-10-02
+(the directory date is the supervisor's audited constant, not the launch
+date). Same pre-registered reads and bands; eager collect unchanged.
 
 ### RESULT -- seqvtree (factorization half 2), 2026-10-02
 
