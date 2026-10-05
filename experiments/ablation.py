@@ -858,6 +858,24 @@ ARMS["effzero-repro-faithful-prioract-noredo"] = {
             "pong-noredo-s0-2026-09-30 and pong-prioract-s0-2026-09-27.",
 }
 
+# Policy-only acting on the faithful control's refresh engine (Kai,
+# 2026-10-05; pre-registered in CURRICULUM): prioract2's arm with the
+# vectorized communal re-search OFF, so refresh runs the control's own
+# sequential run.refresh_targets inline -- the effective delta from the
+# faithful control is then only the acting/pipeline side. Two seeds.
+ARMS["effzero-repro-faithful-prioract-noredo-seqref"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo"],
+    "REFRESH_VTREE": False,
+    "VTREE_COMMUNAL_TRAJS": 1,
+    "_doc": "effzero-repro-faithful-prioract-noredo with REFRESH_VTREE off "
+            "(VTREE_COMMUNAL_TRAJS 1, the default): the faithful control's "
+            "sequential refresh engine (run.refresh_targets, inline; "
+            "REFRESH_OFFLOAD off) under policy-only acting + birth search, "
+            "eager collect, --ray --cpu-actor, no ReDo. Twin: pong-"
+            "prioract2-s0/s1 (vectorized communal re-search); bands from "
+            "the faithful control (pong-faithful-s0/s1-2026-09-24).",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
