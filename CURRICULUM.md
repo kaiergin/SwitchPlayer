@@ -747,6 +747,49 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- policy-only acting on the control's refresh engine (Kai, 2026-10-05)
+
+DECISION (Kai, 2026-10-05, after seed 1 read WORSE): "Let's go with 1 since
+that will truly test if the code is the issue ... audit is also a good
+idea." Two seeds, s0 then s1 (the control broke out 2/2).
+HYPOTHESIS (post hoc, from the cross-run pattern): the only configuration
+that broke out on BOTH seeds is the faithful control, which used the
+SEQUENTIAL refresh engine; every run on the vectorized communal re-search
+(REFRESH_VTREE, VTREE_COMMUNAL_TRAJS 8) broke out about half the time
+regardless of acting -- search acting noredo yes / seqvtree no, policy-only
+prioract2 s0 yes / s1 no. So the communal re-search, not policy-only
+acting, may be what makes runs unreliable.
+ARM effzero-repro-faithful-prioract-noredo-seqref = prioract2's arm with
+REFRESH_VTREE False (VTREE_COMMUNAL_TRAJS 1, the default): the refresh runs
+the control's own code, run.refresh_targets, inline at the iteration
+boundary (REFRESH_OFFLOAD is False in both arms, so --ray does not offload
+it). Its EFFECTIVE delta from the faithful control is then exactly the
+acting/pipeline side: USE_SEARCH_ACTING off, BIRTH_SEARCH, PRIOR_ACT_
+STAGED_TEMP, RAY_EAGER_COLLECT, the --ray --cpu-actor launch (+ inert
+REDO_NETS, read-only STEP_DIAGNOSTICS). Not identical to the 2/2 runs --
+acting differs by design; it isolates the refresh engine.
+COST (measured 10-05 on the GPU, one refresh cycle = 4 production-length
+trajectories from prioract2 s0 @60): sequential 329 s, vtree TRAJS 8
+272 s (TRAJS 1 752 s, so not used) -> ~+0.5 min/iter, ~21 h per seed.
+PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90, per seed):
+  (1)-(3) the standard reads and bands (first success: exact >= +10 or
+  >= 3/4 phases; mean 60-90 vs the faithful control: NO WORSE >= +3.68,
+  WORSE < -2.32; collapses after the first success); secondary: BN-
+  recalibrated.
+  THE TWO-SEED READ (the test):
+    both seeds have a first success and neither reads WORSE -> consistent
+      with the communal re-search having made the vtree stack unreliable
+      (the control's 2/2 standard): keep the sequential refresh (or fix
+      the communal engine) and continue on policy-only acting;
+    neither seed breaks out (0/2) -> the acting/pipeline side (policy-only
+      acting, birth search, the parallel actor) is implicated and the
+      communal re-search is not the sole cause -> Kai's call;
+    otherwise (1/2) -> the vtree stack's rate: no evidence the refresh
+      engine matters -> Kai's call.
+  Strength: at a true 50% rate, 2/2 still happens 25% of the time, so even
+  the clean outcome is suggestive, not proof. Seed 1 runs regardless of
+  seed 0 (the read needs both).
+
 ### RESULT -- prioract2 seed 1, 2026-10-05: WORSE -> the DIRECTION proviso fired
 
 pong-prioract2-s1-2026-10-02 (same arm and code as seed 0; paused 10-04
