@@ -747,6 +747,29 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- prioract2 seed 1, 2026-10-05: WORSE -> the DIRECTION proviso fired
+
+pong-prioract2-s1-2026-10-02 (same arm and code as seed 0; paused 10-04
+20:30 at iter 48 by Kai, PC reboot 10-05 00:34, resumed 00:38) finished
+10-05 10:09. EXACT / BN-recalibrated:
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw    -8.0  -10.5  -11.2  -11.4  -11.3  -13.0   -8.8   -7.3  -11.4  -10.0
+  won    0/4    0/4    0/4    0/4    0/4    0/4    0/4    1/4    0/4    0/4
+  recal                      -11.0  -11.7   -7.7   -9.0   -6.1  -10.5  -11.1
+READ (1): NO first success (best row -7.3, at most 1/4 phases).
+READ (2): mean 60-90 = -10.4524 -> WORSE; recalibrated -9.5716 (WORSE).
+TWO SEEDS of this arm: +3.6431 (s0, broke out @75, ended +16.8) and
+-10.4524 (s1, never broke out); two-seed mean -3.4047 (WORSE band). Seed 1
+ran at T=0.25 from ~iter 68 for 22 iterations without breaking out, so a
+low temperature LATE did not unlock it -- the tempscale arm's regime (low
+temperature throughout) is a different test, but the "T=0.25 gates the
+breakout" pattern now has a counterexample.
+ENFORCEMENT: supervise_tempscale.py read the records at ~10:25 and exited 3
+("seed 1 reads WORSE: the DIRECTION proviso says revisit before building
+further on this stack -- NOT launching; back to Kai"). main was
+fast-forwarded to the audited tempscale code (d7979dce; flag default off,
+inert) by the WMI hand-off after the probes. Decision is Kai's.
+
 ### DIRECTION + next experiment (pre-registered) -- sharper prior-acting temperature (Kai, 2026-10-04)
 
 DIRECTION (Kai, 2026-10-04): develop from the no-search, fully parallel
