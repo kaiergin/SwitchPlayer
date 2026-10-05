@@ -768,6 +768,20 @@ acting/pipeline side: USE_SEARCH_ACTING off, BIRTH_SEARCH, PRIOR_ACT_
 STAGED_TEMP, RAY_EAGER_COLLECT, the --ray --cpu-actor launch (+ inert
 REDO_NETS, read-only STEP_DIAGNOSTICS). Not identical to the 2/2 runs --
 acting differs by design; it isolates the refresh engine.
+The launch bundles HARNESS-level differences too (audit r1 L3), all on
+the acting/pipeline side of the split: (a) IN-RUN EVAL REGIME -- the
+control's in-run rows are 50-sim search evals on the training env; these
+are prior-argmax on a CPU eval actor, so the supervisor's in-run returns
+are NOT comparable to the control's in-run rows (the exact offline evals,
+the pre-registered readout, are); (b) seeds are unpaired (the CPU actor
+has its own RNG and reseeds the env per game); (c) acting runs on CPU;
+(d) the actor plays game it+1 during the boundary work (timing only);
+(e) birth search uses the vtree engine (a defect common to vtree code
+would land in the "birth search" bucket of the 0/2 read). Deferred, not
+blocking (audit r1 L1/L2, after both seeds: changing audited files would
+block seed 1's preflight): a stronger end-to-end refresh test (what the
+refresh sees and changes) and test_reanalyze_refresh / test_vtree_communal
+in the preflight -- the auditor verified both properties hold today.
 COST (measured 10-05 on the GPU, one refresh cycle = 4 production-length
 trajectories from prioract2 s0 @60): sequential 329 s, vtree TRAJS 8
 272 s (TRAJS 1 752 s, so not used) -> ~+0.5 min/iter, ~21 h per seed.
