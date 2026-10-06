@@ -747,6 +747,32 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- seqref seed 0 (interim; seed 1 running), 2026-10-06
+
+pong-seqref-s0-2026-10-05 ran 10-05 11:48 -> 10-06 09:10 (paused by Kai
+10-05 23:50 at the iter-56 checkpoint, resumed 10-06 01:21). EXACT /
+BN-recalibrated:
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw   -13.1  -12.2  -13.9   -9.1  -12.7  -12.7   -2.5  +15.0  +16.6  -20.5
+  won    0/4    0/4    0/4    0/4    0/4    0/4    2/4    4/4    4/4    0/4
+  recal                      -11.1  -12.8   -7.4   -6.2  +13.9   +6.3  +18.5
+READ (1): first success @80 (+15.0, 4/4 phases).
+READ (2): mean 60-90 = -3.7000 -> WORSE (< -2.32); recalibrated +0.1620
+(INCONCLUSIVE). The raw mean carries a full collapse at @90 (-20.5, all
+phases lost; in-run H(pi) 1.77, erank 19.9) that recalibration shows is
+the BN eval artifact (+18.5, 4/4) -- without it the run ended at its best.
+READ (3): one collapse after the first success (@90, raw only).
+FOR THE TWO-SEED READ: seed 0 broke out, so 0/2 is ruled out; but it reads
+WORSE on the primary (raw) mean, so the pre-registered "both break out and
+neither reads WORSE" outcome is ruled out too, whatever seed 1 does -- by
+the letter the read can only land in "otherwise -> Kai's call". Seed 1
+still decides whether the BREAKOUT RATE on the control's refresh engine is
+2/2 (the control's) or 1/2 (the vtree stack's).
+TIMING (post hoc): breakout @80, at T = 0.25 -- as late as prioract2 s0
+(@75) and later than every search-acting breakout (control @50/@65, noredo
+@65). The refresh engine did not move the breakout earlier; lateness so far
+tracks policy-only acting, not the re-search engine.
+
 ### Next experiment (pre-registered) -- policy-only acting on the control's refresh engine (Kai, 2026-10-05)
 
 DECISION (Kai, 2026-10-05, after seed 1 read WORSE): "Let's go with 1 since
