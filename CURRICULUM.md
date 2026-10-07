@@ -773,6 +773,15 @@ Pong's skip) fits ~8-16 sims. (muzero.ACT_SEARCH_SIMS's comment "8 sims
 real-time viable at the control's 50 sims with this engine; a low-sim
 (8-16) search-acting arm, or a batched single-root engine, would be the
 route if the temperature arm does not close the gap.
+LAUNCHED 2026-10-07 09:31 (main d81b3794): supervise_tempscale.py ray 0
+--kai-override; the log shows the exit-3 decision, then OVERRIDE_NOTE, then
+preflight (7 suites), then a fresh launch into pong-tempscale-s0-2026-10-05.
+Override audit r1: nothing above LOW. LOW-1: EVERY RELAUNCH (reboot, pause,
+GPU kill) MUST pass --kai-override again, or the supervisor re-decides and
+exits 3 (fails closed). Deferred until after the run (changing audited files
+would block a relaunch): LOW-2 (the override should also require the
+trigger to have fired -- moot with the real records: no first success) and
+LOW-3 test hardening; plus the deferred seqref L1/L2.
 
 ### RESULT -- seqref seed 1 + THE TWO-SEED READ, 2026-10-07
 
