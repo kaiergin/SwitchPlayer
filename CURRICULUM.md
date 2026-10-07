@@ -747,6 +747,30 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- seqref seed 1 + THE TWO-SEED READ, 2026-10-07
+
+pong-seqref-s1-2026-10-05 ran 10-06 09:10 -> 10-07 ~04:50. EXACT / recal:
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw   -14.8  -15.3  -16.2  -16.0  -16.2  -14.3  -13.6   -8.9  -10.4   -9.5
+  won    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4
+  recal                      -14.9  -13.3  -13.0   -9.6   -9.6  -13.5  -14.8
+READ (1): NO first success (never won a phase, raw or recalibrated).
+READ (2): mean 60-90 = -12.7141 -> WORSE; recalibrated -12.6667.
+TWO-SEED READ (pre-registered): seed 0 broke out (@80), seed 1 did not ->
+1/2 -> "the vtree stack's rate: no evidence the refresh engine matters".
+(By the letter the clean outcome was already ruled out by seed 0's raw
+WORSE.) Policy-only acting now stands at 2 breakouts in 4 seeds on EITHER
+refresh engine -- prioract2 (communal) @75 / none, seqref (sequential) @80
+/ none -- both breakouts late, at T = 0.25. Search acting broke out in 3
+of 4 (control @50 and @65, noredo @65; seqvtree none), always earlier.
+CONCLUSION (single-digit seeds, hedged): the communal re-search is NOT
+what makes policy-only acting unreliable; the acting side is the suspect
+-- consistent with, though not proof of, the acting-randomness hypothesis
+(the tempscale arm, built and merged, inert until launched). Caveat: at a
+true 50% rate the control's 2/2 itself happens 1 time in 4.
+The audited-file freeze for seqref is lifted (both seeds done); the
+deferred audit r1 L1/L2 test hardening can be done now. Next step: Kai's.
+
 ### RESULT -- seqref seed 0 (interim; seed 1 running), 2026-10-06
 
 pong-seqref-s0-2026-10-05 ran 10-05 11:48 -> 10-06 09:10 (paused by Kai
