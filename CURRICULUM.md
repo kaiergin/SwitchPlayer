@@ -747,6 +747,33 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### DECISION + measurement, 2026-10-07: the temperature arm by override; search-acting latency
+
+DECISION (Kai, 2026-10-07: "Sure go for it", to: measure low-sim search
+latency, then launch the temperature arm): the tempscale arm runs by
+Kai's explicit OVERRIDE of the DIRECTION proviso that refused it on
+10-05 (prioract2 s1 WORSE). supervise_tempscale.py gains --kai-override,
+which converts ONLY that refusal (exit 3) into a launch and logs it; an
+unfired trigger (2) or a malformed record (4) still refuses. Its
+pre-registered reads are UNCHANGED -- (H): first success at <= 65 supports
+"acting randomness delayed the breakout" (policy-only breakouts so far:
+@75, @80; search acting: @50, @65, @65); (1)-(3) the standard bands. The
+arm keeps the communal re-search (the seqref read found no evidence the
+refresh engine matters, and it is the faster engine).
+SEARCH-ACTING LATENCY (measured 10-07, Searcher.act_search incl. its
+asyncio.run, prioract2 s0 @85 weights, real Pong observations, idle GPU):
+  sims        0 (policy)   4      8      16     32     50
+  GPU median  1.7 ms       18     31     56    108    169 ms
+  CPU median  1.9 ms       23     38     70    134    206 ms
+~3.3 ms per simulation on the GPU: the engine is per-simulation-overhead
+bound (one network call + Python per simulation), not compute bound. Even
+4 sims exceed a 60 fps frame (16.7 ms); deciding every 4th frame (66.7 ms,
+Pong's skip) fits ~8-16 sims. (muzero.ACT_SEARCH_SIMS's comment "8 sims
+~40% of a 60fps frame" is stale -- now 186%.) So search acting is not
+real-time viable at the control's 50 sims with this engine; a low-sim
+(8-16) search-acting arm, or a batched single-root engine, would be the
+route if the temperature arm does not close the gap.
+
 ### RESULT -- seqref seed 1 + THE TWO-SEED READ, 2026-10-07
 
 pong-seqref-s1-2026-10-05 ran 10-06 09:10 -> 10-07 ~04:50. EXACT / recal:
