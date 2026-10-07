@@ -7,9 +7,11 @@ evals (rows 45-90), then ENFORCES the pre-registration: exit 3 if seed 1
 reads WORSE (the DIRECTION proviso: revisit with Kai), exit 2 if its first
 success is at iteration <= 65 (trigger not fired: SVE next), exit 4 on a
 malformed record; launches only if seed 1 is not WORSE and its first
-success is at iteration >= 70 or never:
+success is at iteration >= 70 or never. --kai-override (Kai, 2026-10-07,
+after the seqref two-seed read) turns ONLY the WORSE-proviso refusal (exit
+3) into a launch, logged; exits 2 and 4 still refuse:
 
-    python benchmarks/supervisors/supervise_tempscale.py ray 0
+    python benchmarks/supervisors/supervise_tempscale.py ray 0 [--kai-override]
 
 Supervisor v2 pattern; a relaunch auto-resumes from the last checkpoint."""
 import json
@@ -25,6 +27,10 @@ VARIANTS = {
             ["--ray", "--cpu-actor"]),
 }
 WRITE = "--write-manifest" in sys.argv
+OVERRIDE = "--kai-override" in sys.argv
+OVERRIDE_NOTE = ("OVERRIDE: Kai's explicit decision (2026-10-07, after the "
+                 "seqref two-seed read; CURRICULUM) launches despite seed 1 "
+                 "reading WORSE -- the pre-registered reads are unchanged")
 VARIANT = "ray" if WRITE else sys.argv[1]
 SEED = 0 if WRITE else int(sys.argv[2])
 REPO = r"Y:\SwitchPlayer"
@@ -288,7 +294,8 @@ AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
            "experiments/ray_actors.py", "tests/test_prioract.py",
            "tests/test_sve.py", "tests/test_searchact.py",
            "tests/test_factor.py", "tests/test_prioract2.py",
-           "tests/test_tempscale.py", "tests/test_harness.py",
+           "tests/test_tempscale.py", "tests/test_seqref.py",
+           "tests/test_harness.py",
            "tests/test_ray_harness.py", "tests/test_checkpoint_resume.py",
            "tests/test_paper_mode.py", "tests/test_reanalyze_refresh.py",
            "tests/test_reanalysis.py", "tests/test_vtree.py", "pytest.ini",
@@ -349,8 +356,8 @@ def manifest_check():
 
 def preflight():
     """(ok, reason). The audited-revision manifest, the quick import probe,
-    then the prioract + SVE + searchact + factor + prioract2 + tempscale
-    suites run IN the main tree."""
+    then the prioract + SVE + searchact + factor + prioract2 + tempscale +
+    seqref suites run IN the main tree."""
     ok, why = manifest_check()
     if not ok:
         return False, why
@@ -364,7 +371,7 @@ def preflight():
                             "no:cacheprovider", "tests/test_prioract.py",
                             "tests/test_sve.py", "tests/test_searchact.py",
                             "tests/test_factor.py", "tests/test_prioract2.py",
-                            "tests/test_tempscale.py"],
+                            "tests/test_tempscale.py", "tests/test_seqref.py"],
                            cwd=REPO, capture_output=True, text=True, env=env,
                            timeout=1800)
     except subprocess.TimeoutExpired:
@@ -408,6 +415,9 @@ while True:
     time.sleep(60)
     waited += 1
 print(msg, flush=True)
+if code == 3 and OVERRIDE:
+    print(OVERRIDE_NOTE, flush=True)
+    code = 0
 if code:
     sys.exit(code)
 polls, told = 0, None
@@ -420,7 +430,7 @@ while True:
         told = why
     time.sleep(600)
     polls += 1
-print(f"preflight ok (manifest + quick probe + 6 suites); starting {VARIANT} "
+print(f"preflight ok (manifest + quick probe + 7 suites); starting {VARIANT} "
       f"({ARM})", flush=True)
 
 os.makedirs(BASE, exist_ok=True)

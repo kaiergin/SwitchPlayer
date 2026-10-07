@@ -458,8 +458,12 @@ def test_the_module_level_enforcement_exits_on_every_nonzero_code():
     # the wait loop leaves only on a decision (0 = RUN is a decision too)
     assert "if code is not None:\n        break" in ast.unparse(calls[0])
     i = body.index(calls[0])
-    after = [ast.unparse(n) for n in body[i + 1:i + 3]]
-    assert after == ["print(msg, flush=True)", "if code:\n    sys.exit(code)"]
+    after = [ast.unparse(n) for n in body[i + 1:i + 4]]
+    assert after == [
+        "print(msg, flush=True)",
+        "if code == 3 and OVERRIDE:\n    print(OVERRIDE_NOTE, flush=True)\n"
+        "    code = 0",
+        "if code:\n    sys.exit(code)"]
     # ...and nothing is launched or created before it.
     before = ast.unparse(ast.Module(body=body[:i], type_ignores=[]))
     assert "os.makedirs(BASE" not in before and "Popen" not in before
@@ -473,3 +477,48 @@ def test_supervisor_variant_matches_the_pin():
     assert set(variants) == {"ray"}
     arm, _stem, flags = variants["ray"]
     assert arm == ARM and flags == ["--ray", "--cpu-actor"]
+
+
+
+@pytest.mark.parametrize("code,override,exits", [
+    (0, False, None), (0, True, None),
+    (2, False, 2), (2, True, 2),          # trigger not fired: still refuses
+    (3, False, 3), (3, True, None),       # WORSE proviso: the override launches
+    (4, False, 4), (4, True, 4)])         # malformed record: still refuses
+def test_kai_override_turns_only_the_worse_refusal_into_a_launch(
+        code, override, exits):
+    """The decision's post-processing, executed from the supervisor's own
+    source: --kai-override converts exit 3 only, and says so."""
+    tree = ast.parse(SUP.read_text(encoding="utf-8"))
+    body = tree.body
+    loop = next(n for n in body if isinstance(n, ast.While)
+                and "trigger_decision(TRIGGER_FILE)" in ast.unparse(n))
+    i = body.index(loop)
+    note = next(n for n in body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], "id", "") == "OVERRIDE_NOTE")
+    printed = []
+
+    class _Exit(Exception):
+        pass
+
+    def fake_exit(c):
+        raise _Exit(c)
+
+    ns = {"code": code, "msg": "m", "OVERRIDE": override,
+          "print": lambda *a, **k: printed.append(a[0]),
+          "sys": type("S", (), {"exit": staticmethod(fake_exit)})}
+    try:
+        exec(compile(ast.Module(body=[note] + body[i + 1:i + 4],
+                                type_ignores=[]), "post", "exec"), ns)
+        got = None
+    except _Exit as e:
+        got = e.args[0]
+    assert got == exits
+    assert any("OVERRIDE" in p for p in printed) is (code == 3 and override)
+
+
+def test_override_flag_is_explicit_and_argv_only():
+    tree = ast.parse(SUP.read_text(encoding="utf-8"))
+    node = next(n for n in tree.body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], "id", "") == "OVERRIDE")
+    assert ast.unparse(node.value) == "'--kai-override' in sys.argv"
