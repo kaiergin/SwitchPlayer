@@ -747,6 +747,50 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- the BN stabilizer on the temperature config (Kai, 2026-10-08)
+
+DECISION (Kai, 2026-10-08: "Sure"): build the BN recalibration stabilizer
+and run it on the temperature config, after the temperature arm's raw
+mean (+2.70) sat 6.1 points under its recalibrated mean (+8.78) because of
+snapshot-level BN collapses (@55, @80, @90).
+MECHANISM (BN_RECAL_ACTING, new, default off; --ray, policy-only acting
+only): at every weight ship to the CPU actor and the eval actor (each
+iteration boundary), the BN running statistics of the REPRESENTATION and
+PREDICTION nets are re-estimated from root-only forward passes
+(momentum=None, BN in train mode, no grad) over the newest
+BN_RECAL_FRAMES (4096) clean stacked observations in the replay buffer
+(newest trajectories first, deterministic stride -- no RNG draws). Only
+the copies shipped to the actor / eval actor carry them. Unchanged: the
+trainer's nets, the target nets, birth search (it keeps the raw
+request-time states -- search runs the prediction head on dynamics latents
+at depths > 0, where root-only statistics would be wrong), refresh, and
+training. Snapshots also store the shipped acting states, so the exact
+probe can evaluate the DEPLOYED policy.
+ARM effzero-repro-faithful-prioract-noredo-temp05-bnrecal = the temperature
+arm + BN_RECAL_ACTING. SEED 1 (not 0: seed 0 would share the temperature
+arm's initial weights and env seeds, so it would not be an independent
+second sample of the temperature config).
+PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90):
+  (S) the stabilizer read, on the DEPLOYED policy (exact eval with the
+      snapshot's acting states): WORKS if no deployed row after the
+      deployed first success falls below 0 AND the deployed mean 60-90 is
+      >= the raw (trainer-statistics) mean 60-90 on the same snapshots;
+      otherwise it does not. (Also reported: the external-calibration
+      recal probe, for comparison with every earlier run.)
+  (T) the temperature read, as a second seed of the temperature config:
+      first success (deployed) at <= 70 -> the early breakout repeats;
+      >= 75 or never -> it does not.
+  (1)-(3) the standard reads and bands on the deployed series (primary);
+      raw as secondary.
+INTERPRETATION (single seed, hedged): S works and T repeats ->
+temperature + stabilizer becomes the base config (then SVE on it, or a
+further seed -- Kai's call); S works and T does not -> acting quality is
+the suspect -> low-sim search acting (8-16 sims fit a 4-frame decision);
+S does not work -> BN needs a structural fix (e.g. LayerNorm) -> Kai's
+call. Caveat: the actor plays with recalibrated statistics, so the
+behaviour (and thus training data) can differ from the temperature arm's
+-- by design; (T) compares configurations, not identical training.
+
 ### RESULT -- the temperature arm (PRIOR_ACT_TEMP_SCALE 0.5), 2026-10-08
 
 pong-tempscale-s0-2026-10-05 ran 10-07 09:31 -> 10-08 09:56 (paused by Kai
