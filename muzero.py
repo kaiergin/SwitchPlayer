@@ -343,6 +343,18 @@ PRIOR_ACT_STAGED_TEMP = False
 # 0.5 / 0.25 / 0.125. Policy-only acting only (inert under search acting --
 # ablation.prior_temp_gate refuses that mix).
 PRIOR_ACT_TEMP_SCALE = 1.0
+# BN recalibration stabilizer (Kai, 2026-10-08; CURRICULUM "the BN
+# stabilizer"): the BN running statistics are averaged over the training
+# unroll depths 0..K (and augmented frames), but prior acting only ever runs
+# depth-0 roots on clean frames -- snapshot-level drift collapses the
+# policy (raw @55/@80/@90 of the temperature arm; recalibrated +17.8/+16.4).
+# Under BN_RECAL_ACTING (--ray, policy-only acting), every weight ship to
+# the actor / eval actor carries representation + prediction BN statistics
+# re-estimated from root-only forwards over the newest BN_RECAL_FRAMES
+# clean replay observations. Training, target nets, birth search (search
+# runs the prediction head at depths > 0) and refresh are unchanged.
+BN_RECAL_ACTING = False
+BN_RECAL_FRAMES = 4096
 # ---------------------------------------------------------------------------
 # Paper-reproduction mode (EfficientZero/MuZero data path), flag-gated like
 # everything else; the shipped product keeps all of these OFF. When the

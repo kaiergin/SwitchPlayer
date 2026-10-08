@@ -876,6 +876,22 @@ ARMS["effzero-repro-faithful-prioract-noredo-seqref"] = {
             "the faithful control (pong-faithful-s0/s1-2026-09-24).",
 }
 
+# The BN stabilizer on the temperature config (Kai, 2026-10-08;
+# pre-registered in CURRICULUM): the actor and eval actor play with
+# representation / prediction BN statistics recalibrated on clean depth-0
+# frames at every weight ship. Run as seed 1.
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo"],
+    "PRIOR_ACT_TEMP_SCALE": 0.5,
+    "BN_RECAL_ACTING": True,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05 + BN_RECAL_ACTING "
+            "(the BN stabilizer: recalibrated representation/prediction BN "
+            "statistics in every actor / eval-actor weight ship; training, "
+            "target nets, birth search and refresh unchanged). Run as seed 1. "
+            "Twin: pong-tempscale-s0-2026-10-05; bands from the faithful "
+            "control (pong-faithful-s0/s1-2026-09-24).",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
@@ -1251,6 +1267,82 @@ def eager_collect_gate(use_ray):
         raise SystemExit(f"EAGER_POLL_STEPS must be an int >= 1, got {poll!r}")
 
 
+def bn_calibration_frames(replay, n):
+    """The BN stabilizer's calibration set: up to `n` clean stacked
+    observations from the NEWEST trajectories in `replay` (walking back from
+    the end), thinned by a deterministic stride -- no RNG is drawn, so the
+    stabilizer never reorders any training stream. A LIST of arrays (no
+    full-pool copy; bn_recalibrated_states stacks per batch). None if the
+    buffer is empty."""
+    pool = []
+    for traj in reversed(replay):
+        pool.extend(rec["obs"] if isinstance(rec, dict) else rec[0]
+                    for rec in traj)
+        if len(pool) >= n:
+            break
+    if not pool:
+        return None
+    if len(pool) > n:
+        stride = len(pool) / n
+        pool = [pool[int(i * stride)] for i in range(n)]
+    return pool
+
+
+@torch.no_grad()
+def bn_recalibrated_states(trainer, frames, batch=256):
+    """CPU state dicts of COPIES of the trainer's representation and
+    prediction nets whose BN running statistics are re-estimated from
+    root-only forwards over `frames` (uint8 stacks, /255 as in
+    initial_inference): running stats reset, momentum=None (a cumulative
+    average over the batches), BN in train mode, no grad. Batches are
+    INTERLEAVED (batch b = frames[b::nb]), not contiguous: contiguous 256-
+    frame batches are temporally correlated stretches of one game, whose
+    within-batch variance misses the between-batch variance (bnrecal r1
+    L1: var x0.96 at @90). Every weight is the trainer's; the trainer's own
+    nets are untouched."""
+    nets = {n: copy.deepcopy(getattr(trainer, n))
+            for n in ("representation", "prediction")}
+    layers = [m for net in nets.values() for m in net.modules()
+              if isinstance(m, torch.nn.modules.batchnorm._BatchNorm)]
+    for m in layers:
+        m.reset_running_stats()
+        m.momentum = None
+    for net in nets.values():
+        net.train()
+    rep, pred = nets["representation"], nets["prediction"]
+    dev = next(rep.parameters()).device
+    nb = max(1, -(-len(frames) // batch))
+    for b in range(nb):
+        x = torch.tensor(np.stack(frames[b::nb]),
+                         dtype=torch.float32, device=dev) / 255.0
+        pred(rep(x))
+    for net in nets.values():
+        net.eval()
+    return {n: {k: v.detach().cpu().clone() if torch.is_tensor(v) else v
+                for k, v in net.state_dict().items()}
+            for n, net in nets.items()}
+
+
+def bn_recal_gate(use_ray):
+    """BN_RECAL_ACTING's supported regime, checked at startup: the
+    --ray pipeline (it rides the actor weight ships), policy-only acting
+    (root-only statistics would distort an acting SEARCH, which runs the
+    prediction head at depths > 0), not the async driver, and a sane
+    calibration size."""
+    if not muzero.BN_RECAL_ACTING:
+        return
+    if not use_ray:
+        raise SystemExit("BN_RECAL_ACTING needs --ray (it rides the actor "
+                         "weight ships)")
+    if muzero.USE_SEARCH_ACTING or muzero.ASYNC_LOOP:
+        raise SystemExit("BN_RECAL_ACTING supports policy-only acting on the "
+                         "pipelined loop only: not USE_SEARCH_ACTING or "
+                         "ASYNC_LOOP")
+    n = muzero.BN_RECAL_FRAMES
+    if isinstance(n, bool) or not isinstance(n, int) or n < 256:
+        raise SystemExit(f"BN_RECAL_FRAMES must be an int >= 256, got {n!r}")
+
+
 def prior_temp_gate():
     """PRIOR_ACT_TEMP_SCALE must be a positive real number, and it only
     acts under policy-only acting -- under search acting it would be a
@@ -1512,7 +1604,7 @@ class Run:
 
     # -- re-analysis -------------------------------------------------------
     def paper_targets(self, traj, terminated, born_step=None,
-                      birth_nets=None):
+                      birth_nets=None, birth_prior_nets=None):
         """Paper data path: every step already carries its acting-search
         policy and root value. Store the target ingredients (values are
         computed at BATCH time under the age-adjusted horizon), the birth
@@ -1528,12 +1620,15 @@ class Run:
         the acting search would have recorded, before anything below reads
         them. birth_nets: the nets the ACTOR played with, when they are
         not the live ones (--ray's pipelined collect runs after the next
-        training block; see RayPipeline.request)."""
+        training block; see RayPipeline.request). birth_prior_nets: the
+        representation / prediction the actor SAMPLED from, when they differ
+        from birth_nets (BN_RECAL_ACTING) -- for the behaviour diagnostics."""
         born = (self.trainer.training_steps if born_step is None
                 else born_step)
         birth = muzero.BIRTH_SEARCH and len(traj[0]) == 3
         if birth:
-            traj = self._birth_search(traj, terminated, nets=birth_nets)
+            traj = self._birth_search(traj, terminated, nets=birth_nets,
+                                      prior_nets=birth_prior_nets)
         if len(traj[0]) != 5:
             raise ValueError(
                 "PAPER_TARGETS requires USE_SEARCH_ACTING (or BIRTH_SEARCH): "
@@ -1575,7 +1670,7 @@ class Run:
             self._fresh_target_H = None
         return out
 
-    def _birth_search(self, traj, terminated, nets=None):
+    def _birth_search(self, traj, terminated, nets=None, prior_nets=None):
         """BIRTH_SEARCH: give a policy-only trajectory (3-field records) the
         per-step (policy, root value) its acting search would have recorded,
         returning 5-field records for paper_targets.
@@ -1591,7 +1686,12 @@ class Run:
         nets: default the live trainer nets (sequential mode, where the
         actor IS the live nets). --ray passes the request-time snapshot the
         actor was synced with, so the targets never come from weights the
-        actor did not play with (round-1 audit HIGH-1)."""
+        actor did not play with (round-1 audit HIGH-1).
+
+        prior_nets: the representation / prediction the actor SAMPLED from,
+        when they differ from `nets` (BN_RECAL_ACTING: recalibrated BN
+        statistics; the search keeps `nets`, as it runs the prediction head
+        at depths > 0) -- only the logged behaviour prior uses them."""
         import muzero_vtree
         t0 = time.time()
         if nets is None:
@@ -1629,9 +1729,11 @@ class Run:
                     root_noise=False)
                 pols[tail] = np.asarray(p[0], dtype=np.float64)
                 vals[tail] = float(v[0])
-            # The prior the actor sampled from (same nets, same /255
-            # preprocessing as initial_inference), for the behaviour
-            # diagnostics paper_targets logs (round-2 design audit).
+            # The prior the actor sampled from (same nets -- or prior_nets
+            # under BN_RECAL_ACTING -- same /255 preprocessing as
+            # initial_inference), for the behaviour diagnostics
+            # paper_targets logs (round-2 design audit; bnrecal r1 M1).
+            pn = prior_nets or nets
             priors = []
             with torch.no_grad():
                 for w0 in range(0, n_acted, batch):
@@ -1639,7 +1741,7 @@ class Run:
                         np.stack([traj[i][0] for i in
                                   range(w0, min(w0 + batch, n_acted))]),
                         dtype=torch.float32, device=self.trainer.device) / 255.0
-                    logits, _, _ = nets["prediction"](nets["representation"](x))
+                    logits, _, _ = pn["prediction"](pn["representation"](x))
                     priors.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
             self._birth_priors = (np.concatenate(priors) if priors
                                   else np.zeros((0, ACTIONS)))
@@ -2181,10 +2283,11 @@ class Run:
             stats["refresh_steps_last_iter"] = 0
 
     def reanalyse(self, traj, terminated=True, born_step=None,
-                  birth_nets=None):
+                  birth_nets=None, birth_prior_nets=None):
         if muzero.PAPER_TARGETS:
             return self.paper_targets(traj, terminated, born_step=born_step,
-                                      birth_nets=birth_nets)
+                                      birth_nets=birth_nets,
+                                      birth_prior_nets=birth_prior_nets)
         evaluated = self.searcher.eval_obs(traj)
         self.searcher.create_tree_from_game(evaluated, terminated=terminated)
         searched = self.searcher.select_reanalysis_indices(len(evaluated))
@@ -2418,7 +2521,7 @@ def weights_blob(run, arm, seed, spec):
             **{n: getattr(run.trainer, n).state_dict() for n in NET_NAMES}}
 
 
-def save_weight_snapshot(run, arm, seed, spec, it):
+def save_weight_snapshot(run, arm, seed, spec, it, acting_states=None):
     """--snapshot-weights: the nets at eval row `it`, in the weights-file
     format plus the row's iteration. Completed runs otherwise keep only
     their final weights, and the collapse-timing question needs mid-run
@@ -2430,7 +2533,14 @@ def save_weight_snapshot(run, arm, seed, spec, it):
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"weights-iter{it:03d}.pth"
     tmp = d / f"weights-iter{it:03d}.pth.tmp"
-    torch.save({**weights_blob(run, arm, seed, spec), "iteration": it}, tmp)
+    blob = {**weights_blob(run, arm, seed, spec), "iteration": it}
+    if acting_states:
+        # BN_RECAL_ACTING: the representation / prediction states the actor
+        # and eval actor were shipped at this boundary (recalibrated BN
+        # statistics, the trainer's weights) -- the DEPLOYED policy, which
+        # probe_exhaustive_eval.py evaluates under PROBE_ACTING_STATES=1.
+        blob["acting_states"] = acting_states
+    torch.save(blob, tmp)
     os.replace(tmp, path)
     return path
 
@@ -3141,11 +3251,14 @@ class RayPipeline:
         self.eval_actor = None
         self.pending_eval = None
         self._states_cache = (None, None)   # (training_steps, state dicts)
+        self._acting_cache = (None, None)   # BN_RECAL_ACTING, same keying
         # BIRTH_SEARCH (round-1 audit HIGH-1): the weights the actor was
         # synced with, captured at request time, and a driver-side net set
         # (built once) that the collect-time birth search loads them into.
         self._birth_states = None
         self._birth_nets = None
+        self._prior_nets = None       # BN_RECAL_ACTING: the actor's rep/pred
+        self._birth_acting = None
         self.refresh_actor = None           # phase 3a, lazy like eval_actor
         self.pending_refresh = None         # ([(uid, future)], now_stamp)
         self._target_states_cache = (None, None)  # (target sync stamp, dicts)
@@ -3237,18 +3350,44 @@ class RayPipeline:
                           "value_prefix")})
         return self._states_cache[1]
 
+    def _acting_states(self):
+        """What the actor and the eval actor play with: _states(), except
+        that under BN_RECAL_ACTING the representation and prediction BN
+        running statistics are re-estimated on the newest replay frames
+        (the BN stabilizer). Cached per training_steps like _states();
+        birth search keeps _states() (raw statistics: it searches)."""
+        states = self._states()
+        if not muzero.BN_RECAL_ACTING:
+            return states
+        stamp = self.run.trainer.training_steps
+        if self._acting_cache[0] != stamp:
+            frames = bn_calibration_frames(self.run.replay,
+                                           muzero.BN_RECAL_FRAMES)
+            recal = ({} if frames is None else
+                     bn_recalibrated_states(self.run.trainer, frames))
+            self._acting_cache = (stamp, {**states, **recal})
+        return self._acting_cache[1]
+
+    def snapshot_acting_states(self):
+        """For save_weight_snapshot: the shipped representation /
+        prediction acting states under BN_RECAL_ACTING, else None."""
+        if not muzero.BN_RECAL_ACTING:
+            return None
+        acting = self._acting_states()
+        return {n: acting[n] for n in ("representation", "prediction")}
+
     def sync(self):
         steps = self.run.trainer.training_steps
         if self.server is not None:
             # One weight ship for the whole pool; workers only mirror the
             # temperature counter (their set_weights skips empty dicts).
             self.ray.get(self.server.set_weights.remote(
-                self._states(), steps))
+                self._acting_states(), steps))
             self.ray.get([w.set_weights.remote({}, steps)
                           for w in self.workers])
         else:
             self.ray.get(self.actor.set_weights.remote(
-                self._states(), steps))
+                self._acting_states(), steps))
 
     def request(self, it):
         # training_steps captured at REQUEST time: sequential reanalysis of
@@ -3269,6 +3408,11 @@ class RayPipeline:
         # ray_scope_gate refuses for non-paper arms). _states() is keyed on
         # the step count and returns clones, so this is the synced set.
         self._birth_states = self._states() if muzero.BIRTH_SEARCH else None
+        # BN_RECAL_ACTING: the rep/pred the actor SAMPLES from this game
+        # (the synced acting set) -- for the behaviour prior only.
+        self._birth_acting = (self._acting_states()
+                              if muzero.BIRTH_SEARCH and muzero.BN_RECAL_ACTING
+                              else None)
 
     def _birth_net_set(self, states):
         """Load `states` into the persistent driver-side birth-search nets
@@ -3283,6 +3427,19 @@ class RayPipeline:
             net.load_state_dict(states[n])
             net.eval()
         return self._birth_nets
+
+    def _prior_net_set(self, states):
+        """Persistent driver-side copies of the trainer's representation /
+        prediction loaded with the actor's acting states (BN_RECAL_ACTING),
+        eval mode: the prior the actor sampled from, for the behaviour
+        diagnostics."""
+        if getattr(self, "_prior_nets", None) is None:
+            self._prior_nets = {n: copy.deepcopy(getattr(self.run.trainer, n))
+                                for n in ("representation", "prediction")}
+        for n, net in self._prior_nets.items():
+            net.load_state_dict(states[n])
+            net.eval()
+        return self._prior_nets
 
     @staticmethod
     def _own_arrays(record):
@@ -3310,6 +3467,10 @@ class RayPipeline:
         birth_nets = (self._birth_net_set(self._birth_states)
                       if self._birth_states is not None else None)
         self._birth_states = None
+        acting = getattr(self, "_birth_acting", None)
+        prior_nets = (self._prior_net_set(acting) if acting is not None
+                      else None)
+        self._birth_acting = None
         # The request-time count flows as an EXPLICIT stamp -- no rewinding
         # of the live trainer counter, so no window in which the two
         # "current step" sources (trainer vs searcher mirror) disagree.
@@ -3325,7 +3486,7 @@ class RayPipeline:
             traj = [self._own_arrays(r) for r in traj]
             self.run.replay.append(self.run.reanalyse(
                 traj, terminated=terminated, born_step=steps_at_request,
-                birth_nets=birth_nets))
+                birth_nets=birth_nets, birth_prior_nets=prior_nets))
             evict_replay(self.run.replay)
 
     def request_eval(self, it, episodes, diagnostics, write_row, elapsed_at):
@@ -3350,11 +3511,11 @@ class RayPipeline:
         steps = self.run.trainer.training_steps
         if self.server is not None:
             self.ray.get(self.server.set_weights.remote(
-                self._states(), steps, which="eval"))
+                self._acting_states(), steps, which="eval"))
             self.ray.get(self.eval_actor.set_weights.remote({}, steps))
         else:
             self.ray.get(self.eval_actor.set_weights.remote(
-                self._states(), steps))
+                self._acting_states(), steps))
         seeds = [self.seed * 100003 + it * 613 + 500000 + e
                  for e in range(episodes)]
         self.pending_eval = (
@@ -3567,6 +3728,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         launch_gate(spec, use_ray, cpu_actor)
         eager_collect_gate(use_ray)
         prior_temp_gate()
+        bn_recal_gate(use_ray)
         birth_search_gate()
         sve_gate()
         if muzero.REDO_EVERY:
@@ -4064,7 +4226,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 if snapshot_weights:
                     # W_it: the weights this row's diagnostics and (in
                     # --ray, the eval actor's synced copy) episodes see.
-                    save_weight_snapshot(run, arm, seed, spec, it)
+                    save_weight_snapshot(
+                        run, arm, seed, spec, it,
+                        acting_states=(pipeline.snapshot_acting_states()
+                                       if pipeline else None))
                 if pipeline:
                     # Any previous late row first, so rows stay file-ordered.
                     pipeline.drain_eval()

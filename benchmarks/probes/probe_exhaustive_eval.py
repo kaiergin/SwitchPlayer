@@ -53,6 +53,23 @@ def _noop_env(env):
     return e
 
 
+# PROBE_ACTING_STATES=1 (BN stabilizer, 2026-10-08): evaluate the DEPLOYED
+# policy -- the snapshot's shipped representation / prediction acting
+# states (recalibrated BN statistics) instead of the trainer's -- and write
+# probe_exhaustive_eval-<run>-acting.jsonl. A snapshot without them refuses.
+ACTING = os.environ.get("PROBE_ACTING_STATES") == "1"
+
+
+def apply_acting_states(run, d):
+    acting = d.get("acting_states")
+    if not acting:
+        raise SystemExit("PROBE_ACTING_STATES=1 but the snapshot has no "
+                         "acting_states (not a BN_RECAL_ACTING run)")
+    for n, sd in acting.items():
+        getattr(run.trainer, n).load_state_dict(sd)
+    run.set_train_mode(False)
+
+
 def play(run, noops):
     ne = _noop_env(run.env)
 
@@ -76,7 +93,9 @@ with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000):
     assert muzero.USE_SEARCH_ACTING is False       # greedy = prior argmax
     for arg in sys.argv[1:]:
         path = pathlib.Path(arg)
-        load(run, path)
+        d = load(run, path)
+        if ACTING:
+            apply_acting_states(run, d)
         t0 = time.time()
         games = {n: play(run, n) for n in range(1, 31)}
         rets = np.array([games[n][0] for n in range(1, 31)])
@@ -91,11 +110,15 @@ with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000):
                "phases_won": sum(1 for v in phase.values() if v > 0),
                "capped": sum(1 for g in games.values() if not g[2]),
                "games": {n: list(g) for n, g in games.items()},
-               "secs": round(time.time() - t0)}
+               "secs": round(time.time() - t0),
+               "acting_states": ACTING,
+               "variant": "acting" if ACTING else "raw"}
         print(f"{rec['run']} @{rec['iteration']}: exact {rec['exact_mean']:+.2f} "
               f"(sd {rec['sd']}, min {rec['min']:+.0f}) phases "
               f"{[round(v, 1) for v in phase.values()]} won {rec['phases_won']}/4 "
               f"capped {rec['capped']}/30 [{rec['secs']}s]", flush=True)
-        with open(HERE / f"probe_exhaustive_eval-{rec['run']}.jsonl", "a") as f:
+        suffix = "-acting" if ACTING else ""
+        with open(HERE / f"probe_exhaustive_eval-{rec['run']}{suffix}.jsonl",
+                  "a") as f:
             f.write(json.dumps(rec) + "\n")
 print("DONE", flush=True)

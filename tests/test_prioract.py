@@ -521,8 +521,9 @@ def test_ray_birth_search_uses_the_weights_the_actor_played_with(monkeypatch):
     run = make_run()
     seen = {}
 
-    def spy(traj, terminated, nets=None):
+    def spy(traj, terminated, nets=None, prior_nets=None):
         seen["nets"] = nets
+        assert prior_nets is None       # BN_RECAL_ACTING off: no acting nets
         seen["w"] = (nets or {}).get("representation",
                                      run.trainer.representation).conv1.weight.detach().clone()
         return [(o, a, r, np.full(ACTIONS, 1.0 / ACTIONS), 0.0)
