@@ -747,6 +747,31 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- the temperature arm (PRIOR_ACT_TEMP_SCALE 0.5), 2026-10-08
+
+pong-tempscale-s0-2026-10-05 ran 10-07 09:31 -> 10-08 09:56 (paused by Kai
+19:48-21:07 at the iter-48 checkpoint; PC shutdown after the 23:02 iter-54
+checkpoint, resumed 01:33 -- both relaunches with --kai-override). EXACT /
+BN-recalibrated:
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw    -7.8   -2.0  -19.5   +2.6   +2.5  +11.6  +13.9   -2.1   +9.2  -18.9
+  won    0/4    1/4    0/4    2/4    2/4    4/4    4/4    1/4    4/4    0/4
+  recal                       +1.7   +5.0   -0.9  +11.1  +17.8  +10.3  +16.4
+READ (H): first success @70 (+11.6, 4/4) -> by the letter NOT supported
+(the criterion was <= 65; @60/@65 won 2/4 phases, short of 3/4). It is the
+earliest policy-only breakout so far (prioract2 @75, seqref @80) and was
+competitive from @50 (-2.0, a phase won), but not at search acting's
+@50-65.
+READ (2): mean 60-90 = +2.6951 -> INCONCLUSIVE; recalibrated +8.7809 ->
+NO WORSE -- the best policy-only recalibrated mean (prioract2 s0 +5.01,
+seqref s0 +0.16), between the control seeds' (+13.94 / +6.76).
+READ (3): two raw collapses after the first success, @80 (-2.1) and @90
+(-18.9), both the BN eval artifact (recal +17.8 and +16.4, 4/4); also a
+pre-success raw collapse @55 (-19.5). The raw/recal gap (+6.1 on the mean)
+is now the largest drag on the primary read. The behaviour windows did
+not collapse with them (beh_prior_maxp 0.43-0.46, act_agree 0.55-0.60
+throughout), so these are snapshot-level eval-statistics drops.
+
 ### DECISION + measurement, 2026-10-07: the temperature arm by override; search-acting latency
 
 DECISION (Kai, 2026-10-07: "Sure go for it", to: measure low-sim search
