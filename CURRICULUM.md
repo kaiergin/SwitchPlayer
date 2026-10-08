@@ -775,7 +775,9 @@ PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90):
       snapshot's acting states): WORKS if no deployed row after the
       deployed first success falls below 0 AND the deployed mean 60-90 is
       >= the raw (trainer-statistics) mean 60-90 on the same snapshots;
-      otherwise it does not. (Also reported: the external-calibration
+      otherwise it does not. UNDETERMINED if the deployed series has no
+      first success (the first clause would be vacuous) -- audit r1 L5,
+      worded before any row existed. (Also reported: the external-calibration
       recal probe, for comparison with every earlier run.)
   (T) the temperature read, as a second seed of the temperature config:
       first success (deployed) at <= 70 -> the early breakout repeats;
@@ -790,6 +792,17 @@ S does not work -> BN needs a structural fix (e.g. LayerNorm) -> Kai's
 call. Caveat: the actor plays with recalibrated statistics, so the
 behaviour (and thus training data) can differ from the temperature arm's
 -- by design; (T) compares configurations, not identical training.
+AUDIT ROUND 1 (2026-10-08) changed, before launch: the behaviour
+diagnostics (beh_prior_maxp, beh_H_act, beh_prior_agree, beh_kl_target_
+prior) now use the prior the actor SAMPLED (the acting nets), while birth
+search still searches with the raw nets (M1); the row fields
+policy_entropy / maxp stay RAW-statistics diagnostics, return_mean is the
+deployed policy. The recalibration uses INTERLEAVED batches (frames[b::nb])
+-- contiguous batches of one game's stretch under-estimated the variance
+(x0.96, L1) -- so its estimator differs slightly from the offline
+external-calibration probe (contiguous), which stays as it was for
+comparability with every earlier run. Probe records gain "variant"
+("raw" / "acting") (L3); the supervisor refuses any seed but 1 (L4).
 
 ### RESULT -- the temperature arm (PRIOR_ACT_TEMP_SCALE 0.5), 2026-10-08
 
