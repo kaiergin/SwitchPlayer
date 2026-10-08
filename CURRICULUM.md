@@ -803,6 +803,17 @@ deployed policy. The recalibration uses INTERLEAVED batches (frames[b::nb])
 external-calibration probe (contiguous), which stays as it was for
 comparability with every earlier run. Probe records gain "variant"
 ("raw" / "acting") (L3); the supervisor refuses any seed but 1 (L4).
+AUDIT ROUND 2: nothing above LOW -- the loop closes. Verified end to end on
+a real game: the logged behaviour prior equals the actor's pre-temperature
+prior to 8e-7 (the raw prior would differ by TV 0.16-0.24); interleaved
+recalibration matches exact full-batch statistics (variance ratio 0.999,
+argmax agreement 0.999 at @80/@90; contiguous gave 0.94-0.96). Wording,
+precisely: the calibration set is a 4096-frame stride sample of the newest
+whole trajectories totalling >= 4096 frames; the row key is policy_maxp;
+the very first ship (empty buffer) carries raw statistics. DEFERRED until
+after the run (an audited test file; a mid-run change would block a
+relaunch): a request->collect chain test pinning the middle of the M1
+wiring (r2 L-1; the auditor's version is in scratchpad audit_bn2).
 
 ### RESULT -- the temperature arm (PRIOR_ACT_TEMP_SCALE 0.5), 2026-10-08
 
