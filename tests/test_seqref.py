@@ -63,19 +63,28 @@ def test_every_startup_gate_passes():
         ablation.launch_gate(ablation.ARMS[ARM], False, False)
 
 
+@pytest.mark.parametrize("ready_after", [0, 10_000])
 def test_ray_loop_refreshes_through_the_sequential_engine(
-        monkeypatch, tmp_path, restore_rngs):  # noqa: F811
+        monkeypatch, tmp_path, restore_rngs, ready_after):  # noqa: F811
     """run_one --ray (in-process fake pipeline) for 2 iterations: the
     iteration-2 refresh goes through run.refresh_targets (the control's
-    sequential engine), never refresh_targets_vtree or an offload."""
+    sequential engine), never refresh_targets_vtree or an offload -- and
+    (seqref audit r1 L1) it SEES both games (game 2 collected mid-block or
+    at the iteration end), stamps every position, and the row counts them."""
     import torch
     torch.set_num_threads(2)
     calls = []
+    seen = {}
     real = ablation.Run.refresh_targets
 
     def spy_seq(self, count):
         calls.append(("seq", count, self.trainer.training_steps))
-        return real(self, count)
+        seen["run"], seen["n_trajs"] = self, len(self.replay)
+        out = real(self, count)
+        seen["stamps"] = [{r.get("refreshed_step") for r in t}
+                          for t in self.replay]
+        seen["positions"] = sum(len(t) for t in self.replay)
+        return out
 
     def no_vtree(self, count):
         raise AssertionError("refresh_targets_vtree called")
@@ -83,7 +92,7 @@ def test_ray_loop_refreshes_through_the_sequential_engine(
     monkeypatch.setattr(ablation.Run, "refresh_targets", spy_seq)
     monkeypatch.setattr(ablation.Run, "refresh_targets_vtree", no_vtree)
     events = []
-    fake = _fake_pipe(events, 0)
+    fake = _fake_pipe(events, ready_after)
     fake.request_refresh = lambda self: (_ for _ in ()).throw(
         AssertionError("offloaded refresh"))
     monkeypatch.setattr(ablation, "RayPipeline", fake)
@@ -100,6 +109,9 @@ def test_ray_loop_refreshes_through_the_sequential_engine(
     assert calls == [("seq", _eff(ablation.ARMS[ARM], "POLICY_REFRESH_COUNT"), 20)]
     rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
     assert [r["iteration"] for r in rows] == [1, 2]
+    assert seen["n_trajs"] == 2                    # both games, both modes
+    assert seen["stamps"] == [{20}, {20}]          # every position stamped
+    assert rows[1]["refresh_steps_last_iter"] == seen["positions"] > 0
 
 
 def test_supervisor_variant_and_seed_order():

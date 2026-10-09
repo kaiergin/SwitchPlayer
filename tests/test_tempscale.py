@@ -458,12 +458,10 @@ def test_the_module_level_enforcement_exits_on_every_nonzero_code():
     # the wait loop leaves only on a decision (0 = RUN is a decision too)
     assert "if code is not None:\n        break" in ast.unparse(calls[0])
     i = body.index(calls[0])
-    after = [ast.unparse(n) for n in body[i + 1:i + 4]]
-    assert after == [
-        "print(msg, flush=True)",
-        "if code == 3 and OVERRIDE:\n    print(OVERRIDE_NOTE, flush=True)\n"
-        "    code = 0",
-        "if code:\n    sys.exit(code)"]
+    assert ast.unparse(body[i + 1]) == "print(msg, flush=True)"
+    assert isinstance(body[i + 2], ast.If)
+    assert ast.unparse(body[i + 2].test) == "code == 3 and OVERRIDE"
+    assert ast.unparse(body[i + 3]) == "if code:\n    sys.exit(code)"
     # ...and nothing is launched or created before it.
     before = ast.unparse(ast.Module(body=body[:i], type_ignores=[]))
     assert "os.makedirs(BASE" not in before and "Popen" not in before
@@ -480,22 +478,26 @@ def test_supervisor_variant_matches_the_pin():
 
 
 
-@pytest.mark.parametrize("code,override,exits", [
-    (0, False, None), (0, True, None),
-    (2, False, 2), (2, True, 2),          # trigger not fired: still refuses
-    (3, False, 3), (3, True, None),       # WORSE proviso: the override launches
-    (4, False, 4), (4, True, 4)])         # malformed record: still refuses
-def test_kai_override_turns_only_the_worse_refusal_into_a_launch(
-        code, override, exits):
+@pytest.mark.parametrize("code,override,fired,ckpt,exits,note", [
+    (0, False, True, False, None, None), (0, True, True, False, None, None),
+    (2, False, True, False, 2, None), (2, True, True, False, 2, None),
+    (3, False, True, False, 3, None),
+    (3, False, True, True, 3, "HINT"),             # relaunch without the flag
+    (3, True, True, False, None, "OVERRIDE:"),     # the override launches
+    (3, True, False, False, 2, "OVERRIDE refused"),  # ...not over an unfired trigger
+    (4, False, True, False, 4, None), (4, True, True, False, 4, None)])
+def test_kai_override_semantics(code, override, fired, ckpt, exits, note):
     """The decision's post-processing, executed from the supervisor's own
-    source: --kai-override converts exit 3 only, and says so."""
+    source: --kai-override converts exit 3 only, and only if the trigger
+    fired; a relaunch without the flag over a checkpoint gets a hint."""
     tree = ast.parse(SUP.read_text(encoding="utf-8"))
     body = tree.body
     loop = next(n for n in body if isinstance(n, ast.While)
                 and "trigger_decision(TRIGGER_FILE)" in ast.unparse(n))
     i = body.index(loop)
-    note = next(n for n in body if isinstance(n, ast.Assign)
-                and getattr(n.targets[0], "id", "") == "OVERRIDE_NOTE")
+    consts = [n for n in body if isinstance(n, ast.Assign)
+              and getattr(n.targets[0], "id", "") in (
+                  "OVERRIDE_NOTE", "OVERRIDE_REFUSED", "RELAUNCH_HINT")]
     printed = []
 
     class _Exit(Exception):
@@ -504,17 +506,69 @@ def test_kai_override_turns_only_the_worse_refusal_into_a_launch(
     def fake_exit(c):
         raise _Exit(c)
 
-    ns = {"code": code, "msg": "m", "OVERRIDE": override,
+    ns = {"code": code, "msg": "m", "OVERRIDE": override, "CKPT": "ck",
+          "TRIGGER_FILE": "tf",
+          "override_code": lambda path: 0 if fired else 2,
+          "os": type("O", (), {"path": type("P", (), {
+              "exists": staticmethod(lambda p: ckpt)})})(),
           "print": lambda *a, **k: printed.append(a[0]),
           "sys": type("S", (), {"exit": staticmethod(fake_exit)})}
     try:
-        exec(compile(ast.Module(body=[note] + body[i + 1:i + 4],
+        exec(compile(ast.Module(body=consts + body[i + 1:i + 4],
                                 type_ignores=[]), "post", "exec"), ns)
         got = None
     except _Exit as e:
         got = e.args[0]
     assert got == exits
-    assert any("OVERRIDE" in p for p in printed) is (code == 3 and override)
+    notes = [p for p in printed if p != "m"]
+    if note is None:
+        assert notes == []
+    else:
+        assert len(notes) == 1 and notes[0].startswith(note)
+
+
+def test_override_code_on_records(tmp_path):
+    """override_code from the real records (seed 1: no first success ->
+    trigger fired -> 0) and from a fixture whose trigger did not fire."""
+    ns = _trigger_ns()
+    tree = ast.parse(SUP.read_text(encoding="utf-8"))
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+              and n.name == "override_code")
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "oc", "exec"), ns)
+    real = (pathlib.Path(__file__).resolve().parents[1] / "benchmarks" /
+            "probes" / "probe_exhaustive_eval-pong-prioract2-s1-2026-10-02.jsonl")
+    assert ns["trigger_decision"](str(real))[0] == 3
+    assert "first success at none, mean 60-90 -10.4524" in ns[
+        "trigger_decision"](str(real))[1]
+    assert ns["override_code"](str(real)) == 0
+    rows = {i: (-10.0, 0) for i in ROWS}
+    rows[50] = (12.0, 4)                     # broke out early, then WORSE
+    path = tmp_path / "rec.jsonl"
+    _write(path, ns["TRIGGER_RUN"], rows)
+    assert ns["trigger_decision"](str(path))[0] == 3
+    assert ns["override_code"](str(path)) == 2
+
+
+def test_override_is_bound_exactly_once():
+    tree = ast.parse(SUP.read_text(encoding="utf-8"))
+    stores = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
+              and n.id == "OVERRIDE" and isinstance(n.ctx, ast.Store)]
+    assert len(stores) == 1
+
+
+def test_preflight_runs_and_audits_the_seqref_suite():
+    src = SUP.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    aud = ast.literal_eval(next(n for n in tree.body if isinstance(n, ast.Assign)
+                                and getattr(n.targets[0], "id", "") == "AUDITED").value)
+    assert "tests/test_seqref.py" in aud and "tests/test_tempscale.py" in aud
+    pre = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+               and n.name == "preflight")
+    suites = [e.value for n in ast.walk(pre) if isinstance(n, ast.List)
+              for e in n.elts if isinstance(e, ast.Constant)
+              and str(e.value).startswith("tests/")]
+    assert {"tests/test_tempscale.py", "tests/test_seqref.py"} <= set(suites)
+    assert set(suites) <= set(aud)
 
 
 def test_override_flag_is_explicit_and_argv_only():

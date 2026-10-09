@@ -321,7 +321,10 @@ GUMBEL_C_SCALE = 0.1
 # does not load the dynamics network).
 # ---------------------------------------------------------------------------
 USE_SEARCH_ACTING = False
-ACT_SEARCH_SIMS = 8            # measured ~40% of a 60fps frame at this budget
+# Per decision through Searcher.act_search (measured 2026-10-07, CURRICULUM):
+# ~3.3 ms per simulation on the GPU -- 8 sims 31 ms (GPU) / 38 ms (CPU), i.e.
+# ~186% of a 60 fps frame (the old "~40%" note predates the current net).
+ACT_SEARCH_SIMS = 8
 # Policy-only acting in PAPER mode (2026-09-26, Kai: the real-time design --
 # no search on the acting path). With BIRTH_SEARCH on (and USE_SEARCH_ACTING
 # off) the actor samples the prior, and every newly collected trajectory is

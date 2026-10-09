@@ -488,3 +488,64 @@ def test_supervisor_refuses_any_seed_but_1():
     r = subprocess.run([sys.executable, str(SUP), "ray", "0"], capture_output=True,
                        text=True, cwd=str(ROOT), timeout=60)
     assert r.returncode != 0 and "pre-registered as SEED 1" in r.stderr
+
+
+
+# bnrecal audit r2 L-1 (the auditor's chain test, adopted after the run): the
+# M1 wiring through the REAL collect -> reanalyse -> paper_targets ->
+# _birth_search (only the search engine stubbed), with training -- weight
+# change, step advance, new replay data, train mode -- between request and
+# collect: the logged prior is the REQUEST-time acting prior and the
+# trainer is untouched.
+def test_m1_chain_with_training_between_request_and_collect(monkeypatch):
+    import muzero_vtree
+    from tests.test_vtree import dezero_heads
+
+    class _Engine:
+        def __init__(self, nets, actions, device):
+            pass
+
+        def search(self, obs, num_simulations, c_puct, discount, root_noise):
+            n = len(obs)
+            return (np.full((n, ablation.ACTIONS), 1.0 / ablation.ACTIONS),
+                    np.zeros(n), None)
+
+    monkeypatch.setattr(muzero_vtree, "VectorizedPUCT", _Engine)
+    monkeypatch.setattr(muzero, "PAPER_TARGETS", True)
+    p, log = _pipeline(monkeypatch, True)
+    tr = p.run.trainer
+    _age_bn(tr)
+    dezero_heads({n: getattr(tr, n) for n in ("representation", "dynamics",
+                                              "prediction", "value_prefix")}, 3)
+    p._birth_nets = p._prior_nets = p._birth_acting = None
+    p.sync()
+    p.request(3)
+    acting = {n: {k: v.clone() for k, v in p._acting_states()[n].items()}
+              for n in ("representation", "prediction")}
+    traj = [(o, 0, 0.0) for o in _frames(5, seed=7)]
+    # training happens while the actor plays
+    with torch.no_grad():
+        for prm in tr.prediction.parameters():
+            prm.add_(0.05 * torch.randn_like(prm))
+    tr.training_steps += 50
+    p.run.replay.append([{"obs": f} for f in _frames(64, seed=9)])
+    p.run.set_train_mode(True)
+    before = {n: copy.deepcopy(getattr(tr, n).state_dict())
+              for n in ("representation", "prediction")}
+    p.pending = (["fut"], 500)
+    p.ray = type("R", (), {"get": staticmethod(
+        lambda x: [(traj, True, 4)] if x == ["fut"] else x)})()
+    monkeypatch.setattr(ablation, "evict_replay", lambda r: None)
+    p.collect()
+    for n in before:
+        now = getattr(tr, n).state_dict()
+        assert all(torch.equal(now[k], before[n][k]) for k in now), n
+    ref = {n: copy.deepcopy(getattr(tr, n)) for n in before}
+    for n, net in ref.items():
+        net.load_state_dict(acting[n])
+        net.eval()
+    with torch.no_grad():
+        x = torch.tensor(np.stack([r[0] for r in traj[:-1]]),
+                         dtype=torch.float32, device=tr.device) / 255.0
+        want = torch.softmax(ref["prediction"](ref["representation"](x))[0], 1).cpu().numpy()
+    assert np.allclose(p.run._birth_priors, want, atol=1e-6)

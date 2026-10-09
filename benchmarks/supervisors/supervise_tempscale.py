@@ -9,7 +9,10 @@ success is at iteration <= 65 (trigger not fired: SVE next), exit 4 on a
 malformed record; launches only if seed 1 is not WORSE and its first
 success is at iteration >= 70 or never. --kai-override (Kai, 2026-10-07,
 after the seqref two-seed read) turns ONLY the WORSE-proviso refusal (exit
-3) into a launch, logged; exits 2 and 4 still refuse:
+3) into a launch, logged -- and only if seed 1's trigger fired; exits 2 and
+4 still refuse. EVERY relaunch of an override launch (pause, reboot, GPU
+kill) must pass --kai-override again; without it the supervisor re-decides
+and exits 3 (it prints a hint when a checkpoint exists):
 
     python benchmarks/supervisors/supervise_tempscale.py ray 0 [--kai-override]
 
@@ -31,6 +34,11 @@ OVERRIDE = "--kai-override" in sys.argv
 OVERRIDE_NOTE = ("OVERRIDE: Kai's explicit decision (2026-10-07, after the "
                  "seqref two-seed read; CURRICULUM) launches despite seed 1 "
                  "reading WORSE -- the pre-registered reads are unchanged")
+OVERRIDE_REFUSED = ("OVERRIDE refused: the trigger did not fire (seed 1's "
+                    "first success at <= 65) -- the override covers only the "
+                    "WORSE proviso; NOT launching")
+RELAUNCH_HINT = ("HINT: a checkpoint exists -- a run launched by Kai's "
+                 "override must be relaunched WITH --kai-override")
 VARIANT = "ray" if WRITE else sys.argv[1]
 SEED = 0 if WRITE else int(sys.argv[2])
 REPO = r"Y:\SwitchPlayer"
@@ -259,6 +267,16 @@ def trigger_decision(path, run=TRIGGER_RUN):
     return 0, head + " -> RUN"
 
 
+def override_code(path, run=TRIGGER_RUN):
+    """--kai-override covers ONLY the WORSE proviso (exit 3): 0 if seed 1's
+    trigger fired (first success >= 70 or none), else 2 -- the override never
+    launches over an unfired trigger (override audit r1 LOW-2). Called only
+    after trigger_decision returned 3, so every row is present and
+    well-formed."""
+    recs, _ = read_records(path, run)
+    return 0 if triggered(first_success(recs)) else 2
+
+
 def _seed_state(ck):
     """'done' (completion marker -- a shrunk checkpoint -- or the seed's own
     supervisor logging RUN COMPLETE, if the checkpoint was moved), 'failed'
@@ -416,8 +434,10 @@ while True:
     waited += 1
 print(msg, flush=True)
 if code == 3 and OVERRIDE:
-    print(OVERRIDE_NOTE, flush=True)
-    code = 0
+    code = override_code(TRIGGER_FILE)
+    print(OVERRIDE_NOTE if code == 0 else OVERRIDE_REFUSED, flush=True)
+elif code == 3 and os.path.exists(CKPT):
+    print(RELAUNCH_HINT, flush=True)
 if code:
     sys.exit(code)
 polls, told = 0, None
