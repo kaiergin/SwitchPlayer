@@ -777,9 +777,19 @@ COMPARISONS: prioract2 s0/s1 (identical except who acts: @75 / none);
 noredo (50-sim search acting with its own 50-sim targets, parallel: @65,
 +5.86); the control (50-sim search acting, sequential: @50 / @65); the
 temperature config (@70 / @75).
-COST: ~38 ms/step on the CPU actor -> ~1.5-2 min per game; with eager
-collect a game joins ~100-300 steps into its 2000-step block (vs 0-40 for
-policy-only) -- slightly staler data, noted.
+COST (corrected by audit r1 LOW-1 before launch): the production Ray CPU
+actor runs ONE torch thread (Ray sets OMP_NUM_THREADS=1) -> ~54 ms per step
+at 8 sims, env step included (the 38 ms figure was 2 threads) -- 81% of a
+4-frame decision, still inside it; ~1.8 min per 2000-step game, ~2.7 min at
+the 3000 cap; with eager collect a game joins ~150-450 steps into its
+2000-step block (vs 0-40 for policy-only) -- slightly staler data, noted.
+POWER (audit r1, measured on prioract2 s0 weights, 127 real states): how
+often the acted action matches the 50-sim search's argmax, 8-sim search vs
+prior sampling: T=1 0.48 vs 0.34 (@50) / 0.43 vs 0.32 (@85); T=0.5 0.52 vs
+0.45; T=0.25 0.55 vs 0.53. The manipulation is real while T >= 0.5 (to
+~iter 67 -- covering read (A)'s window) and nearly nil at T=0.25. Read (A)
+scores the PRIOR argmax (comparable with every run), not the 8-sim agent
+that would be deployed.
 PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90; secondary:
 external-calibration recal):
   (A) the action-quality read: first success at <= 65 -> consistent with
