@@ -747,6 +747,38 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- the BN stabilizer on the temperature config (seed 1), 2026-10-09
+
+pong-bnrecal-s1-2026-10-08 ran 10-08 12:41 -> 10-09 08:13, no
+interruptions. EXACT evals, DEPLOYED (the shipped acting states) / RAW
+(trainer statistics) / external-calibration recal:
+  iter      45     50     55     60     65     70     75     80     85     90
+  deployed -14.3  -13.6  -13.1  -13.1   -1.0   -3.8  +10.1   +9.5  +20.4  +18.4
+    won     0/4    0/4    0/4    0/4    1/4    1/4    3/4    3/4    4/4    4/4
+  raw      -20.2  -12.5  -12.8   -8.4   -6.2   +7.8   +2.7   +8.7  +17.5  +16.2
+    won     0/4    0/4    0/4    0/4    1/4    3/4    2/4    3/4    4/4    4/4
+  ext recal                     -9.0   +2.7   -0.4   +3.4  +10.7  +19.6  +20.5
+READ (S): WORKS by the letter -- no deployed row below 0 after the deployed
+first success, and deployed mean 60-90 +5.8046 >= raw +5.4667. Weakly
+informative: the raw series did not collapse after its own first success
+either (this seed had no late BN collapse to prevent); the deployed policy
+never did worse than raw after @70 and ended higher (+20.4/+18.4 vs
++17.5/+16.2).
+READ (T): first success (deployed) @75 -> NOT repeated by the letter (<= 70);
+the raw series reached 3/4 phases @70.
+READ (2): deployed mean 60-90 = +5.8046 -> NO WORSE (>= +3.68); raw +5.4667
+(NO WORSE); external recal +6.7669.
+READ (3): 0 collapses after the first success.
+THE TEMPERATURE CONFIG ACROSS TWO SEEDS: both broke out (s0 @70 raw;
+s1 @75 deployed / @70 raw) -- the first policy-only configuration to break
+out on 2/2 seeds (the unscaled config: 2/4). Breakouts still later than
+search acting's (@50-65). Final rows +18.4/+20.4 -- near EfficientZero's
+published 20.1.
+PRE-REGISTERED INTERPRETATION: S works, T does not -> acting quality is the
+suspect -> low-sim search acting (8-16 sims fit a 4-frame decision). The
+audited-file freeze is lifted; the deferred items (bnrecal chain test,
+tempscale LOW-2/3, seqref L1/L2) can be done now.
+
 ### Next experiment (pre-registered) -- the BN stabilizer on the temperature config (Kai, 2026-10-08)
 
 DECISION (Kai, 2026-10-08: "Sure"): build the BN recalibration stabilizer
