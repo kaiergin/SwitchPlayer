@@ -756,8 +756,8 @@ HYPOTHESIS: policy-only breakouts come late (@70-80 across five seeds;
 2/2 for the temperature config) while search acting broke out @50-65; the
 quality of the ACTIONS (search-improved vs sampled from the prior) is what
 times the breakout. Test it at a search budget that fits real time: 8
-simulations = 31 ms (GPU) / 38 ms (CPU) per decision, inside a 4-frame
-decision (66.7 ms).
+simulations = 31 ms (GPU) / ~54 ms on the production 1-thread CPU actor
+per decision, inside a 4-frame decision (66.7 ms).
 ARM effzero-repro-faithful-searchact8-birth = prioract2's arm
 (effzero-repro-faithful-prioract-noredo: --ray --cpu-actor, eager collect,
 no ReDo, communal refresh, 50-sim BIRTH search for the targets) with the
@@ -790,6 +790,11 @@ prior sampling: T=1 0.48 vs 0.34 (@50) / 0.43 vs 0.32 (@85); T=0.5 0.52 vs
 ~iter 67 -- covering read (A)'s window) and nearly nil at T=0.25. Read (A)
 scores the PRIOR argmax (comparable with every run), not the 8-sim agent
 that would be deployed.
+AUDIT: round 1 nothing above LOW (four LOWs fixed: latency, a 50-sim birth
+budget test, ACTOR_SEARCH_SIMS only with SEARCH_ACT_BIRTH_TARGETS,
+docstrings/print); round 2 nothing above LOW -- the loop closes. Deferred:
+a test for a stray ACTOR_SEARCH_SIMS on a policy-only arm (inert either
+way).
 PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90; secondary:
 external-calibration recal):
   (A) the action-quality read: first success at <= 65 -> consistent with
