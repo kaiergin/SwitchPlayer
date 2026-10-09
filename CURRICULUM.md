@@ -747,6 +747,18 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### HOUSEKEEPING, 2026-10-09: the deferred audit items closed
+
+Done (commit "Cleanup: the deferred audit items", audit round 1 nothing
+above LOW): the bnrecal request->collect chain test (r2 L-1); tempscale
+override LOW-1 (relaunch hint + docstring), LOW-2 (override_code: the
+override never launches over an unfired trigger), LOW-3 (tests); seqref L1
+(the e2e refresh test sees both games, stamps, counts); the ACT_SEARCH_SIMS
+comment now carries the measured latency. Folded into the next build (its
+audit covers them): a target-change assertion in the seqref e2e test, an
+override_code test for a trigger fired at >= 70, and seqref L2 -- the next
+supervisor's preflight runs test_reanalyze_refresh and test_vtree_communal.
+
 ### RESULT -- the BN stabilizer on the temperature config (seed 1), 2026-10-09
 
 pong-bnrecal-s1-2026-10-08 ran 10-08 12:41 -> 10-09 08:13, no
