@@ -747,6 +747,53 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- low-sim search acting with birth-search targets (Kai, 2026-10-09)
+
+DECISION (Kai, 2026-10-09: the cleanup first, "then you can do that" -- the
+8-sim PUCT search-acting arm, pre-registered and audited): the stabilizer
+result's pre-registered branch (S works, T not met -> acting quality).
+HYPOTHESIS: policy-only breakouts come late (@70-80 across five seeds;
+2/2 for the temperature config) while search acting broke out @50-65; the
+quality of the ACTIONS (search-improved vs sampled from the prior) is what
+times the breakout. Test it at a search budget that fits real time: 8
+simulations = 31 ms (GPU) / 38 ms (CPU) per decision, inside a 4-frame
+decision (66.7 ms).
+ARM effzero-repro-faithful-searchact8-birth = prioract2's arm
+(effzero-repro-faithful-prioract-noredo: --ray --cpu-actor, eager collect,
+no ReDo, communal refresh, 50-sim BIRTH search for the targets) with the
+ACTIONS chosen by an 8-sim PUCT search on the CPU actor (act_search: root
+noise, visit-count sampling at the staged visit temperature 1 / 0.5 /
+0.25). New flags (default off / None): ACTOR_SEARCH_SIMS (the actor's
+per-step search sims; None = ACT_SEARCH_SIMS) and SEARCH_ACT_BIRTH_TARGETS
+(under USE_SEARCH_ACTING the actor records plain (obs, action, reward)
+steps and skips the tail search, so the 50-sim BIRTH search still makes
+every target -- only the action choice changes). EVAL_PRIOR_ONLY (in-run
+eval = prior argmax, comparable with every run); PRIOR_ACT_STAGED_TEMP off
+(inert: no prior sampling). The behaviour diagnostics (beh_*) are not
+recorded in this mode -- they describe prior sampling. No BN stabilizer
+(its gate refuses search acting: root-only statistics would distort a
+search) and no temperature scale (inert under search). Seed 0.
+COMPARISONS: prioract2 s0/s1 (identical except who acts: @75 / none);
+noredo (50-sim search acting with its own 50-sim targets, parallel: @65,
++5.86); the control (50-sim search acting, sequential: @50 / @65); the
+temperature config (@70 / @75).
+COST: ~38 ms/step on the CPU actor -> ~1.5-2 min per game; with eager
+collect a game joins ~100-300 steps into its 2000-step block (vs 0-40 for
+policy-only) -- slightly staler data, noted.
+PRE-REGISTERED READS (exact prior-argmax evals, iters 45-90; secondary:
+external-calibration recal):
+  (A) the action-quality read: first success at <= 65 -> consistent with
+      a little act-time search recovering search acting's earlier
+      breakout; >= 70 or none -> not supported at 8 PUCT sims;
+  (1)-(3) the standard reads and bands.
+INTERPRETATION (single seed, hedged): (A) yes and not WORSE -> 8-sim
+search acting is a real-time-viable improvement -> seed 1, then Kai's call
+on combining it with the stabilizer-equivalent for search (a root-only
+recalibration is not valid for search). (A) no -> PUCT at 8 sims is too
+weak to help; next candidates: Gumbel search at low sims (designed for
+that regime), or accept the temperature config as the base and move to
+SVE -- Kai's call.
+
 ### HOUSEKEEPING, 2026-10-09: the deferred audit items closed
 
 Done (commit "Cleanup: the deferred audit items", audit round 1 nothing
