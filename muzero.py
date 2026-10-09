@@ -322,9 +322,19 @@ GUMBEL_C_SCALE = 0.1
 # ---------------------------------------------------------------------------
 USE_SEARCH_ACTING = False
 # Per decision through Searcher.act_search (measured 2026-10-07, CURRICULUM):
-# ~3.3 ms per simulation on the GPU -- 8 sims 31 ms (GPU) / 38 ms (CPU), i.e.
-# ~186% of a 60 fps frame (the old "~40%" note predates the current net).
+# ~3.3 ms per simulation on the GPU -- 8 sims 31 ms (GPU) / 38 ms (CPU at 2
+# torch threads), i.e. ~186% of a 60 fps frame (the old "~40%" note predates
+# the current net). The production Ray CPU actor runs ONE thread (Ray sets
+# OMP_NUM_THREADS=1): ~54 ms per step at 8 sims, env step included.
 ACT_SEARCH_SIMS = 8
+# Low-sim search acting with birth-search targets (Kai, 2026-10-09; CURRICULUM
+# "low-sim search acting"): ACTOR_SEARCH_SIMS is the SELF-PLAY search's sim
+# count (None = ACT_SEARCH_SIMS); under SEARCH_ACT_BIRTH_TARGETS the search-
+# acting actor records plain (obs, action, reward) steps and skips the tail
+# search, so BIRTH_SEARCH (at ACT_SEARCH_SIMS) still makes every target --
+# only the action choice comes from the actor's search.
+ACTOR_SEARCH_SIMS = None
+SEARCH_ACT_BIRTH_TARGETS = False
 # Policy-only acting in PAPER mode (2026-09-26, Kai: the real-time design --
 # no search on the acting path). With BIRTH_SEARCH on (and USE_SEARCH_ACTING
 # off) the actor samples the prior, and every newly collected trajectory is

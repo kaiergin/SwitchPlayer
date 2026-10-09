@@ -8,6 +8,7 @@ import json
 import pathlib
 import sys
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] /
@@ -80,7 +81,14 @@ def test_ray_loop_refreshes_through_the_sequential_engine(
     def spy_seq(self, count):
         calls.append(("seq", count, self.trainer.training_steps))
         seen["run"], seen["n_trajs"] = self, len(self.replay)
+        before = [[np.array(r["target_policy"], copy=True) for r in t]
+                  for t in self.replay]
         out = real(self, count)
+        # cleanup audit LOW-1: the refresh must CHANGE targets, not only
+        # stamp them -- every refreshed trajectory has a changed policy
+        seen["changed"] = [any(not np.allclose(b, r["target_policy"])
+                               for b, r in zip(bt, t))
+                           for bt, t in zip(before, self.replay)]
         seen["stamps"] = [{r.get("refreshed_step") for r in t}
                           for t in self.replay]
         seen["positions"] = sum(len(t) for t in self.replay)
@@ -111,6 +119,7 @@ def test_ray_loop_refreshes_through_the_sequential_engine(
     assert [r["iteration"] for r in rows] == [1, 2]
     assert seen["n_trajs"] == 2                    # both games, both modes
     assert seen["stamps"] == [{20}, {20}]          # every position stamped
+    assert seen["changed"] == [True, True]          # ...and re-searched
     assert rows[1]["refresh_steps_last_iter"] == seen["positions"] > 0
 
 

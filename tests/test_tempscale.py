@@ -547,6 +547,14 @@ def test_override_code_on_records(tmp_path):
     _write(path, ns["TRIGGER_RUN"], rows)
     assert ns["trigger_decision"](str(path))[0] == 3
     assert ns["override_code"](str(path)) == 2
+    # cleanup audit LOW-2: a late first success (>= 70) with WORSE -> the
+    # trigger fired, so the override launches
+    rows = {i: (-10.0, 0) for i in ROWS}
+    rows[75] = (12.0, 4)
+    late = tmp_path / "late.jsonl"
+    _write(late, ns["TRIGGER_RUN"], rows)
+    assert ns["trigger_decision"](str(late))[0] == 3
+    assert ns["override_code"](str(late)) == 0
 
 
 def test_override_is_bound_exactly_once():

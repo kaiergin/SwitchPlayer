@@ -94,7 +94,8 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-faithful-prioract-noredo",
                         "effzero-repro-faithful-prioract-noredo-temp05",
                         "effzero-repro-faithful-prioract-noredo-seqref",
-                        "effzero-repro-faithful-prioract-noredo-temp05-bnrecal"):
+                        "effzero-repro-faithful-prioract-noredo-temp05-bnrecal",
+                        "effzero-repro-faithful-searchact8-birth"):
             assert spec["USE_AUGMENTATION"] is False, name
 
 
@@ -189,11 +190,14 @@ def test_paper_targets_arms_also_search_act(ablation):
     """PAPER_TARGETS consumes 5-field search records; an arm setting it
     without USE_SEARCH_ACTING would crash at its first reanalyse -- unless
     BIRTH_SEARCH supplies the records (policy-only acting), in which case
-    it must NOT also search-act (birth_search_gate refuses the mix)."""
+    it must NOT also search-act (birth_search_gate refuses the mix) --
+    except under SEARCH_ACT_BIRTH_TARGETS (2026-10-09), where the search
+    only picks the action and birth search still makes every target."""
     for name, spec in ablation.ARMS.items():
         if spec.get("PAPER_TARGETS"):
             if spec.get("BIRTH_SEARCH"):
-                assert not spec.get("USE_SEARCH_ACTING"), name
+                assert (not spec.get("USE_SEARCH_ACTING")
+                        or spec.get("SEARCH_ACT_BIRTH_TARGETS")), name
             else:
                 assert spec.get("USE_SEARCH_ACTING"), name
 

@@ -876,6 +876,26 @@ ARMS["effzero-repro-faithful-prioract-noredo-seqref"] = {
             "the faithful control (pong-faithful-s0/s1-2026-09-24).",
 }
 
+# Low-sim search acting with birth-search targets (Kai, 2026-10-09;
+# pre-registered in CURRICULUM): prioract2's arm with the ACTIONS chosen by
+# an 8-sim PUCT search on the CPU actor; the 50-sim birth search still makes
+# every target. Seed 0.
+ARMS["effzero-repro-faithful-searchact8-birth"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo"],
+    "USE_SEARCH_ACTING": True,
+    "SEARCH_ACT_BIRTH_TARGETS": True,
+    "ACTOR_SEARCH_SIMS": 8,
+    "PRIOR_ACT_STAGED_TEMP": False,
+    "EVAL_PRIOR_ONLY": True,
+    "_doc": "effzero-repro-faithful-prioract-noredo with the actions chosen "
+            "by an 8-sim PUCT search on the CPU actor (ACTOR_SEARCH_SIMS 8; "
+            "visit sampling at the staged visit temperature) while the "
+            "50-sim birth search makes every target "
+            "(SEARCH_ACT_BIRTH_TARGETS); prior-argmax in-run eval. Twin: "
+            "pong-prioract2-s0/s1 (prior sampling); also pong-noredo-s0 "
+            "(50-sim search acting) and the faithful control's bands.",
+}
+
 # The BN stabilizer on the temperature config (Kai, 2026-10-08;
 # pre-registered in CURRICULUM): the actor and eval actor play with
 # representation / prediction BN statistics recalibrated on clean depth-0
@@ -1343,6 +1363,30 @@ def bn_recal_gate(use_ray):
         raise SystemExit(f"BN_RECAL_FRAMES must be an int >= 256, got {n!r}")
 
 
+def search_act_birth_gate():
+    """SEARCH_ACT_BIRTH_TARGETS / ACTOR_SEARCH_SIMS, checked at startup:
+    the mode needs search acting, birth search and the paper data path;
+    ACTOR_SEARCH_SIMS must be None or an int >= 1, and is accepted only in
+    that mode."""
+    sims = muzero.ACTOR_SEARCH_SIMS
+    if sims is not None and (isinstance(sims, bool) or not isinstance(sims, int)
+                             or sims < 1):
+        raise SystemExit(f"ACTOR_SEARCH_SIMS must be None or an int >= 1, "
+                         f"got {sims!r}")
+    if sims is not None and not muzero.SEARCH_ACT_BIRTH_TARGETS:
+        # Without birth targets the acted steps would store targets from the
+        # small search while the tail search and refresh run ACT_SEARCH_SIMS
+        # -- an untested mixed-budget mode (searchact8 audit r1 LOW-3).
+        raise SystemExit("ACTOR_SEARCH_SIMS is supported only with "
+                         "SEARCH_ACT_BIRTH_TARGETS (search picks the action, "
+                         "birth search makes every target)")
+    if muzero.SEARCH_ACT_BIRTH_TARGETS and not (
+            muzero.USE_SEARCH_ACTING and muzero.BIRTH_SEARCH
+            and muzero.PAPER_TARGETS):
+        raise SystemExit("SEARCH_ACT_BIRTH_TARGETS needs USE_SEARCH_ACTING, "
+                         "BIRTH_SEARCH and PAPER_TARGETS")
+
+
 def prior_temp_gate():
     """PRIOR_ACT_TEMP_SCALE must be a positive real number, and it only
     acts under policy-only acting -- under search acting it would be a
@@ -1540,8 +1584,13 @@ class Run:
                 # Round-9 finding: the paper-mode commit had made eval search
                 # unconditional, silently inverting pong-act-search's _doc
                 # against its own archived rows.
+                # ACTOR_SEARCH_SIMS: the self-play search's budget (None =
+                # ACT_SEARCH_SIMS); greedy searches keep the default.
                 action, search_pol, search_val = asyncio.run(
-                    self.searcher.act_search(stack, greedy=greedy))
+                    self.searcher.act_search(
+                        stack, greedy=greedy,
+                        num_simulations=(None if greedy
+                                         else muzero.ACTOR_SEARCH_SIMS)))
             else:
                 search_pol = search_val = None
                 with torch.no_grad():
@@ -1565,7 +1614,10 @@ class Run:
             # them for every search-acting arm broke the pre-existing
             # pong-act-search arm, whose non-paper reanalysis unpacks 6-field
             # eval_obs tuples (round-5 finding, reproduced ValueError).
-            if search_pol is None or not muzero.PAPER_TARGETS:
+            # SEARCH_ACT_BIRTH_TARGETS: the search only chose the action;
+            # BIRTH_SEARCH makes the targets from the plain record.
+            if (search_pol is None or not muzero.PAPER_TARGETS
+                    or muzero.SEARCH_ACT_BIRTH_TARGETS):
                 traj.append((stack, action, prev_reward))
             else:
                 traj.append((stack, action, prev_reward, search_pol, search_val))
@@ -1583,7 +1635,8 @@ class Run:
             # eval windows starting wherever self-play left off.
             self.env.was_real_done = True
         final_stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
-        if muzero.USE_SEARCH_ACTING and muzero.PAPER_TARGETS and not prior_eval:
+        if (muzero.USE_SEARCH_ACTING and muzero.PAPER_TARGETS
+                and not prior_eval and not muzero.SEARCH_ACT_BIRTH_TARGETS):
             # The terminal record needs a stored root value for the paper
             # value targets: 0 at a true terminal; a truncated tail gets one
             # greedy search on the final observation.
@@ -1615,10 +1668,11 @@ class Run:
         passes the request-time count so the 4.3 age matches the
         sequential harness exactly); default is the live counter.
 
-        BIRTH_SEARCH: policy-only acting records carry no search (3
-        fields); _birth_search supplies the per-step policy and root value
-        the acting search would have recorded, before anything below reads
-        them. birth_nets: the nets the ACTOR played with, when they are
+        BIRTH_SEARCH: policy-only acting records -- and, under
+        SEARCH_ACT_BIRTH_TARGETS, search-acting records -- carry no search
+        (3 fields); _birth_search supplies the per-step policy and root
+        value the acting search would have recorded, before anything below
+        reads them. birth_nets: the nets the ACTOR played with, when they are
         not the live ones (--ray's pipelined collect runs after the next
         training block; see RayPipeline.request). birth_prior_nets: the
         representation / prediction the actor SAMPLED from, when they differ
@@ -1655,7 +1709,10 @@ class Run:
             z0 = muzero.paper_value_target(out, idx, muzero.TD_STEPS,
                                            muzero.DISCOUNT)
             t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
-        if birth:
+        if birth and not muzero.USE_SEARCH_ACTING:
+            # The behaviour diagnostics describe PRIOR sampling; a
+            # search-acting actor (SEARCH_ACT_BIRTH_TARGETS) did not sample
+            # the prior, so they are not recorded.
             self._note_behaviour(out[:-1], born)
         pols = [t["target_policy"] for t in out if t["has_policy_target"]]
         # Unreachable-empty from every current caller (play_episode always
@@ -1671,8 +1728,9 @@ class Run:
         return out
 
     def _birth_search(self, traj, terminated, nets=None, prior_nets=None):
-        """BIRTH_SEARCH: give a policy-only trajectory (3-field records) the
-        per-step (policy, root value) its acting search would have recorded,
+        """BIRTH_SEARCH: give a 3-field trajectory (policy-only acting, or a
+        search-acting actor under SEARCH_ACT_BIRTH_TARGETS) the per-step
+        (policy, root value) a full acting search would have recorded,
         returning 5-field records for paper_targets.
 
         Same search as act_search on the acting path: fresh-root PUCT,
@@ -3170,17 +3228,21 @@ def sve_gate():
 
 def birth_search_gate():
     """BIRTH_SEARCH's supported regime, checked at startup (before any
-    --overwrite destruction) instead of at the first collect: it replaces
-    the acting search, so it needs the paper data path and policy-only
-    acting, and its engine is PUCT-only."""
+    --overwrite destruction) instead of at the first collect: it makes the
+    targets the acting search would have recorded, so it needs the paper
+    data path and either policy-only acting or SEARCH_ACT_BIRTH_TARGETS
+    (a search picks the action, birth search still makes the targets); its
+    engine is PUCT-only."""
     if not muzero.BIRTH_SEARCH:
         return
     if not muzero.PAPER_TARGETS:
         raise SystemExit("BIRTH_SEARCH requires PAPER_TARGETS: it builds the "
                          "paper records the acting search would have made")
-    if muzero.USE_SEARCH_ACTING:
-        raise SystemExit("BIRTH_SEARCH replaces the acting search: set "
-                         "USE_SEARCH_ACTING False (policy-only acting)")
+    if muzero.USE_SEARCH_ACTING and not muzero.SEARCH_ACT_BIRTH_TARGETS:
+        raise SystemExit("BIRTH_SEARCH replaces the acting search's targets: "
+                         "set USE_SEARCH_ACTING False (policy-only acting) or "
+                         "SEARCH_ACT_BIRTH_TARGETS (search picks the action, "
+                         "birth search makes the targets)")
     if muzero.USE_GUMBEL_SEARCH:
         raise SystemExit("BIRTH_SEARCH's vectorized engine is PUCT-only; a "
                          "Gumbel arm would silently change the search")
@@ -3729,6 +3791,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         eager_collect_gate(use_ray)
         prior_temp_gate()
         bn_recal_gate(use_ray)
+        search_act_birth_gate()
         birth_search_gate()
         sve_gate()
         if muzero.REDO_EVERY:
