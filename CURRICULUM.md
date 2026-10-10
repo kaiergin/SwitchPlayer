@@ -747,6 +747,45 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- SVE on the temperature + stabilizer config (Kai, 2026-10-10)
+
+DECISION (Kai, 2026-10-10: "building SVE makes sense as a next step"):
+EfficientZero V2's search-based value estimation on the strongest
+real-time configuration. SVE was built and audited on 09-28/29 (stage 2:
+fresh 16-sim search through the target nets) but never run; its
+prerequisite -- drop ReDo -- is met by this base.
+ARM effzero-repro-faithful-prioract-noredo-temp05-bnrecal-sve = the BN
+stabilizer arm (prior temperature x0.5, BN_RECAL_ACTING, policy-only CPU
+actor, eager collect, birth search, communal refresh, no ReDo) + SVE
+exactly as pre-registered on 09-28: VALUE_TARGET_MODE "mixed",
+SVE_START_TRAIN_STEPS 40000 (T1), SVE_FRESH_TRANSITIONS 20000 (T2),
+SVE_SOURCE "search", SVE_SEARCH_SIMS 16. SVE's searches run the raw-
+statistics target nets (search runs the prediction head at depth > 0; the
+stabilizer touches only the actor / eval copies). SEED 1, paired with its
+twin pong-bnrecal-s1-2026-10-08 (same initial weights and env seeds; SVE
+switches on at 40k steps = iter 20; runs are not replayable, so this pairs
+the start, not the trajectory). COST: stage 2 measured +52% wall-clock on
+09-29 -> ~20 min/iter, ~30 h.
+PRE-REGISTERED READS (the 09-28 SVE reads, against the twin; exact evals
+of the DEPLOYED policy, rows 45-90; raw and external recal secondary;
+Pong saturates at +21, so SVE can only show as SPEED or STABILITY):
+  (1) speed: first success (exact >= +10 or >= 3/4 phases) and first row
+      >= +15 -- twin: @75 and @85;
+  (2) level: mean 60-90 vs the bands (NO WORSE >= +3.68, WORSE < -2.32)
+      and vs the twin's +5.80;
+  (3) late stability: rows 60-90 below 0 -- twin: 3 (@60/@65/@70, all
+      before its first success);
+  (4) diagnostics: sve_buffer_frac 0 before T1, then ~0.29-0.36 once the
+      buffer is full; sve_frac relative to it; sve_td_gap / bias against
+      the stage-0 prediction (~+0.11).
+  SVE HELPS (single seed, hedged) if (1) moves the first success to <= 65
+  -- search acting's range, which no policy-only run has reached -- without
+  (2) reading WORSE; same or later -> no evidence of a speed gain at this
+  seed.
+STOP RULE -> REVIEW WITH KAI (09-28): the TD-referenced `value` (mean
+|v(s0) - TD z0| over the diagnostics panel) above 2x the TWIN's value at
+the same row for 3 consecutive rows after T1 (a value self-echo).
+
 ### RESULT -- low-sim (8) search acting with birth targets, 2026-10-10
 
 pong-searchact8-s0-2026-10-09 ran 10-09 12:49 -> 10-10 09:11 (paused by Kai
