@@ -762,10 +762,13 @@ SVE_START_TRAIN_STEPS 40000 (T1), SVE_FRESH_TRANSITIONS 20000 (T2),
 SVE_SOURCE "search", SVE_SEARCH_SIMS 16. SVE's searches run the raw-
 statistics target nets (search runs the prediction head at depth > 0; the
 stabilizer touches only the actor / eval copies). SEED 1, paired with its
-twin pong-bnrecal-s1-2026-10-08 (same initial weights and env seeds; SVE
-switches on at 40k steps = iter 20; runs are not replayable, so this pairs
-the start, not the trajectory). COST: stage 2 measured +52% wall-clock on
-09-29 -> ~20 min/iter, ~30 h.
+twin pong-bnrecal-s1-2026-10-08 (same initial weights and env seeds --
+verified bit-identical through T1 by the sve2 audit; SVE's first batch is
+iteration 21's first step, its first row 25; runs are not replayable, so
+this pairs the start, not the trajectory). COST: stage 2 measured +52%
+wall-clock on 09-29 -> ~20 min/iter, ~30 h; eager collect's mid-block
+reopen re-runs some cached SVE searches (sve2 audit r1: +6-8 s/iter,
+under 1% of wall clock; estimate 18-21 min/iter after T1).
 PRE-REGISTERED READS (the 09-28 SVE reads, against the twin; exact evals
 of the DEPLOYED policy, rows 45-90; raw and external recal secondary;
 Pong saturates at +21, so SVE can only show as SPEED or STABILITY):
@@ -776,15 +779,19 @@ Pong saturates at +21, so SVE can only show as SPEED or STABILITY):
   (3) late stability: rows 60-90 below 0 -- twin: 3 (@60/@65/@70, all
       before its first success);
   (4) diagnostics: sve_buffer_frac 0 before T1, then ~0.29-0.36 once the
-      buffer is full; sve_frac relative to it; sve_td_gap / bias against
-      the stage-0 prediction (~+0.11).
+      buffer is full (row 25 will read lower, ~0.20-0.25: on the twin's
+      pace the 31.25k buffer fills only at ~iter 26); sve_frac relative to
+      it; sve_td_gap / bias against the stage-0 prediction (~+0.11).
   SVE HELPS (single seed, hedged) if (1) moves the first success to <= 65
   -- search acting's range, which no policy-only run has reached -- without
   (2) reading WORSE; same or later -> no evidence of a speed gain at this
   seed.
 STOP RULE -> REVIEW WITH KAI (09-28): the TD-referenced `value` (mean
 |v(s0) - TD z0| over the diagnostics panel) above 2x the TWIN's value at
-the same row for 3 consecutive rows after T1 (a value self-echo).
+the same row for 3 consecutive rows after T1 (a value self-echo) --
+monitored live: supervise_sve2.py prints each row's value, the twin's and
+the ratio from row 25 and an "ALERT: STOP RULE" line on the third
+consecutive row above 2x (sve2 audit r1 MEDIUM-1).
 
 ### RESULT -- low-sim (8) search acting with birth targets, 2026-10-10
 
