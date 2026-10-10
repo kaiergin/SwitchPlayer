@@ -747,6 +747,30 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- low-sim (8) search acting with birth targets, 2026-10-10
+
+pong-searchact8-s0-2026-10-09 ran 10-09 12:49 -> 10-10 09:11 (paused by Kai
+16:47-17:03 at the iter-18 checkpoint). EXACT / external recal:
+  iter    45     50     55     60     65     70     75     80     85     90
+  raw    -8.6  -10.9  -10.4   -9.2   -4.6   +2.1   +5.9   -1.4   +3.8  +19.4
+  won    1/4    1/4    0/4    0/4    2/4    2/4    2/4    1/4    2/4    4/4
+  recal                      -6.1   -5.2  -10.0   -4.6   -6.0  +17.1  +13.2
+READ (A): first success @90 (+19.4, 4/4; recal @85) -> NOT supported (<= 65).
+Competitive from @65 (2/4 phases) but under the success bar until the end.
+READ (2): mean 60-90 = +2.2999 -> INCONCLUSIVE; recalibrated -0.2050.
+READ (3): no collapse after the first success (it came last).
+VS ITS TWIN (prioract2: identical but prior sampling): @75 / none. The
+8-sim PUCT search did not move the breakout earlier -- if anything later.
+PRE-REGISTERED INTERPRETATION: (A) no -> PUCT at 8 sims is too weak to
+help; next candidates: Gumbel search at low sims, or accept the
+temperature config as the base and move to SVE -- Kai's call. (Single seed.)
+STANDING SUMMARY OF THE REAL-TIME (policy-only) LINE: the temperature
+config (prior T x0.5) broke out on 2/2 seeds (@70 / @75) -- tempscale s0
+raw +2.70 (recal +8.78), bnrecal s1 deployed +5.80 NO WORSE, final
++18.4/+20.4 -- the strongest real-time configuration so far; the BN
+stabilizer works (weakly tested); 8-sim act-time search adds 54 ms/decision
+and no earlier breakout. The audited-file freeze is lifted.
+
 ### Next experiment (pre-registered) -- low-sim search acting with birth-search targets (Kai, 2026-10-09)
 
 DECISION (Kai, 2026-10-09: the cleanup first, "then you can do that" -- the
