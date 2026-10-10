@@ -791,7 +791,14 @@ STOP RULE -> REVIEW WITH KAI (09-28): the TD-referenced `value` (mean
 the same row for 3 consecutive rows after T1 (a value self-echo) --
 monitored live: supervise_sve2.py prints each row's value, the twin's and
 the ratio from row 25 and an "ALERT: STOP RULE" line on the third
-consecutive row above 2x (sve2 audit r1 MEDIUM-1).
+consecutive row above 2x (sve2 audit r1 MEDIUM-1). The live alert is ADVISORY:
+the rule is evaluated from the two jsonl files at the end (authoritative).
+AUDIT: round 1 one MEDIUM (stop-rule quantity not printed) + three LOWs,
+fixed; round 2 nothing above LOW -- the loop closes. Deferred until after
+the run (an audited file): r2 LOW-A (a resume that re-runs a row can shift
+the live streak by one row -- key it by iteration), LOW-B (a behavioural
+test of the wiring), LOW-C (NaN value, a row skipped by an earlier print
+error, a startup "stop rule armed: N twin rows" line).
 
 ### RESULT -- low-sim (8) search acting with birth targets, 2026-10-10
 
