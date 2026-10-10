@@ -912,6 +912,26 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal"] = {
             "control (pong-faithful-s0/s1-2026-09-24).",
 }
 
+# SVE on the temperature + stabilizer config (Kai, 2026-10-10; pre-
+# registered in CURRICULUM): the BN stabilizer arm + EfficientZero V2's
+# search-based value estimation exactly as pre-registered on 09-28 (stage 2:
+# fresh 16-sim searches through the target nets). Seed 1.
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-sve"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal"],
+    "VALUE_TARGET_MODE": "mixed",
+    "SVE_START_TRAIN_STEPS": 40000,
+    "SVE_FRESH_TRANSITIONS": 20000,
+    "SVE_SOURCE": "search",
+    "SVE_SEARCH_SIMS": 16,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal + SVE "
+            "(VALUE_TARGET_MODE mixed; from 40k training steps, every real "
+            "position in the window of a root outside the newest 20k "
+            "transitions takes a fresh 16-sim search through the target nets "
+            "as its value target). Run as seed 1. "
+            "Twin: pong-bnrecal-s1-2026-10-08; bands from the faithful "
+            "control.",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
