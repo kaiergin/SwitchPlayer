@@ -117,23 +117,37 @@ def test_supervisor_variant_suites_and_seed():
               "tests/test_bnrecal.py", "tests/test_reanalyze_refresh.py"):
         assert t in suites and t in aud, t
     assert set(suites) <= set(aud)
-    r = subprocess.run([sys.executable, str(SUP), "ray", "0"],
+    twins = ast.literal_eval(next(
+        n for n in tree.body if isinstance(n, ast.Assign)
+        and getattr(n.targets[0], "id", "") == "TWINS").value)
+    # seed 1 pairs with its twin; seed 0 (Kai 10-12) reads tempscale s0
+    assert twins == {1: "pong-bnrecal-s1-2026-10-08",
+                     0: "pong-tempscale-s0-2026-10-05"}
+    r = subprocess.run([sys.executable, str(SUP), "ray", "2"],
                        capture_output=True, text=True, cwd=str(ROOT), timeout=60)
-    assert r.returncode != 0 and "pre-registered as SEED 1" in r.stderr
+    assert (r.returncode != 0
+            and "pre-registered as SEED 1 and SEED 0 only" in r.stderr)
 
 
 
 # --------------------------------------------------------------------------
 # the stop rule (sve2 audit r1 MEDIUM-1)
 # --------------------------------------------------------------------------
-def _stop_ns():
+_STOP_FUNCS = ("twin_values", "stop_streak", "stop_rule_step")
+_STOP_CONSTS = ("STOP_FROM", "STOP_RATIO", "STOP_ROWS")
+
+
+def _stop_ns(funcs=_STOP_FUNCS, consts=_STOP_CONSTS, extra=None):
+    """The supervisor's own top-level functions/constants, exec'd without
+    running its main loop."""
     tree = ast.parse(SUP.read_text(encoding="utf-8"))
     keep = [n for n in tree.body if isinstance(n, ast.FunctionDef)
-            and n.name in ("twin_values", "stop_rule_step")]
+            and n.name in funcs]
     keep += [n for n in tree.body if isinstance(n, ast.Assign)
-             and getattr(n.targets[0], "id", "") in (
-                 "STOP_FROM", "STOP_RATIO", "STOP_ROWS")]
-    ns = {"json": json, "os": __import__("os"), "TWIN_JSONL": "unused"}
+             and getattr(n.targets[0], "id", "") in consts]
+    assert {n.name for n in keep if isinstance(n, ast.FunctionDef)} == set(funcs)
+    ns = {"json": json, "os": __import__("os"), "math": __import__("math"),
+          "TWIN_JSONL": "unused", **(extra or {})}
     exec(compile(ast.Module(body=sorted(keep, key=lambda n: n.lineno),
                             type_ignores=[]), "stop", "exec"), ns)
     return ns
@@ -143,28 +157,47 @@ def test_stop_rule_streak_and_alert():
     ns = _stop_ns()
     assert (ns["STOP_FROM"], ns["STOP_RATIO"], ns["STOP_ROWS"]) == (25, 2.0, 3)
     twin = {i: 0.5 for i in range(5, 91, 5)}
-    step, streak = ns["stop_rule_step"], 0
+    step, over = ns["stop_rule_step"], {}
     seq = [(20, 9.0), (25, 1.2), (30, 1.1), (35, 0.9), (40, 1.5)]
     alerts = []
     for it, v in seq:
-        ratio, streak, alert = step(it, v, twin, streak)
+        ratio, streak, alert = step(it, v, twin, over)
         alerts.append((it, streak, alert))
     # @20 is before STOP_FROM (ignored despite 18x); 25/30 > 2x, 35 resets,
     # 40 starts again -- never 3 in a row
     assert alerts == [(20, 0, False), (25, 1, False), (30, 2, False),
                       (35, 0, False), (40, 1, False)]
-    streak = 0
-    for it in (45, 50, 55):
-        _, streak, alert = step(it, 1.01, twin, streak)
-    assert streak == 3 and alert is True            # exactly the rule
+    _, streak, alert = step(45, 1.01, twin, over)
+    assert (streak, alert) == (2, False)            # 40, 45
+    _, streak, alert = step(50, 1.01, twin, over)
+    assert (streak, alert) == (3, True)             # exactly the rule
+
+
+def test_stop_rule_keys_rows_by_iteration():
+    """sve2 audit r2 LOW-A: a resume that re-runs a row writes a second row
+    for the SAME iteration -- it replaces that row's entry, never extends
+    the streak; a later re-run that drops below the ratio breaks it."""
+    ns = _stop_ns()
+    twin = {i: 0.5 for i in range(5, 91, 5)}
+    step, over = ns["stop_rule_step"], {}
+    assert step(25, 1.5, twin, over)[1:] == (1, False)
+    assert step(30, 1.5, twin, over)[1:] == (2, False)
+    assert step(30, 1.5, twin, over)[1:] == (2, False)   # re-run row 30
+    assert step(30, 0.5, twin, over)[1:] == (0, False)   # re-run, below 2x
+    assert step(35, 1.5, twin, over)[1:] == (1, False)
+    assert over == {25: True, 30: False, 35: True}
 
 
 @pytest.mark.parametrize("value,twinv", [(None, 0.5), (True, 0.5), ("1", 0.5),
+                                         (float("nan"), 0.5),
+                                         (float("inf"), 0.5),
                                          (1.5, None), (1.5, 0.0)])
 def test_stop_rule_ignores_unusable_rows(value, twinv):
     ns = _stop_ns()
     twin = {} if twinv is None else {30: twinv}
-    assert ns["stop_rule_step"](30, value, twin, 2) == (None, 2, False)
+    over = {25: True, 26: True}            # two recorded rows above 2x
+    assert ns["stop_rule_step"](30, value, twin, over) == (None, 2, False)
+    assert over == {25: True, 26: True}    # records nothing
 
 
 def test_twin_values_from_the_real_twin_rows(tmp_path):
@@ -175,23 +208,87 @@ def test_twin_values_from_the_real_twin_rows(tmp_path):
         tv = ns["twin_values"](str(real))
         assert set(range(5, 91, 5)) <= set(tv)
         assert abs(tv[5] - 0.0861) < 1e-3
+    ref0 = (ROOT / "benchmarks" / "results" / "pong-tempscale-s0-2026-10-05" /
+            "ablation-pong-skip4.jsonl")
+    if ref0.exists():                      # seed 0's reference (Kai 10-12)
+        tv = ns["twin_values"](str(ref0))
+        assert set(range(25, 91, 5)) <= set(tv)
+        assert all(v > 0 for v in tv.values())
     p = tmp_path / "t.jsonl"
     p.write_text('{"iteration": 5, "value": 0.25}\n{"iteration": 10}\n'
-                 'not json\n{"iteration": 15, "value": true}\n')
+                 'not json\n{"iteration": 15, "value": true}\n'
+                 '{"iteration": 20, "value": NaN}\n')
     assert ns["twin_values"](str(p)) == {5: 0.25}
     assert ns["twin_values"](str(tmp_path / "missing.jsonl")) == {}
 
 
-def test_supervisor_prints_and_replays_the_stop_rule():
+def _emit_ns(tmp_path, twin):
+    jsonl = tmp_path / "rows.jsonl"
+    ns = _stop_ns(funcs=_STOP_FUNCS + ("rows", "emit_new_rows", "replay_rows",
+                                       "stop_rule_armed_line"),
+                  extra={"JSONL": str(jsonl), "SEED": 0, "TWIN": twin,
+                         "TWINS": {0: "ref-s0"}, "STOP_OVER": {},
+                         "seen": set()})
+    ns["emit_new_rows"].last = None
+    return ns, jsonl
+
+
+def _row(it, value, **kw):
+    return json.dumps({"iteration": it, "train_steps": it * 2000,
+                       "policy_entropy": 1.4, "policy_maxp": 0.4,
+                       "return_mean": -15.0, "value": value, **kw})
+
+
+def test_supervisor_prints_the_stop_rule_behaviourally(tmp_path, capsys):
+    """sve2 audit r2 LOW-B/LOW-C: the supervisor's own emit_new_rows over a
+    real jsonl prints each row's ratio and streak and the ALERT on the third
+    consecutive row above 2x; a row whose main print fails (return_mean
+    None) still counts; a re-run row (a resume) does not extend the streak;
+    a relaunch's replay restores the streak without re-printing."""
+    twin = {i: 0.5 for i in range(5, 91, 5)}
+    ns, jsonl = _emit_ns(tmp_path, twin)
+    lines = [_row(20, 9.0), _row(25, 1.5), _row(30, 1.5, return_mean=None),
+             _row(30, 1.5, elapsed_s=1.0)]          # row 30 re-run
+    jsonl.write_text("\n".join(lines) + "\n")
+    ns["emit_new_rows"]()
+    out = capsys.readouterr().out
+    assert "ratio n/a  (streak 0 of 3)" in out           # row 20
+    assert "ratio 3.00  (streak 1 of 3)" in out          # row 25
+    assert out.count("ratio 3.00  (streak 2 of 3)") == 2  # 30 + its re-run
+    assert "ALERT: STOP RULE" not in out
+    jsonl.write_text(jsonl.read_text() + _row(35, 1.2) + "\n")
+    ns["emit_new_rows"]()
+    out = capsys.readouterr().out
+    assert "ratio 2.40  (streak 3 of 3)" in out
+    assert "ALERT: STOP RULE" in out
+    # a relaunch: a fresh namespace replays the file, prints nothing, and
+    # resumes the streak (the next row above 2x is the 4th)
+    ns2, _ = _emit_ns(tmp_path, twin)
+    ns2["replay_rows"]()
+    assert capsys.readouterr().out == ""
+    assert ns2["STOP_OVER"] == {25: True, 30: True, 35: True}
+    jsonl.write_text(jsonl.read_text() + _row(40, 1.1) + "\n")
+    ns2["emit_new_rows"]()
+    out = capsys.readouterr().out
+    assert "ratio 2.20  (streak 4 of 3)" in out and "ALERT: STOP RULE" in out
+    assert "EVAL s0 iter 40" in out and "EVAL s0 iter 35" not in out
+
+
+def test_stop_rule_armed_line(tmp_path):
+    ns, _ = _emit_ns(tmp_path, {i: 0.5 for i in range(5, 91, 5)})
+    assert ns["stop_rule_armed_line"]().startswith(
+        "stop rule armed: 14 twin rows from row 25 (ref-s0)")
+    ns, _ = _emit_ns(tmp_path, {i: 0.5 for i in range(5, 50, 5)})
+    assert ns["stop_rule_armed_line"]().startswith(
+        "ALERT: stop rule NOT fully armed: 5 twin rows")
+
+
+def test_supervisor_replays_then_announces_at_startup():
     src = SUP.read_text(encoding="utf-8")
     tree = ast.parse(src)
-    emit = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-                and n.name == "emit_new_rows")
-    body = ast.unparse(emit)
-    assert "stop_rule_step(" in body and "TD-referenced value" in body
-    assert "ALERT: STOP RULE" in body
-    # the relaunch replay over already-written rows
-    loops = [n for n in tree.body if isinstance(n, ast.For)
-             and "rows()" in ast.unparse(n.iter)]
-    assert any("stop_rule_step(" in ast.unparse(n) for n in loops)
-    assert "emit_new_rows.streak = 0" in src
+    calls = [ast.unparse(n) for n in tree.body if isinstance(n, ast.Expr)]
+    assert "replay_rows()" in calls
+    assert "print(stop_rule_armed_line(), flush=True)" in calls
+    assert calls.index("replay_rows()") < calls.index(
+        "print(stop_rule_armed_line(), flush=True)")
+    assert "emit_new_rows.streak" not in src    # the keyed STOP_OVER replaced it

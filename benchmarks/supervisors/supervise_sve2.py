@@ -1,13 +1,16 @@
 """SVE on the temperature + stabilizer config (Kai, 2026-10-10):
-effzero-repro-faithful-prioract-noredo-temp05-bnrecal-sve, SEED 1, --ray
---cpu-actor (pinned by the arm). Design and pre-registered reads:
-CURRICULUM.md "Next experiment (pre-registered) -- SVE on the temperature +
-stabilizer config".
+effzero-repro-faithful-prioract-noredo-temp05-bnrecal-sve, --ray
+--cpu-actor (pinned by the arm). SEED 1 (twin pong-bnrecal-s1; done
+10-11) and SEED 0 (Kai, 2026-10-12; reference pong-tempscale-s0). Design
+and pre-registered reads: CURRICULUM.md "Next experiment (pre-registered)
+-- SVE on the temperature + stabilizer config" and "... SVE seed 0".
 
+    python benchmarks/supervisors/supervise_sve2.py ray 0
     python benchmarks/supervisors/supervise_sve2.py ray 1
 
 Supervisor v2 pattern; a relaunch auto-resumes from the last checkpoint."""
 import json
+import math
 import os
 import re
 import subprocess
@@ -21,10 +24,14 @@ VARIANTS = {
 WRITE = "--write-manifest" in sys.argv
 VARIANT = "ray" if WRITE else sys.argv[1]
 SEED = 0 if WRITE else int(sys.argv[2])
-if not WRITE and SEED != 1:
-    # Pre-registered as seed 1, paired with its twin pong-bnrecal-s1.
-    sys.exit(f"supervise_sve2: this arm is pre-registered as SEED 1; "
-             f"refusing seed {SEED}")
+# Each pre-registered seed and the run its stop rule reads the same-row
+# `value` from: seed 1's twin (same arm without SVE, same seed); seed 0 has
+# no stabilizer twin, so its reference is the temperature config at seed 0
+# (the stabilizer changes only the actor's BN statistics, not training).
+TWINS = {1: "pong-bnrecal-s1-2026-10-08", 0: "pong-tempscale-s0-2026-10-05"}
+if not WRITE and SEED not in TWINS:
+    sys.exit(f"supervise_sve2: this arm is pre-registered as SEED 1 and "
+             f"SEED 0 only; refusing seed {SEED}")
 REPO = r"Y:\SwitchPlayer"
 ARM, _stem, _mode = VARIANTS[VARIANT]
 REL = f"benchmarks/results/{_stem}-s{SEED}-2026-10-10"
@@ -47,8 +54,8 @@ MAX_ATTEMPTS = 40
 # an automatic kill): the TD-referenced `value` above STOP_RATIO x the twin's
 # value at the same row for STOP_ROWS consecutive rows from STOP_FROM (the
 # first row with SVE in effect: T1 = 40k steps = iteration 20; rows every 5).
-TWIN_JSONL = os.path.join(REPO, "benchmarks", "results",
-                          "pong-bnrecal-s1-2026-10-08", "ablation-pong-skip4.jsonl")
+TWIN_JSONL = os.path.join(REPO, "benchmarks", "results", TWINS.get(SEED, ""),
+                          "ablation-pong-skip4.jsonl")
 STOP_FROM = 25
 STOP_RATIO = 2.0
 STOP_ROWS = 3
@@ -67,30 +74,47 @@ def twin_values(path=TWIN_JSONL):
                 except ValueError:
                     continue
                 v = r.get("value")
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and math.isfinite(v)):
                     out[r.get("iteration")] = float(v)
     except OSError:
         pass
     return out
 
 
-def stop_rule_step(it, value, twin, streak):
+def stop_streak(over, upto):
+    """Trailing run of rows above the ratio among the recorded iterations
+    <= upto (consecutive recorded rows, newest first)."""
+    streak = 0
+    for k in sorted((k for k in over if k <= upto), reverse=True):
+        if not over[k]:
+            break
+        streak += 1
+    return streak
+
+
+def stop_rule_step(it, value, twin, over):
     """(ratio, streak, alert) for one row: ratio = value / the twin's value
-    at the same row; the streak counts consecutive rows from STOP_FROM with
-    ratio > STOP_RATIO and resets on a row at or below it; alert once it
-    reaches STOP_ROWS. A row before STOP_FROM, without a numeric value, or
-    without a positive twin value changes nothing."""
+    at the same row. `over` maps each usable row's ITERATION to ratio >
+    STOP_RATIO, so a row re-run by a resume overwrites its own entry instead
+    of extending the streak (sve2 audit r2 LOW-A); the streak is the
+    trailing run of True entries up to `it`, and the alert fires once it
+    reaches STOP_ROWS. A row before STOP_FROM, without a finite numeric
+    value, or without a positive twin value records nothing."""
     tv = twin.get(it)
-    if (not isinstance(it, int) or it < STOP_FROM
+    if (not isinstance(it, int) or isinstance(it, bool) or it < STOP_FROM
             or not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value)
             or not isinstance(tv, float) or tv <= 0):
-        return None, streak, False
+        return None, (stop_streak(over, it) if isinstance(it, int) else 0), False
     ratio = value / tv
-    streak = streak + 1 if ratio > STOP_RATIO else 0
+    over[it] = ratio > STOP_RATIO
+    streak = stop_streak(over, it)
     return ratio, streak, streak >= STOP_ROWS
 
 
 TWIN = twin_values()
+STOP_OVER = {}      # {iteration: ratio > STOP_RATIO} for the stop rule
 seen = set()
 
 
@@ -111,6 +135,19 @@ def emit_new_rows():
         seen.add(key)
         try:
             r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        # The stop rule FIRST, so a print error below cannot skip a row
+        # (sve2 audit r2 LOW-C).
+        try:
+            ratio, streak, alert = stop_rule_step(
+                r.get("iteration"), r.get("value"), TWIN, STOP_OVER)
+        except Exception as e:
+            ratio, streak, alert = None, 0, False
+            print(f"ALERT: stop rule failed on a row: {e!r}", flush=True)
+        try:
             print("EVAL s%d iter %s  train %s  H(pi) %.3f  maxp %.3f  freshH %s  "
                   "erank %s  dead %s  return %.1f" % (
                       SEED, r.get("iteration"), r.get("train_steps"),
@@ -145,21 +182,24 @@ def emit_new_rows():
                       r.get("beh_kl_target_prior"), r.get("beh_rare_rate"),
                       r.get("birth_positions_window", "n/a"),
                       r.get("eager_collect_steps", "n/a")), flush=True)
-            # The STOP RULE's quantity, next to the twin's (sve2 audit r1 M1).
-            ratio, emit_new_rows.streak, alert = stop_rule_step(
-                r.get("iteration"), r.get("value"), TWIN, emit_new_rows.streak)
+        except Exception:
+            pass
+        # The STOP RULE's quantity, next to the twin's (sve2 audit r1 M1).
+        try:
             print("      TD-referenced value %s control %s | twin %s  ratio %s  "
                   "(streak %d of %d)" % (
                       r.get("value"), r.get("value_control"),
                       TWIN.get(r.get("iteration")),
                       "n/a" if ratio is None else "%.2f" % ratio,
-                      emit_new_rows.streak, STOP_ROWS), flush=True)
-            if alert:
-                print("ALERT: STOP RULE -- TD-referenced value > %.0fx the twin's "
-                      "for %d consecutive rows (from row %d) -> REVIEW WITH KAI "
-                      "(not an automatic kill)" % (STOP_RATIO,
-                                                   emit_new_rows.streak,
-                                                   STOP_FROM), flush=True)
+                      streak, STOP_ROWS), flush=True)
+        except Exception:
+            pass
+        if alert:
+            print("ALERT: STOP RULE -- TD-referenced value > %.0fx the twin's "
+                  "for %d consecutive rows (from row %d) -> REVIEW WITH KAI "
+                  "(not an automatic kill)" % (STOP_RATIO, streak, STOP_FROM),
+                  flush=True)
+        try:
             # SVE diagnostics (pre-registered read (4)).
             print("      sve frac %s  buffer_frac %s  td_gap %s  td_bias %s  "
                   "value_age %s  searches %s (%s s)" % (
@@ -172,7 +212,27 @@ def emit_new_rows():
 
 
 emit_new_rows.last = None     # (elapsed_s, iteration) of the previous row
-emit_new_rows.streak = 0      # stop-rule streak (consecutive rows > 2x twin)
+
+
+def replay_rows():
+    """A relaunch marks the rows already written as seen (they are not
+    re-printed) and replays the stop rule over them."""
+    for line in rows():
+        seen.add(line.strip())
+        try:
+            r = json.loads(line)
+            stop_rule_step(r.get("iteration"), r.get("value"), TWIN, STOP_OVER)
+        except (ValueError, AttributeError):
+            pass
+
+
+def stop_rule_armed_line():
+    """The startup line: how many twin rows the stop rule can use."""
+    n = sum(1 for k in TWIN if isinstance(k, int) and k >= STOP_FROM)
+    head = "stop rule armed" if n >= 14 else "ALERT: stop rule NOT fully armed"
+    return (f"{head}: {n} twin rows from row {STOP_FROM} "
+            f"({TWINS.get(SEED)}), alert at {STOP_ROWS} consecutive rows > "
+            f"{STOP_RATIO:.0f}x")
 
 
 def completed():
@@ -371,16 +431,8 @@ print(f"preflight ok (manifest + quick probe + 12 suites); starting {VARIANT} "
       f"({ARM})", flush=True)
 
 os.makedirs(BASE, exist_ok=True)
-for line in rows():
-    seen.add(line.strip())
-    # A relaunch replays the stop-rule streak over the rows already written
-    # (they are not re-printed).
-    try:
-        _r = json.loads(line)
-        _, emit_new_rows.streak, _ = stop_rule_step(
-            _r.get("iteration"), _r.get("value"), TWIN, emit_new_rows.streak)
-    except (ValueError, AttributeError):
-        pass
+replay_rows()
+print(stop_rule_armed_line(), flush=True)
 
 # CUDA_VISIBLE_DEVICES is dropped: inherited from a shell that set -1 it
 # would silently train on the CPU.

@@ -2,7 +2,7 @@
  "EpisodicLifeEnv.py": "0cbbeb27752eeb3ba093efe4d80557caef703d90ea7520a0f7d266c4c13957d3",
  "atari_wrappers.py": "cbf69aee1f41970a807c93739c58160fa0cfc66e1cccdcfc2426c7bd6c8047b2",
  "benchmarks/probes/probe_exhaustive_eval.py": "bd2d112507c6b6563d1453ba39db4b4917f1dd3d38397bbf6db6867e60466bf7",
- "benchmarks/supervisors/supervise_sve2.py": "7a144c3458700bf40809b8f4d83fb0b0123b8e6472ec5d5789474ecb0b3d66f9",
+ "benchmarks/supervisors/supervise_sve2.py": "94cfaaf57d48f056b6f09b2f50978eafeec15ef755932306b9ed433b0be345be",
  "experiments/ablation.py": "12a81d8aedacdc20fa9aa5bbb4bf8e9638f7489e670554e9c02bd7e5b9b37bec",
  "experiments/ray_actors.py": "d01a2ac36ed2a4bdabb66b287e46a87b06390ff1580a16346131bfd657199981",
  "memory.py": "b9ace138763bd2e890077c06411ed596e349d2a26c416c252e9134a204211524",
@@ -26,7 +26,7 @@
  "tests/test_searchact8.py": "d20a3b27e35da2830ff0e2c31fc1ac711a37bf09c26288ea2c8a8a26ee40cb47",
  "tests/test_seqref.py": "0f06ebe153749784d0030e0dc474bd9e5a221e541a15ae165a3374aa5f9f6ccf",
  "tests/test_sve.py": "6622c904be33b27bf3305c1fc3a9822c4ed8eabd81f86640b91f2ae2bd552a84",
- "tests/test_sve2.py": "10a30eafd8269937206f66c71e30e549d19a296a4c33ae6f3a4704c874f5d3a2",
+ "tests/test_sve2.py": "8ffba668e73afa5fdfc3c51f6103e45d348bd0e8fd28aa3901176c9dc92951e9",
  "tests/test_tempscale.py": "fb0f5cb503d9eb16d45cbce62d51a219db4ba9563fda91018c01e143f953d07e",
  "tests/test_vtree.py": "5fc4dfa2d36ddf457fe84345d13ce95378ad0f2d884a81b73d35121645daf91c",
  "tests/test_vtree_communal.py": "b4a5bd4be0699e2073516f235be17b80b7cedafccfc74506c3e1f5ba3fdd476b"
