@@ -747,6 +747,45 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- SVE seed 0, then Gumbel acting (Kai, 2026-10-12)
+
+DECISION (Kai, 2026-10-12): "run a second SVE seed, then plan gumbel to run
+immediately after it ... gumbel without SVE, and if the second SVE run works
+out, we can do a combination of gumbel and SVE after the gumbel only run".
+QUEUE: (1) SVE seed 0 (this section); (2) Gumbel search acting without SVE,
+pre-registered in its own section before it is built, armed to launch as
+soon as (1) and its evals finish; (3) Gumbel + SVE after (2), only if (1)
+WORKS OUT (below).
+(1) ARM unchanged: effzero-repro-faithful-prioract-noredo-temp05-bnrecal-sve
+(the audited 10-10 arm), SEED 0, dir pong-sve2-s0-2026-10-10 (the date is
+the supervisor's audited constant). Supervisor change only:
+supervise_sve2.py accepts seed 0 and seed 1, each with its own stop-rule
+reference, and takes the deferred r2 hardening (LOW-A: streak keyed by
+iteration; LOW-B: a behavioural test; LOW-C: NaN rows, the stop rule
+computed before the prints, a startup "stop rule armed: N twin rows" line).
+REFERENCE: no seed-0 run of the stabilizer config exists. The reference is
+pong-tempscale-s0-2026-10-05, the temperature config at seed 0 without the
+stabilizer (which changes only the actor's BN statistics): raw first
+success @70, raw mean 60-90 +2.70, external recal +8.78. As with seed 1,
+the parallel actor splits the games within the first iterations, so this
+pairs the start only.
+PRE-REGISTERED READS (as seed 1's; exact evals of the DEPLOYED policy,
+rows 45-90; raw and external recal secondary): (1) speed: first success
+(exact >= +10 or >= 3/4 phases) and first row >= +15 -- reference @70
+(raw); (2) level: mean 60-90 vs the bands (NO WORSE >= +3.68, WORSE <
+-2.32); (3) late stability: rows 60-90 below 0; (4) diagnostics:
+sve_buffer_frac ~0.29-0.36 once full, sve_td_bias near +0.11 and not
+drifting upward.
+STOP RULE: as seed 1's, against tempscale s0's same-row `value` (rows
+25-90 all present, 0.17-1.06); advisory live, evaluated from the jsonl
+files at the end.
+WORKS OUT (gates (3)): the deployed series reaches a first success at any
+row 45-90 AND its mean 60-90 is not WORSE (>= -2.32). Two-seed summary
+either way: SVE 0/2 breakouts -> SVE shelved on this line (the
+temperature config without SVE: 2/2); 1/2 -> no evidence SVE helps or
+hurts, but (3) is run as Kai asked.
+COST: ~26 h (seed 1: 93,571 s).
+
 ### RESULT -- SVE on the temperature + stabilizer config (seed 1), 2026-10-12
 
 pong-sve2-s1-2026-10-10 ran 10-10 19:36 -> 10-11 21:35 (93,571 s, one
