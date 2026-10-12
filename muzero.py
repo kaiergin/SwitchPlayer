@@ -345,6 +345,15 @@ SEARCH_ACT_BIRTH_TARGETS = False
 # (ablation.search_act_birth_gate): the search picks the action, the 50-sim
 # PUCT birth search still makes every target.
 ACTOR_GUMBEL_SEARCH = False
+# ...and its exploration schedule: the actor's Gumbel draws are scaled by the
+# staged visit temperature (visit_softmax_temperature: 1 / 0.5 / 0.25 at 50% /
+# 75% of the run). argmax(T*g + logits + sigma(q_hat)) is a temperature-T
+# sample of the improved policy among the halving survivors -- the schedule
+# the PUCT-8 twin samples its visits at. Off = the paper's scale 1
+# throughout (measured 2026-10-12: Gumbel-8 at scale 1 matches a 50-sim
+# search's argmax about as often as PUCT-8 at T=1). Self-play only: greedy
+# searches keep scale 1 (they act by the improved-policy argmax).
+ACTOR_GUMBEL_STAGED_SCALE = False
 # Policy-only acting in PAPER mode (2026-09-26, Kai: the real-time design --
 # no search on the acting path). With BIRTH_SEARCH on (and USE_SEARCH_ACTING
 # off) the actor samples the prior, and every newly collected trajectory is
@@ -2201,7 +2210,8 @@ class MCTSHelper:
     # deterministic visit-matching below it, and a policy target built from
     # completed Q-values instead of visit fractions.
     # -----------------------------
-    async def run_gumbel_mcts(self, index, num_simulations=32, discount=None, max_depth=None):
+    async def run_gumbel_mcts(self, index, num_simulations=32, discount=None,
+                              max_depth=None, gumbel_scale=1.0):
         discount = DISCOUNT if discount is None else discount
         max_depth = MAX_DEPTH if max_depth is None else max_depth
         root = self.current_trajectory[index]
@@ -2219,8 +2229,12 @@ class MCTSHelper:
         self.seed_min_max_stats(root, discount)
         # No Dirichlet noise: the Gumbel draws ARE the exploration, fresh per
         # search, and unlike the noise they never contaminate node.policy.
+        # gumbel_scale (ACTOR_GUMBEL_STAGED_SCALE) tempers them; 1.0 leaves
+        # every value bit-identical.
         logits = np.log(np.asarray(root.policy, dtype=np.float64) + 1e-9)
         gumbels = np.random.gumbel(size=self.action_space)
+        if gumbel_scale != 1.0:
+            gumbels = gumbels * gumbel_scale
         baseline = {a: child.visit_count for a, child in root.children.items()}
 
         m = max(1, min(GUMBEL_MAX_CANDIDATES, self.action_space, num_simulations))
@@ -2291,9 +2305,16 @@ class MCTSHelper:
         gumbel = USE_GUMBEL_SEARCH or bool(force_gumbel)
         try:
             if gumbel:
-                # The Gumbel draws are the exploration: no root noise.
+                # The Gumbel draws are the exploration: no root noise. The
+                # actor's self-play draws follow the staged temperature under
+                # ACTOR_GUMBEL_STAGED_SCALE.
+                scale = 1.0
+                if force_gumbel and ACTOR_GUMBEL_STAGED_SCALE and not greedy:
+                    scale = visit_softmax_temperature(
+                        getattr(self.network_manager, "training_steps", 0))
                 policy, value, has_policy = await self.run_gumbel_mcts(
-                    0, num_simulations=num_simulations, discount=discount)
+                    0, num_simulations=num_simulations, discount=discount,
+                    gumbel_scale=scale)
             else:
                 policy, value, has_policy = await self.run_full_mcts(
                     0, num_simulations=num_simulations,

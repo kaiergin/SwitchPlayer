@@ -83,8 +83,20 @@ def apply_acting_states(run, d):
 # PROBE_ACTING_STATES (root-only BN statistics are wrong inside a search).
 SEARCH_SIMS = int(os.environ.get("PROBE_SEARCH_SIMS") or 0)
 SEARCH_ENGINE = os.environ.get("PROBE_SEARCH_ENGINE", "puct")
-# Smoke runs only: play noop counts 1..MAX_NOOP (the readout uses all 30).
+ENGINE_SET = "PROBE_SEARCH_ENGINE" in os.environ
+# Smoke runs only: play noop counts 1..MAX_NOOP (the readout uses all 30);
+# a smoke record goes to a "-noops<N>" file, never the readout's.
 MAX_NOOP = int(os.environ.get("PROBE_MAX_NOOP") or 30)
+
+
+def check_mode():
+    """Refuses a search engine without a budget (it would silently run the
+    prior argmax) and a noop range outside 1..30."""
+    if ENGINE_SET and not SEARCH_SIMS:
+        raise SystemExit("PROBE_SEARCH_ENGINE without PROBE_SEARCH_SIMS would "
+                         "evaluate the prior argmax; set both")
+    if not 1 <= MAX_NOOP <= 30:
+        raise SystemExit(f"PROBE_MAX_NOOP must be 1..30, got {MAX_NOOP}")
 
 
 def configure_search():
@@ -127,6 +139,7 @@ def play(run, noops):
 
 
 def main(argv):
+    check_mode()
     with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000):
         run = ablation.Run(ARM, 0, ablation.ARMS[ARM])
         assert muzero.USE_SEARCH_ACTING is False       # greedy = prior argmax
@@ -158,12 +171,16 @@ def main(argv):
                                else "raw")}
             if SEARCH_SIMS:
                 rec["search"] = {"engine": SEARCH_ENGINE, "sims": SEARCH_SIMS}
+            if MAX_NOOP != 30:
+                rec["max_noop"] = MAX_NOOP
             print(f"{rec['run']} @{rec['iteration']}: exact {rec['exact_mean']:+.2f} "
                   f"(sd {rec['sd']}, min {rec['min']:+.0f}) phases "
                   f"{[round(v, 1) for v in phase.values()]} won {rec['phases_won']}/4 "
                   f"capped {rec['capped']}/{len(games)} [{rec['secs']}s]", flush=True)
             suffix = ("-acting" if ACTING else
                       f"-{SEARCH_ENGINE}{SEARCH_SIMS}" if SEARCH_SIMS else "")
+            if MAX_NOOP != 30:
+                suffix += f"-noops{MAX_NOOP}"     # a smoke run
             with open(HERE / f"probe_exhaustive_eval-{rec['run']}{suffix}.jsonl",
                       "a") as f:
                 f.write(json.dumps(rec) + "\n")

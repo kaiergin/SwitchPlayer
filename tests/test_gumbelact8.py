@@ -39,8 +39,9 @@ def _eff(spec, k):
 def test_arm_changes_only_the_actor_engine():
     a, b = ablation.ARMS[TWIN], ablation.ARMS[ARM]
     assert {k for k in set(a) | set(b) if a.get(k) != b.get(k)} == {
-        "ACTOR_GUMBEL_SEARCH", "_doc"}
+        "ACTOR_GUMBEL_SEARCH", "ACTOR_GUMBEL_STAGED_SCALE", "_doc"}
     assert b["ACTOR_GUMBEL_SEARCH"] is True
+    assert b["ACTOR_GUMBEL_STAGED_SCALE"] is True     # the twin's T schedule
     assert _eff(b, "USE_GUMBEL_SEARCH") is False      # every other search: PUCT
     assert b["ACTOR_SEARCH_SIMS"] == 8 and _eff(b, "ACT_SEARCH_SIMS") == 50
     assert b["SEARCH_ACT_BIRTH_TARGETS"] is True and b["EVAL_PRIOR_ONLY"] is True
@@ -51,6 +52,7 @@ def test_arm_changes_only_the_actor_engine():
 
 def test_defaults_off():
     assert muzero.ACTOR_GUMBEL_SEARCH is False
+    assert muzero.ACTOR_GUMBEL_STAGED_SCALE is False
 
 
 def test_every_startup_gate_passes_the_arm():
@@ -80,6 +82,34 @@ def test_actor_gumbel_only_with_birth_targets(monkeypatch):
         ablation.search_act_birth_gate()
 
 
+@pytest.mark.parametrize("bad", [1, "yes", None])
+def test_staged_scale_must_be_a_bool(bad):
+    with ablation.arm_config(ARM):
+        muzero.ACTOR_GUMBEL_STAGED_SCALE = bad     # an arm key: restored
+        with pytest.raises(SystemExit,
+                           match="ACTOR_GUMBEL_STAGED_SCALE must be a bool"):
+            ablation.search_act_birth_gate()
+
+
+def test_staged_scale_needs_the_gumbel_actor():
+    with ablation.arm_config(ARM):
+        muzero.ACTOR_GUMBEL_SEARCH = False
+        with pytest.raises(SystemExit, match="inert without ACTOR_GUMBEL_SEARCH"):
+            ablation.search_act_birth_gate()
+
+
+def test_run_one_runs_the_gate_before_anything_else(monkeypatch, tmp_path):
+    """r1 L4 (A8): the gate is wired into run_one -- a bad flag stops the
+    run at startup."""
+    monkeypatch.setitem(ablation.ARMS, "bad-g8", {
+        **ablation.ARMS[ARM], "ACTOR_GUMBEL_STAGED_SCALE": "yes"})
+    with pytest.raises(SystemExit,
+                       match="ACTOR_GUMBEL_STAGED_SCALE must be a bool"):
+        ablation.run_one("bad-g8", 0, 2, 1, 10, 1, tmp_path / "a.jsonl",
+                         use_ray=True, cpu_actor=True)
+    assert not (tmp_path / "a.jsonl").exists()
+
+
 def test_actor_gumbel_refuses_global_gumbel():
     # A plain setattr inside arm_config: the arm's own key, restored on exit
     # (a monkeypatch here would "restore" the ARM's value at teardown).
@@ -94,8 +124,10 @@ def test_actor_gumbel_refuses_global_gumbel():
 # act_search's dispatch (real searcher)
 # --------------------------------------------------------------------------
 @pytest.fixture
-def helper(monkeypatch):
+def helper(monkeypatch, request):
     import torch
+    threads = torch.get_num_threads()
+    request.addfinalizer(lambda: torch.set_num_threads(threads))
     torch.set_num_threads(2)
     monkeypatch.setattr(muzero, "USE_GUMBEL_SEARCH", False)
     h = muzero.MCTSHelper(action_space=6, device=torch.device("cpu"),
@@ -106,15 +138,19 @@ def helper(monkeypatch):
     return h
 
 
-def _spies(monkeypatch):
+def _spies(monkeypatch, scales=None):
     calls = {"gumbel": [], "puct": []}
     real_g = muzero.MCTSHelper.run_gumbel_mcts
     real_p = muzero.MCTSHelper.run_full_mcts
 
-    async def g(self, index, num_simulations=32, discount=None, max_depth=None):
+    async def g(self, index, num_simulations=32, discount=None, max_depth=None,
+                gumbel_scale=1.0):
         calls["gumbel"].append(num_simulations)
+        if scales is not None:
+            scales.append(gumbel_scale)
         return await real_g(self, index, num_simulations=num_simulations,
-                            discount=discount, max_depth=max_depth)
+                            discount=discount, max_depth=max_depth,
+                            gumbel_scale=gumbel_scale)
 
     async def p(self, index, num_simulations=128, sim_batches=8, c_puct=1.0,
                 discount=None, max_depth=None, root_noise=True):
@@ -189,6 +225,105 @@ def test_gumbel_visits_every_action_at_8_sims(helper, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# the staged scale, and the engine's behaviour at the arm's budget
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("staged,force,greedy,want", [
+    (True, True, False, 0.25),      # the actor's self-play: the staged T
+    (True, True, True, 1.0),        # greedy: improved-policy argmax, scale 1
+    (False, True, False, 1.0),      # the paper's scale
+    (True, False, False, None)])    # not the actor: PUCT, no Gumbel at all
+def test_actor_gumbel_scale_follows_the_staged_temperature(
+        helper, monkeypatch, staged, force, greedy, want):
+    scales = []
+    calls = _spies(monkeypatch, scales)
+    monkeypatch.setattr(muzero, "ACTOR_GUMBEL_STAGED_SCALE", staged)
+    monkeypatch.setattr(muzero, "visit_softmax_temperature", lambda steps: 0.25)
+    asyncio.run(helper.act_search(_obs(), num_simulations=8, greedy=greedy,
+                                  force_gumbel=force))
+    assert scales == ([] if want is None else [want])
+    assert bool(calls["gumbel"]) is (want is not None)
+
+
+def _tagged_root(helper):
+    """A fresh act_search-style root with a uniform prior; each child is
+    tagged with its action (for _fixed_q)."""
+    latents, _, values = helper.network_manager.batch_inference(_obs()[None])
+    root = muzero.MCTSNode(latent=latents[0:1], prior=1.0)
+    root.policy = np.full(6, 1.0 / 6)
+    root.expanded_value = float(values[0])
+    helper.current_trajectory = [root]
+    helper.batch_expand_nodes([root])
+    for a, child in root.children.items():
+        child.tag = a
+    return root
+
+
+def _fixed_q(monkeypatch, q):
+    monkeypatch.setattr(
+        muzero.MCTSHelper, "_normalized_q",
+        lambda self, child, discount: q.get(getattr(child, "tag", None), 0.0))
+
+
+def test_q_drives_the_halving_and_the_action(helper, monkeypatch):
+    """r1 L4 (E2): one action with q_hat 1 (sigma ~5 logits) against flat
+    others under a uniform prior is played in nearly every search at scale
+    1 -- a halving that ignored Q would keep it only ~half the time."""
+    _fixed_q(monkeypatch, {4: 1.0})
+    wins = 0
+    for seed in range(30):
+        np.random.seed(seed)
+        _tagged_root(helper)
+        asyncio.run(helper.run_gumbel_mcts(0, num_simulations=8))
+        wins += helper.last_search_action == 4
+    assert wins >= 27
+
+
+def test_scale_zero_is_deterministic_and_scale_one_explores(helper,
+                                                            monkeypatch):
+    """r1 L4 (E3) + the staged scale: with flat Q and a uniform prior the
+    played action is the Gumbel draw's -- spread over the actions at scale
+    1, a single action at scale 0."""
+    _fixed_q(monkeypatch, {})
+    picks = {1.0: set(), 0.0: set()}
+    for scale in picks:
+        for seed in range(20):
+            np.random.seed(seed)
+            _tagged_root(helper)
+            asyncio.run(helper.run_gumbel_mcts(0, num_simulations=8,
+                                               gumbel_scale=scale))
+            picks[scale].add(helper.last_search_action)
+    assert len(picks[1.0]) >= 4 and len(picks[0.0]) == 1
+
+
+def test_phase1_visits_go_to_the_top_two(helper, monkeypatch):
+    """r1 L4 (E5): the 6 + 2 schedule -- every action once, then the second
+    visits to the two best by g + logits + sigma(q_hat) (no noise here)."""
+    _fixed_q(monkeypatch, {4: 1.0, 1: 0.8})
+    seen = []
+    real_release = muzero.MCTSHelper.release_root
+
+    def spy_release(self, node):
+        seen.append({a: c.visit_count for a, c in node.children.items()})
+        return real_release(self, node)
+
+    monkeypatch.setattr(muzero.MCTSHelper, "release_root", spy_release)
+    _tagged_root(helper)
+    asyncio.run(helper.run_gumbel_mcts(0, num_simulations=8, gumbel_scale=0.0))
+    assert seen == [{0: 1, 1: 2, 2: 1, 3: 1, 4: 2, 5: 1}]
+    assert helper.last_search_action == 4
+
+
+def test_sigma_scale_counts_this_searchs_visits(helper):
+    """r1 L4 (E4): sigma = (c_visit + max visits) * c_scale, the visits
+    net of the baseline."""
+    kids = {a: type("C", (), {"visit_count": n})()
+            for a, n in enumerate([2, 1, 1, 1, 1, 1])}
+    node = type("N", (), {"children": kids})()
+    assert helper._sigma_scale(node) == pytest.approx((50.0 + 2) * 0.1)
+    assert helper._sigma_scale(node, {0: 1}) == pytest.approx((50.0 + 1) * 0.1)
+
+
+# --------------------------------------------------------------------------
 # play_episode's wiring
 # --------------------------------------------------------------------------
 class _Env:
@@ -235,6 +370,7 @@ def test_run_one_ray_loop_acts_gumbel_8_and_births_puct_50(
     PUCT) searches every position at 50 sims; rows carry no beh_*."""
     import muzero_vtree
     import torch
+    threads = torch.get_num_threads()
     torch.set_num_threads(2)
     calls = _spies(monkeypatch)
     eng = []
@@ -262,6 +398,7 @@ def test_run_one_ray_loop_acts_gumbel_8_and_births_puct_50(
     rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
     assert [r["iteration"] for r in rows] == [1, 2]
     assert not any(k.startswith("beh_") for r in rows for k in r)
+    torch.set_num_threads(threads)
 
 
 # --------------------------------------------------------------------------
@@ -302,8 +439,11 @@ def probe(monkeypatch, tmp_path, request):
     for k in _SEARCH_FLAGS:
         monkeypatch.setattr(muzero, k, getattr(muzero, k))
     request.addfinalizer(lambda: torch.set_num_threads(threads))
+    if "PROBE_MAX_NOOP" not in os.environ:
+        assert pe.MAX_NOOP == 30            # r1 L4 (P3): the readout's range
     monkeypatch.setattr(pe, "HERE", tmp_path)
     monkeypatch.setattr(pe, "MAX_NOOP", 1)
+    monkeypatch.setattr(pe, "ENGINE_SET", False)
     return pe
 
 
@@ -334,9 +474,10 @@ def test_probe_evaluates_the_search_agent(probe, monkeypatch, tmp_path,
                         lambda self, greedy=False, cap=None:
                         real_play(self, greedy=greedy, cap=40))
     probe.main([str(snap)])
-    rec = json.loads((tmp_path / f"probe_exhaustive_eval-run-x-{engine}2.jsonl")
+    rec = json.loads((tmp_path /
+                      f"probe_exhaustive_eval-run-x-{engine}2-noops1.jsonl")
                      .read_text().splitlines()[0])
-    assert rec["variant"] == f"search-{engine}2"
+    assert rec["variant"] == f"search-{engine}2" and rec["max_noop"] == 1
     assert rec["search"] == {"engine": engine, "sims": 2}
     assert list(rec["games"]) == ["1"]
     if engine == "gumbel":
@@ -359,9 +500,10 @@ def test_probe_default_mode_is_still_the_prior_argmax(probe, monkeypatch,
                         lambda self, greedy=False, cap=None:
                         real_play(self, greedy=greedy, cap=40))
     probe.main([str(snap)])
-    rec = json.loads((tmp_path / "probe_exhaustive_eval-run-x.jsonl")
+    rec = json.loads((tmp_path / "probe_exhaustive_eval-run-x-noops1.jsonl")
                      .read_text().splitlines()[0])
     assert rec["variant"] == "raw" and "search" not in rec
+    assert not (tmp_path / "probe_exhaustive_eval-run-x.jsonl").exists()
     assert calls == {"gumbel": [], "puct": []}
 
 
@@ -376,6 +518,20 @@ def test_probe_search_mode_refusals(probe, monkeypatch, engine, sims, acting,
     monkeypatch.setattr(probe, "ACTING", acting)
     with pytest.raises(SystemExit, match=msg):
         probe.configure_search()
+
+
+@pytest.mark.parametrize("engine_set,sims,noops,msg", [
+    (True, 0, 30, "without PROBE_SEARCH_SIMS"),
+    (False, 0, 0, "PROBE_MAX_NOOP must be 1..30"),
+    (False, 0, 31, "PROBE_MAX_NOOP must be 1..30")])
+def test_probe_mode_refusals(probe, monkeypatch, engine_set, sims, noops, msg):
+    """r1 L5: an engine without a budget would silently run the prior
+    argmax; a noop range outside the readout's is refused."""
+    monkeypatch.setattr(probe, "ENGINE_SET", engine_set)
+    monkeypatch.setattr(probe, "SEARCH_SIMS", sims)
+    monkeypatch.setattr(probe, "MAX_NOOP", noops)
+    with pytest.raises(SystemExit, match=msg):
+        probe.main([])
 
 
 def test_probe_reseeds_each_search_game(probe, monkeypatch):
@@ -425,9 +581,26 @@ def test_supervisor_variant_suites_seed_and_queue():
     assert "benchmarks/probes/probe_exhaustive_eval.py" in aud
     src = SUP.read_text(encoding="utf-8")
     assert f"preflight ok (manifest + quick probe + {len(suites)} suites)" in src
-    # queued behind SVE seed 0's completion marker
+    # queued behind SVE seed 0's completion marker, ALERTing if it failed
     wait = ast.unparse(lit("WAIT_CKPTS"))
     assert "pong-sve2-s0-2026-10-10" in wait and "sve-seed0.ckpt" in wait
+    loops = [ast.unparse(n) for n in tree.body if isinstance(n, ast.While)]
+    assert any("_seed_state" in l and "ALERT: SVE seed 0 FAILED" in l
+               for l in loops)
+    # r1 L4 (S4-S7): the twin's run command and module set, this run's dir
+    twin_tree = ast.parse((ROOT / "benchmarks" / "supervisors" /
+                           "supervise_searchact8.py").read_text(encoding="utf-8"))
+
+    def twin_lit(name):
+        return next(n for n in twin_tree.body if isinstance(n, ast.Assign)
+                    and getattr(n.targets[0], "id", "") == name).value
+
+    assert ast.unparse(lit("COMMON")) == ast.unparse(twin_lit("COMMON"))
+    assert (set(ast.literal_eval(twin_lit("AUDITED")))
+            - {"benchmarks/supervisors/supervise_searchact8.py"}) <= set(aud)
+    assert "2026-10-12" in ast.unparse(lit("REL"))
+    quick = ast.unparse(lit("QUICK"))
+    assert "ACTOR_GUMBEL_SEARCH" in quick and "is True" in quick
     r = subprocess.run([sys.executable, str(SUP), "ray", "1"],
                        capture_output=True, text=True, cwd=str(ROOT), timeout=60)
     assert r.returncode != 0 and "pre-registered as SEED 0" in r.stderr

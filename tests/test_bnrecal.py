@@ -322,8 +322,11 @@ def test_probe_main_loop_applies_acting_states_under_the_flag():
     nxt = body[i + 1]
     assert isinstance(nxt, ast.If) and ast.unparse(nxt.test) == "ACTING"
     assert [ast.unparse(x) for x in nxt.body] == ["apply_acting_states(run, d)"]
-    loop = ast.unparse(loops[0])
-    assert "suffix = '-acting' if ACTING else ''" in loop
+    # the -acting file (the suffix gained the search-agent / smoke cases on
+    # 2026-10-12; ACTING still comes first)
+    suffix = next(n for n in ast.walk(loops[0]) if isinstance(n, ast.Assign)
+                  and ast.unparse(n.targets[0]) == "suffix")
+    assert ast.unparse(suffix.value).startswith("'-acting' if ACTING else ")
     opens = [n for n in ast.walk(loops[0]) if isinstance(n, ast.Call)
              and ast.unparse(n.func) == "open"]
     assert len(opens) == 1 and "{suffix}" in ast.unparse(opens[0].args[0])

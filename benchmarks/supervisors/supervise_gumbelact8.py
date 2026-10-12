@@ -7,6 +7,13 @@ revision (merged by hand / the watcher only after SVE seed 0's evals).
 
     python benchmarks/supervisors/supervise_gumbelact8.py ray 0
 
+Launched BEFORE the merge, it runs from the worktree's absolute path (the
+script is not in main yet; its manifest is the worktree copy, identical to
+main's after the merge), with cwd Y:/SwitchPlayer and stdout appended to
+benchmarks/results/pong-gumbelact8-s0-2026-10-12/supervisor.log -- create
+that folder first (the shell redirect opens the log before Python runs;
+post_gumbel.py reads it for RUN COMPLETE / CRASH LOOP).
+
 Supervisor v2 pattern; a relaunch auto-resumes from the last checkpoint."""
 import json
 import os
@@ -287,6 +294,11 @@ while True:
     if all(s == "done" for s in states):
         break
     msg = "WAITING (%s)" % states
+    if "failed" in states:
+        # SVE seed 0 gave up (CRASH LOOP / MAX ATTEMPTS): the queue holds
+        # (its relaunch must not race this run) and says so.
+        msg = ("ALERT: SVE seed 0 FAILED -- holding the Gumbel launch until it "
+               "is relaunched and completes (%s)" % states)
     if msg != told or waited % 60 == 0:
         print(f"{msg} [{waited // 60} h]", flush=True)
         told = msg

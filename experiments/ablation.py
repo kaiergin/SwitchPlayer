@@ -938,13 +938,16 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-sve"] = {
 ARMS["effzero-repro-faithful-gumbelact8-birth"] = {
     **ARMS["effzero-repro-faithful-searchact8-birth"],
     "ACTOR_GUMBEL_SEARCH": True,
+    "ACTOR_GUMBEL_STAGED_SCALE": True,
     "_doc": "effzero-repro-faithful-searchact8-birth with the actor's 8-sim "
             "search on the GUMBEL engine (ACTOR_GUMBEL_SEARCH: sequential "
             "halving over all 6 actions, fresh Gumbel draws as the "
-            "exploration, the halving survivor acts) instead of PUCT; the "
-            "50-sim PUCT birth search makes every target; prior-argmax "
-            "in-run eval. Seed 0. Twin: pong-searchact8-s0-2026-10-09 "
-            "(PUCT-8 acting); also pong-prioract2-s0 (prior sampling).",
+            "exploration, the halving survivor acts) instead of PUCT, its "
+            "draws scaled by the twin's staged temperature 1 / 0.5 / 0.25 "
+            "(ACTOR_GUMBEL_STAGED_SCALE); the 50-sim PUCT birth search makes "
+            "every target; prior-argmax in-run eval. Seed 0. Twin: "
+            "pong-searchact8-s0-2026-10-09 (PUCT-8 acting); also "
+            "pong-prioract2-s0 (prior sampling).",
 }
 
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
@@ -1433,6 +1436,12 @@ def search_act_birth_gate():
         raise SystemExit("ACTOR_GUMBEL_SEARCH switches only the actor's "
                          "searches to Gumbel; USE_GUMBEL_SEARCH would switch "
                          "every search")
+    st = muzero.ACTOR_GUMBEL_STAGED_SCALE
+    if not isinstance(st, bool):
+        raise SystemExit(f"ACTOR_GUMBEL_STAGED_SCALE must be a bool, got {st!r}")
+    if st and not g:
+        raise SystemExit("ACTOR_GUMBEL_STAGED_SCALE scales the actor's Gumbel "
+                         "draws; it is inert without ACTOR_GUMBEL_SEARCH")
 
 
 def prior_temp_gate():
