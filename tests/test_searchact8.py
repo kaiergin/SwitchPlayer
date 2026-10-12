@@ -127,7 +127,8 @@ class _Searcher:
         self.network_manager = type("NM", (), {"training_steps": 0})()
 
     async def act_search(self, stack, num_simulations=None, discount=None,
-                         greedy=False):
+                         greedy=False, force_gumbel=False):
+        assert force_gumbel is False                # PUCT arms: never Gumbel
         self.calls.append((greedy, num_simulations))
         return 2, np.full(ablation.ACTIONS, 1.0 / ablation.ACTIONS), 0.5
 
@@ -216,10 +217,12 @@ def test_run_one_ray_loop_acts_with_8_sims_and_birth_targets(
     real = muzero.MCTSHelper.act_search
 
     async def spy(self, obs_stack, num_simulations=None, discount=None,
-                  greedy=False):
+                  greedy=False, force_gumbel=False):
+        assert force_gumbel is False                # PUCT-8: never Gumbel
         sims.append((greedy, num_simulations))
         return await real(self, obs_stack, num_simulations=num_simulations,
-                          discount=discount, greedy=greedy)
+                          discount=discount, greedy=greedy,
+                          force_gumbel=force_gumbel)
 
     monkeypatch.setattr(muzero.MCTSHelper, "act_search", spy)
     births = []

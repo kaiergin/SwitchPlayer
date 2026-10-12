@@ -12,7 +12,9 @@ Writes probe_exhaustive_eval-<run>.jsonl (one line per snapshot, one file
 per run so concurrent probes never share a file) next to itself; records
 before 2026-09-27 are in probe_exhaustive_eval.jsonl.
 CPU only; PROBE_THREADS (default 2) fixes the thread count so results are
-reproducible. ~5.5 min per snapshot."""
+reproducible. ~5.5 min per snapshot (prior argmax; a search agent costs
+the search per step). PROBE_SEARCH_SIMS / PROBE_SEARCH_ENGINE: the search
+agent instead of the prior argmax (below)."""
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # "" deletes the var on Windows
 import json
@@ -70,8 +72,44 @@ def apply_acting_states(run, d):
     run.set_train_mode(False)
 
 
+# PROBE_SEARCH_SIMS=N (Gumbel search acting, 2026-10-12): evaluate the
+# SEARCH agent a search-acting run would deploy instead of the prior argmax
+# -- every step a greedy N-sim act_search through play_episode:
+# PROBE_SEARCH_ENGINE "puct" (argmax of the visits, no root noise) or
+# "gumbel" (argmax of the Gumbel improved policy; ACTOR_GUMBEL_SEARCH).
+# Gumbel's halving still draws Gumbel noise, so np.random is reseeded per
+# game: a snapshot's result is reproducible. Writes
+# probe_exhaustive_eval-<run>-<engine><N>.jsonl. Not with
+# PROBE_ACTING_STATES (root-only BN statistics are wrong inside a search).
+SEARCH_SIMS = int(os.environ.get("PROBE_SEARCH_SIMS") or 0)
+SEARCH_ENGINE = os.environ.get("PROBE_SEARCH_ENGINE", "puct")
+# Smoke runs only: play noop counts 1..MAX_NOOP (the readout uses all 30).
+MAX_NOOP = int(os.environ.get("PROBE_MAX_NOOP") or 30)
+
+
+def configure_search():
+    """The search agent's flags (inside the probe's arm_config); refuses
+    a bad engine or budget, and the acting-states combination."""
+    if SEARCH_ENGINE not in ("puct", "gumbel") or SEARCH_SIMS < 1:
+        raise SystemExit(f"PROBE_SEARCH_ENGINE must be puct|gumbel and "
+                         f"PROBE_SEARCH_SIMS >= 1, got {SEARCH_ENGINE!r} / "
+                         f"{SEARCH_SIMS!r}")
+    if ACTING:
+        raise SystemExit("PROBE_SEARCH_SIMS with PROBE_ACTING_STATES: the "
+                         "root-only BN statistics are wrong inside a search")
+    muzero.USE_SEARCH_ACTING = True      # greedy play_episode searches ...
+    muzero.PAPER_TARGETS = True          # ... (only in paper mode) ...
+    muzero.EVAL_PRIOR_ONLY = False       # ... per step
+    muzero.SEARCH_ACT_BIRTH_TARGETS = False
+    muzero.ACT_SEARCH_SIMS = SEARCH_SIMS  # greedy searches use this budget
+    muzero.USE_GUMBEL_SEARCH = False
+    muzero.ACTOR_GUMBEL_SEARCH = SEARCH_ENGINE == "gumbel"
+
+
 def play(run, noops):
     ne = _noop_env(run.env)
+    if SEARCH_SIMS:
+        np.random.seed(1000 + noops)
 
     def fixed(self, **kw):
         obs, info = self.env.reset(**kw)
@@ -88,37 +126,49 @@ def play(run, noops):
     return float(ret), int(steps), bool(term)
 
 
-with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000):
-    run = ablation.Run(ARM, 0, ablation.ARMS[ARM])
-    assert muzero.USE_SEARCH_ACTING is False       # greedy = prior argmax
-    for arg in sys.argv[1:]:
-        path = pathlib.Path(arg)
-        d = load(run, path)
-        if ACTING:
-            apply_acting_states(run, d)
-        t0 = time.time()
-        games = {n: play(run, n) for n in range(1, 31)}
-        rets = np.array([games[n][0] for n in range(1, 31)])
-        phase = {k: float(np.mean([games[n][0] for n in games if n % 4 == k]))
-                 for k in range(4)}
-        rec = {"snapshot": str(path), "run": path.parent.parent.name,
-               "iteration": int(path.stem[-3:]) if path.stem[-3:].isdigit() else None,
-               "exact_mean": round(float(rets.mean()), 3),
-               "sd": round(float(rets.std()), 2),
-               "min": float(rets.min()),
-               "phase_means": phase,
-               "phases_won": sum(1 for v in phase.values() if v > 0),
-               "capped": sum(1 for g in games.values() if not g[2]),
-               "games": {n: list(g) for n, g in games.items()},
-               "secs": round(time.time() - t0),
-               "acting_states": ACTING,
-               "variant": "acting" if ACTING else "raw"}
-        print(f"{rec['run']} @{rec['iteration']}: exact {rec['exact_mean']:+.2f} "
-              f"(sd {rec['sd']}, min {rec['min']:+.0f}) phases "
-              f"{[round(v, 1) for v in phase.values()]} won {rec['phases_won']}/4 "
-              f"capped {rec['capped']}/30 [{rec['secs']}s]", flush=True)
-        suffix = "-acting" if ACTING else ""
-        with open(HERE / f"probe_exhaustive_eval-{rec['run']}{suffix}.jsonl",
-                  "a") as f:
-            f.write(json.dumps(rec) + "\n")
-print("DONE", flush=True)
+def main(argv):
+    with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000):
+        run = ablation.Run(ARM, 0, ablation.ARMS[ARM])
+        assert muzero.USE_SEARCH_ACTING is False       # greedy = prior argmax
+        if SEARCH_SIMS:
+            configure_search()                         # greedy = the search agent
+        for arg in argv:
+            path = pathlib.Path(arg)
+            d = load(run, path)
+            if ACTING:
+                apply_acting_states(run, d)
+            t0 = time.time()
+            games = {n: play(run, n) for n in range(1, MAX_NOOP + 1)}
+            rets = np.array([games[n][0] for n in games])
+            phase = {k: float(np.mean([games[n][0] for n in games if n % 4 == k]))
+                     for k in range(4) if any(n % 4 == k for n in games)}
+            rec = {"snapshot": str(path), "run": path.parent.parent.name,
+                   "iteration": int(path.stem[-3:]) if path.stem[-3:].isdigit() else None,
+                   "exact_mean": round(float(rets.mean()), 3),
+                   "sd": round(float(rets.std()), 2),
+                   "min": float(rets.min()),
+                   "phase_means": phase,
+                   "phases_won": sum(1 for v in phase.values() if v > 0),
+                   "capped": sum(1 for g in games.values() if not g[2]),
+                   "games": {n: list(g) for n, g in games.items()},
+                   "secs": round(time.time() - t0),
+                   "acting_states": ACTING,
+                   "variant": ("acting" if ACTING else
+                               f"search-{SEARCH_ENGINE}{SEARCH_SIMS}" if SEARCH_SIMS
+                               else "raw")}
+            if SEARCH_SIMS:
+                rec["search"] = {"engine": SEARCH_ENGINE, "sims": SEARCH_SIMS}
+            print(f"{rec['run']} @{rec['iteration']}: exact {rec['exact_mean']:+.2f} "
+                  f"(sd {rec['sd']}, min {rec['min']:+.0f}) phases "
+                  f"{[round(v, 1) for v in phase.values()]} won {rec['phases_won']}/4 "
+                  f"capped {rec['capped']}/{len(games)} [{rec['secs']}s]", flush=True)
+            suffix = ("-acting" if ACTING else
+                      f"-{SEARCH_ENGINE}{SEARCH_SIMS}" if SEARCH_SIMS else "")
+            with open(HERE / f"probe_exhaustive_eval-{rec['run']}{suffix}.jsonl",
+                      "a") as f:
+                f.write(json.dumps(rec) + "\n")
+    print("DONE", flush=True)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

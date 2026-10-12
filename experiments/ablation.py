@@ -932,6 +932,21 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-sve"] = {
             "control.",
 }
 
+# Gumbel search acting (Kai, 2026-10-12; pre-registered in CURRICULUM): the
+# searchact8 arm with the actor's 8-sim search on the Gumbel engine instead
+# of PUCT; the 50-sim PUCT birth search still makes every target. Seed 0.
+ARMS["effzero-repro-faithful-gumbelact8-birth"] = {
+    **ARMS["effzero-repro-faithful-searchact8-birth"],
+    "ACTOR_GUMBEL_SEARCH": True,
+    "_doc": "effzero-repro-faithful-searchact8-birth with the actor's 8-sim "
+            "search on the GUMBEL engine (ACTOR_GUMBEL_SEARCH: sequential "
+            "halving over all 6 actions, fresh Gumbel draws as the "
+            "exploration, the halving survivor acts) instead of PUCT; the "
+            "50-sim PUCT birth search makes every target; prior-argmax "
+            "in-run eval. Seed 0. Twin: pong-searchact8-s0-2026-10-09 "
+            "(PUCT-8 acting); also pong-prioract2-s0 (prior sampling).",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
@@ -1384,10 +1399,12 @@ def bn_recal_gate(use_ray):
 
 
 def search_act_birth_gate():
-    """SEARCH_ACT_BIRTH_TARGETS / ACTOR_SEARCH_SIMS, checked at startup:
-    the mode needs search acting, birth search and the paper data path;
-    ACTOR_SEARCH_SIMS must be None or an int >= 1, and is accepted only in
-    that mode."""
+    """SEARCH_ACT_BIRTH_TARGETS / ACTOR_SEARCH_SIMS / ACTOR_GUMBEL_SEARCH,
+    checked at startup: the mode needs search acting, birth search and the
+    paper data path; ACTOR_SEARCH_SIMS must be None or an int >= 1, and
+    ACTOR_GUMBEL_SEARCH a bool; both are accepted only in that mode, and
+    ACTOR_GUMBEL_SEARCH not with USE_GUMBEL_SEARCH (every search would
+    already be Gumbel -- and birth search refuses it)."""
     sims = muzero.ACTOR_SEARCH_SIMS
     if sims is not None and (isinstance(sims, bool) or not isinstance(sims, int)
                              or sims < 1):
@@ -1405,6 +1422,17 @@ def search_act_birth_gate():
             and muzero.PAPER_TARGETS):
         raise SystemExit("SEARCH_ACT_BIRTH_TARGETS needs USE_SEARCH_ACTING, "
                          "BIRTH_SEARCH and PAPER_TARGETS")
+    g = muzero.ACTOR_GUMBEL_SEARCH
+    if not isinstance(g, bool):
+        raise SystemExit(f"ACTOR_GUMBEL_SEARCH must be a bool, got {g!r}")
+    if g and not muzero.SEARCH_ACT_BIRTH_TARGETS:
+        raise SystemExit("ACTOR_GUMBEL_SEARCH is supported only with "
+                         "SEARCH_ACT_BIRTH_TARGETS (the Gumbel search picks "
+                         "the action, birth search makes every target)")
+    if g and muzero.USE_GUMBEL_SEARCH:
+        raise SystemExit("ACTOR_GUMBEL_SEARCH switches only the actor's "
+                         "searches to Gumbel; USE_GUMBEL_SEARCH would switch "
+                         "every search")
 
 
 def prior_temp_gate():
@@ -1606,11 +1634,13 @@ class Run:
                 # against its own archived rows.
                 # ACTOR_SEARCH_SIMS: the self-play search's budget (None =
                 # ACT_SEARCH_SIMS); greedy searches keep the default.
+                # ACTOR_GUMBEL_SEARCH: these searches run the Gumbel engine.
                 action, search_pol, search_val = asyncio.run(
                     self.searcher.act_search(
                         stack, greedy=greedy,
                         num_simulations=(None if greedy
-                                         else muzero.ACTOR_SEARCH_SIMS)))
+                                         else muzero.ACTOR_SEARCH_SIMS),
+                        force_gumbel=muzero.ACTOR_GUMBEL_SEARCH))
             else:
                 search_pol = search_val = None
                 with torch.no_grad():

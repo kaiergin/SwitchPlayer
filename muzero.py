@@ -335,6 +335,16 @@ ACT_SEARCH_SIMS = 8
 # only the action choice comes from the actor's search.
 ACTOR_SEARCH_SIMS = None
 SEARCH_ACT_BIRTH_TARGETS = False
+# Gumbel search acting (Kai, 2026-10-12; CURRICULUM "Gumbel search acting"):
+# the per-step searches play_episode runs (self-play, and greedy eval where
+# it searches) use the Gumbel engine -- run_gumbel_mcts: sequential halving
+# over m = min(GUMBEL_MAX_CANDIDATES, actions, sims) root candidates, fresh
+# Gumbel draws as the exploration, the halving survivor acts -- while
+# USE_GUMBEL_SEARCH stays off, so birth search, refresh, SVE and every other
+# search keep PUCT. Supported only under SEARCH_ACT_BIRTH_TARGETS
+# (ablation.search_act_birth_gate): the search picks the action, the 50-sim
+# PUCT birth search still makes every target.
+ACTOR_GUMBEL_SEARCH = False
 # Policy-only acting in PAPER mode (2026-09-26, Kai: the real-time design --
 # no search on the acting path). With BIRTH_SEARCH on (and USE_SEARCH_ACTING
 # off) the actor samples the prior, and every newly collected trajectory is
@@ -2256,12 +2266,14 @@ class MCTSHelper:
         return improved_policy, root_value, True
 
     async def act_search(self, obs_stack, num_simulations=None, discount=None,
-                         greedy=False):
+                         greedy=False, force_gumbel=False):
         """One search from a live observation; returns (action, policy, value).
 
         The papers' acting mode (USE_SEARCH_ACTING; the shipped product keeps
         it off): a fresh one-node tree per step, dispatching PUCT or Gumbel by
-        USE_GUMBEL_SEARCH. PUCT mode samples the action from the visit
+        USE_GUMBEL_SEARCH -- or Gumbel regardless when force_gumbel
+        (ACTOR_GUMBEL_SEARCH's actor-only engine; play_episode passes it).
+        PUCT mode samples the action from the visit
         distribution at the staged paper temperature (argmax when greedy);
         Gumbel mode acts with the halving survivor (improved-policy argmax
         when greedy). The returned policy/value are the search policy target
@@ -2276,15 +2288,21 @@ class MCTSHelper:
         root.expanded_value = float(values[0])
         saved = getattr(self, "current_trajectory", None)
         self.current_trajectory = [root]
+        gumbel = USE_GUMBEL_SEARCH or bool(force_gumbel)
         try:
-            policy, value, has_policy = await self.run_full_mcts(
-                0, num_simulations=num_simulations,
-                sim_batches=min(MCTS_BATCHES, num_simulations),
-                c_puct=C_PUCT, discount=discount,
-                root_noise=not greedy)
+            if gumbel:
+                # The Gumbel draws are the exploration: no root noise.
+                policy, value, has_policy = await self.run_gumbel_mcts(
+                    0, num_simulations=num_simulations, discount=discount)
+            else:
+                policy, value, has_policy = await self.run_full_mcts(
+                    0, num_simulations=num_simulations,
+                    sim_batches=min(MCTS_BATCHES, num_simulations),
+                    c_puct=C_PUCT, discount=discount,
+                    root_noise=not greedy)
             if not has_policy:
                 action = int(np.random.randint(self.action_space))
-            elif USE_GUMBEL_SEARCH:
+            elif gumbel:
                 action = (int(np.argmax(policy)) if greedy
                           else int(self.last_search_action))
             else:
