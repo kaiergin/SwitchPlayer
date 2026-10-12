@@ -747,6 +747,145 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Gumbel search acting (Kai, 2026-10-12)
+
+DECISION (Kai, 2026-10-12): "plan gumbel to run immediately after [SVE
+seed 0] ... gumbel without SVE". Queue item (2) of "SVE seed 0, then Gumbel
+acting" below; the searchact8 result's pre-registered follow-up ("Gumbel
+search at low sims (designed for that regime)").
+HYPOTHESIS: 8-sim PUCT acting did not move the breakout (@90) because PUCT
+at 8 sims is a weak improvement over the prior. Gumbel MuZero's sequential
+halving is built for tiny budgets: at 8 sims over Pong's 6 actions it gives
+EVERY action a one-step lookahead, then re-checks the best two -- an
+improvement step the paper guarantees at any budget when the Q estimates
+are right.
+ARM effzero-repro-faithful-gumbelact8-birth = the searchact8 arm
+(prioract-noredo + 8-sim search acting on the CPU actor, 50-sim PUCT birth
+search makes every target, EVAL_PRIOR_ONLY) + two new flags (default off):
+ACTOR_GUMBEL_SEARCH -- play_episode's per-step searches run the repo's
+Gumbel engine (MCTSHelper.run_gumbel_mcts) instead of PUCT, while
+USE_GUMBEL_SEARCH stays off, so birth search, refresh and every other search
+keep PUCT -- and ACTOR_GUMBEL_STAGED_SCALE (below). The deltas vs
+searchact8 are the actor's search engine and its exploration mapping (the
+staged temperature on the Gumbel draws, which also cools the search's own
+visit allocation -- which 3 actions survive phase 0, which 2 get the extra
+sims -- where PUCT-8's temperature acts only after its search). SEED 0 (twin
+pong-searchact8-s0-2026-10-09, same seed; the runs split within the first
+iterations, so this pairs the start).
+THE ENGINE AT THIS BUDGET (m = min(16, 6 actions, 8 sims) = 6): phase 0
+visits each of the 6 root actions once (6 sims, one batched expansion),
+keeps the top 3 by g + logits + sigma(q_hat); phase 1 spends the last 2 sims
+on the top 2 of those; the final halving keeps 1, which acts. sigma = (50 +
+max visits) x 0.1 (the paper's Atari c_visit / c_scale); q_hat is normalized
+by the search's min-max range with EfficientZero's range floor (EZ-V2 style;
+the floor never binds here: root-Q spread median 0.097 / 0.053). Below the
+root: the paper's deterministic visit matching. No Dirichlet noise.
+Deviations from mctx, measured on prioract2 s0 @50 / @85 (audit r2 re-run
+of the r1 probe, scratchpad audit_gumbel_r2/engine_probe2.log): the final
+pick is among the 3 survivors, not mctx's most-visited 2 (the played action
+differs in 6.1% / 10.3% of steps); min-max over the tree, not per node
+(10.4% / 15.3%); the greedy argmax differs in 8.9% / 11.4%.
+EXPLORATION SCHEDULE (ACTOR_GUMBEL_STAGED_SCALE): the actor's self-play
+Gumbel draws are scaled by the twin's staged visit temperature (1 / 0.5 /
+0.25 at 50% / 75% of the run): argmax(T*g + logits + sigma(q_hat)) is a
+temperature-T sample of the improved policy among the halving survivors.
+Measured (below): at the paper's scale 1, Gumbel-8 matches a 50-sim search
+about as often as PUCT-8 at T=1, so without the schedule the late rows would
+compare different exploration levels. Deviation from the paper (scale 1
+throughout). Greedy searches keep scale 1 (they act by the improved-policy
+argmax).
+MEASURED BEFORE LAUNCH (prioract2 s0 weights, real Pong states, CPU;
+scratchpad gumbel_measure.py / gumbel_measure2.py):
+  latency per decision (act_search, 1 torch thread as the production Ray
+  actor, machine loaded by test suites -- ratios hold, absolutes high):
+  PUCT-8 66.9 ms, Gumbel-8 47.9 ms (0.72x: phase 0 batches its 6 root-
+  forced simulations), Gumbel-4 29.7, Gumbel-16 103.5, PUCT-16 128.1. With
+  the unloaded PUCT-8 figure (~54 ms/step incl. env) -> Gumbel-8 ~40
+  ms/step, inside a 4-frame decision (66.7 ms). Faster games also join the
+  eager collect earlier than the twin's (slightly fresher data) -- noted.
+  power -- how often the acted action matches a 50-sim PUCT search's
+  greedy argmax (K=16 draws per state; prior rows exact):
+                         @50    @85
+    PUCT-8 at T 1       0.485  0.406
+    PUCT-8 at T 0.5     0.523  0.452
+    PUCT-8 at T 0.25    0.552  0.479
+    prior at T 1        0.407  0.290
+    prior at T 0.5      0.559  0.373
+    prior at T 0.25     0.671  0.443
+    Gumbel-8, scale 1   0.470  0.397
+    greedy: Gumbel-8 0.598 / 0.488, PUCT-8 0.661 / 0.535, prior argmax
+    0.748 / 0.465.
+  staged scale, paired with PUCT-8 at the same T on the same states (K=8):
+                         @50            @85
+                     Gumbel  PUCT   Gumbel  PUCT
+    T 1               0.483  0.470   0.372  0.425
+    T 0.5             0.530  0.516   0.443  0.441
+    T 0.25            0.600  0.535   0.450  0.464
+  -> with the schedule, Gumbel-8's exploration tracks the twin's at every
+  stage (within +-0.065).
+  The reference is itself a (50-sim) PUCT search that leans on the prior,
+  so agreement favours PUCT-8 and the prior; it is a manipulation check,
+  not a quality measure. Q changes the played action relative to pure
+  prior sampling in 37.2% / 39.4% of steps (engine_probe2.log) -- the
+  manipulation is real.
+  PRE-LAUNCH OBSERVATION (audit r1, searchact8 s0 @90, noops 1-8): the
+  greedy Gumbel-8 agent scored +15.1 vs the prior argmax's +19.5 on the
+  same games (paired -4.4); min-max stretches small one-step Q differences
+  to ~5 logits of sigma, so at deployment the 8-sim Gumbel agent can be
+  WORSE than the prior it searches from. Read (D) measures this properly.
+PRE-REGISTERED READS (exact prior-argmax evals, rows 45-90 -- comparable
+with every run; secondary: external recal 60-90):
+  (A) the action-quality read (as searchact8's): first success (exact >=
+      +10 or >= 3/4 phases) at <= 65 -> consistent with low-sim Gumbel
+      acting recovering search acting's earlier breakout (50-sim search
+      acting: @50-65); >= 70 or none -> not supported at 8 Gumbel sims;
+  (B) vs the twin (PUCT-8, same seed): first success @90, mean 60-90
+      +2.30 -- reported, single-seed, descriptive;
+  (1)-(3) the standard reads and bands (NO WORSE >= +3.68, WORSE < -2.32).
+  (D) the deployment read (tertiary, new): the SEARCH agent a search-
+      acting Switch player would deploy -- probe_exhaustive_eval with
+      PROBE_SEARCH_SIMS 8 on rows 60-90: greedy Gumbel-8 (improved-policy
+      argmax; np.random reseeded per game) on this run, and greedy PUCT-8
+      on searchact8 s0's snapshots (the 10-10 question: what the 8-sim
+      agent itself scores). Each against its run's prior-argmax mean on
+      the same rows. Known asymmetries: PUCT-8's max visit count ties in
+      6.7% / 18.3% of states (@50 / @85) and its greedy rule then takes the
+      lowest action index; the greedy Gumbel-8 agent keeps scale-1 draws in
+      its halving (one draw of a stochastic agent per noop count, reseeded
+      for reproducibility) while greedy PUCT-8 is deterministic.
+INTERPRETATION (single seed, hedged): (A) yes and not WORSE -> Gumbel-8
+acting is a real-time-viable improvement -> its seed 1. (A) yes but WORSE
+-> mixed (an early breakout that does not hold) -> seed 1 before any
+conclusion. (A) no -> 8-sim acting does not move the breakout with either
+engine; the temperature + stabilizer config stays the base for policy-only
+acting. Either way, queue item (3), Gumbel + SVE, stays exactly as Kai set
+it: conditional only on SVE seed 0 working out (this result is reported to
+him with it). (D) decides separately whether a deployed Switch player
+should search at 8 sims at all.
+COST: the actor's ~2000-3000-step game takes ~1.5-2 min, inside the ~13-min
+training block (eager collect joins it mid-block); ~13-14 min/iter -> ~20
+h. Evals after the run: exact + recal (~30 min), then the search-agent
+probes (14 snapshots, ~107 s per Gumbel game at 2 threads -> ~5 h).
+QUEUE MECHANICS: supervise_gumbelact8.py ray 0 (WMI, launched from the
+worktree path before the merge; run folder created first) waits for SVE
+seed 0's completion marker (ALERT and hold if it FAILED), then polls its
+preflight (the manifest needs the gumbelact branch on main); a WMI watcher
+(gumbel_merge.py) merges gumbelact into main only after SVE seed 0's eval
+hand-off logs "all done" AND the run completed (up to 4 attempts); the
+supervisor launches at its next 10-min poll. post_gumbel.py runs the evals.
+The worktree Y:\SwitchPlayer-gumbel must stay on gumbelact until the run
+completes (the supervisor reads its manifest from there on every
+relaunch). A stall on a failure path (the SVE hand-off dying, a manual SVE
+relaunch after a CRASH LOOP) shows only as WAITING / PREFLIGHT lines.
+AUDIT: round 1 one HIGH (a preflight suite pinned the probe's old source --
+the queue could never have launched) + LOWs, fixed with the staged scale
+added; round 2 nothing above LOW -- the loop closes. Round-2 fixes to text
+and scripts only (numbers above, queue item (3) as registered, the merge
+watcher's explicit identity, this pre-registration on the gumbelact branch
+so the merge fast-forwards). Deferred (test-only): r2 LOW-1 (the staged-
+scale tests use patched temperatures and scales 0/1 only), NIT-1
+(behavioural supervisor test), NIT-3 (test thread/sys.path residue).
+
 ### Next experiment (pre-registered) -- SVE seed 0, then Gumbel acting (Kai, 2026-10-12)
 
 DECISION (Kai, 2026-10-12): "run a second SVE seed, then plan gumbel to run
