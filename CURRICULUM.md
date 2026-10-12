@@ -747,6 +747,56 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- SVE on the temperature + stabilizer config (seed 1), 2026-10-12
+
+pong-sve2-s1-2026-10-10 ran 10-10 19:36 -> 10-11 21:35 (93,571 s, one
+attempt, no interruptions; ~19-20 min/iter after T1, inside the 18-21
+estimate). EXACT evals, DEPLOYED (shipped acting states) / RAW (trainer
+statistics) / external-calibration recal:
+  iter      45     50     55     60     65     70     75     80     85     90
+  deployed -13.4  -16.5  -13.5  -15.8  -12.8   -8.0  -14.5  -13.7  -14.5  -16.7
+    won     0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4
+  raw      -14.2  -16.7  -12.2  -14.3  -12.6  -13.3  -12.5  -13.5  -12.7  -14.8
+    won     0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4
+  ext recal                     -11.4  -12.5  -14.6  -11.9  -14.8  -12.2  -14.0
+  twin dep -14.3  -13.6  -13.1  -13.1   -1.0   -3.8  +10.1   +9.5  +20.4  +18.4
+NO BREAKOUT. The closest it came: deployed @70 (-8.0; phases 1/3 at -2.75 /
+-1.0, 14 games capped). In-run eval (prior argmax) -9.4 @70, -17.8 @90.
+READ (1) speed: no first success, no row >= +15 (twin @75 / @85).
+READ (2) level: deployed mean 60-90 = -13.7001 -> WORSE (< -2.32); raw
+-13.3904; external recal -13.0619 (twin +5.8046 / +5.4667 / +6.7669).
+READ (3) late stability: 7 of 7 rows 60-90 below 0 (twin 3) -- no breakout
+to collapse from.
+READ (4) diagnostics: sve_buffer_frac 0 through row 20; row 25 0.151 (below
+the 0.20-0.25 predicted: this run's slower pace put 26.6k transitions in
+the buffer by iteration 25 vs the twin's 30.1k), then 0.33-0.35 (in
+range). sve_frac 0.146 @25, then 0.285-0.312 (~0.87 of the buffer share:
+PER samples stale roots slightly less). sve_td_bias +0.143 @25 (stage-0
+prediction ~+0.11), then drifting DOWN to +0.079 @90; sve_td_gap 0.19 ->
+0.14. SVE did what it was built to do; nothing in the value diagnostics
+looks broken.
+STOP RULE (authoritative, from the two jsonl files): same-row ratio above
+2x at 25 (2.08), 50 (2.46), 55 (2.21) -- longest streak 2 (@50-55); NOT
+triggered. The live supervisor printed the same streaks.
+BEHAVIOUR VS THE TWIN, rows 75-90: search-target entropy 1.29-1.44 (twin
+1.24-1.31), act/target agreement 0.40-0.47 (0.46-0.51), prior maxp
+0.36-0.38 (0.38-0.40). The twin's late rows are a winning agent's, so these
+read as consequences as much as causes.
+PAIRING: the twin pairs the initial weights only. env_steps already differ
+at row 5 (4,327 vs 4,911), so the parallel actor's timing split the games
+in the first iterations, well before T1 -- in practice an independent run
+from the same start.
+PRE-REGISTERED INTERPRETATION: SVE HELPS -> NO (no first success; (2)
+WORSE). "One seed: a null or negative result is suggestive only." Base
+rate: the policy-only line has had a non-breakout seed before (prioract2 s1,
+-10.45; the unscaled config broke out 2/4), and the temperature config
+without SVE broke out 2/2. This seed cannot separate SVE hurting from an
+unlucky run, but it gives no sign of the speed gain SVE was run for, at
++52% training wall clock. Next step is Kai's call: a second SVE seed (~26
+h), or keep the temperature + stabilizer config as the base and move on.
+The audited-file freeze is lifted; the r2 LOW-A/B/C stop-rule hardening
+stays deferred (moot unless SVE runs again).
+
 ### Next experiment (pre-registered) -- SVE on the temperature + stabilizer config (Kai, 2026-10-10)
 
 DECISION (Kai, 2026-10-10: "building SVE makes sense as a next step"):
