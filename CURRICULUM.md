@@ -747,6 +747,46 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- SVE seed 0 (temperature + stabilizer config), 2026-10-13
+
+pong-sve2-s0-2026-10-10 ran 10-12 15:31 -> 10-13 18:23 (96,751 s, one
+attempt, no interruptions). Evals by the hand-off 18:24-18:53. EXACT evals,
+DEPLOYED (shipped acting states) / RAW / external-calibration recal, and
+the reference (pong-tempscale-s0, no stabilizer, no deployed series):
+  iter      45     50     55     60     65     70     75     80     85     90
+  deployed -14.2  -13.7  -13.5  -12.0  -13.6   -9.1   -8.8   -7.5  -12.4   -8.1
+    won     0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4
+  raw      -15.3  -13.1  -16.5   -9.6  -14.1  -14.0  -10.4   -9.1  -12.1   -6.3
+    won     0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    1/4
+  ext recal                     -14.2  -14.1   -7.7   -6.6   -4.5  -12.4   -7.0
+  ref raw   -7.8   -2.0  -19.5   +2.6   +2.5  +11.6  +13.9   -2.1   +9.2  -18.9
+  ref recal                     +1.7   +5.0   -0.9  +11.1  +17.8  +10.3  +16.4
+NO BREAKOUT. Slow climb from ~-14 (45-65) to -7.5..-9 (70-90, many games
+capped, deployed phase 0 at -1.0 @80); the only phases won are raw @90
+(phase 0, +1.1) and recal @90 (phase 2, +0.1). In-run eval (prior argmax)
+-9.2 @70, -8.6 @90.
+READ (1) speed: no first success, no row >= +15 (reference raw @70).
+READ (2) level: deployed mean 60-90 = -10.2143 -> WORSE (< -2.32); raw
+-10.7906; external recal -9.4859 (reference raw +2.6951, recal +8.7809).
+READ (3) late stability: 7 of 7 rows 60-90 below 0 (reference raw 2).
+READ (4) diagnostics: sve_buffer_frac 0.29 @25, then 0.32-0.35 (in range);
+sve_frac 0.27-0.31; sve_td_bias +0.155 @25 drifting DOWN to +0.077 @90;
+sve_td_gap 0.21 -> 0.13. As in seed 1, SVE behaved as built.
+STOP RULE (from the two jsonl files): same-row ratio above 2x at 35 (3.44)
+and 45 (2.73) only -- longest streak 1; NOT triggered (live: the same).
+PAIRING: env_steps already differ at row 5 (4,746 vs 4,349); late rows
+trail the reference (170,671 vs 180,020 @90). Start-only pairing, as
+pre-registered.
+WORKS OUT -> NO (no first success; (2) WORSE). TWO-SEED SUMMARY: SVE 0/2
+breakouts (deployed means -13.70 / -10.21) vs 2/2 for the temperature
+config without SVE -> SVE SHELVED on the policy-only line, as
+pre-registered. Queue item (3), Gumbel + SVE, does NOT run. Queue item (2),
+Gumbel acting, launched as armed: gumbel_merge fast-forwarded main to
+a980ed44 at 18:53, the supervisor launched at 18:58 (preflight 14 suites).
+PAUSED 10-13 20:57 (Kai asked) after its iteration-10 checkpoint (in-run
+rows 5/10: -21.0 / -19.2; twin searchact8 s0 -20.6 / -17.6; ~11.5
+min/iter).
+
 ### Next experiment (pre-registered) -- Gumbel search acting (Kai, 2026-10-12)
 
 DECISION (Kai, 2026-10-12): "plan gumbel to run immediately after [SVE
