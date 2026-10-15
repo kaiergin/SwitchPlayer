@@ -771,8 +771,8 @@ PRE-REGISTERED READS (exact prior-argmax evals, rows 45-90; external recal
   (1) breakout: first success (exact >= +10 or >= 3/4 phases) at any row;
   (2) level: mean 60-90 vs the bands (NO WORSE >= +3.68, WORSE < -2.32);
   (3) late stability: rows below 0 after the first success;
-  (4) data: env steps at the first success (seed 0: 148.9k; bnrecal s1
-      raw: its @70 row), reported so a gain is not mistaken for extra data.
+  (4) data: env steps at the first success (seed 0: 148.9k @70; bnrecal s1
+      raw: 130.9k @70), reported so a gain is not mistaken for extra data.
 TWO-SEED DECISION:
   REPLICATES -- seed 1 breaks out AND its mean 60-90 is NO WORSE: Gumbel-8
     acting is 2/2 and NO WORSE on both seeds -> it becomes the training

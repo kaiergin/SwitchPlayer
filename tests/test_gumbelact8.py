@@ -581,11 +581,10 @@ def test_supervisor_variant_suites_seed_and_queue():
     assert "benchmarks/probes/probe_exhaustive_eval.py" in aud
     src = SUP.read_text(encoding="utf-8")
     assert f"preflight ok (manifest + quick probe + {len(suites)} suites)" in src
-    # queued behind SVE seed 0's completion marker, ALERTing if it failed
-    wait = ast.unparse(lit("WAIT_CKPTS"))
-    assert "pong-sve2-s0-2026-10-10" in wait and "sve-seed0.ckpt" in wait
+    # each seed queued behind a completion marker, ALERTing if that run failed
+    assert ast.literal_eval(lit("SEEDS")) == {0: "2026-10-12", 1: "2026-10-15"}
     loops = [ast.unparse(n) for n in tree.body if isinstance(n, ast.While)]
-    assert any("_seed_state" in l and "ALERT: SVE seed 0 FAILED" in l
+    assert any("_seed_state" in l and "FAILED" in l and "WAIT_NAME" in l
                for l in loops)
     # r1 L4 (S4-S7): the twin's run command and module set, this run's dir
     twin_tree = ast.parse((ROOT / "benchmarks" / "supervisors" /
@@ -598,9 +597,76 @@ def test_supervisor_variant_suites_seed_and_queue():
     assert ast.unparse(lit("COMMON")) == ast.unparse(twin_lit("COMMON"))
     assert (set(ast.literal_eval(twin_lit("AUDITED")))
             - {"benchmarks/supervisors/supervise_searchact8.py"}) <= set(aud)
-    assert "2026-10-12" in ast.unparse(lit("REL"))
+    assert ast.unparse(lit("REL")) == (
+        "f'benchmarks/results/{_stem}-s{SEED}-{SEEDS[SEED]}'")
     quick = ast.unparse(lit("QUICK"))
     assert "ACTOR_GUMBEL_SEARCH" in quick and "is True" in quick
-    r = subprocess.run([sys.executable, str(SUP), "ray", "1"],
+    r = subprocess.run([sys.executable, str(SUP), "ray", "2"],
                        capture_output=True, text=True, cwd=str(ROOT), timeout=60)
-    assert r.returncode != 0 and "pre-registered as SEED 0" in r.stderr
+    assert r.returncode != 0 and "pre-registered for seeds [0, 1]" in r.stderr
+
+
+def _sup_ns(argv):
+    """The supervisor's module-level setup (everything before the
+    --write-manifest branch: constants, the per-seed paths, the helpers),
+    executed with `argv` -- no preflight, no launch."""
+    tree = ast.parse(SUP.read_text(encoding="utf-8"))
+    stop = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.If)
+                and "--write-manifest" in ast.unparse(n.test))
+    code = compile(ast.Module(body=tree.body[:stop], type_ignores=[]),
+                   str(SUP), "exec")
+    ns = {"__file__": str(SUP), "__name__": "supervise_gumbelact8_probe"}
+    old = sys.argv
+    sys.argv = list(argv)
+    try:
+        exec(code, ns)
+    finally:
+        sys.argv = old
+    return ns
+
+
+@pytest.mark.parametrize("seed, folder, wait_name, wait_dir, wait_ckpt", [
+    (0, "pong-gumbelact8-s0-2026-10-12", "SVE seed 0",
+     "pong-sve2-s0-2026-10-10",
+     "resume-pong-skip4-effzero-repro-faithful-prioract-noredo-temp05-"
+     "bnrecal-sve-seed0.ckpt"),
+    (1, "pong-gumbelact8-s1-2026-10-15", "Gumbel seed 0",
+     "pong-gumbelact8-s0-2026-10-12",
+     f"resume-pong-skip4-{ARM}-seed0.ckpt"),
+])
+def test_supervisor_seed_paths_and_queue(seed, folder, wait_name, wait_dir,
+                                         wait_ckpt):
+    ns = _sup_ns(["supervise_gumbelact8.py", "ray", str(seed)])
+    res = os.path.join(ns["REPO"], "benchmarks", "results")
+    assert ns["SEED"] == seed and ns["ARM"] == ARM
+    assert ns["REL"] == f"benchmarks/results/{folder}"
+    assert ns["BASE"] == os.path.join(res, folder)
+    assert ns["CKPT"] == os.path.join(
+        res, folder, f"resume-pong-skip4-{ARM}-seed{seed}.ckpt")
+    assert ns["COMMON"][ns["COMMON"].index("--seed") + 1] == str(seed)
+    assert ns["WAIT_NAME"] == wait_name
+    assert ns["WAIT_CKPTS"] == [os.path.join(res, wait_dir, wait_ckpt)]
+    # seed 1's wait is Gumbel seed 0 -- never itself
+    assert ns["CKPT"] not in ns["WAIT_CKPTS"]
+
+
+def test_supervisor_write_manifest_mode_resolves_seed_0():
+    ns = _sup_ns(["supervise_gumbelact8.py", "--write-manifest"])
+    assert ns["SEED"] == 0 and ns["WRITE"] is True
+    assert ns["REL"] == "benchmarks/results/pong-gumbelact8-s0-2026-10-12"
+
+
+def test_supervisor_seed_state_reads_the_waited_runs_marker(tmp_path):
+    ns = _sup_ns(["supervise_gumbelact8.py", "ray", "1"])
+    st = ns["_seed_state"]
+    ck = tmp_path / "resume.ckpt"
+    assert st(str(ck)) == "running"                   # nothing yet
+    ck.write_bytes(b"x" * 1_000_001)                   # a live checkpoint
+    assert st(str(ck)) == "running"
+    (tmp_path / "supervisor.log").write_text("CRASH LOOP: 5 deaths\n")
+    assert st(str(ck)) == "failed"
+    (tmp_path / "supervisor.log").write_text("RUN COMPLETE s0\n")
+    assert st(str(ck)) == "done"
+    (tmp_path / "supervisor.log").unlink()
+    ck.write_bytes(b"marker")                          # shrunk = complete
+    assert st(str(ck)) == "done"

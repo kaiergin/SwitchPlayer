@@ -1,18 +1,18 @@
 """Gumbel search acting with birth-search targets (Kai, 2026-10-12):
-effzero-repro-faithful-gumbelact8-birth, SEED 0, --ray --cpu-actor (pinned
-by the arm). Design and pre-registered reads: CURRICULUM.md "Next experiment
-(pre-registered) -- Gumbel search acting". Queued behind SVE seed 0: waits
-for its completion marker, then for the main tree to hold the audited
-revision (merged by hand / the watcher only after SVE seed 0's evals).
+effzero-repro-faithful-gumbelact8-birth, --ray --cpu-actor (pinned by the
+arm). SEED 0 (2026-10-12; pre-registered in CURRICULUM.md "Next experiment
+(pre-registered) -- Gumbel search acting") and SEED 1 (Kai, 2026-10-15: "run
+gumbel one more time"; "... Gumbel search acting, seed 1"). Each seed waits
+for the completion marker of the run it was queued behind (seed 0: SVE seed
+0; seed 1: Gumbel seed 0), then for the main tree to hold the audited
+revision.
 
-    python benchmarks/supervisors/supervise_gumbelact8.py ray 0
+    python benchmarks/supervisors/supervise_gumbelact8.py ray SEED
 
-Launched BEFORE the merge, it runs from the worktree's absolute path (the
-script is not in main yet; its manifest is the worktree copy, identical to
-main's after the merge), with cwd Y:/SwitchPlayer and stdout appended to
-benchmarks/results/pong-gumbelact8-s0-2026-10-12/supervisor.log -- create
-that folder first (the shell redirect opens the log before Python runs;
-post_gumbel.py reads it for RUN COMPLETE / CRASH LOOP).
+Launch with cwd Y:/SwitchPlayer and stdout appended to the seed's
+benchmarks/results/pong-gumbelact8-s{SEED}-{SEEDS[SEED]}/supervisor.log --
+create that folder first (the shell redirect opens the log before Python
+runs; the eval hand-off reads it for RUN COMPLETE / CRASH LOOP).
 
 Supervisor v2 pattern; a relaunch auto-resumes from the last checkpoint."""
 import json
@@ -26,23 +26,32 @@ VARIANTS = {
     "ray": ("effzero-repro-faithful-gumbelact8-birth",
             "pong-gumbelact8", ["--ray", "--cpu-actor"]),
 }
+# The pre-registered seeds and each one's run-folder date.
+SEEDS = {0: "2026-10-12", 1: "2026-10-15"}
 WRITE = "--write-manifest" in sys.argv
 VARIANT = "ray" if WRITE else sys.argv[1]
 SEED = 0 if WRITE else int(sys.argv[2])
-if not WRITE and SEED != 0:
-    sys.exit(f"supervise_gumbelact8: this arm is pre-registered as SEED 0; "
-             f"refusing seed {SEED}")
+if SEED not in SEEDS:
+    sys.exit(f"supervise_gumbelact8: this arm is pre-registered for seeds "
+             f"{sorted(SEEDS)}; refusing seed {SEED}")
 REPO = r"Y:\SwitchPlayer"
 ARM, _stem, _mode = VARIANTS[VARIANT]
-REL = f"benchmarks/results/{_stem}-s{SEED}-2026-10-12"
+REL = f"benchmarks/results/{_stem}-s{SEED}-{SEEDS[SEED]}"
 
 
-# The queue (Kai, 2026-10-12): SVE seed 0 first. Its completion marker (a
-# shrunk checkpoint, or its supervisor's RUN COMPLETE) releases this wait.
-WAIT_CKPTS = [os.path.join(
-    REPO, "benchmarks", "results", "pong-sve2-s0-2026-10-10",
-    "resume-pong-skip4-effzero-repro-faithful-prioract-noredo-temp05-"
-    "bnrecal-sve-seed0.ckpt")]
+# The queue: the run each seed was queued behind (Kai, 2026-10-12: SVE seed
+# 0, then Gumbel; 2026-10-15: Gumbel seed 1 after seed 0). Its completion
+# marker (a shrunk checkpoint, or its supervisor's RUN COMPLETE) releases
+# the wait.
+WAIT = {0: ("SVE seed 0", [os.path.join(
+            REPO, "benchmarks", "results", "pong-sve2-s0-2026-10-10",
+            "resume-pong-skip4-effzero-repro-faithful-prioract-noredo-temp05-"
+            "bnrecal-sve-seed0.ckpt")]),
+        1: ("Gumbel seed 0", [os.path.join(
+            REPO, "benchmarks", "results", "pong-gumbelact8-s0-2026-10-12",
+            "resume-pong-skip4-effzero-repro-faithful-gumbelact8-birth-"
+            "seed0.ckpt")])}
+WAIT_NAME, WAIT_CKPTS = WAIT[SEED]
 BASE = os.path.join(REPO, *REL.split("/"))
 PY = os.path.join(REPO, ".venv", "Scripts", "python.exe")
 JSONL = os.path.join(BASE, "ablation-pong-skip4.jsonl")
@@ -295,10 +304,10 @@ while True:
         break
     msg = "WAITING (%s)" % states
     if "failed" in states:
-        # SVE seed 0 gave up (CRASH LOOP / MAX ATTEMPTS): the queue holds
+        # The run ahead gave up (CRASH LOOP / MAX ATTEMPTS): the queue holds
         # (its relaunch must not race this run) and says so.
-        msg = ("ALERT: SVE seed 0 FAILED -- holding the Gumbel launch until it "
-               "is relaunched and completes (%s)" % states)
+        msg = ("ALERT: %s FAILED -- holding the Gumbel seed %d launch until "
+               "it is relaunched and completes (%s)" % (WAIT_NAME, SEED, states))
     if msg != told or waited % 60 == 0:
         print(f"{msg} [{waited // 60} h]", flush=True)
         told = msg
