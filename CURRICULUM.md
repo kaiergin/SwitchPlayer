@@ -747,6 +747,48 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Gumbel search acting, seed 1 (Kai, 2026-10-15)
+
+DECISION (Kai, 2026-10-15): "let's run gumbel one more time then decide
+what comes next" -- next being his list of things to try, or moving the
+working algorithm to a different game (e.g. Ms. Pac-Man) to see whether it
+holds up.
+QUESTION: does seed 0's result -- breakout @70, the line's highest 60-90
+mean (+9.74), no collapse after it -- replicate on another seed?
+ARM unchanged: effzero-repro-faithful-gumbelact8-birth (the audited 10-12
+arm), SEED 1, dir pong-gumbelact8-s1-2026-10-15. Supervisor change only:
+supervise_gumbelact8.py accepts seeds 0 and 1 (each with its own run-folder
+date and the run it queues behind: seed 1 behind Gumbel seed 0's completion
+marker, already there).
+SEED-1 REFERENCES (no PUCT-8 run exists at seed 1): pong-prioract2-s1 (the
+same base arm with prior sampling): no breakout, raw mean 60-90 -10.45;
+pong-bnrecal-s1 (temperature + stabilizer): raw first success @70
+(deployed @75), raw mean +5.47 (deployed +5.80). Seed 1 has been the harder
+seed: 3 of the 4 other configs run on it never broke out (prioract2,
+seqref, SVE).
+PRE-REGISTERED READS (exact prior-argmax evals, rows 45-90; external recal
+60-90 secondary -- as seed 0):
+  (1) breakout: first success (exact >= +10 or >= 3/4 phases) at any row;
+  (2) level: mean 60-90 vs the bands (NO WORSE >= +3.68, WORSE < -2.32);
+  (3) late stability: rows below 0 after the first success;
+  (4) data: env steps at the first success (seed 0: 148.9k; bnrecal s1
+      raw: its @70 row), reported so a gain is not mistaken for extra data.
+TWO-SEED DECISION:
+  REPLICATES -- seed 1 breaks out AND its mean 60-90 is NO WORSE: Gumbel-8
+    acting is 2/2 and NO WORSE on both seeds -> it becomes the training
+    configuration for the real-time line (the deployed player stays the
+    prior argmax, read (D) 10-15). Two-seed raw mean reported against the
+    temperature config's (+2.70 s0 / +5.47 s1 = +4.08).
+  BREAKS OUT ONLY -- a first success but the mean below +3.68: 2/2
+    breakouts like the temperature config but no level gain shown -> Kai's
+    call between the two (cost per decision during training: Gumbel-8 ~40
+    ms vs prior sampling ~2 ms; both fit a 4-frame decision).
+  NO BREAKOUT -- Gumbel-8 1/2; the temperature config (2/2) stays the base.
+The search-agent read (D) is not repeated (answered on both engines, 14
+snapshot rows, consistent).
+COST: ~20 h (seed 0: 72 iterations at ~13.7 min) + ~30 min evals (exact
+45-90, recal 60-90) by a hand-off script.
+
 ### RESULT -- Gumbel search acting (8 sims, staged scale), seed 0, 2026-10-15
 
 pong-gumbelact8-s0-2026-10-12 ran 10-13 18:58 -> 10-15 03:48 (paused by Kai
