@@ -747,6 +747,62 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Gumbel search acting (8 sims, staged scale), seed 0, 2026-10-15
+
+pong-gumbelact8-s0-2026-10-12 ran 10-13 18:58 -> 10-15 03:48 (paused by Kai
+10-13 20:57 -> 10-14 01:27 at the iter-10 checkpoint; a power cut 10-14
+~03:26 lost iters 19-20, resumed 11:19 from the iter-18 checkpoint, which
+read back whole). Evals by the hand-off 03:49-07:15. EXACT prior argmax
+(raw) / external recal / the 8-sim SEARCH AGENT, and the twin
+(pong-searchact8-s0, PUCT-8 acting):
+  iter       45     50     55     60     65     70     75     80     85     90
+  raw      -13.7   -9.6   -7.2   -7.5   -0.5   +7.3  +17.9  +17.7  +15.4  +17.9
+    won     0/4    0/4    0/4    0/4    1/4    3/4    4/4    4/4    4/4    4/4
+  recal                         -10.4   -0.8  +17.4  +19.1  +18.2  +17.5  +17.0
+  Gumbel-8 agent                 -9.2   -1.1  -13.1  +12.4  +12.7  +12.6  +14.1
+  twin raw  -8.6  -10.9  -10.4   -9.2   -4.6   +2.1   +5.9   -1.4   +3.8  +19.4
+  PUCT-8 agent (twin)           -11.2   -3.5   +2.3  -15.7   -7.2   -4.7  +19.5
+  env steps  81.5k  94.5k 107.5k 121.0k 134.7k 148.9k 162.1k 174.1k 185.3k 196.3k
+  twin env   60.9k  69.9k  80.8k  89.7k 100.6k 113.1k 125.2k 137.2k 150.6k 162.7k
+BREAKOUT @70 (+7.3, 3/4 phases), then four rows +15.4..+17.9, every game
+>= +8 from @75 on. In-run eval (prior argmax) +1.9 @65, +7.5 @70, +18.8 @75,
++18.8 @90.
+READ (A): first success @70 -> NOT SUPPORTED by the pre-registered letter
+(<= 65): 8 Gumbel sims did not recover 50-sim search acting's @50-65.
+READ (B) vs the twin (descriptive, single seed): first success @70 vs @90;
+mean 60-90 +9.74 vs +2.30. CONFOUND, larger than pre-registered ("slightly
+fresher data"): the faster Gumbel actor collected more env steps per
+iteration in iters 10-55 (+35% by @50), so by iteration the Gumbel run had
+more data. At matched env steps the gap shrinks: Gumbel first success at
+148.9k env steps vs the twin's at 162.7k; the twin at ~113k (@70) was +2.1,
+the Gumbel run at ~121k (@60) -7.5.
+READ (1) speed: first success @70, first >= +15 @75.
+READ (2) level: mean 60-90 = +9.7381 -> NO WORSE (>= +3.68); recal
++11.1334. The highest 60-90 mean of the real-time line (temperature config:
+tempscale s0 raw +2.70, bnrecal s1 deployed +5.80; twin +2.30).
+READ (3) late stability: 2 of 7 rows 60-90 below 0 (both before the
+breakout); no collapse after it (tempscale s0 had -18.9 @90, the twin -1.4
+@80).
+READ (D), deployment (the 10-10 question): searching at 8 sims at
+deployment HURTS on both engines. Paired game by game against the same
+snapshot's prior argmax, rows 60-90: Gumbel-8 -5.67 (worse in 145 of 210
+games), PUCT-8 on the twin -5.23 (worse in 131). Each has one collapsed row
+(Gumbel @70 -13.1 vs the prior's +7.3; PUCT @75 -15.7 vs +5.9) and neither
+beats the prior at any row by more than +1.03. The pre-launch audit
+observation (-4.4) holds up. A Switch player trained with search acting
+should still deploy the prior argmax.
+PRE-REGISTERED INTERPRETATION: (A) no -> "8-sim acting does not move the
+breakout with either engine; the temperature + stabilizer config stays the
+base for policy-only acting." Queue item (3) (Gumbel + SVE) does not run
+(SVE s0 did not work out). Beyond the letter, single seed: the Gumbel run
+broke out no earlier than the temperature config (@70 / @75) but held the
+highest, most stable late level of the line -- whether that replicates
+(and how much is the extra data) needs a second seed. Gumbel-8 acting costs
+~40 ms/decision during training (inside a 4-frame budget); the deployed
+player stays policy-only either way. Next step is Kai's call. The
+audited-file freeze is lifted; deferred test-only items: Gumbel r2 LOW-1,
+NIT-1, NIT-3 (the SVE2 deferrals are moot with SVE shelved).
+
 ### RESULT -- SVE seed 0 (temperature + stabilizer config), 2026-10-13
 
 pong-sve2-s0-2026-10-10 ran 10-12 15:31 -> 10-13 18:23 (96,751 s, one
