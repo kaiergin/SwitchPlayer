@@ -584,8 +584,8 @@ def test_supervisor_variant_suites_seed_and_queue():
     # each seed queued behind a completion marker, ALERTing if that run failed
     assert ast.literal_eval(lit("SEEDS")) == {0: "2026-10-12", 1: "2026-10-15"}
     loops = [ast.unparse(n) for n in tree.body if isinstance(n, ast.While)]
-    assert any("_seed_state" in l and "FAILED" in l and "WAIT_NAME" in l
-               for l in loops)
+    assert any("_seed_state(c) for c in WAIT_CKPTS" in l and "FAILED" in l
+               and "WAIT_NAME" in l for l in loops)
     # r1 L4 (S4-S7): the twin's run command and module set, this run's dir
     twin_tree = ast.parse((ROOT / "benchmarks" / "supervisors" /
                            "supervise_searchact8.py").read_text(encoding="utf-8"))

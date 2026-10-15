@@ -764,30 +764,40 @@ SEED-1 REFERENCES (no PUCT-8 run exists at seed 1): pong-prioract2-s1 (the
 same base arm with prior sampling): no breakout, raw mean 60-90 -10.45;
 pong-bnrecal-s1 (temperature + stabilizer): raw first success @70
 (deployed @75), raw mean +5.47 (deployed +5.80). Seed 1 has been the harder
-seed: 3 of the 4 other configs run on it never broke out (prioract2,
-seqref, SVE).
+seed for policy-only acting: 3 of the 4 other policy-only configs run on it
+never broke out (prioract2, seqref, SVE); the 50-sim search-acting control
+(pong-faithful-s1) did (recal @65).
 PRE-REGISTERED READS (exact prior-argmax evals, rows 45-90; external recal
 60-90 secondary -- as seed 0):
   (1) breakout: first success (exact >= +10 or >= 3/4 phases) at any row;
   (2) level: mean 60-90 vs the bands (NO WORSE >= +3.68, WORSE < -2.32);
-  (3) late stability: rows below 0 after the first success;
+  (3) late stability: rows below 0 after the first success. A COLLAPSE is
+      such a row unless its external recal row is >= 0 (the known BN
+      artifact, as tempscale s0 @90 -- reported, not counted); rows before
+      60 have no recal and count as they are. STABLE = no collapse;
   (4) data: env steps at the first success (seed 0: 148.9k @70; bnrecal s1
       raw: 130.9k @70), reported so a gain is not mistaken for extra data.
 TWO-SEED DECISION:
-  REPLICATES -- seed 1 breaks out AND its mean 60-90 is NO WORSE: Gumbel-8
-    acting is 2/2 and NO WORSE on both seeds -> it becomes the training
-    configuration for the real-time line (the deployed player stays the
-    prior argmax, read (D) 10-15). Two-seed raw mean reported against the
-    temperature config's (+2.70 s0 / +5.47 s1 = +4.08).
-  BREAKS OUT ONLY -- a first success but the mean below +3.68: 2/2
-    breakouts like the temperature config but no level gain shown -> Kai's
-    call between the two (cost per decision during training: Gumbel-8 ~40
-    ms vs prior sampling ~2 ms; both fit a 4-frame decision).
+  REPLICATES -- seed 1 breaks out AND its mean 60-90 is NO WORSE AND it is
+    STABLE: seed 0's breakout, level and stability all hold on seed 1 ->
+    Gumbel-8 acting becomes the training configuration for the real-time
+    line (the deployed player stays the prior argmax, read (D) 10-15).
+  PARTIAL -- a first success, but the mean below +3.68 or a collapse:
+    2/2 breakouts like the temperature config, but seed 0's level or
+    stability did not hold on seed 1 -> Kai's call between the two (cost
+    per decision during training: Gumbel-8 ~40 ms vs prior sampling ~2 ms;
+    both fit a 4-frame decision).
   NO BREAKOUT -- Gumbel-8 1/2; the temperature config (2/2) stays the base.
+Reported in every case, descriptive only: the two-seed raw mean against
+the temperature config's (+2.70 s0 / +5.47 s1 = +4.08) -- seed 0's +9.74
+carries it above +4.08 for any seed-1 mean above -1.58, so it is not a
+decision read.
 The search-agent read (D) is not repeated (answered on both engines, 14
 snapshot rows, consistent).
-COST: ~20 h (seed 0: 72 iterations at ~13.7 min) + ~30 min evals (exact
-45-90, recal 60-90) by a hand-off script.
+COST: ~20 h (seed 0: 90 iterations in 71,631 s of training) + ~30 min
+evals (exact 45-90, recal 60-90) by the WMI hand-off scratchpad
+post_gumbel_s1.py (log post_gumbel_s1.log; logs "all done"; a FAILED run
+is ALERTed and waited on, so a relaunch still gets its evals).
 
 ### RESULT -- Gumbel search acting (8 sims, staged scale), seed 0, 2026-10-15
 

@@ -181,8 +181,10 @@ def _seed_state(ck):
 
 # Files whose AUDITED content must be in the main tree (sha256 of the text
 # with CRLF normalized to LF, so git's autocrlf round trip does not matter).
-# Written by `supervise_gumbelact8.py --write-manifest` in the worktree when the
-# audit loop closes; any later edit to one of them blocks the launch.
+# Written by `supervise_gumbelact8.py --write-manifest` (it hashes the tree
+# the script sits in -- the gumbelact worktree for seed 0, the main tree for
+# seed 1) when the audit loop closes; any later edit to one of them blocks
+# the launch.
 MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "gumbelact8_manifest.json")
 # Every repo module the run executes (SVE audit r1 L4), plus the tests
