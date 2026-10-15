@@ -754,7 +754,9 @@ what comes next" -- next being his list of things to try, or moving the
 working algorithm to a different game (e.g. Ms. Pac-Man) to see whether it
 holds up.
 QUESTION: does seed 0's result -- breakout @70, the line's highest 60-90
-mean (+9.74), no collapse after it -- replicate on another seed?
+mean (+9.74), no collapse after it -- replicate on another seed? (The level
+test is the NO WORSE band, not seed 0's +9.74; the seed-1 mean is also
+reported against the same-seed temperature reference, bnrecal s1 +5.47.)
 ARM unchanged: effzero-repro-faithful-gumbelact8-birth (the audited 10-12
 arm), SEED 1, dir pong-gumbelact8-s1-2026-10-15. Supervisor change only:
 supervise_gumbelact8.py accepts seeds 0 and 1 (each with its own run-folder
@@ -774,19 +776,25 @@ PRE-REGISTERED READS (exact prior-argmax evals, rows 45-90; external recal
   (3) late stability: rows below 0 after the first success. A COLLAPSE is
       such a row unless its external recal row is >= 0 (the known BN
       artifact, as tempscale s0 @90 -- reported, not counted); rows before
-      60 have no recal and count as they are. STABLE = no collapse;
+      60 have no recal and count as they are. Recal only classifies a raw
+      row here; the raw series stays primary (seed 0 has no row below 0
+      after its first success under either reading). STABLE = no collapse
+      AND at least two rows after the first success (first success <= 80);
+      a first success at 85 or 90 leaves stability UNTESTED;
   (4) data: env steps at the first success (seed 0: 148.9k @70; bnrecal s1
       raw: 130.9k @70), reported so a gain is not mistaken for extra data.
 TWO-SEED DECISION:
   REPLICATES -- seed 1 breaks out AND its mean 60-90 is NO WORSE AND it is
-    STABLE: seed 0's breakout, level and stability all hold on seed 1 ->
+    STABLE (which needs the first success by 80): the breakout and the
+    stability hold on seed 1 and its level clears the NO WORSE band ->
     Gumbel-8 acting becomes the training configuration for the real-time
     line (the deployed player stays the prior argmax, read (D) 10-15).
-  PARTIAL -- a first success, but the mean below +3.68 or a collapse:
-    2/2 breakouts like the temperature config, but seed 0's level or
-    stability did not hold on seed 1 -> Kai's call between the two (cost
-    per decision during training: Gumbel-8 ~40 ms vs prior sampling ~2 ms;
-    both fit a 4-frame decision).
+  PARTIAL -- a first success, but the mean below +3.68, a collapse, or
+    stability UNTESTED (first success at 85 / 90): 2/2 breakouts like the
+    temperature config, but seed 0's level or stability is not shown on
+    seed 1 -> Kai's call between the two (cost per decision during
+    training: Gumbel-8 ~40 ms vs prior sampling ~2 ms; both fit a 4-frame
+    decision).
   NO BREAKOUT -- Gumbel-8 1/2; the temperature config (2/2) stays the base.
 Reported in every case, descriptive only: the two-seed raw mean against
 the temperature config's (+2.70 s0 / +5.47 s1 = +4.08) -- seed 0's +9.74
@@ -797,7 +805,10 @@ snapshot rows, consistent).
 COST: ~20 h (seed 0: 90 iterations in 71,631 s of training) + ~30 min
 evals (exact 45-90, recal 60-90) by the WMI hand-off scratchpad
 post_gumbel_s1.py (log post_gumbel_s1.log; logs "all done"; a FAILED run
-is ALERTed and waited on, so a relaunch still gets its evals).
+is ALERTed and waited on, so a relaunch still gets its evals; before the
+evals it re-hashes the run's audited files and both probe scripts against
+the launch-time manifest and ALERTs on any difference; a probe with a
+nonzero exit is ALERTed).
 
 ### RESULT -- Gumbel search acting (8 sims, staged scale), seed 0, 2026-10-15
 
