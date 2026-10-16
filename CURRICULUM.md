@@ -747,6 +747,60 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Gumbel search acting, seed 1 + THE TWO-SEED DECISION, 2026-10-16
+
+pong-gumbelact8-s1-2026-10-15 ran 10-15 12:23 -> 10-16 08:12 in one attempt
+(71,340 s, no deaths). Evals by the hand-off 08:13-08:33 (code check ok:
+audited manifest + recal probe). EXACT prior argmax (raw) / external recal
+(calibration pong-prioract-s0 @85), 30 games per row; "capped" = games that
+hit the 3000-step cap:
+  iter       45     50     55     60     65     70     75     80     85     90
+  raw      -15.4  -16.3  -16.9   -8.6   -6.3   -8.3   -7.7   -8.2   -7.0   -3.7
+    won     0/4    0/4    0/4    0/4    0/4    0/4    0/4    0/4    1/4    1/4
+    capped    0      0      0     23     22     15     16     15      9     30
+  recal                          -8.2   -4.1   -0.8  -10.8   -4.2  -10.2   -3.6
+    won                           0/4    0/4    2/4    0/4    1/4    0/4    1/4
+  env steps 68.3k  79.8k  90.6k 101.1k 112.9k 123.3k 135.6k 148.5k 161.9k 173.6k
+In-run eval (prior argmax, 8 games): -16.0 @45, -17.9 @55, -7.8 @60, -7.5
+@70, -7.8 @80, -3.2 @90 (8/8 games at the cap).
+READ (1) breakout: NONE -- no row 45-90 at exact >= +10 or >= 3/4 phases
+(best raw -3.73 @90, 1/4 phases; best recal -0.77 @70, 2/4).
+READ (2) level: raw mean 60-90 = -7.1143 -> WORSE band (< -2.32); recal
+-5.9857. Same-seed temperature reference (bnrecal s1) raw +5.47.
+READ (3) late stability: UNTESTED (no first success).
+READ (4) data: no first success; 173.6k env steps @90 (seed 0: 196.3k).
+SHAPE (descriptive): at @60 the policy learned to defend -- most games run to
+the 3000-step cap with few points either way -- and it stayed on that
+plateau to @90 (30/30 games capped) without learning to score: the first
+won games are @85 (8 of 30) and @90 (3 of 30). Seed 0 (20-22 of 30 games
+capped @55-65) and bnrecal s1 (16-23 @60-65) passed through the same
+plateau and broke out of it @70; seed 1 had not left it by @90.
+TWO-SEED DECISION (pre-registered): NO BREAKOUT -- Gumbel-8 acting 1/2; the
+temperature + stabilizer config (2/2) stays the base of the real-time line.
+Scored by hand; it matches the Ms. Pac-Man supervisor's DECISION line
+(10-16 08:34, "NO BREAKOUT -- no first success at rows 45-90"), so the
+Ms. Pac-Man run trains effzero-repro-faithful-prioract-noredo-temp05-bnrecal-
+mspacman.
+Descriptive only, not a decision read: the two-seed raw mean 60-90 is
+(+9.74 - 7.11) / 2 = +1.31, against the temperature config's +4.08. Seed 1
+stays the hard seed for policy-only acting: 4 of the 5 configs run on it
+never broke out (prioract2, seqref, SVE, Gumbel-8); only the temperature +
+stabilizer config did.
+MS. PAC-MAN LAUNCH: the merge watcher fast-forwarded main to the audited
+f07d1d44 at 08:34. Seed 1 finished earlier than forecast, so the pre-launch
+Ray GPU smoke ran after the merge: the supervisor was stopped at 08:44,
+before its preflight finished. The smoke ran both -mspacman arms at seed 0
+(2 iterations x 30 train steps, from the worktree). The temp arm was killed
+mid-iteration 2 and resumed. The eval probe (PROBE_MAX_NOOP=2) then ran on
+each iter-2 snapshot, raw, plus acting states for temp: whole 3-life games
+of 372-540 decisions, each ending at real game over. Everything passed and
+no process was left over. The supervisor was relaunched from main's copy
+(same args, auto 0) at 08:51: it gave the same decision, "preflight ok
+(manifest + quick probe + 15 suites)", and "LAUNCHED s0 temp attempt 1
+(fresh)" at 08:55, with exactly the pre-registered command line. The
+freeze in the Ms. Pac-Man pre-registration (below) applies until its evals
+finish.
+
 ### Next experiment (pre-registered) -- the real-time algorithm on Ms. Pac-Man (Kai, 2026-10-16)
 
 DECISION (Kai, 2026-10-16): "I'd like to test the current algorithm on ms
