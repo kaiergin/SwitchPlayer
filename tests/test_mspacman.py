@@ -596,7 +596,9 @@ def test_supervisor_readout_waits_for_every_row(sup, monkeypatch, tmp_path):
     rec = lambda i, m, **kw: json.dumps({"iteration": i, "exact_mean": m,
                                          "variant": "raw", **kw})
     raw_f.write_text("\n".join(rec(i, 1.0) for i in range(45, 90, 5)) + "\n")
-    recal_f.write_text("\n".join(json.dumps({"iteration": i, "exact_mean": 2.0})
+    cal = sup.S1_CAL.replace("/", chr(92))           # as the probe writes it
+    recal_f.write_text("\n".join(json.dumps({"iteration": i, "exact_mean": 2.0,
+                                            "calibration": cal})
                                  for i in range(60, 95, 5)) + "\n")
     assert sup.s1_readout() is None                   # raw @90 missing
     # a smoke record, an acting-variant record and a torn line do not count
@@ -610,6 +612,12 @@ def test_supervisor_readout_waits_for_every_row(sup, monkeypatch, tmp_path):
         f.write(rec(90, 5.0) + "\n" + rec(90, 6.0) + "\n")  # a rerun: last wins
     raw, recal = sup.s1_readout()
     assert raw[90]["exact_mean"] == 6.0 and len(raw) == 10 and len(recal) == 7
+    # a recal rerun on another calibration snapshot never replaces a row
+    with open(recal_f, "a") as f:
+        f.write(json.dumps({"iteration": 90, "exact_mean": -9.0,
+                            "calibration": "elsewhere/weights-iter050.pth"})
+                + "\n")
+    assert sup.s1_readout()[1][90]["exact_mean"] == 2.0
 
 
 def test_supervisor_seed_state(sup, tmp_path):
@@ -645,7 +653,12 @@ def test_supervisor_refuses_bad_arguments(sup, argv):
     assert sup.main(argv) == 64
 
 
-def test_supervisor_partial_holds_without_launching(sup, monkeypatch, capsys):
+def test_supervisor_partial_holds_without_launching(sup, monkeypatch, capsys,
+                                                   tmp_path):
+    """Isolated from the real run folder (audit r3 M1: this test runs in
+    the preflight of every relaunch, when the run's own checkpoint IS in
+    that folder)."""
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
     monkeypatch.setattr(sup, "wait_for_s1", lambda: (
         _rows([-15] * 5 + [10, 1, 1, 1, 1]), _recal([5] * 7)))
     monkeypatch.setattr(sup, "preflight", lambda arm: pytest.fail("launched"))
@@ -698,6 +711,76 @@ def test_supervisor_live_child_guard(sup):
         p.kill()
         p.wait()
     assert p.pid not in sup.live_children(arm, 0)
+
+
+def test_supervisor_holds_on_either_variants_live_child(sup, monkeypatch,
+                                                         tmp_path, capsys):
+    """Audit r3 L1: launching gumbel while an orphaned TEMP ablation.py runs
+    (no checkpoint yet) holds with an ALERT -- no second writer."""
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup, "wait_for_s1", lambda: _REPLICATES)
+    monkeypatch.setattr(sup, "preflight", lambda arm: (True, ""))
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup, "live_children", lambda arm, seed: (
+        [4242] if arm == sup.VARIANTS["temp"] else []))
+    monkeypatch.setattr(sup.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("launched"))
+
+    def sleep(s):
+        raise RuntimeError("held")
+
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    with pytest.raises(RuntimeError, match="held"):
+        sup.main(["gumbel", "0"])
+    assert "already running (pids [4242])" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("porcelain,rc", [(" M experiments/ablation.py\n", 1),
+                                           ("", 0)])
+def test_supervisor_write_manifest_refuses_a_dirty_tree(sup, monkeypatch,
+                                                        tmp_path, porcelain,
+                                                        rc):
+    """Audit r3 M1: the manifest hashes the working tree, so uncommitted
+    edits to an AUDITED file refuse it (nothing written)."""
+    out = tmp_path / "m.json"
+    monkeypatch.setattr(sup, "MANIFEST_OUT", str(out))
+    monkeypatch.setattr(sup, "file_hashes", lambda root: {"a": "b"})
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout=porcelain, stderr="")
+
+    monkeypatch.setattr(sup.subprocess, "run", run)
+    assert sup.main(["--write-manifest"]) == rc
+    assert calls[0][:4] == ["git", "-C", str(ROOT), "status"]
+    assert calls[0][-len(sup.AUDITED):] == sup.AUDITED
+    assert out.exists() is (rc == 0)
+
+
+@pytest.mark.parametrize("manifest_in_main", [False, True])
+def test_supervisor_preflight_failure_alerts_once_merged(sup, monkeypatch,
+                                                         tmp_path, capsys,
+                                                         manifest_in_main):
+    """Audit r3 M1: before the merge a failing preflight is the expected
+    wait; once main holds the manifest it is an ALERT."""
+    m = tmp_path / "mspacman_manifest.json"
+    if manifest_in_main:
+        m.write_text("{}")
+    monkeypatch.setattr(sup, "MANIFEST", str(m))
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup, "wait_for_s1", lambda: _REPLICATES)
+    monkeypatch.setattr(sup, "preflight", lambda arm: (False, "why"))
+
+    def sleep(s):
+        raise RuntimeError("enough")
+
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    with pytest.raises(RuntimeError, match="enough"):
+        sup.main(["auto", "0"])
+    out = capsys.readouterr().out
+    assert ("ALERT: PREFLIGHT not ready" in out) is manifest_in_main
+    assert "PREFLIGHT not ready (0 min): why" in out
 
 
 def test_supervisor_auto_resumes_kais_pick_after_partial(sup, monkeypatch,
@@ -771,7 +854,7 @@ def test_supervisor_readout_clock_starts_at_the_marker(sup, monkeypatch,
     os.utime(ck, (old, old))
     monkeypatch.setattr(sup, "S1_CKPT", str(ck))
     monkeypatch.setattr(sup, "s1_readout", lambda: None)
-    monkeypatch.setattr(sup, "read_rows", lambda path, raw=False: {})
+    monkeypatch.setattr(sup, "read_rows", lambda path, raw=False, **kw: {})
 
     def sleep(s):
         raise RuntimeError("enough")
@@ -789,7 +872,7 @@ def test_supervisor_alerts_on_an_incomplete_readout(sup, monkeypatch,
     clock = iter([0.0, 0.0, 3 * 3600.0, 3 * 3600.0])
     monkeypatch.setattr(sup, "seed_state", lambda ck: "done")
     monkeypatch.setattr(sup, "s1_readout", lambda: None)
-    monkeypatch.setattr(sup, "read_rows", lambda path, raw=False: (
+    monkeypatch.setattr(sup, "read_rows", lambda path, raw=False, **kw: (
         {i: {} for i in range(45, 90, 5)} if raw else {}))
     monkeypatch.setattr(sup.time, "time", lambda: next(clock))
     sleeps = []

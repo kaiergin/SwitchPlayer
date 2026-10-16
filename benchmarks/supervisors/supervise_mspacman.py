@@ -5,7 +5,8 @@ running"; pre-registered in CURRICULUM.md "Next experiment (pre-registered)
 arms' launch pin), MsPacmanNoFrameskip-v4 through the lineage's wrapper
 stack, one game's 3 lives per iteration.
 
-    python benchmarks/supervisors/supervise_mspacman.py {auto|gumbel|temp} 0 [--kai-override]
+    python benchmarks/supervisors/supervise_mspacman.py MODE 0 [--kai-override]
+    (MODE: auto | gumbel | temp)
 
 "current algorithm" = the base the Gumbel seed-1 decision (CURRICULUM, 10-15)
 leaves: REPLICATES -> gumbel (effzero-repro-faithful-gumbelact8-birth-
@@ -20,12 +21,14 @@ reboot): "auto" then resumes that variant. An explicit variant waits for
 the same readout (the run must never overlap seed 1 or its evals) and must
 agree with a definite decision (REPLICATES / NO BREAKOUT); after PARTIAL
 either is accepted (Kai's pick). --kai-override accepts a disagreeing
-explicit variant, logged (Kai's explicit instruction only). Either way the main tree must then hold the audited
+explicit variant, logged (Kai's explicit instruction only; ignored, with a
+note, by "auto"). Either way the main tree must then hold the audited
 revision (the manifest in the MAIN tree, which only the merge brings), and
 the quick probe + 15 suites must pass -- once per supervisor process;
-every relaunch attempt re-checks the manifest. A live ablation.py of this
-arm and seed (an orphan of an earlier supervisor, or a duplicate) holds
-every launch.
+every relaunch attempt re-checks the manifest. A live ablation.py of
+EITHER variant's arm at this seed (an orphan of an earlier supervisor, or
+a duplicate) holds every launch. Relaunch with the arguments the run was
+started with.
 
 Launch with cwd Y:/SwitchPlayer and stdout appended to
 benchmarks/results/mspacman-s0-2026-10-16/supervisor.log -- create that
@@ -65,6 +68,10 @@ S1_RAW = os.path.join(REPO, "benchmarks", "probes",
                       f"probe_exhaustive_eval-{S1_RUN}.jsonl")
 S1_RECAL = os.path.join(REPO, "benchmarks", "probes",
                         f"probe_bn_recal_eval-{S1_RUN}.jsonl")
+# The pre-registered external-recal calibration snapshot (post_gumbel_s1's
+# CAL): a rerun with another one must not replace those rows.
+S1_CAL = ("benchmarks/results/pong-prioract-s0-2026-09-27/snapshots-pong-"
+          "skip4-effzero-repro-faithful-prioract-seed0/weights-iter085.pth")
 RAW_ROWS = tuple(range(45, 95, 5))        # exact evals 45-90 (primary)
 MEAN_ROWS = tuple(range(60, 95, 5))       # the level read: raw mean 60-90
 RECAL_ROWS = MEAN_ROWS                    # external recal 60-90
@@ -111,10 +118,11 @@ def seed_state(ck):
     return "running"
 
 
-def read_rows(path, raw=False):
+def read_rows(path, raw=False, calibration=None):
     """{iteration: exact_mean record} from a probe jsonl; a later record of
     the same iteration wins (a rerun). raw=True keeps only the full 30-noop
-    prior-argmax records (variant "raw", no max_noop). Torn or foreign lines
+    prior-argmax records (variant "raw", no max_noop); `calibration` keeps
+    only recal records calibrated on that snapshot. Torn or foreign lines
     are skipped."""
     out = {}
     try:
@@ -133,6 +141,9 @@ def read_rows(path, raw=False):
             continue
         if raw and (r.get("variant") != "raw" or "max_noop" in r):
             continue
+        if calibration is not None and not str(r.get("calibration", "")).replace(
+                chr(92), "/").endswith(calibration):
+            continue
         out[r["iteration"]] = r
     return out
 
@@ -140,7 +151,8 @@ def read_rows(path, raw=False):
 def s1_readout():
     """(raw, recal) when Gumbel seed 1's pre-registered readout is complete
     (every exact row 45-90 and every recal row 60-90), else None."""
-    raw, recal = read_rows(S1_RAW, raw=True), read_rows(S1_RECAL)
+    raw = read_rows(S1_RAW, raw=True)
+    recal = read_rows(S1_RECAL, calibration=S1_CAL)
     if all(i in raw for i in RAW_ROWS) and all(i in recal for i in RECAL_ROWS):
         return raw, recal
     return None
@@ -434,7 +446,8 @@ def wait_for_s1():
                     done_at = min(done_at, os.path.getmtime(S1_CKPT))
             except OSError:
                 pass
-        raw, recal = read_rows(S1_RAW, raw=True), read_rows(S1_RECAL)
+        raw = read_rows(S1_RAW, raw=True)
+        recal = read_rows(S1_RECAL, calibration=S1_CAL)
         if state == "failed":
             msg = ("ALERT: Gumbel seed 1 FAILED -- holding the Ms. Pac-Man "
                    "launch until it is relaunched and completes")
@@ -461,6 +474,15 @@ def main(argv):
     if "--write-manifest" in argv:
         root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))
+        # The manifest hashes the working tree: refuse uncommitted edits to
+        # an AUDITED file, or the manifest would describe code no commit
+        # holds (audit r3 M1).
+        r = subprocess.run(["git", "-C", root, "status", "--porcelain",
+                            "--"] + AUDITED, capture_output=True, text=True)
+        if r.returncode or r.stdout.strip():
+            print("refusing --write-manifest: commit these AUDITED files "
+                  "first:\n" + (r.stdout or r.stderr), flush=True)
+            return 1
         with open(MANIFEST_OUT, "w", encoding="utf-8") as f:
             json.dump(file_hashes(root), f, indent=1, sort_keys=True)
         print(f"wrote {MANIFEST_OUT} from {root}")
@@ -483,6 +505,9 @@ def main(argv):
     print(f"DECISION (Gumbel seed 1, pre-registered): {label} -- {detail}",
           flush=True)
     if variant == "auto":
+        if override:
+            print("note: --kai-override is ignored by 'auto' (it applies to "
+                  "an explicit variant)", flush=True)
         have = variant_ckpts(seed)
         if picked is None and len(have) == 1:
             # Kai's pick was launched (explicitly) before this relaunch:
@@ -511,7 +536,8 @@ def main(argv):
     clash = other_variant_ckpt(variant, seed)
     if clash:
         print(f"ALERT: {clash} exists -- the other variant already ran here; "
-              f"refusing to start {variant}", flush=True)
+              f"refusing to start {variant} (relaunch with the arguments it "
+              f"was started with, incl. any --kai-override)", flush=True)
         return 3
 
     polls, told = 0, None
@@ -520,7 +546,11 @@ def main(argv):
         if ok:
             break
         if why != told or polls % 6 == 0:
-            print(f"PREFLIGHT not ready ({polls * 10} min): {why}", flush=True)
+            # Before the merge the manifest is simply not in main yet;
+            # once it is, a failing preflight is an ALERT (audit r3 M1).
+            alert = "ALERT: " if os.path.exists(MANIFEST) else ""
+            print(f"{alert}PREFLIGHT not ready ({polls * 10} min): {why}",
+                  flush=True)
             told = why
         time.sleep(600)
         polls += 1
@@ -561,11 +591,15 @@ def main(argv):
             polls += 1
         polls, told = 0, None
         while True:
-            pids = live_children(arm, seed)
+            # Either variant's arm (audit r3 L1): the other variant's
+            # orphan has no checkpoint until its iteration 2.
+            pids = sorted({p for a in VARIANTS.values()
+                           for p in live_children(a, seed)})
             if not pids:
                 break
-            msg = (f"ALERT: ablation.py for {arm} seed {seed} is already "
-                   f"running (pids {pids}) -- not launching a second writer")
+            msg = (f"ALERT: an ablation.py of a Ms. Pac-Man arm at seed {seed} "
+                   f"is already running (pids {pids}) -- not launching a "
+                   f"second writer")
             if msg != told or polls % 60 == 0:
                 print(f"{msg} [{polls} min]", flush=True)
                 told = msg
