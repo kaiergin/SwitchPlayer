@@ -14,7 +14,11 @@ before 2026-09-27 are in probe_exhaustive_eval.jsonl.
 CPU only; PROBE_THREADS (default 2) fixes the thread count so results are
 reproducible. ~5.5 min per snapshot (prior argmax; a search agent costs
 the search per step). PROBE_SEARCH_SIMS / PROBE_SEARCH_ENGINE: the search
-agent instead of the prior argmax (below)."""
+agent instead of the prior argmax (below). PROBE_ENV (default Pong-v4): the
+env id the snapshots were trained on (Ms. Pac-Man, 2026-10-16:
+MsPacmanNoFrameskip-v4); the action count comes from the env. Every game is
+a whole GAME (Run.play_game: all lives of a multi-life game, the 3000 cap per
+life); a Pong game is one life, so Pong records are unchanged."""
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # "" deletes the var on Windows
 import json
@@ -30,8 +34,22 @@ import muzero
 import ablation
 torch.set_num_threads(int(os.environ.get("PROBE_THREADS", "2")))
 ARM = "effzero-repro-faithful-prioract"      # policy-only eval semantics
+ENV = os.environ.get("PROBE_ENV") or "Pong-v4"
+
+
+def env_actions(env_id):
+    """The env's action count (Pong-v4: 6, the value hardcoded before
+    PROBE_ENV)."""
+    import gymnasium as gym
+    probe = gym.make(env_id)
+    try:
+        return int(probe.action_space.n)
+    finally:
+        probe.close()
+
+
 ablation.ENV_NAME, ablation.FRAMESKIP, ablation.EPISODE_CAP, ablation.ACTIONS = \
-    "Pong-v4", 4, 3000, 6
+    ENV, 4, 3000, env_actions(ENV)
 HERE = pathlib.Path(__file__).parent
 
 
@@ -131,8 +149,11 @@ def play(run, noops):
 
     ne.reset = fixed.__get__(ne)
     try:
+        run.env.was_real_done = True     # every game starts from a real reset
         run.env.reset(seed=777)
-        _, ret, steps, term = run.play_episode(greedy=True, cap=3000)
+        # Unbound, as the Ray eval actor calls it: any object with env and
+        # play_episode plays a game.
+        ret, steps, term = ablation.Run.play_game(run, cap=3000)
     finally:
         del ne.reset
     return float(ret), int(steps), bool(term)
@@ -169,6 +190,8 @@ def main(argv):
                    "variant": ("acting" if ACTING else
                                f"search-{SEARCH_ENGINE}{SEARCH_SIMS}" if SEARCH_SIMS
                                else "raw")}
+            if ENV != "Pong-v4":
+                rec["env"] = ENV
             if SEARCH_SIMS:
                 rec["search"] = {"engine": SEARCH_ENGINE, "sims": SEARCH_SIMS}
             if MAX_NOOP != 30:

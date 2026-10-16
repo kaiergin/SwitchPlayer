@@ -950,6 +950,41 @@ ARMS["effzero-repro-faithful-gumbelact8-birth"] = {
             "pong-prioract2-s0 (prior sampling).",
 }
 
+# The Ms. Pac-Man port (Kai, 2026-10-16: "test the current algorithm on ms
+# pacman"; pre-registered in CURRICULUM): the real-time line's config with
+# its two per-TRAJECTORY knobs converted from Pong's unit (a trajectory is
+# a game) to Ms. Pac-Man's (a trajectory is one of the game's 3 lives --
+# EpisodicLifeEnv ends each training episode at a life loss, as in
+# EfficientZero), so both stay per GAME: MAX_REPLAY 85 -> 255 keeps the
+# 31,250-transition cap the binding one, as it always was in Pong (85 lives
+# of ~180 random-play steps would hold ~15k), and POLICY_REFRESH_COUNT
+# 4 -> 12 re-searches 4 games' worth of trajectories per 2 iterations.
+# Everything else, including the launch pin, is the base arm's. Gumbel seed
+# 1's pre-registered decision picks which base runs.
+ARMS["effzero-repro-faithful-gumbelact8-birth-mspacman"] = {
+    **ARMS["effzero-repro-faithful-gumbelact8-birth"],
+    "MAX_REPLAY": 255,
+    "POLICY_REFRESH_COUNT": 12,
+    "_doc": "effzero-repro-faithful-gumbelact8-birth for Ms. Pac-Man (one "
+            "trajectory per LIFE, 3 per game): MAX_REPLAY 255 and "
+            "POLICY_REFRESH_COUNT 12 (x3, the per-game values). With 9 "
+            "actions the actor's 8-sim Gumbel search considers the top 8 "
+            "by Gumbel + logit and halves once. Run with --env "
+            "MsPacmanNoFrameskip-v4 --frameskip 4 --episode-cap 3000 "
+            "--episodes-per-iter 3 --ray --cpu-actor.",
+}
+
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal"],
+    "MAX_REPLAY": 255,
+    "POLICY_REFRESH_COUNT": 12,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal for Ms. "
+            "Pac-Man (one trajectory per LIFE, 3 per game): MAX_REPLAY 255 "
+            "and POLICY_REFRESH_COUNT 12 (x3, the per-game values). Run "
+            "with --env MsPacmanNoFrameskip-v4 --frameskip 4 --episode-cap "
+            "3000 --episodes-per-iter 3 --ray --cpu-actor.",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
@@ -1473,19 +1508,21 @@ def prior_temp_gate():
 
 
 def eval_summary(episodes):
-    """Row fields from greedy eval episodes given as (return, decisions,
-    terminated) triples. eval_len_mean / eval_capped exist because greedy
-    play in deterministic Pong can lock into a perpetual rally that only
-    EPISODE_CAP ends -- such an episode's return is a partial score, and
-    a row where eval_capped > 0 must be read with that in mind
-    (2026-09-10; the fields are additive, older rows simply lack them).
-    Mechanism: eval_capped counts play_episode returns with
-    terminated=False, which under the paper stack means the cap fired --
-    a gym truncation and an EpisodicLifeEnv life-loss both read as
-    terminated=True there. On Pong-v4 (no lives; ALE's 108000-frame
-    limit is ~27000 decisions, never before a 3000 cap) it is exactly
-    the cap-truncation count; a multi-life game or a cap >= 27000 would
-    need this re-read."""
+    """Row fields from greedy eval games given as (return, decisions,
+    terminated) triples (Run.play_game). eval_len_mean / eval_capped exist
+    because greedy play in deterministic Pong can lock into a perpetual
+    rally that only EPISODE_CAP ends -- such an episode's return is a
+    partial score, and a row where eval_capped > 0 must be read with that
+    in mind (2026-09-10; the fields are additive, older rows simply lack
+    them). Mechanism: eval_capped counts games whose last life returned
+    terminated=False, which under the paper stack means the per-life cap
+    fired -- a gym truncation and a game over both read as terminated=True
+    there. On Pong-v4 (no lives; ALE's 108000-frame limit is ~27000
+    decisions, never before a 3000 cap) it is exactly the cap-truncation
+    count. A multi-life game (Ms. Pac-Man) is played to its real game over
+    by play_game, so its return is the GAME score, its length the game's
+    decisions, and the cap applies per LIFE; an ALE 108000-frame
+    truncation (~27000 decisions) would read as terminated, not capped."""
     returns = [float(r) for r, _, _ in episodes]
     return {"return_mean": float(np.mean(returns)),
             "return_max": float(np.max(returns)),
@@ -1713,6 +1750,32 @@ class Run:
         else:
             traj.append((final_stack, 0, prev_reward))
         return traj, total, steps, terminated
+
+    def play_game(self, cap=None):
+        """One greedy evaluation GAME: every life, until the real game over
+        (Ms. Pac-Man, 2026-10-16). EpisodicLifeEnv ends play_episode at
+        each life loss -- the TRAINING unit, as in EfficientZero -- so an
+        eval made of single play_episode calls would score one life and
+        start the next eval "game" mid-match. Here a game starts from a real
+        reset and plays on through every life; returns (game return,
+        decisions, terminated) for eval_summary. `cap` bounds each LIFE
+        (play_episode's cap): a capped life ends the game (play_episode
+        forces the next reset to be real) and reads terminated=False. A
+        single-life game (Pong) is exactly one play_episode, unchanged.
+        Callers that seed the game reset the env with that seed first
+        (setting was_real_done themselves, so the reseed is a real reset);
+        the game then starts from play_episode's own real reset -- the
+        double reset every eval had before. The sequential harness shares
+        its env with training, so there an eval game ends the training
+        match in progress (the --ray eval actor has its own env)."""
+        self.env.was_real_done = True
+        total, steps = 0.0, 0
+        while True:
+            _, ret, n, terminated = self.play_episode(greedy=True, cap=cap)
+            total += ret
+            steps += n
+            if not terminated or getattr(self.env, "was_real_done", True):
+                return total, steps, terminated
 
     # -- re-analysis -------------------------------------------------------
     def paper_targets(self, traj, terminated, born_step=None,
@@ -2447,11 +2510,11 @@ class Run:
         through train-mode BatchNorm: a different function from the one the
         prediction-error metrics measured a few lines later.
         """
-        # Triples built inside the comprehension so no eval trajectory
-        # outlives its episode (8 cap-3000 trajectories would be ~2 GB
-        # transient; verification F1).
-        played = [(ret, steps, term) for _, ret, steps, term in
-                  (self.play_episode(greedy=True) for _ in range(episodes))]
+        # Whole GAMES (play_game: every life of a multi-life game), which
+        # keeps only (return, decisions, terminated) triples, so no eval
+        # trajectory outlives its life (8 cap-3000 trajectories would be
+        # ~2 GB transient; verification F1).
+        played = [self.play_game() for _ in range(episodes)]
         return {**eval_summary(played),
                 **self.evaluate_diagnostics(batches=batches)}
 

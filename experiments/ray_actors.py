@@ -117,27 +117,38 @@ class SelfPlayActor:
                 getattr(nm.dynamics, "renormalize_output", None))
 
     def play(self, episode_seed):
-        """One self-play episode; returns (trajectory, terminated, steps)."""
-        self.env.reset(seed=int(episode_seed))
+        """One self-play episode; returns (trajectory, terminated, steps).
+        In a multi-life game (Ms. Pac-Man) an episode is one LIFE:
+        EpisodicLifeEnv carries the match on across calls. The seeded reset
+        runs only when a new game starts (always, in single-life Pong --
+        unchanged there); mid-match, play_episode's own reset is the one
+        respawn no-op EpisodicLifeEnv takes -- calling both took two, one of
+        them uncounted in env_steps (Ms. Pac-Man audit r1 L1)."""
+        if self.env.was_real_done:
+            self.env.reset(seed=int(episode_seed))
         before = self.shell.env_steps
         traj, _, _, terminated = self._ablation.Run.play_episode(
             self.shell, greedy=False, cap=self.episode_cap)
         return traj, terminated, self.shell.env_steps - before
 
     def eval_episodes(self, seeds):
-        """Greedy evaluation episodes; returns one (return, decisions,
-        terminated) triple per episode. Greedy play in deterministic
-        Pong can enter a perpetual rally that only the cap ends, and a
-        capped game's return is a PARTIAL score -- the driver logs the
-        mean length and the capped count per row so those reads are
-        visible (2026-09-10). Env steps from eval are protocol-exempt
-        (the driver never counts them) and the shell's counter is
+        """Greedy evaluation GAMES (Run.play_game: every life of a
+        multi-life game; each game's env reseeded by its entry in `seeds`
+        -- a real reset -- before play_episode's own real reset starts it,
+        the double reset this eval always had); returns one (return,
+        decisions, terminated) triple per game. Greedy
+        play in deterministic Pong can enter a perpetual rally that only
+        the cap ends, and a capped game's return is a PARTIAL score -- the
+        driver logs the mean length and the capped count per row so those
+        reads are visible (2026-09-10). Env steps from eval are protocol-
+        exempt (the driver never counts them) and the shell's counter is
         scratch here."""
         out = []
         for s in seeds:
+            self.env.was_real_done = True     # a new game: the reseed is real
             self.env.reset(seed=int(s))
-            _, ret, steps, terminated = self._ablation.Run.play_episode(
-                self.shell, greedy=True, cap=self.episode_cap)
+            ret, steps, terminated = self._ablation.Run.play_game(
+                self.shell, cap=self.episode_cap)
             out.append((float(ret), int(steps), bool(terminated)))
         return out
 
