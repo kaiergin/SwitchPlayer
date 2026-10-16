@@ -250,11 +250,14 @@ def test_actor_play_continues_the_match_with_one_respawn_noop(
 
 
 @pytest.mark.slow
-def test_pong_actor_eval_and_play_are_unchanged(monkeypatch, restore_rngs):  # noqa: F811
+@pytest.mark.parametrize("cap", [150, 3000])
+def test_pong_actor_eval_and_play_are_unchanged(monkeypatch, restore_rngs,  # noqa: F811
+                                                cap):
     """Audit r1 N2: on the real Pong-v4 env, the new eval_episodes and play
     reproduce the old code (reset(seed) + one play_episode) exactly --
     returns, lengths, flags, actions, the inner reset sequence and the RNG
-    state -- interleaved as the pipeline interleaves them."""
+    state -- interleaved as the pipeline interleaves them; capped games
+    (150) and natural game overs (3000, the run's cap: audit r2 L1)."""
     import torch
     import ray_actors
     arm = "effzero-repro-faithful-prioract-noredo-temp05-bnrecal"
@@ -287,7 +290,7 @@ def test_pong_actor_eval_and_play_are_unchanged(monkeypatch, restore_rngs):  # n
 
     def trace(evalf, playf):
         actor = ray_actors.SelfPlayActor(overrides, 6, 5000, schedule,
-                                         "Pong-v4", 4, 150, server=None,
+                                         "Pong-v4", 4, cap, server=None,
                                          server_set="eval", force_cpu=True)
         resets, inner = [], actor.env.env
         real = inner.reset
@@ -310,6 +313,10 @@ def test_pong_actor_eval_and_play_are_unchanged(monkeypatch, restore_rngs):  # n
     old = trace(old_eval, old_play)
     assert new == old
     assert new[-2][:2] == [500000, None]                    # the double reset
+    # cap 150 truncates every game; at 3000 a random net loses 21-0 first
+    capped = [not t for _, _, t in new[0] + new[3]] + [not new[1][0],
+                                                       not new[2][0]]
+    assert all(capped) if cap == 150 else not any(capped)
 
 
 # --------------------------------------------------------------------------
@@ -632,7 +639,8 @@ def test_supervisor_waits_on_gumbel_seed_1(sup):
 
 
 @pytest.mark.parametrize("argv", [[], ["ray", "0"], ["auto", "1"],
-                                  ["gumbel", "0", "x"], ["auto", "x"]])
+                                  ["gumbel", "0", "x"], ["auto", "x"],
+                                  ["--kai-override", "gumbel"]])
 def test_supervisor_refuses_bad_arguments(sup, argv):
     assert sup.main(argv) == 64
 
@@ -711,6 +719,67 @@ def test_supervisor_auto_resumes_kais_pick_after_partial(sup, monkeypatch,
         sup.main(["auto", "0"])
     assert picked == [sup.VARIANTS["temp"]]
     assert "resuming temp" in capsys.readouterr().out
+
+
+_REPLICATES = (_rows([-15] * 5 + [12] * 5), _recal([12] * 7))
+_PARTIAL = (_rows([-15] * 5 + [10, 1, 1, 1, 1]), _recal([5] * 7))
+_NO_BREAKOUT = (_rows([-15] * 10), _recal([-15] * 7))
+
+
+@pytest.mark.parametrize("readout,argv,want", [
+    # a definite decision picks the arm: a disagreeing explicit variant is
+    # refused unless Kai overrode it; an agreeing one runs
+    (_REPLICATES, ["temp", "0"], 3),
+    (_NO_BREAKOUT, ["gumbel", "0"], 3),
+    (_REPLICATES, ["temp", "0", "--kai-override"], "temp"),
+    (_REPLICATES, ["gumbel", "0"], "gumbel"),
+    (_NO_BREAKOUT, ["auto", "0"], "temp"),
+    (_REPLICATES, ["auto", "0"], "gumbel"),
+    # after PARTIAL either explicit pick is Kai's
+    (_PARTIAL, ["temp", "0"], "temp"),
+    (_PARTIAL, ["gumbel", "0"], "gumbel"),
+])
+def test_supervisor_variant_choice(sup, monkeypatch, readout, argv, want):
+    """Audit r2 NIT: an explicit variant must agree with a definite
+    decision (or carry --kai-override)."""
+    monkeypatch.setattr(sup, "wait_for_s1", lambda: readout)
+    monkeypatch.setattr(sup, "variant_ckpts", lambda seed: [])
+    monkeypatch.setattr(sup, "other_variant_ckpt", lambda v, seed: None)
+    picked = []
+
+    def stop(arm):
+        picked.append(arm)
+        raise RuntimeError("stop before launch")
+
+    monkeypatch.setattr(sup, "preflight", stop)
+    if want == 3:
+        assert sup.main(argv) == 3 and picked == []
+    else:
+        with pytest.raises(RuntimeError, match="stop before launch"):
+            sup.main(argv)
+        assert picked == [sup.VARIANTS[want]]
+
+
+def test_supervisor_readout_clock_starts_at_the_marker(sup, monkeypatch,
+                                                       tmp_path, capsys):
+    """Audit r2 NIT: a relaunched supervisor dates seed 1's completion by
+    its marker, so the 2-h ALERT is not postponed by the relaunch."""
+    import time
+    ck = tmp_path / "resume.ckpt"
+    ck.write_bytes(b"marker")
+    old = time.time() - 3 * 3600
+    os.utime(ck, (old, old))
+    monkeypatch.setattr(sup, "S1_CKPT", str(ck))
+    monkeypatch.setattr(sup, "s1_readout", lambda: None)
+    monkeypatch.setattr(sup, "read_rows", lambda path, raw=False: {})
+
+    def sleep(s):
+        raise RuntimeError("enough")
+
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    with pytest.raises(RuntimeError, match="enough"):
+        sup.wait_for_s1()
+    assert "ALERT: Gumbel seed 1 completed > 2 h ago" in capsys.readouterr().out
 
 
 def test_supervisor_alerts_on_an_incomplete_readout(sup, monkeypatch,

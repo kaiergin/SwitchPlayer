@@ -1771,7 +1771,9 @@ class Run:
         self.env.was_real_done = True
         total, steps = 0.0, 0
         while True:
-            _, ret, n, terminated = self.play_episode(greedy=True, cap=cap)
+            # [1:]: the life's trajectory is dropped at once, never held
+            # while the next life plays.
+            ret, n, terminated = self.play_episode(greedy=True, cap=cap)[1:]
             total += ret
             steps += n
             if not terminated or getattr(self.env, "was_real_done", True):

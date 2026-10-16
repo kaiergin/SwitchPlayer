@@ -122,8 +122,9 @@ class SelfPlayActor:
         EpisodicLifeEnv carries the match on across calls. The seeded reset
         runs only when a new game starts (always, in single-life Pong --
         unchanged there); mid-match, play_episode's own reset is the one
-        respawn no-op EpisodicLifeEnv takes -- calling both took two, one of
-        them uncounted in env_steps (Ms. Pac-Man audit r1 L1)."""
+        respawn no-op EpisodicLifeEnv takes, as in eval and the baselines
+        wrapper -- calling both took two (Ms. Pac-Man audit r1 L1). Respawn
+        no-ops are not decisions: env_steps never counted them."""
         if self.env.was_real_done:
             self.env.reset(seed=int(episode_seed))
         before = self.shell.env_steps

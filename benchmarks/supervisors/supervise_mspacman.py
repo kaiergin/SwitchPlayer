@@ -5,7 +5,7 @@ running"; pre-registered in CURRICULUM.md "Next experiment (pre-registered)
 arms' launch pin), MsPacmanNoFrameskip-v4 through the lineage's wrapper
 stack, one game's 3 lives per iteration.
 
-    python benchmarks/supervisors/supervise_mspacman.py {auto|gumbel|temp} 0
+    python benchmarks/supervisors/supervise_mspacman.py {auto|gumbel|temp} 0 [--kai-override]
 
 "current algorithm" = the base the Gumbel seed-1 decision (CURRICULUM, 10-15)
 leaves: REPLICATES -> gumbel (effzero-repro-faithful-gumbelact8-birth-
@@ -17,8 +17,10 @@ that decision, logs it, and on PARTIAL exits 2 without launching (relaunch
 with Kai's pick, "gumbel" or "temp") -- unless exactly one variant's
 checkpoint is already in the folder (Kai's pick, launched before a
 reboot): "auto" then resumes that variant. An explicit variant waits for
-the same readout (the run must never overlap seed 1 or its evals) but
-skips the decision. Either way the main tree must then hold the audited
+the same readout (the run must never overlap seed 1 or its evals) and must
+agree with a definite decision (REPLICATES / NO BREAKOUT); after PARTIAL
+either is accepted (Kai's pick). --kai-override accepts a disagreeing
+explicit variant, logged (Kai's explicit instruction only). Either way the main tree must then hold the audited
 revision (the manifest in the MAIN tree, which only the merge brings), and
 the quick probe + 15 suites must pass -- once per supervisor process;
 every relaunch attempt re-checks the manifest. A live ablation.py of this
@@ -64,7 +66,8 @@ S1_RAW = os.path.join(REPO, "benchmarks", "probes",
 S1_RECAL = os.path.join(REPO, "benchmarks", "probes",
                         f"probe_bn_recal_eval-{S1_RUN}.jsonl")
 RAW_ROWS = tuple(range(45, 95, 5))        # exact evals 45-90 (primary)
-RECAL_ROWS = tuple(range(60, 95, 5))      # external recal 60-90
+MEAN_ROWS = tuple(range(60, 95, 5))       # the level read: raw mean 60-90
+RECAL_ROWS = MEAN_ROWS                    # external recal 60-90
 NO_WORSE = 3.68                           # the faithful control's band
 
 
@@ -158,7 +161,7 @@ def decide(raw, recal):
                   or raw[i].get("phases_won", 0) >= 3), None)
     if first is None:
         return "temp", "NO BREAKOUT", "no first success at rows 45-90"
-    mean = sum(raw[i]["exact_mean"] for i in RECAL_ROWS) / len(RECAL_ROWS)
+    mean = sum(raw[i]["exact_mean"] for i in MEAN_ROWS) / len(MEAN_ROWS)
     collapses = [i for i in RAW_ROWS if i > first
                  and raw[i]["exact_mean"] < 0
                  and not (i in recal and recal[i]["exact_mean"] >= 0)]
@@ -423,7 +426,14 @@ def wait_for_s1():
         if readout is not None:
             return readout
         if state == "done" and done_at is None:
+            # The completion marker's write time when there is one, so a
+            # relaunch does not restart the 2-h clock (audit r2 NIT).
             done_at = time.time()
+            try:
+                if os.path.getsize(S1_CKPT) < 1_000_000:
+                    done_at = min(done_at, os.path.getmtime(S1_CKPT))
+            except OSError:
+                pass
         raw, recal = read_rows(S1_RAW, raw=True), read_rows(S1_RECAL)
         if state == "failed":
             msg = ("ALERT: Gumbel seed 1 FAILED -- holding the Ms. Pac-Man "
@@ -455,21 +465,24 @@ def main(argv):
             json.dump(file_hashes(root), f, indent=1, sort_keys=True)
         print(f"wrote {MANIFEST_OUT} from {root}")
         return 0
-    if (len(argv) != 2 or argv[0] not in ("auto", *VARIANTS)
-            or not argv[1].isdigit()):
-        print("usage: supervise_mspacman.py {auto|gumbel|temp} SEED", flush=True)
+    override = "--kai-override" in argv
+    pos = [a for a in argv if a != "--kai-override"]
+    if (len(pos) != 2 or pos[0] not in ("auto", *VARIANTS)
+            or not pos[1].isdigit()):
+        print("usage: supervise_mspacman.py {auto|gumbel|temp} SEED "
+              "[--kai-override]", flush=True)
         return 64
-    variant, seed = argv[0], int(argv[1])
+    variant, seed = pos[0], int(pos[1])
     if seed not in SEEDS:
         print(f"supervise_mspacman: pre-registered for seeds {sorted(SEEDS)}; "
               f"refusing seed {seed}", flush=True)
         return 64
 
     raw, recal = wait_for_s1()
+    picked, label, detail = decide(raw, recal)
+    print(f"DECISION (Gumbel seed 1, pre-registered): {label} -- {detail}",
+          flush=True)
     if variant == "auto":
-        picked, label, detail = decide(raw, recal)
-        print(f"DECISION (Gumbel seed 1, pre-registered): {label} -- {detail}",
-              flush=True)
         have = variant_ckpts(seed)
         if picked is None and len(have) == 1:
             # Kai's pick was launched (explicitly) before this relaunch:
@@ -482,9 +495,17 @@ def main(argv):
                   "'temp'; nothing launched", flush=True)
             return 2
         variant = picked
+    elif picked is not None and picked != variant and not override:
+        # A definite decision picks the arm (audit r2 NIT): an explicit
+        # variant that disagrees is a mistake unless Kai said so.
+        print(f"ALERT: {variant} given explicitly but the decision picks "
+              f"{picked} -- refusing (--kai-override if Kai chose this)",
+              flush=True)
+        return 3
     else:
-        print(f"variant {variant} given explicitly (Gumbel seed 1 readout "
-              f"complete)", flush=True)
+        print(f"variant {variant} given explicitly"
+              + (" (KAI OVERRIDE of the decision)" if picked not in
+                 (None, variant) else ""), flush=True)
     arm = VARIANTS[variant]
     base, jsonl, ckpt, deaths_log = paths(arm, seed)
     clash = other_variant_ckpt(variant, seed)
