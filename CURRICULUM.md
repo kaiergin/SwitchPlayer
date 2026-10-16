@@ -863,7 +863,8 @@ checkpoint is in the folder; holds, with an ALERT, while a live ablation.py
 of EITHER -mspacman arm at the seed is running; the manifest is read from
 the main tree; manifest + quick probe + 15 suites once per supervisor
 process, the manifest again before every relaunch; a failing preflight is
-an ALERT once main holds the manifest); tests/test_mspacman.py. Merged into
+an ALERT once main holds the manifest, and so is a manifest still missing
+2 h into the preflight); tests/test_mspacman.py. Merged into
 main only after seed 1's evals finish (seed 1's relaunch and hand-off check
 the old manifest), by the WMI watcher scratchpad mspacman_merge.py with the
 audited SHA pinned (a full 40-hex SHA that carries the manifest and whose
@@ -872,7 +873,9 @@ probe is rerun by hand on the pre-merge code first -- holds if seed 1's
 hand-off logged a code difference, checks main is still
 this line, waits out Kai's in-progress git operations and uncommitted edits
 to the files it updates, and re-hashes main against the manifest after the
-merge, ALERTing on any difference).
+merge, ALERTing on any difference; it also ALERTs hourly if seed 1 is
+complete with a whole readout but its hand-off has not logged "all done"
+for 2 h).
 The supervisor is launched hidden via WMI from the worktree path (stdout
 -> supervisor.log, stderr -> supervisor.err in the run dir); after the
 merge every relaunch uses main's identical copy, with the same arguments.
@@ -884,10 +887,12 @@ too. Nor any pip install into the shared .venv (the manifest cannot see
 it; post_mspacman.py ALERTs on a change). AUDITED also pins four finished
 runs' probe records the suites read (prioract2 s0/s1 exact, Gumbel s0 exact
 and recal): no raw/recal re-probe of those runs (it would append to them)
-until the evals finish.
+until the evals finish. Gumbel seed 1's run folder and its two probe jsonls
+stay where they are too (every supervisor relaunch re-reads them).
 EVALS: the WMI hand-off scratchpad post_mspacman.py (log post_mspacman.log;
 logs "all done"; repeats the supervisor's DECISION / ALERT / HOLD lines,
-the merge watcher's ALERTs and any supervisor.err text;
+the merge watcher's ALERTs and tracebacks and any supervisor.err text;
+ALERTs when supervisor.log goes 4 h silent;
 ALERTs on a FAILED run, a HOLD, a code difference from the manifest, a
 probe exiting nonzero, or a row of the 18 missing from a jsonl) writes
 benchmarks/probes/probe_exhaustive_eval-mspacman-s0-2026-10-16.jsonl (raw)
