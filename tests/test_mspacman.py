@@ -750,7 +750,10 @@ def test_supervisor_write_manifest_refuses_a_dirty_tree(sup, monkeypatch,
                                                         tmp_path, porcelain,
                                                         rc):
     """Audit r3 M1: the manifest hashes the working tree, so uncommitted
-    edits to an AUDITED file refuse it (nothing written)."""
+    edits to an AUDITED file refuse it (nothing written). REPO is pointed
+    away from this tree: in main's copy the tree IS REPO and the main-tree
+    refusal would fire first (audit r5 HIGH-1)."""
+    monkeypatch.setattr(sup, "REPO", str(tmp_path / "main"))
     out = tmp_path / "m.json"
     monkeypatch.setattr(sup, "MANIFEST_OUT", str(out))
     monkeypatch.setattr(sup, "file_hashes", lambda root: {"a": "b"})
@@ -779,6 +782,7 @@ def test_supervisor_write_manifest_refuses_the_main_tree(sup, monkeypatch):
 def test_supervisor_preflight_failure_alerts_once_merged(sup, monkeypatch,
                                                          tmp_path, capsys,
                                                          manifest_in_main):
+    # (see also test_supervisor_alerts_on_a_missing_manifest below)
     """Audit r3 M1: before the merge a failing preflight is the expected
     wait; once main holds the manifest it is an ALERT."""
     m = tmp_path / "mspacman_manifest.json"
@@ -798,6 +802,31 @@ def test_supervisor_preflight_failure_alerts_once_merged(sup, monkeypatch,
     out = capsys.readouterr().out
     assert ("ALERT: PREFLIGHT not ready" in out) is manifest_in_main
     assert "PREFLIGHT not ready (0 min): why" in out
+
+
+def test_supervisor_alerts_on_a_missing_manifest(sup, monkeypatch, tmp_path,
+                                                  capsys):
+    """Audit r5 LOW-1: the manifest still absent from main 2 h after the
+    decision (the merge watcher died or held) is an ALERT."""
+    monkeypatch.setattr(sup, "MANIFEST", str(tmp_path / "absent.json"))
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup, "wait_for_s1", lambda: _REPLICATES)
+    monkeypatch.setattr(sup, "preflight", lambda arm: (False, "why"))
+    sleeps = []
+
+    def sleep(s):
+        sleeps.append(s)
+        if len(sleeps) > 13:
+            raise RuntimeError("enough")
+
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    with pytest.raises(RuntimeError, match="enough"):
+        sup.main(["auto", "0"])
+    out = capsys.readouterr().out.splitlines()
+    early = [l for l in out if "PREFLIGHT not ready (0 min)" in l]
+    late = [l for l in out if "PREFLIGHT not ready (120 min)" in l]
+    assert early and not early[0].startswith("ALERT")
+    assert late and late[0].startswith("ALERT") and "mspacman_merge" in late[0]
 
 
 def test_supervisor_auto_resumes_kais_pick_after_partial(sup, monkeypatch,

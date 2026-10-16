@@ -570,8 +570,16 @@ def main(argv):
             break
         if why != told or polls % 6 == 0:
             # Before the merge the manifest is simply not in main yet;
-            # once it is, a failing preflight is an ALERT (audit r3 M1).
-            alert = "ALERT: " if os.path.exists(MANIFEST) else ""
+            # once it is, a failing preflight is an ALERT (audit r3 M1) --
+            # and so is a manifest still missing 2 h after the decision
+            # (the merge watcher died or held: audit r5 LOW-1).
+            if os.path.exists(MANIFEST):
+                alert = "ALERT: "
+            elif polls * 10 >= 120:
+                alert = ("ALERT: (main still lacks the manifest 2 h after "
+                         "the decision -- check mspacman_merge.log) ")
+            else:
+                alert = ""
             print(f"{alert}PREFLIGHT not ready ({polls * 10} min): {why}",
                   flush=True)
             told = why
