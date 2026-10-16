@@ -747,6 +747,133 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- the real-time algorithm on Ms. Pac-Man (Kai, 2026-10-16)
+
+DECISION (Kai, 2026-10-16): "I'd like to test the current algorithm on ms
+pacman when the current code is done running" (10-15: "... start moving our
+working algorithm to a different problem to solve to see if it holds up on
+something like pac man").
+QUESTION: does the real-time line's algorithm -- Pong's recipe, with only
+the env and the unit conversion below changed -- learn Ms. Pac-Man, and how
+close does it get to the published Atari-100k results?
+ARM = the base that the Gumbel seed-1 decision (below, 10-15) leaves as the
+real-time line's training configuration:
+  REPLICATES  -> effzero-repro-faithful-gumbelact8-birth-mspacman
+                 (Gumbel-8 acting, 50-sim birth targets);
+  NO BREAKOUT -> effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman
+                 (temperature + BN stabilizer, prior sampling);
+  PARTIAL     -> Kai's call between the two (nothing launches until then).
+The supervisor applies this decision from seed 1's readout files ("auto":
+first success, mean 60-90, collapses with the recal classification, first
+success <= 80), logs it, and launches. I re-check it by hand from the same
+files; if the two disagree, the run is stopped and Kai decides.
+SEED 0, one run, dir benchmarks/results/mspacman-s0-2026-10-16.
+ENV: MsPacmanNoFrameskip-v4 (EfficientZero's env id; v4 = no sticky actions,
+the 9-action minimal set), through the lineage's wrapper stack unchanged:
+NoopReset(30) -> MaxAndSkip(4, flicker max-pool) -> EpisodicLife for
+training. Rewards clipped to +-1 as in Pong (REWARD_CLIP 1.0 = EfficientZero's
+sign clip: every Ms. Pac-Man reward -- 10 / 50 / 200-1600 / fruit -- is +1);
+discount 0.997^4, 84x84 RGB, 4-frame stack, network, search, refresh engine,
+buffer (31,250 transitions), schedule (90 iterations x 2000 train steps,
+eval every 5, checkpoint every 2, staged temperature) all unchanged; --ray
+--cpu-actor; --episode-cap 3000 (per life).
+UNIT CONVERSION (the only arm change): EpisodicLife ends each training
+episode at a life loss (EfficientZero's episode_life), so a Ms. Pac-Man
+trajectory is one LIFE and a game is 3; in Pong a trajectory was a game.
+Knobs counted in trajectories are kept per GAME (x3): --episodes-per-iter 3
+(one game's lives per iteration, as Pong's one game; the actor's env carries
+the match on across them, one respawn no-op per continued life),
+MAX_REPLAY 85 -> 255 (keeps the 31,250-transition cap the binding one, as
+it always was in Pong -- 85 random-play lives hold ~15k),
+POLICY_REFRESH_COUNT 4 -> 12 (4 games' worth re-searched per 2 iterations).
+Per POSITION the refresh coverage still differs from Pong's (Ms. Pac-Man
+games are shorter) -- reported, not corrected. Row diagnostics that
+describe the last collected trajectory (fresh_target_entropy,
+birth_*_last) now describe one life, not a game: not comparable with
+Pong's.
+Measured random play through this stack (5 games): 3 lives, ~180 decisions
+per life, ~545 per game, mean score 286 (published random 307.3). So an
+iteration collects ~550 env steps early (Pong ~800-3000); expect roughly
+60-120k env steps by iteration 90 (Pong 150-200k): the same 180k gradient
+steps on less data.
+EVAL CHANGE (code): the in-run eval (8 games per row) and the exact probe
+play whole GAMES -- Run.play_game: every life to the real game over, the
+3000 cap per life (a capped life ends the game and reads capped); the Ray
+eval actor and the probe reseed the env per game first (a real reset; the
+game then starts from play_episode's own real reset, the double reset
+every eval already had). Before, each eval "game" was one play_episode,
+which in a multi-life game is one life, and the next one resumed the match
+mid-way. A Pong game is one life: identical results (pinned in
+tests/test_mspacman.py against the old code on the real Pong-v4 env). The
+probe takes PROBE_ENV (default Pong-v4; the action count from the env).
+REFERENCES (Atari-100k = 100k env steps = 400k frames; the BBF table, arXiv
+2305.19452): random 307.3, human 6951.6, DER 1187.4, DrQ(eps) 1218.1,
+SPR 1318.4, EfficientZero 1281.2, BBF 2008.3.
+PRE-REGISTERED READS. The exact eval: 30 noop starts (1..30), whole games,
+prior argmax, rows 5-90 (all 18 snapshots). PRIMARY variant = the deployed
+policy: raw for the Gumbel arm; the acting states (PROBE_ACTING_STATES=1)
+for the temperature + stabilizer arm, raw secondary (as bnrecal s1). No
+external BN recal (no Ms. Pac-Man calibration set; Pong's frames do not
+transfer). Greedy play from a noop count is deterministic and the 30
+counts collapse into a few distinct games (noops mod 4, as on Pong; audit
+measured 2 distinct scores on random nets), so one row is a weighted mean
+of a handful of games -- the reads average rows. The probe's phases_won is
+Pong's win test (every Ms. Pac-Man phase mean is positive): not a read.
+  (1) learning: the primary exact score per row and its mean over rows
+      60-90;
+  (2) level against EfficientZero: g = (score - 307.3) / (1281.2 - 307.3),
+      the fraction of EfficientZero's gain over random, for the primary
+      mean over rows 60-90. On Pong the same line sits at g = 0.57-0.75
+      over 60-90 (random -20.7, EfficientZero 20.1: tempscale s0 raw +2.70
+      -> 0.57, bnrecal s1 deployed +5.80 -> 0.65, Gumbel s0 raw +9.74 ->
+      0.75). Bands: HOLDS UP g >= 0.5 (mean >= 794.25, just below that
+      Pong range); PART-WAY 0.2 <= g < 0.5 (502.08 <= mean < 794.25);
+      DOES NOT HOLD UP g < 0.2 (mean < 502.08, under 1.63x random).
+      Read (2) is NOT matched on data: Pong's rows 60-90 sat at ~120-200k
+      env steps, Ms. Pac-Man's will likely sit lower, and EfficientZero's
+      1281.2 is a final score at exactly 100k -- read (3) is the
+      data-matched read;
+  (3) data: env steps per row; the primary exact score at the first row
+      with env_steps >= 100k (the Atari-100k point; or row 90 with its env
+      steps if never reached) against EfficientZero 1281.2 / SPR 1318.4 --
+      descriptive (one seed against 3-seed means);
+  (4) stability, descriptive: the largest drop between consecutive rows from
+      row 45 on, capped games, game length (eval_len_mean), in-run vs exact.
+DECISION AFTER:
+  HOLDS UP -> the algorithm transfers off Pong: next is Kai's (his list of
+    things to try, or onward toward the Switch); a second seed is optional.
+  PART-WAY -> Kai's call: a second seed, or a look at the port first.
+  DOES NOT HOLD UP -> do not carry it to new games yet; diagnose the port
+    first (refresh coverage per position, the higher train/env-step ratio,
+    84x84 vs pellets, 9-action exploration) before blaming the algorithm.
+CODE (worktree Y:\SwitchPlayer-mspacman, branch mspacman; this section is
+committed on main itself, so the branch touches no file a write-up does):
+Run.play_game + the sequential / Ray eval paths + the probe's PROBE_ENV;
+SelfPlayActor.play reseeds only at a new game; the two -mspacman arms;
+benchmarks/supervisors/supervise_mspacman.py {auto|gumbel|temp} 0 (waits
+for Gumbel seed 1's completion marker AND its full readout -- exact 45-90,
+recal 60-90; ALERTs if the readout is still incomplete 2 h after seed 1
+completed -- so it never overlaps seed 1 or its evals; applies the decision
+in "auto", exits 2 on PARTIAL unless Kai's pick is already running there;
+refuses if the other variant's checkpoint is in the folder or a live
+ablation.py of the arm is running; the manifest is read from the main tree;
+manifest + quick probe + 15 suites once per supervisor process, the
+manifest again before every relaunch); tests/test_mspacman.py. Merged into
+main only after seed 1's evals finish (seed 1's relaunch and hand-off check
+the old manifest), by the WMI watcher scratchpad mspacman_merge.py with the
+audited SHA pinned.
+FREEZE: no edit to an AUDITED file (supervise_mspacman.py's list) in the
+main tree from the merge until this run's evals finish -- every relaunch
+re-checks the manifest; the deferred Gumbel test-only items (they touch
+tests/test_gumbelact8.py) wait too.
+EVALS: the WMI hand-off scratchpad post_mspacman.py (log post_mspacman.log;
+logs "all done"; ALERTs on a FAILED run, a HOLD, a code difference from the
+manifest, or a probe exiting nonzero) writes
+benchmarks/probes/probe_exhaustive_eval-mspacman-s0-2026-10-16.jsonl (raw)
+and, for the temperature arm, ...-acting.jsonl (deployed).
+COST: ~20-21 h (Pong's ~13.5 min/iteration; acting runs beside training)
++ evals ~30-60 min.
+
 ### Next experiment (pre-registered) -- Gumbel search acting, seed 1 (Kai, 2026-10-15)
 
 DECISION (Kai, 2026-10-15): "let's run gumbel one more time then decide
