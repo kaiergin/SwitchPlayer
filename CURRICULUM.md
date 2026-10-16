@@ -881,7 +881,10 @@ main tree from the manifest commit (the audited SHA) until this run's evals
 finish -- the merge and every relaunch check main against the manifest; the
 deferred Gumbel test-only items (they touch tests/test_gumbelact8.py) wait
 too. Nor any pip install into the shared .venv (the manifest cannot see
-it; post_mspacman.py ALERTs on a change).
+it; post_mspacman.py ALERTs on a change). AUDITED also pins four finished
+runs' probe records the suites read (prioract2 s0/s1 exact, Gumbel s0 exact
+and recal): no raw/recal re-probe of those runs (it would append to them)
+until the evals finish.
 EVALS: the WMI hand-off scratchpad post_mspacman.py (log post_mspacman.log;
 logs "all done"; repeats the supervisor's DECISION / ALERT / HOLD lines,
 the merge watcher's ALERTs and any supervisor.err text;
