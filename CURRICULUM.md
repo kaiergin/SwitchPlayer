@@ -766,7 +766,8 @@ real-time line's training configuration:
 The supervisor applies this decision from seed 1's readout files ("auto":
 first success, mean 60-90, collapses with the recal classification, first
 success <= 80), logs it, and launches. I re-check it by hand from the same
-files; if the two disagree, the run is stopped and Kai decides.
+files and the hand-off's code-check line (post_gumbel_s1.log); if they
+disagree, the run is stopped and Kai decides.
 SEED 0, one run, dir benchmarks/results/mspacman-s0-2026-10-16.
 ENV: MsPacmanNoFrameskip-v4 (EfficientZero's env id; v4 = no sticky actions,
 the 9-action minimal set), through the lineage's wrapper stack unchanged:
@@ -854,14 +855,21 @@ benchmarks/supervisors/supervise_mspacman.py {auto|gumbel|temp} 0 (waits
 for Gumbel seed 1's completion marker AND its full readout -- exact 45-90,
 recal 60-90; ALERTs if the readout is still incomplete 2 h after seed 1
 completed -- so it never overlaps seed 1 or its evals; applies the decision
-in "auto", exits 2 on PARTIAL unless Kai's pick is already running there;
-refuses if the other variant's checkpoint is in the folder or a live
-ablation.py of the arm is running; the manifest is read from the main tree;
+in "auto", exits 2 on PARTIAL unless exactly one variant's checkpoint (live
+or completion marker) is already in the folder -- Kai's pick, then resumed;
+an explicit variant must agree with a definite decision unless
+--kai-override (Kai's instruction only); refuses if the other variant's
+checkpoint is in the folder; holds, with an ALERT, while a live ablation.py
+of the arm and seed is running; the manifest is read from the main tree;
 manifest + quick probe + 15 suites once per supervisor process, the
 manifest again before every relaunch); tests/test_mspacman.py. Merged into
 main only after seed 1's evals finish (seed 1's relaunch and hand-off check
 the old manifest), by the WMI watcher scratchpad mspacman_merge.py with the
-audited SHA pinned.
+audited SHA pinned (it checks the SHA carries the manifest and that main is
+still this line, and waits out uncommitted edits to the files it updates).
+The supervisor is launched hidden via WMI from the worktree path (stdout
+-> supervisor.log, stderr -> supervisor.err in the run dir); after the
+merge every relaunch uses main's identical copy, with the same arguments.
 FREEZE: no edit to an AUDITED file (supervise_mspacman.py's list) in the
 main tree from the merge until this run's evals finish -- every relaunch
 re-checks the manifest; the deferred Gumbel test-only items (they touch
