@@ -612,12 +612,17 @@ def test_supervisor_readout_waits_for_every_row(sup, monkeypatch, tmp_path):
         f.write(rec(90, 5.0) + "\n" + rec(90, 6.0) + "\n")  # a rerun: last wins
     raw, recal = sup.s1_readout()
     assert raw[90]["exact_mean"] == 6.0 and len(raw) == 10 and len(recal) == 7
+    # the calibration match ignores case (audit r4 N3)
+    with open(recal_f, "a") as f:
+        f.write(json.dumps({"iteration": 90, "exact_mean": 3.0,
+                            "calibration": cal.upper()}) + "\n")
+    assert sup.s1_readout()[1][90]["exact_mean"] == 3.0
     # a recal rerun on another calibration snapshot never replaces a row
     with open(recal_f, "a") as f:
         f.write(json.dumps({"iteration": 90, "exact_mean": -9.0,
                             "calibration": "elsewhere/weights-iter050.pth"})
                 + "\n")
-    assert sup.s1_readout()[1][90]["exact_mean"] == 2.0
+    assert sup.s1_readout()[1][90]["exact_mean"] == 3.0
 
 
 def test_supervisor_seed_state(sup, tmp_path):
@@ -677,6 +682,10 @@ def test_supervisor_audits_what_it_runs(sup):
                 "atari_wrappers.py"):
         assert rel in sup.AUDITED
     assert len(sup.SUITES) == 15
+    # every older supervisor the suites read / exec / run (audit r4 L3)
+    for name in ("gumbelact8", "bnrecal", "searchact8", "factor",
+                 "prioract2", "tempscale", "seqref"):
+        assert f"benchmarks/supervisors/supervise_{name}.py" in sup.AUDITED
 
 
 def test_supervisor_manifest_matches_this_tree(sup):
@@ -756,6 +765,14 @@ def test_supervisor_write_manifest_refuses_a_dirty_tree(sup, monkeypatch,
     assert calls[0][:4] == ["git", "-C", str(ROOT), "status"]
     assert calls[0][-len(sup.AUDITED):] == sup.AUDITED
     assert out.exists() is (rc == 0)
+
+
+def test_supervisor_write_manifest_refuses_the_main_tree(sup, monkeypatch):
+    """Audit r4 N2: main's copy never writes the manifest."""
+    monkeypatch.setattr(sup, "REPO", str(ROOT))
+    monkeypatch.setattr(sup.subprocess, "run",
+                        lambda *a, **k: pytest.fail("ran git"))
+    assert sup.main(["--write-manifest"]) == 1
 
 
 @pytest.mark.parametrize("manifest_in_main", [False, True])
@@ -866,9 +883,11 @@ def test_supervisor_readout_clock_starts_at_the_marker(sup, monkeypatch,
 
 
 def test_supervisor_alerts_on_an_incomplete_readout(sup, monkeypatch,
-                                                    capsys):
+                                                    capsys, tmp_path):
     """Audit r1 L1: seed 1 done but its readout still incomplete 2 h later
-    -> an ALERT naming the missing rows (and it keeps waiting)."""
+    -> an ALERT naming the missing rows (and it keeps waiting). Isolated
+    from seed 1's real checkpoint (audit r4 N1)."""
+    monkeypatch.setattr(sup, "S1_CKPT", str(tmp_path / "absent.ckpt"))
     clock = iter([0.0, 0.0, 3 * 3600.0, 3 * 3600.0])
     monkeypatch.setattr(sup, "seed_state", lambda ck: "done")
     monkeypatch.setattr(sup, "s1_readout", lambda: None)

@@ -142,7 +142,7 @@ def read_rows(path, raw=False, calibration=None):
         if raw and (r.get("variant") != "raw" or "max_noop" in r):
             continue
         if calibration is not None and not str(r.get("calibration", "")).replace(
-                chr(92), "/").endswith(calibration):
+                chr(92), "/").lower().endswith(calibration.lower()):
             continue
         out[r["iteration"]] = r
     return out
@@ -198,7 +198,9 @@ MANIFEST = os.path.join(REPO, "benchmarks", "supervisors",
                         "mspacman_manifest.json")
 # Every repo module the run executes, the tests the preflight runs (plus
 # the two harness suites the eval change touches), the eval probe the
-# readout runs, and the supervisors the tests exec.
+# readout runs, every older supervisor the suites read, exec or run, and the
+# finished runs' probe records they read (audit r4 L3) -- so nothing the
+# preflight's verdict depends on can change unseen.
 AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
            "scalar_categorical.py", "memory.py", "EpisodicLifeEnv.py",
            "atari_wrappers.py", "experiments/ablation.py",
@@ -215,7 +217,21 @@ AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
            "tests/test_reanalysis.py", "tests/test_vtree.py", "pytest.ini",
            "benchmarks/probes/probe_exhaustive_eval.py",
            "benchmarks/supervisors/supervise_gumbelact8.py",
-           "benchmarks/supervisors/supervise_mspacman.py"]
+           "benchmarks/supervisors/supervise_mspacman.py",
+           "benchmarks/supervisors/supervise_bnrecal.py",
+           "benchmarks/supervisors/supervise_searchact8.py",
+           "benchmarks/supervisors/supervise_factor.py",
+           "benchmarks/supervisors/supervise_prioract2.py",
+           "benchmarks/supervisors/supervise_tempscale.py",
+           "benchmarks/supervisors/supervise_seqref.py",
+           "benchmarks/probes/probe_exhaustive_eval-pong-prioract2-s0-"
+           "2026-10-02.jsonl",
+           "benchmarks/probes/probe_exhaustive_eval-pong-prioract2-s1-"
+           "2026-10-02.jsonl",
+           "benchmarks/probes/probe_exhaustive_eval-pong-gumbelact8-s0-"
+           "2026-10-12.jsonl",
+           "benchmarks/probes/probe_bn_recal_eval-pong-gumbelact8-s0-"
+           "2026-10-12.jsonl"]
 SUITES = ["tests/test_prioract.py", "tests/test_sve.py",
           "tests/test_searchact.py", "tests/test_factor.py",
           "tests/test_prioract2.py", "tests/test_tempscale.py",
@@ -474,6 +490,13 @@ def main(argv):
     if "--write-manifest" in argv:
         root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))
+        # Only the audited worktree writes it: main's copy would re-bless
+        # whatever main holds (audit r4 N2).
+        if os.path.normcase(os.path.abspath(root)) == os.path.normcase(
+                os.path.abspath(REPO)):
+            print("refusing --write-manifest in the main tree: write it in "
+                  "the audited worktree and merge", flush=True)
+            return 1
         # The manifest hashes the working tree: refuse uncommitted edits to
         # an AUDITED file, or the manifest would describe code no commit
         # holds (audit r3 M1).
