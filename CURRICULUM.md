@@ -868,7 +868,8 @@ main only after seed 1's evals finish (seed 1's relaunch and hand-off check
 the old manifest), by the WMI watcher scratchpad mspacman_merge.py with the
 audited SHA pinned (a full 40-hex SHA that carries the manifest and whose
 files hash to it; it waits for seed 1's complete readout -- a failed seed-1
-probe is rerun by hand on the pre-merge code first -- checks main is still
+probe is rerun by hand on the pre-merge code first -- holds if seed 1's
+hand-off logged a code difference, checks main is still
 this line, waits out Kai's in-progress git operations and uncommitted edits
 to the files it updates, and re-hashes main against the manifest after the
 merge, ALERTing on any difference).
@@ -879,9 +880,11 @@ FREEZE: no edit to an AUDITED file (supervise_mspacman.py's list) in the
 main tree from the manifest commit (the audited SHA) until this run's evals
 finish -- the merge and every relaunch check main against the manifest; the
 deferred Gumbel test-only items (they touch tests/test_gumbelact8.py) wait
-too.
+too. Nor any pip install into the shared .venv (the manifest cannot see
+it; post_mspacman.py ALERTs on a change).
 EVALS: the WMI hand-off scratchpad post_mspacman.py (log post_mspacman.log;
-logs "all done"; repeats the supervisor's DECISION / ALERT / HOLD lines;
+logs "all done"; repeats the supervisor's DECISION / ALERT / HOLD lines,
+the merge watcher's ALERTs and any supervisor.err text;
 ALERTs on a FAILED run, a HOLD, a code difference from the manifest, a
 probe exiting nonzero, or a row of the 18 missing from a jsonl) writes
 benchmarks/probes/probe_exhaustive_eval-mspacman-s0-2026-10-16.jsonl (raw)
