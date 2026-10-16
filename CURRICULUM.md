@@ -860,23 +860,30 @@ or completion marker) is already in the folder -- Kai's pick, then resumed;
 an explicit variant must agree with a definite decision unless
 --kai-override (Kai's instruction only); refuses if the other variant's
 checkpoint is in the folder; holds, with an ALERT, while a live ablation.py
-of the arm and seed is running; the manifest is read from the main tree;
-manifest + quick probe + 15 suites once per supervisor process, the
-manifest again before every relaunch); tests/test_mspacman.py. Merged into
+of EITHER -mspacman arm at the seed is running; the manifest is read from
+the main tree; manifest + quick probe + 15 suites once per supervisor
+process, the manifest again before every relaunch; a failing preflight is
+an ALERT once main holds the manifest); tests/test_mspacman.py. Merged into
 main only after seed 1's evals finish (seed 1's relaunch and hand-off check
 the old manifest), by the WMI watcher scratchpad mspacman_merge.py with the
-audited SHA pinned (it checks the SHA carries the manifest and that main is
-still this line, and waits out uncommitted edits to the files it updates).
+audited SHA pinned (a full 40-hex SHA that carries the manifest and whose
+files hash to it; it waits for seed 1's complete readout -- a failed seed-1
+probe is rerun by hand on the pre-merge code first -- checks main is still
+this line, waits out Kai's in-progress git operations and uncommitted edits
+to the files it updates, and re-hashes main against the manifest after the
+merge, ALERTing on any difference).
 The supervisor is launched hidden via WMI from the worktree path (stdout
 -> supervisor.log, stderr -> supervisor.err in the run dir); after the
 merge every relaunch uses main's identical copy, with the same arguments.
 FREEZE: no edit to an AUDITED file (supervise_mspacman.py's list) in the
-main tree from the merge until this run's evals finish -- every relaunch
-re-checks the manifest; the deferred Gumbel test-only items (they touch
-tests/test_gumbelact8.py) wait too.
+main tree from the manifest commit (the audited SHA) until this run's evals
+finish -- the merge and every relaunch check main against the manifest; the
+deferred Gumbel test-only items (they touch tests/test_gumbelact8.py) wait
+too.
 EVALS: the WMI hand-off scratchpad post_mspacman.py (log post_mspacman.log;
-logs "all done"; ALERTs on a FAILED run, a HOLD, a code difference from the
-manifest, or a probe exiting nonzero) writes
+logs "all done"; repeats the supervisor's DECISION / ALERT / HOLD lines;
+ALERTs on a FAILED run, a HOLD, a code difference from the manifest, a
+probe exiting nonzero, or a row of the 18 missing from a jsonl) writes
 benchmarks/probes/probe_exhaustive_eval-mspacman-s0-2026-10-16.jsonl (raw)
 and, for the temperature arm, ...-acting.jsonl (deployed).
 COST: ~20-21 h (Pong's ~13.5 min/iteration; acting runs beside training)
