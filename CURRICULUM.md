@@ -747,6 +747,50 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- the real-time algorithm on Ms. Pac-Man (seed 0), 2026-10-17
+
+mspacman-s0-2026-10-16 trained the temperature + stabilizer arm
+(effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman) from
+10-16 08:55 to 10-17 02:09 in one attempt (62,011 s, 11.9 min/iteration, no
+deaths, supervisor.err empty). The hand-off ran the evals 02:10-02:25: code
+check ok, all 18 rows in both variants. EXACT eval: whole games, 30 noop
+starts, prior argmax. ACTING = the deployed policy (primary); RAW is
+secondary; IN-RUN = the run's own 8-game eval:
+  iter      5   10   15   20   25   30   35   40   45   50   55   60   65   70   75   80   85   90
+  acting  462 1109  453  606  495  684  490  706  588  643  508  781  338  361  730  816  875  642
+  raw     459  499  482  374  406  298  416  479  592  576  878  478  479  515  520  627  643  837
+  in-run  534 1115  325  385  539  668  424  800  575  650  580  975  395  481  766  851  889  685
+  env k   3.0  6.4  9.0 12.1 15.3 18.2 20.8 23.7 26.3 29.7 32.9 35.8 38.9 41.8 44.5 47.3 50.0 53.4
+Each row is 4 distinct games, one per noops mod 4: every row has exactly 4
+distinct scores, as the pre-registration expected.
+READ (1) learning: acting mean 60-90 = 649.14 (2.11x random). The acting
+row means by thirds are 625 (5-25), 603 (30-55) and 649 (60-90); without
+the @10 outlier (1109) rows 5-25 are 504. Raw by thirds: 444 / 543 / 586.
+Most of the gain over random came in the first ~10 iterations (~6k env
+steps); after that the level rose little.
+READ (2) level: g = (649.14 - 307.3) / 973.9 = 0.351 -> PART-WAY
+(0.2 <= g < 0.5; HOLDS UP needed a mean >= 794.25). Raw 585.62 -> g =
+0.286, also PART-WAY. Pong's same line: g = 0.57-0.75.
+READ (3) data: no row reached 100k env steps. Each iteration collected ~600
+env steps (one game), so the run ended at 53.4k: half the Atari-100k
+budget, with 180k gradient steps (3.4 per env step, Pong's ratio ~1). Per
+the pre-registration this read falls back to row 90: 642.3 (g 0.34) at
+53.4k env steps, against EfficientZero 1281.2 / SPR 1318.4 at 100k --
+descriptive; this run had half the references' env steps.
+READ (4) stability: the largest acting drop from row 45 on is -443 (781 @60
+-> 338 @65; raw -399, 878 @55 -> 478 @60). No capped game in any row. Game
+length 450-750 decisions. In-run 60-90 mean 720 vs exact 649: the 8-game
+in-run eval reads ~70 higher. Deployed acting states vs raw: +63 over
+60-90 on average, but mixed row by row (4 rows higher, 3 lower).
+PRE-REGISTERED DECISION: PART-WAY -> Kai's call: a second seed, or a look at
+the port first. Beyond the letter: the curve flattened after ~10
+iterations, and the run saw only half the data the references use at 3.4x
+Pong's gradient steps per env step. The port's train/env-step ratio is the
+first suspect on the pre-registered diagnose list. A second seed would
+measure seed variance in a recipe whose data budget is itself in question,
+so the port deserves a look first. The freeze is lifted (the evals are
+done).
+
 ### RESULT -- Gumbel search acting, seed 1 + THE TWO-SEED DECISION, 2026-10-16
 
 pong-gumbelact8-s1-2026-10-15 ran 10-15 12:23 -> 10-16 08:12 in one attempt
