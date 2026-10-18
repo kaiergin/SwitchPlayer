@@ -879,6 +879,21 @@ DECISION AFTER:
     tokens?), the frame-time targets, the bias.
 COST: ~20 h (the base's ~13.5 min/iteration; 12 search children ~2x the
 base's per expansion, on fewer decisions per game) + ~30 min evals.
+AUDIT + LAUNCH: four audit rounds. r1: HIGH (records stored the
+post-token frame stack) + MEDIUM (replay cap in records) -> 1f21a464;
+r2: MEDIUM (BN-stabilizer window in decisions) -> 7014e1b1; r3 and r4:
+nothing above LOW in the code (r3's launch-plan HIGH -- bare `python`
+under WMI has no psutil -- answered by launching with the venv
+interpreter; LOW test gaps -> 3494b7e7). Manifest 6a66298a (34 AUDITED
+files of 3494b7e7). The run executes from the run worktree
+Y:\SwitchPlayer-p2a-run, detached at 6a66298a (development continues on
+curriculum-p2 elsewhere); GPU smoke from it (kill mid-iteration +
+resume, probe raw + acting) OK. LAUNCHED 2026-10-18 00:18 (the folder
+keeps the pre-registration date, pong-tokens-s1-2026-10-17): preflight
+ok (manifest + quick probe + 13 suites), attempt 1 fresh; eval hand-off
+scratchpad post_tokens.py (rows 45-90, acting + raw; logs "all done").
+Deferred, test-only: pin the probe's pooled frames_per_decision exactly
+(r4 NIT-1).
 
 ### RESULT -- the real-time algorithm on Ms. Pac-Man (seed 0), 2026-10-17
 
