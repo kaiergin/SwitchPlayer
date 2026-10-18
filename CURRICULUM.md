@@ -815,9 +815,19 @@ MECHANICS (code, default OFF everywhere):
     falling linearly from 0.5 at step 0 to 0 at 25% of training. Eval
     and deployment: the prior's argmax token.
   - env_steps = frames / 4 (the base's decision-equivalents, so rows
-    share the base's x-axis); decisions are logged beside it. The
-    replay transition cap stays in records: with long tokens the buffer
-    spans more game time -- reported, not corrected.
+    share the base's x-axis); cumulative decisions are logged beside it
+    (tok_decisions_total, checkpointed). The episode cap (3000 base
+    steps) is checked between decisions, so the last token can run past
+    it by up to 7 base steps.
+  - The replay transition cap (31,250) counts BASE steps under tokens, so
+    the buffer spans the same game time as the twin's (~12-30 games)
+    whatever tokens are played -- counted in records, ~200-decision token
+    games would have made MAX_REPLAY 85 the binding cap and the buffer
+    ~3-7x the twin's tiny one (audit r1). Rows log replay_trajs /
+    replay_records / replay_base_steps. Refresh keeps the twin's 4
+    trajectories per 2 iterations, so the per-trajectory revisit rate
+    matches; with fewer decisions per game each gradient step's samples
+    reuse fewer distinct positions -- intrinsic to tokens, reported.
   - REGRESSION (pinned in the tests): TOKEN_VOCAB = the base's six ALE
     actions x 4 frames reproduces the base arm bit for bit.
 READS. Exact eval as the line's: 30 noop starts, prior argmax (now over
@@ -834,6 +844,15 @@ tokens), rows 45-90; DEPLOYED (acting states) primary, raw secondary.
       decisions per second (60 / mean frames per decision) -- the
       real-time quantity;
   (5) stability: rows below 0 after the first success.
+NOTES (audit r1, before launch): the row policy_entropy is over 12 tokens
+(max ln 12 = 2.48 against the twin's ln 6 = 1.79), so H(pi) values are not
+comparable across the pair; a token's payoff (read 4) uses the 20-frame
+n-step horizon, which for a long token is its own duration -- descriptive,
+not like-for-like across durations. The twin ran code 9a7f3388 (branch
+bnrecal); the plain Pong path's equivalence since then is pinned by the
+Ms. Pac-Man real-Pong actor regression and P2a's base-token regressions
+(TOKEN_VOCAB = six ALE actions x 4 frames reproduces the plain arm bit for
+bit: the real-Pong actor and a whole train + refresh slice).
 DECISION AFTER:
   BREAKOUT and NO WORSE -> tokens hold up: P2b (the composition loss) on
     this arm, then P3.

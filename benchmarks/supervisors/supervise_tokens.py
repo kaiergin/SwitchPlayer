@@ -44,6 +44,14 @@ AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
            "atari_wrappers.py", "residual_block.py",
            "experiments/ablation.py", "experiments/ray_actors.py",
            "pytest.ini", "tests/test_gumbelact8.py",
+           # imported by the suites (audit r1 B-L1)
+           "tests/test_reanalysis.py",
+           # older supervisors the suites read or exec
+           "benchmarks/supervisors/supervise_bnrecal.py",
+           "benchmarks/supervisors/supervise_gumbelact8.py",
+           "benchmarks/supervisors/supervise_prioract2.py",
+           "benchmarks/supervisors/supervise_searchact8.py",
+           "benchmarks/supervisors/supervise_tempscale.py",
            "benchmarks/probes/probe_exhaustive_eval.py",
            "benchmarks/supervisors/supervise_tokens.py"] + SUITES
 

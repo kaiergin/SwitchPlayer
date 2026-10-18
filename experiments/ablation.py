@@ -1839,8 +1839,13 @@ class Run:
                         policy = policy * token_bias_weights(b)
                         policy = policy / policy.sum()
                     action = int(np.random.choice(ACTIONS, p=policy))
+            after = stack
             if tokens:
-                obs, reward, term, trunc, stack, n_base = play_token(
+                # play_token pushes the token's inner frames into its own
+                # copy: the record below keeps the stack the decision was
+                # made on (audit r1 A-1), the next decision continues from
+                # `after`.
+                obs, reward, term, trunc, after, n_base = play_token(
                     self.env, action, stack)
             else:
                 obs, reward, term, trunc, _ = self.env.step(action)
@@ -1857,6 +1862,7 @@ class Run:
                 traj.append((stack, action, prev_reward))
             else:
                 traj.append((stack, action, prev_reward, search_pol, search_val))
+            stack = after
             prev_reward = muzero.clip_reward(reward)
             total += float(reward)
             steps += n_base
@@ -2157,6 +2163,12 @@ class Run:
         w["decisions"] += len(acted)
         w["games"] += 1
         self._tok_window = w
+        # Cumulative decisions beside env_steps (base steps), checkpointed
+        # with the other diag counters (audit r1 B-L2: the per-row window
+        # alone undercounts across a resume).
+        tot = getattr(self, "_tok_totals", None) or {"tok_decisions_total": 0}
+        tot["tok_decisions_total"] += len(acted)
+        self._tok_totals = tot
 
     def _search_traj_communal(self, traj, indices):
         """Communal refresh search (USE_COMMUNAL_REANALYSIS): re-search a
@@ -2819,6 +2831,18 @@ class Run:
             errs["tok_decisions_per_game"] = round(
                 tw["decisions"] / tw["games"], 1)
             self._tok_window = None
+        if muzero.TOKEN_VOCAB is not None:
+            tot = getattr(self, "_tok_totals", None)
+            if tot:
+                errs.update(tot)
+            # The buffer's size in trajectories, records and base steps
+            # (audit r1 B-M1: the transition cap counts base steps under
+            # tokens; these show what it holds).
+            replay = getattr(self, "replay", None) or []
+            errs["replay_trajs"] = len(replay)
+            errs["replay_records"] = int(sum(len(t) for t in replay))
+            errs["replay_base_steps"] = int(sum(replay_units(t)
+                                                for t in replay))
         sv = getattr(getattr(self, "trainer", None), "_sve_window", None)
         if sv and sv["n_real"]:
             # SVE (VALUE_TARGET_MODE "mixed"): share of real value targets
@@ -3008,7 +3032,8 @@ def save_run_checkpoint(run, path, meta):
     # BIRTH_SEARCH / ReDo row counters (round-1 audit LOW-1): cumulative
     # totals must survive a resume. Written only when present, so every
     # other arm's checkpoint head is unchanged.
-    diag = {k: dict(getattr(run, k)) for k in ("_birth_stats", "_redo_stats")
+    diag = {k: dict(getattr(run, k)) for k in ("_birth_stats", "_redo_stats",
+                                               "_tok_totals")
             if getattr(run, k, None)}
     plan = getattr(run, "_redo_last_plan", None)
     if plan:
@@ -3378,14 +3403,28 @@ def evict_replay(replay):
     only -- an unroll window or n-step target must never cross an eviction
     seam -- oldest first, always keeping the newest even if it alone
     exceeds the transition cap. PER sampling is untouched: priorities live
-    on the surviving records; eviction just decides which records survive."""
+    on the surviving records; eviction just decides which records survive.
+    Under TOKEN_VOCAB the transition cap counts BASE steps (replay_units)."""
     while len(replay) > muzero.MAX_REPLAY:
         replay.pop(0)
     cap = muzero.MAX_REPLAY_TRANSITIONS
     if cap:
-        total = sum(len(t) for t in replay)
+        total = sum(replay_units(t) for t in replay)
         while total > cap and len(replay) > 1:
-            total -= len(replay.pop(0))
+            total -= replay_units(replay.pop(0))
+
+
+def replay_units(traj):
+    """A stored trajectory's size against MAX_REPLAY_TRANSITIONS: its record
+    count -- or, under TOKEN_VOCAB, its BASE steps (each acted token's
+    frames / TOKEN_BASE_FRAMES, plus the final record), so the buffer spans
+    the same game time as the plain arm's whatever tokens were played
+    (audit r1 B-M1: counted in records, ~200-decision token games made
+    MAX_REPLAY the binding cap and the buffer ~3-7x the twin's)."""
+    if muzero.TOKEN_VOCAB is None:
+        return len(traj)
+    return 1 + sum(muzero.token_frames(t["action"]) // muzero.TOKEN_BASE_FRAMES
+                   for t in traj[:-1])
 
 
 def seed_list(seed, seeds):
@@ -4125,6 +4164,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         birth_search_gate()
         sve_gate()
         token_gate(spec, use_ray, cpu_actor, ray_workers)
+        if muzero.TOKEN_VOCAB is not None:
+            # main()'s banner printed the env's action count; this arm's
+            # action space is its vocabulary (audit r1 B-NIT).
+            print(f"  [{arm} s{seed}] TOKEN_VOCAB: {ACTIONS} tokens "
+                  f"(ALE action, frames) {list(muzero.TOKEN_VOCAB)}",
+                  flush=True)
         if muzero.REDO_EVERY:
             # Fail at startup -- before any --overwrite deletion (round-2
             # audit LOW-3) and not at step REDO_EVERY: import redo and

@@ -224,7 +224,10 @@ def test_fresh_root_engine_base_tokens_are_the_scalar_path(monkeypatch,
 
 
 @pytest.mark.parametrize("sims,max_depth,horizon", [
-    (12, 12, 3), (12, 2, 3), (20, 12, 100), (30, 30, 5)])
+    (12, 12, 3), (12, 2, 3), (20, 12, 100), (30, 30, 5),
+    # audit r1 A-2: these two reach the range update (upd = r + d * q)
+    # where a scalar-discount mutant changes the counts
+    (40, 30, 3), (60, 12, 3)])
 def test_fresh_root_engine_mixed_durations_match_sequential(
         monkeypatch, token_discount, sims, max_depth, horizon):
     helper, engine, obs = vtree_world(monkeypatch)
@@ -291,6 +294,30 @@ def test_communal_engine_mixed_durations_match_sequential(
     monkeypatch.setattr(muzero, "TOKEN_VOCAB", MIXED6)
     traj = make_traj(2, length, terminated)
     run_both(monkeypatch, traj, windows, sims, **world)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_communal_cuda_graph_waves_match_eager_with_tokens(monkeypatch,
+                                                           token_discount):
+    """Audit r1 A-3: on CUDA the selection wave body is a captured graph
+    reading f["disc"]; with mixed durations it must equal the eager waves."""
+    import muzero_vtree
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", MIXED6)
+    traj = make_traj(70, 40, True)
+    windows = [[0, 3, 5, 9, 10, 14], [15, 16, 21, 27, 28, 31]]
+    out = []
+    for graphs in (False, True):
+        monkeypatch.setattr(muzero_vtree, "USE_CUDA_GRAPHS", graphs)
+        helper, engine = communal_world(monkeypatch, noise=True, horizon=5,
+                                        max_depth=50)
+        cuda = torch.device("cuda")
+        for n in engine.nets.values():
+            n.to(cuda)
+        engine.device = cuda
+        res, _ = vectorized_windows(engine, traj, windows, 30)
+        out.append({k: (v[0].tolist(), v[1], v[3].tolist())
+                    for k, v in res.items()})
+    assert out[0] == out[1]
 
 
 def test_communal_chain_seed_folds_each_in_edge(monkeypatch, token_discount):
@@ -406,6 +433,43 @@ def test_play_episode_plays_tokens_and_counts_base_steps(prior_tokens):
     assert total == 4.0
     assert run.env_steps == 0                       # greedy: never counted
     assert env.was_real_done is True                # capped -> real reset next
+
+
+class _RecNM(_TokNM):
+    def __init__(self, probs):
+        super().__init__(probs)
+        self.seen = []
+
+    def initial_inference(self, stack):
+        self.seen.append(np.array(stack, copy=True))
+        return super().initial_inference(stack)
+
+
+def test_records_keep_the_stack_the_decision_was_made_on(prior_tokens):
+    """Audit r1 A-1: each record's observation is the stack the policy
+    saw at that decision (not the stack after the token's inner frames),
+    and that stack is always the last four BASE steps' frames, whatever
+    tokens were played -- the decision-independent observation."""
+    np.random.seed(1)
+    env = _Steps()
+    run = _token_shell(env, [0.25] * 4)
+    nm = run.searcher.network_manager = _RecNM([0.25] * 4)
+    traj, _, steps, _ = run.play_episode(greedy=False, cap=40)
+    assert len(nm.seen) == len(traj) - 1
+    assert len({muzero.token_frames(r[1]) for r in traj[:-1]}) > 1   # mixed
+    base = 0
+    for i, rec in enumerate(traj[:-1]):
+        assert np.array_equal(rec[0], nm.seen[i]), i
+        expect = np.concatenate([
+            preprocess_frame(env.frame(max(0, t)), IMAGE_RESHAPE)
+            for t in range(base - 3, base + 1)], axis=0)
+        assert np.array_equal(rec[0], expect), i
+        base += muzero.token_frames(rec[1]) // 4
+    assert base == steps
+    final = np.concatenate([preprocess_frame(env.frame(max(0, t)),
+                                             IMAGE_RESHAPE)
+                            for t in range(base - 3, base + 1)], axis=0)
+    assert np.array_equal(traj[-1][0], final)
 
 
 def test_self_play_counts_base_steps_as_env_steps(prior_tokens):
@@ -701,3 +765,77 @@ def test_supervisor_finds_live_children_of_its_arm_and_seed(sup, monkeypatch):
     monkeypatch.setattr(psutil, "process_iter", lambda attrs: [
         SimpleNamespace(info=p) for p in procs])
     assert sup.live_children(1) == [1]
+
+
+def test_supervisor_pins_every_module_and_supervisor_the_suites_read(sup):
+    """Audit r1 B-L1: every tests.* module a preflight suite imports, and
+    every supervisor file a suite reads or execs, is in AUDITED."""
+    import re
+    for rel in sup.SUITES:
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        for mod in re.findall(r"from tests\.(\w+) import", src):
+            assert f"tests/{mod}.py" in sup.AUDITED, (rel, mod)
+        for name in re.findall(r"(supervise_\w+)\.py", src):
+            assert f"benchmarks/supervisors/{name}.py" in sup.AUDITED, \
+                (rel, name)
+
+
+# --------------------------------------------------------------------------
+# the replay cap in base steps; row fields (audit r1 B-M1 / B-L2)
+# --------------------------------------------------------------------------
+def _rec_traj(actions):
+    return [{"action": a, "reward": 0.0} for a in actions] + [
+        {"action": 0, "reward": 0.0}]
+
+
+def test_replay_cap_counts_base_steps_under_tokens(monkeypatch):
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", ((0, 4), (2, 32)))
+    monkeypatch.setattr(muzero, "MAX_REPLAY", 85)
+    monkeypatch.setattr(muzero, "MAX_REPLAY_TRANSITIONS", 40)
+    long_game = _rec_traj([1, 1, 1])          # 3 records + 1, 24 + 1 units
+    assert ablation.replay_units(long_game) == 25
+    replay = [_rec_traj([1, 1, 1]), _rec_traj([0] * 5), _rec_traj([1, 1])]
+    ablation.evict_replay(replay)              # 25 + 6 + 17 = 48 > 40
+    assert [ablation.replay_units(t) for t in replay] == [6, 17]
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", None)
+    assert ablation.replay_units(long_game) == 4     # plain: records
+
+
+def test_plain_eviction_is_unchanged(monkeypatch):
+    monkeypatch.setattr(muzero, "MAX_REPLAY", 85)
+    monkeypatch.setattr(muzero, "MAX_REPLAY_TRANSITIONS", 10)
+    replay = [_rec_traj([1] * 5), _rec_traj([1] * 3), _rec_traj([1] * 4)]
+    ablation.evict_replay(replay)              # records 6 + 4 + 5 = 15 > 10
+    assert [len(t) for t in replay] == [4, 5]
+
+
+def test_token_rows_carry_buffer_size_and_cumulative_decisions(monkeypatch):
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", ((0, 4), (2, 32)))
+    run = object.__new__(ablation.Run)
+    run.replay = [_rec_traj([1, 0]), _rec_traj([0])]
+    for tr in run.replay:
+        out = [dict(t, target_policy=np.array([0.5, 0.5]), root_value=0.0)
+               for t in tr]
+        run._note_tokens(out, [0.0] * len(out))
+    errs = {}
+    run._merge_row_stats(errs)
+    assert errs["tok_decisions_total"] == 3
+    assert errs["replay_trajs"] == 2 and errs["replay_records"] == 5
+    assert errs["replay_base_steps"] == (1 + 8 + 1) + (1 + 1)
+    assert errs["tok_counts"] == [2, 1]
+    assert errs["tok_frames_per_decision"] == pytest.approx(40 / 3, abs=1e-3)
+    errs2 = {}
+    run._merge_row_stats(errs2)          # the window restarts, the total not
+    assert errs2["tok_decisions_total"] == 3 and "tok_counts" not in errs2
+    src = inspect.getsource(ablation.save_run_checkpoint) \
+        if hasattr(ablation, "save_run_checkpoint") else \
+        (ROOT / "experiments" / "ablation.py").read_text(encoding="utf-8")
+    assert '"_tok_totals")' in src         # checkpointed with the diag stats
+
+
+def test_plain_rows_gain_no_token_fields(monkeypatch):
+    run = object.__new__(ablation.Run)
+    run.replay = [_rec_traj([1, 0])]
+    errs = {}
+    run._merge_row_stats(errs)
+    assert not any(k.startswith(("tok_", "replay_")) for k in errs)
