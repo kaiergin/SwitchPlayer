@@ -106,15 +106,21 @@ def manifest_check():
 
 def write_manifest():
     """Written from a CLEAN tree (the audited commit) only: uncommitted
-    edits to an AUDITED file refuse it."""
+    edits to an AUDITED file refuse it. The commit it was written at is
+    recorded under "_commit" (provenance; manifest_check reads only the
+    AUDITED keys -- audit r2 B-NIT2)."""
     r = subprocess.run(["git", "status", "--porcelain", "--", *AUDITED],
                        cwd=REPO, capture_output=True, text=True)
     if r.returncode or r.stdout.strip():
         print("refusing --write-manifest: AUDITED files differ from the "
               "commit (or git failed):\n" + (r.stdout or r.stderr), flush=True)
         return 1
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
+                          capture_output=True, text=True)
+    out = file_hashes(REPO)
+    out["_commit"] = head.stdout.strip() if head.returncode == 0 else "?"
     with open(MANIFEST, "w", encoding="utf-8") as f:
-        json.dump(file_hashes(REPO), f, indent=1, sort_keys=True)
+        json.dump(out, f, indent=1, sort_keys=True)
     print(f"wrote {MANIFEST} from {REPO}", flush=True)
     return 0
 

@@ -828,6 +828,11 @@ MECHANICS (code, default OFF everywhere):
     trajectories per 2 iterations, so the per-trajectory revisit rate
     matches; with fewer decisions per game each gradient step's samples
     reuse fewer distinct positions -- intrinsic to tokens, reported.
+  - The BN stabilizer's calibration window (BN_RECAL_FRAMES 4096) also
+    counts BASE steps under tokens: the newest trajectories totalling
+    >= 4096 base steps, all of their decision states (~1k at ~4 base
+    steps per decision) -- the twin's recency in game time, rather than
+    4096 decisions spanning ~4x the game time (audit r2).
   - REGRESSION (pinned in the tests): TOKEN_VOCAB = the base's six ALE
     actions x 4 frames reproduces the base arm bit for bit.
 READS. Exact eval as the line's: 30 noop starts, prior argmax (now over
@@ -852,12 +857,22 @@ not like-for-like across durations. The twin ran code 9a7f3388 (branch
 bnrecal); the plain Pong path's equivalence since then is pinned by the
 Ms. Pac-Man real-Pong actor regression and P2a's base-token regressions
 (TOKEN_VOCAB = six ALE actions x 4 frames reproduces the plain arm bit for
-bit: the real-Pong actor and a whole train + refresh slice).
+bit: the real-Pong actor and a whole train + refresh slice). The
+twin acted over Pong-v4's six ALE actions (FIRE / RIGHTFIRE / LEFTFIRE
+duplicate NOOP / UP / DOWN, splitting its priors and birth-search visits
+across duplicate children); this arm's tokens are built on the minimal
+three, a second difference from the twin that this run does not separate
+(a minimal-actions x 4-frames control would). A token cut short by a
+terminal is counted at its nominal length in replay_units /
+tok_frames_per_decision / replay_base_steps (at most 7 base steps per
+game; env_steps counts the steps actually played).
 DECISION AFTER:
-  BREAKOUT and NO WORSE -> tokens hold up: P2b (the composition loss) on
-    this arm, then P3.
-  BREAKOUT but below the band, or no row 45-90 by the twin's @75 -> Kai's
-    call (P2b may repair long/short disagreement; or a shorter menu).
+  HOLDS UP -- a first success by row 75 (the twin's deployed one) AND
+    deployed mean 60-90 NO WORSE: tokens hold up -> P2b (the composition
+    loss) on this arm, then P3.
+  PARTIAL -- a first success, but later than row 75 or a mean below
+    +3.68 -> Kai's call (P2b may repair long/short disagreement; or a
+    shorter menu).
   NO BREAKOUT -> diagnose before P2b: token usage (stuck on long
     tokens?), the frame-time targets, the bias.
 COST: ~20 h (the base's ~13.5 min/iteration; 12 search children ~2x the

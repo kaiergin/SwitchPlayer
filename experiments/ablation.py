@@ -1405,12 +1405,20 @@ def bn_calibration_frames(replay, n):
     the end), thinned by a deterministic stride -- no RNG is drawn, so the
     stabilizer never reorders any training stream. A LIST of arrays (no
     full-pool copy; bn_recalibrated_states stacks per batch). None if the
-    buffer is empty."""
-    pool = []
+    buffer is empty.
+
+    Under TOKEN_VOCAB the window counts BASE steps (replay_units), like the
+    replay cap: the newest trajectories totalling >= n base steps, all of
+    their decision states -- the twin's recency in game time rather than
+    n decisions spanning ~4x the game time (audit r2 B-M1)."""
+    pool, units = [], 0
+    tokens = muzero.TOKEN_VOCAB is not None
     for traj in reversed(replay):
         pool.extend(rec["obs"] if isinstance(rec, dict) else rec[0]
                     for rec in traj)
-        if len(pool) >= n:
+        if tokens:
+            units += replay_units(traj)
+        if (units if tokens else len(pool)) >= n:
             break
     if not pool:
         return None

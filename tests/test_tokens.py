@@ -839,3 +839,126 @@ def test_plain_rows_gain_no_token_fields(monkeypatch):
     errs = {}
     run._merge_row_stats(errs)
     assert not any(k.startswith(("tok_", "replay_")) for k in errs)
+
+
+# --------------------------------------------------------------------------
+# audit r2: the BN window in base steps; mid-token terminal stacks; the
+# token / behaviour diagnostics with real values; the arm's refresh mode
+# --------------------------------------------------------------------------
+def _obs_traj(actions, tag):
+    """Records whose obs encode (trajectory tag, position)."""
+    recs = [{"action": a, "reward": 0.0,
+             "obs": np.full((1, 1, 1), 10 * tag + i, dtype=np.uint8)}
+            for i, a in enumerate(actions)]
+    recs.append({"action": 0, "reward": 0.0,
+                 "obs": np.full((1, 1, 1), 10 * tag + len(actions),
+                                dtype=np.uint8)})
+    return recs
+
+
+def test_bn_window_counts_base_steps_under_tokens(monkeypatch):
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", ((0, 4), (2, 32)))
+    # oldest .. newest; each long game is 3 x 8 + 1 = 25 base steps
+    replay = [_obs_traj([1, 1, 1], t) for t in range(4)]
+    pool = ablation.bn_calibration_frames(replay, 40)
+    # the two newest games (50 >= 40 base steps), all 8 of their states
+    assert sorted(int(o[0, 0, 0]) for o in pool) == \
+        [20, 21, 22, 23, 30, 31, 32, 33]
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", None)
+    plain = ablation.bn_calibration_frames(replay, 6)
+    # plain: records -- the newest two games' 8 records thinned to 6
+    assert len(plain) == 6 and {int(o[0, 0, 0]) // 10 for o in plain} == {2, 3}
+
+
+def test_a_terminal_mid_token_stacks_its_last_frame_once(prior_tokens):
+    """Audit r2 A-LOW2: DOWN x16 (4 base steps) twice, the game ending at
+    base step 6 inside the second token: the final record's stack is the
+    last four base frames 3..6, the terminal frame pushed exactly once."""
+    env = _Steps(end=6)
+    run = _token_shell(env, [0.1, 0.1, 0.7, 0.1])        # greedy: token 2
+    traj, total, steps, term = run.play_episode(greedy=True, cap=100)
+    assert term and steps == 6 and env.actions == [3] * 6
+
+    def frames(ts):
+        return np.concatenate([preprocess_frame(env.frame(max(0, t)),
+                                                IMAGE_RESHAPE) for t in ts],
+                              axis=0)
+
+    assert len(traj) == 3
+    assert np.array_equal(traj[0][0], frames([0, 0, 0, 0]))
+    assert np.array_equal(traj[1][0], frames([1, 2, 3, 4]))
+    assert np.array_equal(traj[2][0], frames([3, 4, 5, 6]))
+
+
+def test_token_payoff_is_z_minus_v_per_token(monkeypatch):
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", ((0, 4), (2, 32)))
+    run = object.__new__(ablation.Run)
+    run.replay = []
+    out = [{"action": 0, "target_policy": np.array([0.9, 0.1]),
+            "root_value": 1.0},
+           {"action": 1, "target_policy": np.array([0.2, 0.8]),
+            "root_value": -2.0},
+           {"action": 0, "target_policy": np.array([0.5, 0.5]),
+            "root_value": 0.5},
+           {"action": 0, "target_policy": np.array([0.5, 0.5]),
+            "root_value": 0.0}]                      # the final record
+    run._note_tokens(out, [3.0, 1.0, 0.0, 9.0])
+    errs = {}
+    run._merge_row_stats(errs)
+    # token 0: (3 - 1) and (0 - 0.5) -> mean 0.75; token 1: 1 - (-2) = 3
+    assert errs["tok_payoff"] == [0.75, 3.0]
+    assert errs["tok_counts"] == [2, 1]
+    assert errs["tok_search_share"] == [round(1.6 / 3, 4), round(1.4 / 3, 4)]
+    assert errs["tok_duration_play_share"] == {"4": round(2 / 3, 4),
+                                               "32": round(1 / 3, 4)}
+
+
+def test_behaviour_entropy_includes_the_long_token_bias(monkeypatch):
+    for k, v in (("TOKEN_VOCAB", ((0, 4), (0, 8), (0, 16), (0, 32))),
+                 ("TOKEN_LONG_BIAS", 0.5), ("TOKEN_LONG_BIAS_END", 0.25),
+                 ("TEMPERATURE_TOTAL_STEPS", 1000),
+                 ("PRIOR_ACT_STAGED_TEMP", False),
+                 ("ACTING_TEMPERATURE", 1.0), ("PRIOR_ACT_TEMP_SCALE", 1.0)):
+        monkeypatch.setattr(muzero, k, v)
+    monkeypatch.setattr(ablation, "ACTIONS", 4)
+    run = object.__new__(ablation.Run)
+    run._birth_priors = np.full((3, 4), 0.25)
+    acted = [{"action": a, "target_policy": np.full(4, 0.25)}
+             for a in (0, 3, 3)]
+    run._note_behaviour(acted, born=0)           # b = 0.5 at step 0
+    w = np.array([1.0, 2 ** 0.5, 2.0, 8 ** 0.5])
+    p = w / w.sum()
+    H = float(-(p * np.log(p)).sum())
+    assert run._beh_window["sums"]["H_act"] / 3 == pytest.approx(H, abs=1e-9)
+    run._beh_window = None
+    run._note_behaviour(acted, born=250)         # the bias has ended
+    assert run._beh_window["sums"]["H_act"] / 3 == pytest.approx(
+        np.log(4), abs=1e-9)
+
+
+LONG0 = ((0, 32), (1, 4), (2, 8), (3, 16), (4, 4), (5, 8))
+
+
+@pytest.mark.parametrize("edge_visits", [False, True])
+def test_communal_parity_with_a_long_slot0_and_edge_visits(
+        monkeypatch, token_discount, edge_visits):
+    """Audit r2 A-NIT2: the arm refreshes with COMMUNAL_EDGE_VISITS on; and
+    a vocabulary whose slot 0 (the placeholder) is not a base token."""
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", LONG0)
+    monkeypatch.setattr(muzero, "COMMUNAL_EDGE_VISITS", edge_visits)
+    traj = make_traj(5, 24, False)
+    run_both(monkeypatch, traj, [[0, 2, 3, 7, 8], [9, 12, 15, 20, 23]], 20,
+             noise=True, horizon=5, max_depth=30)
+
+
+def test_fresh_root_parity_with_a_long_slot0(monkeypatch, token_discount):
+    helper, engine, obs = vtree_world(monkeypatch)
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", LONG0)
+    seq = [sequential_search(helper, obs[t], 40, max_depth=30,
+                             discount=TEST_DISCOUNT)
+           for t in range(len(obs))]
+    counts, vals = engine_per_tree(engine, obs, num_simulations=40,
+                                   c_puct=1.25, discount=TEST_DISCOUNT,
+                                   max_depth=30, root_noise=False)
+    assert counts.tolist() == [c.tolist() for c, _ in seq]
+    assert np.allclose(vals, [v for _, v in seq], rtol=0, atol=1e-12)
