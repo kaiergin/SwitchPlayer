@@ -66,6 +66,34 @@ exploration pressure (explicit duration-head prior, annealed).
   ball approaches, long otherwise — validates "same play, far fewer
   decisions" for zero training cost.
 
+DECISIONS 2026-10-17 (Kai; the build starts on branch curriculum-p2):
+- TOKENS, not action head x duration head. A held action is already a
+  token ("UP x16" -- P5b's multiplicity token), and P5e's mined chunks
+  are tokens too, so the policy scores ONE vocabulary of tokens with a
+  FIXED number of slots; P2's 12 duration tokens (Pong's minimal NOOP /
+  UP / DOWN x {4, 8, 16, 32} frames) are the first vocabulary. Each
+  token is one dynamics transition; its reward is the sum over its
+  frames; its edge discounts gamma_frame^frames.
+- The vocabulary NEVER changes while a network trains. At a generation
+  swap (P3) the least-used tokens are dropped, and the data the master
+  recorded with a dropped token is replayed to the next model as raw
+  4-frame steps (so P3's runs record games at raw-step resolution with
+  token boundaries; the inner steps get policy targets by re-search).
+  This replaces the iteration-scheduled menu shrink: long tokens live
+  on while they are used.
+- Trial and error (Kai): simplest defaults first -- plain per-slot
+  embeddings (content-built token embeddings are a later variant), all
+  12 tokens legal for the whole first run, a mild early long-token
+  bias, per-token usage and payoff logged.
+- Pong's minimal 3 actions (the FIRE variants duplicate them; 12
+  children keep search at ~2x the base's 6 instead of ~4x for 24).
+- The composition-consistency loss is the SECOND step (P2b), measured
+  on its own.
+- Reward-clip growth (Kai, 2026-08-27; previously a one-line carried
+  decision) is built on this branch too: raw rewards stored, clipped at
+  target-build time under a rising ceiling. Inert on Pong (every reward
+  is +-1), so it is tested as its own Ms. Pac-Man run.
+
 ## P3 — Student / master
 
 Master = best network so far, frozen; retains only its VALUE heads
@@ -746,6 +774,75 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
   is weak (~44% at the old 1-in-4 rate);
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
+
+### Next experiment (pre-registered) -- P2a: duration tokens on Pong (Kai, 2026-10-17)
+
+DECISION (Kai, 2026-10-17): after Ms. Pac-Man, "go with my list" -- his
+curriculum algorithm, built on branch curriculum-p2 (decisions in P2
+above). Trial and error, simplest defaults first.
+QUESTION: does the real-time base learn Pong when every decision is a
+TOKEN -- NOOP, UP or DOWN held for 4, 8, 16 or 32 frames -- and which
+tokens does it come to use?
+ARM effzero-repro-faithful-prioract-noredo-temp05-bnrecal-tokens = the
+real-time base (temperature + BN stabilizer, 2/2 breakouts) +
+TOKEN_VOCAB (the 12 tokens) + the early long-token bias. SEED 1, so the
+twin is the SAME arm at the same seed without tokens:
+pong-bnrecal-s1-2026-10-08 (deployed first success @75, raw @70; deployed
+mean 60-90 +5.80, raw +5.47). Same recipe: Pong-v4, --frameskip 4,
+90 x 2000 train steps, 1 game per iteration, eval every 5, --ray
+--cpu-actor, --snapshot-weights; the episode cap is 3000 x 4 = 12000
+frames (the base's game-length cap in time).
+MECHANICS (code, default OFF everywhere):
+  - A token (ALE action, F frames) plays F/4 consecutive steps of the
+    paper wrapper stack (MaxAndSkip 4) with that action; its reward is
+    the sum of the inner rewards, then the base's sign clip. The frame
+    stack is pushed at EVERY inner step, so the observation is always
+    the last 16 raw frames at 4-frame spacing, whatever tokens were
+    played.
+  - Discount per raw frame: an edge into a token of F frames discounts
+    by DISCOUNT^(F/4) (DISCOUNT = the base's 0.997^4 per 4 frames) -- in
+    the birth search and the communal refresh (per node, by its in-edge
+    token) and in the value targets.
+  - Value targets in FRAME time: real rewards up to the first position
+    at least 4 x horizon frames ahead (horizon = TD_STEPS 5 under the
+    4.3 age shrink: 20 frames at age 0), then the target-net bootstrap
+    there; priorities likewise.
+  - Unroll K = 5 tokens; the value-prefix target is unchanged (an
+    undiscounted sum); policy and dynamics see 12 slots (plain per-slot
+    embedding, as the base's 6 actions).
+  - Acting: prior sampling over the 12 tokens at the base's staged
+    temperature x 0.5, with a long-token bias: weights x (F/4)^b, b
+    falling linearly from 0.5 at step 0 to 0 at 25% of training. Eval
+    and deployment: the prior's argmax token.
+  - env_steps = frames / 4 (the base's decision-equivalents, so rows
+    share the base's x-axis); decisions are logged beside it. The
+    replay transition cap stays in records: with long tokens the buffer
+    spans more game time -- reported, not corrected.
+  - REGRESSION (pinned in the tests): TOKEN_VOCAB = the base's six ALE
+    actions x 4 frames reproduces the base arm bit for bit.
+READS. Exact eval as the line's: 30 noop starts, prior argmax (now over
+tokens), rows 45-90; DEPLOYED (acting states) primary, raw secondary.
+  (1) breakout: first success (exact >= +10 or >= 3/4 phases);
+  (2) level: deployed mean 60-90 against the bands (NO WORSE >= +3.68,
+      WORSE < -2.32) and the twin's +5.80;
+  (3) game time: score against cumulative frames (env_steps) beside the
+      twin, so a gain is not mistaken for more data;
+  (4) tokens, descriptive: per row the acting share of each duration,
+      mean frames per decision, decisions per game, the birth search's
+      visit share per duration, and each token's payoff (mean z - V over
+      the positions where it was played); for the deployed player,
+      decisions per second (60 / mean frames per decision) -- the
+      real-time quantity;
+  (5) stability: rows below 0 after the first success.
+DECISION AFTER:
+  BREAKOUT and NO WORSE -> tokens hold up: P2b (the composition loss) on
+    this arm, then P3.
+  BREAKOUT but below the band, or no row 45-90 by the twin's @75 -> Kai's
+    call (P2b may repair long/short disagreement; or a shorter menu).
+  NO BREAKOUT -> diagnose before P2b: token usage (stuck on long
+    tokens?), the frame-time targets, the bias.
+COST: ~20 h (the base's ~13.5 min/iteration; 12 search children ~2x the
+base's per expansion, on fewer decisions per game) + ~30 min evals.
 
 ### RESULT -- the real-time algorithm on Ms. Pac-Man (seed 0), 2026-10-17
 
