@@ -135,6 +135,12 @@ def test_gate_passes_the_arm_and_ignores_plain_arms(tok_arm, monkeypatch):
     ({"VALUE_TARGET_MODE": "mixed"}, "tested path"),
     ({"USE_GUMBEL_SEARCH": True}, "tested path"),
     ({"BIRTH_SEARCH": False}, "tested path"),
+    ({"USE_TARGET_MODEL": False}, "tested path"),
+    ({"ASYNC_LOOP": True}, "tested path"),
+    ({"REFRESH_OFFLOAD": True}, "tested path"),
+    ({"REFRESH_SATURATE": True}, "tested path"),
+    ({"USE_ATARI_WRAPPERS": False}, "tested path"),
+    ({"ACTOR_GUMBEL_SEARCH": True}, "tested path"),
     ({"TOKEN_VOCAB": ((0, 4), (2, 6))}, "positive multiple"),
     ({"TOKEN_VOCAB": ((0, 4), (7, 8))}, "outside"),
     ({"TOKEN_VOCAB": ((0, 4), (0, 4))}, "duplicate"),
@@ -911,6 +917,10 @@ def test_token_payoff_is_z_minus_v_per_token(monkeypatch):
     assert errs["tok_search_share"] == [round(1.6 / 3, 4), round(1.4 / 3, 4)]
     assert errs["tok_duration_play_share"] == {"4": round(2 / 3, 4),
                                                "32": round(1 / 3, 4)}
+    # audit r3 A-LOW1: the search share by duration, decisions per game
+    assert errs["tok_duration_search_share"] == {"4": round(1.6 / 3, 4),
+                                                 "32": round(1.4 / 3, 4)}
+    assert errs["tok_decisions_per_game"] == 3.0
 
 
 def test_behaviour_entropy_includes_the_long_token_bias(monkeypatch):
@@ -962,3 +972,73 @@ def test_fresh_root_parity_with_a_long_slot0(monkeypatch, token_discount):
                                    max_depth=30, root_noise=False)
     assert counts.tolist() == [c.tolist() for c, _ in seq]
     assert np.allclose(vals, [v for _, v in seq], rtol=0, atol=1e-12)
+
+
+# --------------------------------------------------------------------------
+# audit r3: temperature then bias (acting and the behaviour log agree); the
+# cumulative-decision counter round-trips through a checkpoint
+# --------------------------------------------------------------------------
+def _temp_then_bias(p, T, b, frames):
+    q = np.asarray(p, dtype=np.float64) ** (1.0 / T)
+    q = q / q.sum()
+    q = q * np.array([(f / 4) ** b for f in frames])
+    return q / q.sum()
+
+
+def test_acting_applies_the_temperature_then_the_bias(prior_tokens,
+                                                      monkeypatch):
+    """Audit r3 A-LOW2: at the arm's T < 1 the order matters (bias first
+    would give an effective exponent b / T)."""
+    monkeypatch.setattr(muzero, "PRIOR_ACT_TEMP_SCALE", 0.5)        # T 0.5
+    monkeypatch.setattr(muzero, "TOKEN_LONG_BIAS", 0.5)
+    monkeypatch.setattr(muzero, "TOKEN_LONG_BIAS_END", 0.25)
+    monkeypatch.setattr(muzero, "TEMPERATURE_TOTAL_STEPS", 1000)
+    seen = []
+    monkeypatch.setattr(np.random, "choice",
+                        lambda n, p=None: seen.append(np.asarray(p)) or 0)
+    prior = [0.4, 0.3, 0.2, 0.1]
+    _token_shell(_Steps(), prior, steps=0).play_episode(greedy=False, cap=1)
+    frames = [f for _, f in muzero.TOKEN_VOCAB]
+    want = _temp_then_bias(prior, 0.5, 0.5, frames)
+    assert np.allclose(seen[-1], want, rtol=0, atol=1e-12)
+    wrong = _temp_then_bias(np.asarray(prior) * np.array(
+        [(f / 4) ** 0.5 for f in frames]), 0.5, 0.0, frames)
+    assert not np.allclose(want, wrong, atol=1e-3)     # the order is visible
+
+
+def test_behaviour_log_matches_the_sampled_distribution_at_low_T(
+        monkeypatch):
+    frames = (4, 8, 16, 32)
+    for k, v in (("TOKEN_VOCAB", tuple((0, f) for f in frames)),
+                 ("TOKEN_LONG_BIAS", 0.5), ("TOKEN_LONG_BIAS_END", 0.25),
+                 ("TEMPERATURE_TOTAL_STEPS", 1000),
+                 ("PRIOR_ACT_STAGED_TEMP", False),
+                 ("ACTING_TEMPERATURE", 1.0), ("PRIOR_ACT_TEMP_SCALE", 0.5)):
+        monkeypatch.setattr(muzero, k, v)
+    monkeypatch.setattr(ablation, "ACTIONS", 4)
+    run = object.__new__(ablation.Run)
+    prior = np.array([0.4, 0.3, 0.2, 0.1])
+    run._birth_priors = np.tile(prior, (2, 1))
+    acted = [{"action": 1, "target_policy": np.full(4, 0.25)}] * 2
+    run._note_behaviour(acted, born=0)
+    q = _temp_then_bias(prior, 0.5, 0.5, frames)
+    H = float(-(q * np.log(q)).sum())
+    assert run._beh_window["sums"]["H_act"] / 2 == pytest.approx(H, abs=1e-9)
+
+
+def test_cumulative_decisions_survive_a_checkpoint(tmp_path):
+    """Audit r3 A-LOW3: _tok_totals round-trips (save -> load)."""
+    from tests.test_checkpoint_resume import EXPECT, META, make_run
+    a = make_run()
+    a.trainer.training_steps = META["training_steps"]
+    a._tok_totals = {"tok_decisions_total": 4321}
+    path = tmp_path / "resume.ckpt"
+    ablation.save_run_checkpoint(a, path, META)
+    b = make_run()
+    ablation.load_run_checkpoint(b, path, EXPECT)
+    assert b._tok_totals == {"tok_decisions_total": 4321}
+    c = make_run()                         # a plain run writes no such key
+    ablation.save_run_checkpoint(c, tmp_path / "plain.ckpt", META)
+    d = make_run()
+    ablation.load_run_checkpoint(d, tmp_path / "plain.ckpt", EXPECT)
+    assert not hasattr(d, "_tok_totals")

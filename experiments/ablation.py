@@ -1408,9 +1408,10 @@ def bn_calibration_frames(replay, n):
     buffer is empty.
 
     Under TOKEN_VOCAB the window counts BASE steps (replay_units), like the
-    replay cap: the newest trajectories totalling >= n base steps, all of
-    their decision states -- the twin's recency in game time rather than
-    n decisions spanning ~4x the game time (audit r2 B-M1)."""
+    replay cap: the newest trajectories totalling >= n base steps, and up
+    to n of their decision states (strided down as above only when they
+    number more than n) -- the twin's recency in game time rather than n
+    decisions spanning ~4x the game time (audit r2 B-M1)."""
     pool, units = [], 0
     tokens = muzero.TOKEN_VOCAB is not None
     for traj in reversed(replay):

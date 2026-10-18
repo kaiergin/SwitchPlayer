@@ -786,7 +786,8 @@ tokens does it come to use?
 ARM effzero-repro-faithful-prioract-noredo-temp05-bnrecal-tokens = the
 real-time base (temperature + BN stabilizer, 2/2 breakouts) +
 TOKEN_VOCAB (the 12 tokens) + the early long-token bias. SEED 1, so the
-twin is the SAME arm at the same seed without tokens:
+twin is the SAME arm at the same seed without tokens (and on Pong's
+six ALE actions -- see NOTES):
 pong-bnrecal-s1-2026-10-08 (deployed first success @75, raw @70; deployed
 mean 60-90 +5.80, raw +5.47). Same recipe: Pong-v4, --frameskip 4,
 90 x 2000 train steps, 1 game per iteration, eval every 5, --ray
@@ -846,7 +847,8 @@ tokens), rows 45-90; DEPLOYED (acting states) primary, raw secondary.
       mean frames per decision, decisions per game, the birth search's
       visit share per duration, and each token's payoff (mean z - V over
       the positions where it was played); for the deployed player,
-      decisions per second (60 / mean frames per decision) -- the
+      decisions per second (60 / the probe's frames per decision,
+      pooled over the row's games) -- the
       real-time quantity;
   (5) stability: rows below 0 after the first success.
 NOTES (audit r1, before launch): the row policy_entropy is over 12 tokens

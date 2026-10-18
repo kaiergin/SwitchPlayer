@@ -243,12 +243,14 @@ def main(argv):
                 rec["env"] = ENV
             if vocab is not None:
                 # TOKEN_VOCAB: each game is [return, base steps, terminated,
-                # decisions]; the deployed player's mean raw frames per
-                # decision (P2a read 4: decisions per second = 60 / this).
+                # decisions]; the deployed player's raw frames per decision,
+                # pooled over the row's games (P2a read 4: decisions per
+                # second = 60 / this; audit r3 A-NIT: pooled, not a mean of
+                # per-game ratios).
                 rec["tokens"] = len(vocab)
-                rec["frames_per_decision"] = round(float(np.mean(
-                    [g[1] * muzero.TOKEN_BASE_FRAMES / max(1, g[3])
-                     for g in games.values()])), 3)
+                rec["frames_per_decision"] = round(
+                    sum(g[1] for g in games.values()) * muzero.TOKEN_BASE_FRAMES
+                    / max(1, sum(g[3] for g in games.values())), 3)
             if SEARCH_SIMS:
                 rec["search"] = {"engine": SEARCH_ENGINE, "sims": SEARCH_SIMS}
             if MAX_NOOP != 30:
