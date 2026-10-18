@@ -387,6 +387,25 @@ PRIOR_ACT_TEMP_SCALE = 1.0
 # runs the prediction head at depths > 0) and refresh are unchanged.
 BN_RECAL_ACTING = False
 BN_RECAL_FRAMES = 4096
+# Curriculum P2a, duration TOKENS (Kai, 2026-10-17; CURRICULUM "P2a"): every
+# decision is one token of a fixed vocabulary of (ALE action, frames) pairs;
+# policy / dynamics slot i is TOKEN_VOCAB[i]. A token plays frames /
+# TOKEN_BASE_FRAMES consecutive steps of the paper wrapper stack (MaxAndSkip
+# TOKEN_BASE_FRAMES) with its action; its reward is the sum of the inner
+# rewards (then the usual clip); the edge into the state it reaches
+# discounts by DISCOUNT ** (frames / TOKEN_BASE_FRAMES) -- DISCOUNT stays the
+# per-base-step (4-frame) discount, so the discount is defined per raw frame
+# -- and value targets measure the TD horizon in frames. None = the plain
+# action space: every path unchanged. The vocabulary never changes during a
+# run (P3 swaps vocabularies only between generations).
+TOKEN_VOCAB = None
+TOKEN_BASE_FRAMES = 4
+# Early long-token bias for prior acting under TOKEN_VOCAB: the sampling
+# weights are multiplied by (frames / TOKEN_BASE_FRAMES) ** b, b falling
+# linearly from TOKEN_LONG_BIAS at step 0 to 0 at TOKEN_LONG_BIAS_END of the
+# planned run (TEMPERATURE_TOTAL_STEPS). 0 = off.
+TOKEN_LONG_BIAS = 0.0
+TOKEN_LONG_BIAS_END = 0.25
 # ---------------------------------------------------------------------------
 # Paper-reproduction mode (EfficientZero/MuZero data path), flag-gated like
 # everything else; the shipped product keeps all of these OFF. When the
@@ -662,6 +681,41 @@ def prior_acting_temperature(training_steps):
     return t * PRIOR_ACT_TEMP_SCALE
 
 
+def token_frames(action):
+    """Raw frames one decision lasts: the token's under TOKEN_VOCAB, else
+    TOKEN_BASE_FRAMES."""
+    if TOKEN_VOCAB is None:
+        return TOKEN_BASE_FRAMES
+    return int(TOKEN_VOCAB[int(action)][1])
+
+
+def token_edge_discounts():
+    """Per-slot edge discounts DISCOUNT ** (frames / TOKEN_BASE_FRAMES) under
+    TOKEN_VOCAB (Python floats, as DISCOUNT), else None -- callers then keep
+    their scalar discount untouched. A base-length token's discount is
+    DISCOUNT exactly (x ** 1.0 == x), so a vocabulary of base-length tokens
+    reproduces the scalar arithmetic bit for bit."""
+    if TOKEN_VOCAB is None:
+        return None
+    d = float(DISCOUNT)
+    return tuple(d ** (int(f) / TOKEN_BASE_FRAMES) for _, f in TOKEN_VOCAB)
+
+
+def token_long_bias(training_steps):
+    """The long-token bias exponent b at `training_steps`: TOKEN_LONG_BIAS
+    falling linearly to 0 at TOKEN_LONG_BIAS_END of the planned run; 0
+    without TOKEN_VOCAB or when off."""
+    if TOKEN_VOCAB is None or not TOKEN_LONG_BIAS:
+        return 0.0
+    total = TEMPERATURE_TOTAL_STEPS
+    if not total:
+        return float(TOKEN_LONG_BIAS)
+    end = float(TOKEN_LONG_BIAS_END) * total
+    if end <= 0 or training_steps >= end:
+        return 0.0
+    return float(TOKEN_LONG_BIAS) * (1.0 - training_steps / end)
+
+
 def paper_horizon(age_steps):
     """EfficientZero 4.3: older data gets a shorter real-reward horizon."""
     if not OFFPOLICY_DECAY_STEPS:
@@ -694,7 +748,24 @@ def paper_value_parts(traj, idx, horizon, discount):
     """The decomposition (reward_sum, g, tail): z = reward_sum + g * v(tail).
 
     Separated so the target-model refresh can supply v(tail) from a lagged
-    network at batch time instead of the stored root value."""
+    network at batch time instead of the stored root value.
+
+    Under TOKEN_VOCAB the horizon is measured in FRAMES: real rewards run to
+    the first position at least horizon * TOKEN_BASE_FRAMES raw frames after
+    idx (or the trajectory's end), each edge discounted by its token's
+    discount ** (frames / TOKEN_BASE_FRAMES) -- with base-length tokens the
+    same positions and the same products as below, bit for bit."""
+    if TOKEN_VOCAB is not None:
+        budget = int(horizon) * TOKEN_BASE_FRAMES
+        last = len(traj) - 1
+        value, g, frames, k = 0.0, 1.0, 0, idx
+        while k < last and frames < budget:
+            f = token_frames(traj[k]["action"])
+            value += g * traj[k + 1]["reward"]
+            g *= discount ** (f / TOKEN_BASE_FRAMES)
+            frames += f
+            k += 1
+        return value, g, k
     tail = min(idx + horizon, len(traj) - 1)
     value, g = 0.0, 1.0
     for k in range(1, tail - idx + 1):
@@ -842,6 +913,10 @@ class MCTSNode:
         self.expanded_value = expanded_value
         self.virtual_loss = 0.0
         self.is_gameplay = is_gameplay
+        # The discount of the edge INTO this node under TOKEN_VOCAB (its
+        # token's DISCOUNT ** (frames / base)); None = the search's scalar
+        # discount (every non-token search).
+        self.edge_discount = None
 
     def q_value(self):
         # Mean over COMPLETED backups only. Virtual loss must NOT sit in this
@@ -1713,7 +1788,8 @@ class MCTSHelper:
 
                 child_prefixes, child_states, prefix_resets = self.expand_prefixes(
                     chunk, next_latents, A)
-            
+            edge_disc = token_edge_discounts()
+
             # Update each node in the chunk.
             for j, node in enumerate(chunk):
                 start = j * A
@@ -1754,6 +1830,8 @@ class MCTSHelper:
                         prefix_state=child_state,
                         prefix_len=child_len,
                     )
+                    if edge_disc is not None:
+                        child.edge_discount = edge_disc[a]
                     node.children[a] = child
                 node.is_expanded = True
         
@@ -1814,7 +1892,9 @@ class MCTSHelper:
             n.visit_count += 1
             n.value_sum += backup_value
             n.virtual_loss = 0.0
-            backup_value = n.reward + discount * backup_value
+            # TOKEN_VOCAB: each hop discounts by the node's own in-edge.
+            d = discount if n.edge_discount is None else n.edge_discount
+            backup_value = n.reward + d * backup_value
             if min_max_stats is not None and i != last:
                 # Track the same composite selection normalises: r + discount*V,
                 # not V alone, or the recorded range is on the wrong scale.
@@ -1823,7 +1903,7 @@ class MCTSHelper:
                 # subtree, and folding it in inflates the range -- compressing
                 # every normalized advantage precisely at positions that follow
                 # big reward events.
-                min_max_stats.update(n.reward + discount * n.q_value())
+                min_max_stats.update(n.reward + d * n.q_value())
 
     def create_tree_from_game(self, game_trajectory, terminated=True,
                               seed_values=True):
@@ -1845,6 +1925,7 @@ class MCTSHelper:
         prev_node = None
         prev_action_taken = None
         path = []
+        edge_disc = token_edge_discounts()
         for (obs_sample, action_taken, reward, latent, policy, expanded_value) in game_trajectory:
             new_node = MCTSNode(latent=latent, prior=1.0, reward=reward, is_gameplay=True)
             new_node.policy = policy
@@ -1852,6 +1933,8 @@ class MCTSHelper:
             if prev_node != None:
                 new_node.prior = prev_node.policy[prev_action_taken]
                 prev_node.children[prev_action_taken] = new_node
+                if edge_disc is not None:
+                    new_node.edge_discount = edge_disc[int(prev_action_taken)]
             path.append(new_node)
             prev_node = new_node
             prev_action_taken = action_taken
@@ -1929,7 +2012,8 @@ class MCTSHelper:
                     onward = 0.0
                 else:
                     onward = child.expanded_value
-                score = stats.normalize(child.reward + discount * onward)
+                d = discount if child.edge_discount is None else child.edge_discount
+                score = stats.normalize(child.reward + d * onward)
                 if child.virtual_loss > 0:
                     # Virtual loss: each in-flight simulation counts as a
                     # completed visit at the normalized MINIMUM (0 once the
@@ -2013,7 +2097,8 @@ class MCTSHelper:
                 onward = 0.0
             else:
                 onward = child.expanded_value
-            stats.update(child.reward + discount * onward)
+            d = discount if child.edge_discount is None else child.edge_discount
+            stats.update(child.reward + d * onward)
 
     def release_root(self, node):
         """Prune imagined children and release the latent once a search is done.
@@ -2369,7 +2454,8 @@ class MCTSHelper:
             onward = 0.0
         else:
             onward = child.expanded_value
-        qn = self.min_max_stats.normalize(child.reward + discount * onward)
+        d = discount if child.edge_discount is None else child.edge_discount
+        qn = self.min_max_stats.normalize(child.reward + d * onward)
         if child.virtual_loss > 0:
             n = max(child.visit_count, 1)
             # min() mirrors the PUCT clamp: a below-minimum child

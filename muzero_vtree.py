@@ -160,6 +160,19 @@ class VectorizedPUCT:
         T = len(obs_batch)
         N = 1 + A * (sims + 1)          # root + its children + per-sim waves
         f64 = dict(dtype=torch.float64, device=dev)
+        # TOKEN_VOCAB (curriculum P2a): every node keeps the discount of its
+        # in-edge -- its token's DISCOUNT ** (frames / base) -- read wherever
+        # the scalar discount was (selection, seeding, backup, range). None
+        # = the scalar path, untouched.
+        edge_disc = muzero.token_edge_discounts()
+        ndisc = slot_disc = None
+        if edge_disc is not None:
+            assert len(edge_disc) == A, "TOKEN_VOCAB size != action space"
+            assert discount == float(muzero.DISCOUNT), (
+                "token edge discounts derive from muzero.DISCOUNT; a search "
+                "at another discount would mix the two")
+            slot_disc = torch.tensor(edge_disc, **f64)
+            ndisc = torch.full((T, N), discount, **f64)
 
         parent = torch.full((T, N), -1, dtype=torch.long, device=dev)
         children = torch.full((T, N, A), -1, dtype=torch.long, device=dev)
@@ -243,6 +256,8 @@ class VectorizedPUCT:
             tsel_e = tsel.unsqueeze(1).expand_as(ids)
             parent[tsel_e, ids] = nsel.unsqueeze(1).expand_as(ids)
             reward[tsel_e, ids] = edge
+            if ndisc is not None:
+                ndisc[tsel_e, ids] = slot_disc.unsqueeze(0).expand_as(edge)
             prior[tsel_e, ids] = policy[tsel, nsel]  # parent's policy row
             policy[tsel_e, ids] = pol
             evalue[tsel_e, ids] = val
@@ -269,7 +284,8 @@ class VectorizedPUCT:
             ev = evalue.gather(1, ch)
             pr = prior.gather(1, ch)
             q = torch.where(v > 0, w / v.clamp(min=1), ev)
-            comp = r + discount * q
+            d = ndisc.gather(1, ch) if ndisc is not None else discount
+            comp = r + d * q
             has_range = (maxv > minv)
             span = (maxv - minv).clamp(min=floor)
             norm = torch.where(has_range.unsqueeze(1),
@@ -290,7 +306,8 @@ class VectorizedPUCT:
         expand(torch.zeros(T, dtype=torch.long, device=dev),
                torch.ones(T, dtype=torch.bool, device=dev))
         rc = children[:, 0]                          # [T,A]
-        seed_comp = reward.gather(1, rc) + discount * evalue.gather(1, rc)
+        d0 = ndisc.gather(1, rc) if ndisc is not None else discount
+        seed_comp = reward.gather(1, rc) + d0 * evalue.gather(1, rc)
         minv = torch.minimum(minv, seed_comp.min(dim=1).values)
         maxv = torch.maximum(maxv, seed_comp.max(dim=1).values)
 
@@ -320,14 +337,15 @@ class VectorizedPUCT:
             while alive.any():
                 visit[rows[alive], node[alive]] += 1
                 wsum[rows[alive], node[alive]] += bv[alive]
-                bv = torch.where(alive, reward[rows, node] + discount * bv,
+                dn = ndisc[rows, node] if ndisc is not None else discount
+                bv = torch.where(alive, reward[rows, node] + dn * bv,
                                  bv)
                 # Range update for every path node EXCEPT the root, with
                 # the POST-increment q (sequential updates after +=).
                 nonroot = alive & (node != 0)
                 if nonroot.any():
                     qn = wsum[rows, node] / visit[rows, node].clamp(min=1)
-                    upd = reward[rows, node] + discount * qn
+                    upd = reward[rows, node] + dn * qn
                     minv = torch.where(nonroot, torch.minimum(minv, upd),
                                        minv)
                     maxv = torch.where(nonroot, torch.maximum(maxv, upd),
@@ -520,6 +538,9 @@ class ChainForest:
             "expanded": ((), bl, False), "done": ((), bl, False),
             "pref": ((), f64, 0.0), "pref_len": ((), lg, 0),
             "has_state": ((), bl, False), "vl": ((), f64, 0.0),
+            # discount of the edge INTO the node (TOKEN_VOCAB; WEAK, a
+            # Python float as DISCOUNT is) -- read only under tokens
+            "disc": ((), f64, 0.0),
         }
         if self.latent_shape is not None:
             spec["latent"] = (tuple(self.latent_shape),
@@ -587,11 +608,17 @@ class ChainForest:
     # ---- chain construction -------------------------------------------
 
     def append_chain(self, latents, policies, values, actions, rewards,
-                     terminated, seed_values, seed_discount):
+                     terminated, seed_values, seed_discount, edge_disc=None):
         """Link one trajectory as create_tree_from_game does, seeding the
         chain with the Monte-Carlo backup (computed with the SAME NumPy
         scalar objects the sequential engine folds, so every value AND its
-        type code is reproduced by construction)."""
+        type code is reproduced by construction).
+
+        edge_disc: TOKEN_VOCAB's per-slot discounts (Python floats) or None.
+        Chain node k > 0 then discounts by its in-edge token actions[k-1],
+        in the seeding fold and in the node's `disc` field, as the
+        sequential chain node's edge_discount; the head keeps
+        seed_discount (its in-edge lies outside the tree)."""
         L = len(actions)
         assert L >= 1
         self.ensure_capacity(self.count + L)
@@ -641,6 +668,12 @@ class ChainForest:
         f["reward_t"][ids] = torch.as_tensor(np.asarray(rtypes, dtype=np.uint8), device=dev)
         f["done"][ids[-1]] = bool(terminated)
         f["latent"][ids] = latents.to(dev, torch.float32)
+        disc = [float(seed_discount)] * L
+        if edge_disc is not None:
+            for k in range(1, L):
+                disc[k] = edge_disc[int(actions[k - 1])]
+        f["disc"][ids] = torch.as_tensor(np.asarray(disc, dtype=np.float64),
+                                         device=dev)
         self.count += L
 
         if seed_values:
@@ -656,7 +689,9 @@ class ChainForest:
                 s = 0.0 + bv           # value_sum starts as Python 0.0
                 vs.append(float(s))
                 vt.append(_scalar_type(s))
-                bv = rewards[k] + seed_discount * bv
+                dk = (seed_discount if edge_disc is None or k == 0
+                      else edge_disc[int(actions[k - 1])])
+                bv = rewards[k] + dk * bv
             vs.reverse()
             vt.reverse()
             f["visit"][ids] = 1.0
@@ -784,6 +819,27 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
     shifting by a median 0.26, max 2.1. See DESIGN.md.
     """
 
+    # TOKEN_VOCAB's per-slot edge discounts ([A] float64 on the device) for
+    # the current call, or None: the scalar-discount path, untouched.
+    _slot_disc = None
+
+    def _resolve_edges(self, discount=None):
+        """Resolve TOKEN_VOCAB's per-slot discounts for this call from
+        muzero (the arm-override contract) and return them as Python floats
+        for chain seeding (None without tokens)."""
+        edge = muzero.token_edge_discounts()
+        if edge is None:
+            self._slot_disc = None
+            return None
+        assert len(edge) == self.A, "TOKEN_VOCAB size != action space"
+        if discount is not None:
+            assert float(discount) == float(muzero.DISCOUNT), (
+                "token edge discounts derive from muzero.DISCOUNT; a search "
+                "at another discount would mix the two")
+        self._slot_disc = torch.tensor(edge, dtype=torch.float64,
+                                       device=self.device)
+        return edge
+
     # ---- trajectory evaluation (eval_obs, batch 32) --------------------
 
     def evaluate(self, obs_seq, batch_size=32):
@@ -820,6 +876,7 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         self.use_prefix = bool(muzero.USE_VALUE_PREFIX_IN_TREE)
         seed_discount = (muzero.DISCOUNT if seed_discount is None
                          else seed_discount)
+        edge = self._resolve_edges(seed_discount)
         total = sum(len(t["actions"]) for t in trajectories)
         forest = ChainForest(self, 0)
         first = trajectories[0]["latents"]
@@ -832,7 +889,8 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         for tr in trajectories:
             forest.append_chain(tr["latents"], tr["policies"], tr["values"],
                                 tr["actions"], tr["rewards"],
-                                tr["terminated"], seed_values, seed_discount)
+                                tr["terminated"], seed_values, seed_discount,
+                                edge_disc=edge)
         return forest
 
     # ---- expansion (batch_expand_nodes) ------------------------------
@@ -899,6 +957,8 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         f["wsum_t"][flat] = WEAK
         f["reward"][flat] = edge.reshape(-1)
         f["reward_t"][flat] = WEAK
+        if self._slot_disc is not None:
+            f["disc"][flat] = self._slot_disc.repeat(B)   # child a: slot a's
         # prior = parent.policy[a]: np.float32 from a net row, np.float64
         # from a noised (root) row.
         f["prior"][flat] = f["policy"][pids].reshape(-1)
@@ -932,7 +992,10 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         onward = torch.where(v > 0, q, torch.where(dn, zero, f["evalue"][ch]))
         onward_t = torch.where(v > 0, qt, torch.where(
             dn, torch.zeros_like(qt), f["evalue_t"][ch]))
-        prod, prodt = _tbw(_MUL, onward, onward_t, discount)
+        # TOKEN_VOCAB: each child's own in-edge discount (a weak tensor
+        # operand -- _tbw rounds it to float32 exactly as a Python scalar).
+        d = f["disc"][ch] if self._slot_disc is not None else discount
+        prod, prodt = _tbw(_MUL, onward, onward_t, d)
         return _tb(_ADD, f["reward"][ch], f["reward_t"][ch], prod, prodt)
 
     def _child_scores(self, f, n, st, c_puct, cp32, discount, floor):
@@ -1115,7 +1178,8 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
             node = path[rows, ii]
             contrib[rows, ii] = torch.where(ok, bv, contrib[rows, ii])
             contrib_t[rows, ii] = torch.where(ok, bvt, contrib_t[rows, ii])
-            prod, prodt = _tbw(_MUL, bv, bvt, discount)
+            dd = f["disc"][node] if self._slot_disc is not None else discount
+            prod, prodt = _tbw(_MUL, bv, bvt, dd)
             nb, nbt = _tb(_ADD, f["reward"][node], f["reward_t"][node], prod, prodt)
             bv = torch.where(ok, nb, bv)
             bvt = torch.where(ok, nbt, bvt)
@@ -1172,7 +1236,8 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
             node = path[rows, ii]
             q, qt = _tbw(_DIV, post_w[rows, ii], post_wt[rows, ii],
                          post_v[rows, ii].clamp(min=1))
-            prod, prodt = _tbw(_MUL, q, qt, discount)
+            dd = f["disc"][node] if self._slot_disc is not None else discount
+            prod, prodt = _tbw(_MUL, q, qt, dd)
             upd, updt = _tb(_ADD, f["reward"][node], f["reward_t"][node],
                             prod, prodt)
             gt = ok & _tc(_GT, upd, updt, st["maxv"], st["maxt"])
@@ -1223,6 +1288,7 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
         assert max_depth >= 1, "max_depth=0 forbids leaving the root"
         self.use_prefix = bool(muzero.USE_VALUE_PREFIX_IN_TREE)
         self.use_edge = bool(muzero.COMMUNAL_EDGE_VISITS)
+        self._resolve_edges(discount)
         A, dev = self.A, self.device
         roots = sorted((r if isinstance(r, tuple) else (0, int(r)))
                        for r in roots)
@@ -1393,6 +1459,7 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
                        else num_simulations), 1)
         self.use_prefix = bool(muzero.USE_VALUE_PREFIX_IN_TREE)
         seed_discount = muzero.DISCOUNT
+        edge = self._resolve_edges(discount)
         # Reserve up front: chain + 1.5x one window's expansion bound
         # (R*(sims+1)*A). The carry past a window is a fraction of a
         # window's expansions, so growth is rare (audit F3).
@@ -1411,7 +1478,8 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
                 forest.set_geometry(lat.shape[1:], state_shape)
                 forest.ensure_capacity(total + reserve)
             forest.append_chain(lat, pol, val, tr["actions"], tr["rewards"],
-                                tr["terminated"], seed_values, seed_discount)
+                                tr["terminated"], seed_values, seed_discount,
+                                edge_disc=edge)
             del lat
         windows = [[list(idx[w0:w0 + window])
                     for w0 in range(0, len(idx), window)]

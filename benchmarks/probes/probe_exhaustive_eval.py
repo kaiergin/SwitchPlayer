@@ -21,6 +21,7 @@ a whole GAME (Run.play_game: all lives of a multi-life game, the 3000 cap per
 life); a Pong game is one life, so Pong records are unchanged."""
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # "" deletes the var on Windows
+import contextlib
 import json
 import pathlib
 import sys
@@ -55,6 +56,12 @@ HERE = pathlib.Path(__file__).parent
 
 def load(run, path):
     d = torch.load(str(path), map_location="cpu", weights_only=False)
+    v = (d.get("spec") or {}).get("TOKEN_VOCAB")
+    v = None if v is None else tuple(tuple(t) for t in v)
+    if v != muzero.TOKEN_VOCAB:
+        # One vocabulary per probe call (main sets it from the first file).
+        raise SystemExit(f"{path.name}: TOKEN_VOCAB {v!r} differs from the "
+                         f"probe's {muzero.TOKEN_VOCAB!r}")
     for n in ablation.NET_NAMES:
         getattr(run.trainer, n).load_state_dict(d[n])
     renorm = d.get("spec", {}).get("LATENT_RENORMALIZE", True)
@@ -136,10 +143,46 @@ def configure_search():
     muzero.ACTOR_GUMBEL_SEARCH = SEARCH_ENGINE == "gumbel"
 
 
+def snapshot_vocab(path):
+    """The TOKEN_VOCAB a snapshot's run trained with (curriculum P2a; the
+    weights file's spec), as tuples -- None for a plain-action run."""
+    d = torch.load(str(path), map_location="cpu", weights_only=False)
+    v = (d.get("spec") or {}).get("TOKEN_VOCAB")
+    return None if v is None else tuple(tuple(t) for t in v)
+
+
+@contextlib.contextmanager
+def snapshot_tokens(vocab):
+    """Play the snapshots' tokens: TOKEN_VOCAB and the vocabulary-sized
+    action space for the probe's Run, restored after. None = unchanged."""
+    saved = muzero.TOKEN_VOCAB, ablation.ACTIONS
+    if vocab is not None:
+        muzero.TOKEN_VOCAB = vocab
+        ablation.ACTIONS = len(vocab)
+    try:
+        yield
+    finally:
+        muzero.TOKEN_VOCAB, ablation.ACTIONS = saved
+
+
 def play(run, noops):
+    """One noop-start game: (return, base steps, terminated), plus the
+    decisions played under TOKEN_VOCAB (where base steps count frames / 4
+    and decisions count tokens)."""
     ne = _noop_env(run.env)
     if SEARCH_SIMS:
         np.random.seed(1000 + noops)
+    tokens = muzero.TOKEN_VOCAB is not None
+    decisions = [0]
+    if tokens:
+        inner = run.play_episode
+
+        def counted(*a, **k):
+            out = inner(*a, **k)
+            decisions[0] += len(out[0]) - 1   # records minus the final one
+            return out
+
+        run.play_episode = counted
 
     def fixed(self, **kw):
         obs, info = self.env.reset(**kw)
@@ -156,12 +199,18 @@ def play(run, noops):
         ret, steps, term = ablation.Run.play_game(run, cap=3000)
     finally:
         del ne.reset
+        if tokens:
+            del run.play_episode          # back to the class's method
+    if tokens:
+        return float(ret), int(steps), bool(term), int(decisions[0])
     return float(ret), int(steps), bool(term)
 
 
 def main(argv):
     check_mode()
-    with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000):
+    vocab = snapshot_vocab(argv[0]) if argv else None
+    with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000), \
+            snapshot_tokens(vocab):
         run = ablation.Run(ARM, 0, ablation.ARMS[ARM])
         assert muzero.USE_SEARCH_ACTING is False       # greedy = prior argmax
         if SEARCH_SIMS:
@@ -192,6 +241,14 @@ def main(argv):
                                else "raw")}
             if ENV != "Pong-v4":
                 rec["env"] = ENV
+            if vocab is not None:
+                # TOKEN_VOCAB: each game is [return, base steps, terminated,
+                # decisions]; the deployed player's mean raw frames per
+                # decision (P2a read 4: decisions per second = 60 / this).
+                rec["tokens"] = len(vocab)
+                rec["frames_per_decision"] = round(float(np.mean(
+                    [g[1] * muzero.TOKEN_BASE_FRAMES / max(1, g[3])
+                     for g in games.values()])), 3)
             if SEARCH_SIMS:
                 rec["search"] = {"engine": SEARCH_ENGINE, "sims": SEARCH_SIMS}
             if MAX_NOOP != 30:

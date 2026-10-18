@@ -688,16 +688,33 @@ def test_supervisor_audits_what_it_runs(sup):
         assert f"benchmarks/supervisors/supervise_{name}.py" in sup.AUDITED
 
 
-def test_supervisor_manifest_matches_this_tree(sup):
+MSPACMAN_LAUNCH = "f07d1d440059821edd0c206fef6b8262c521f4d7"
+
+
+def test_supervisor_manifest_matches_the_launch_commit(sup):
     """The manifest next to the script (written by --write-manifest) hashes
-    this tree; the supervisor READS the main tree's copy (audit r1 L2)."""
+    the AUDITED files of the run's launch commit; the supervisor READS the
+    main tree's copy (audit r1 L2). The run and its evals finished
+    2026-10-17 and the freeze lifted, so the live tree has moved on (P2a's
+    edits): the manifest is the archived launch record, checked against
+    that commit's content through git (skipped in an archive copy without
+    git history)."""
+    import hashlib
     assert sup.MANIFEST_OUT == str(SUP.parent / "mspacman_manifest.json")
     assert sup.MANIFEST == os.path.join(sup.REPO, "benchmarks", "supervisors",
                                         "mspacman_manifest.json")
     with open(sup.MANIFEST_OUT, encoding="utf-8") as f:
         want = json.load(f)
     assert sorted(want) == sorted(sup.AUDITED)
-    assert want == sup.file_hashes(str(ROOT))
+    have = {}
+    for rel in want:
+        r = subprocess.run(["git", "show", f"{MSPACMAN_LAUNCH}:{rel}"],
+                           cwd=ROOT, capture_output=True)
+        if r.returncode:
+            pytest.skip("no git history for the launch commit here")
+        have[rel] = hashlib.sha256(
+            r.stdout.replace(b"\r\n", b"\n")).hexdigest()
+    assert want == have
 
 
 def test_supervisor_live_child_guard(sup):

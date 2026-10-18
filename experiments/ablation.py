@@ -985,6 +985,29 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"] = {
             "3000 --episodes-per-iter 3 --ray --cpu-actor.",
 }
 
+# Curriculum P2a, duration tokens (Kai, 2026-10-17; pre-registered in
+# CURRICULUM): the real-time base with every decision one token of Pong's
+# minimal NOOP / UP / DOWN held for 4, 8, 16 or 32 frames (slot order:
+# action-major; slot 0 = NOOP x4 is the placeholder action's token), and the
+# early long-token bias (b 0.5 -> 0 over the first 25% of the run). Seed 1
+# (twin pong-bnrecal-s1-2026-10-08).
+PONG_DURATION_TOKENS = tuple((a, f) for a in (0, 2, 3) for f in (4, 8, 16, 32))
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-tokens"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal"],
+    "TOKEN_VOCAB": PONG_DURATION_TOKENS,
+    "TOKEN_LONG_BIAS": 0.5,
+    "TOKEN_LONG_BIAS_END": 0.25,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal with "
+            "TOKEN_VOCAB: 12 duration tokens -- Pong's NOOP / UP / DOWN x "
+            "{4, 8, 16, 32} frames -- each one decision (inner wrapper "
+            "steps, summed reward, edge discount DISCOUNT ** (frames / 4), "
+            "frame-time value targets), and TOKEN_LONG_BIAS 0.5 falling to "
+            "0 at 25% of the run. Run with --env Pong-v4 --frameskip 4 "
+            "--episode-cap 3000 (base steps = 12000 frames) "
+            "--episodes-per-iter 1 --ray --cpu-actor. Twin: "
+            "pong-bnrecal-s1-2026-10-08 (same arm, no tokens, seed 1).",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
@@ -1216,6 +1239,22 @@ def arm_config(arm):
     finally:
         for k, v in saved.items():
             setattr(muzero, k, v)
+
+
+@contextlib.contextmanager
+def token_actions():
+    """Under TOKEN_VOCAB (curriculum P2a) the action space IS the vocabulary:
+    ACTIONS = len(TOKEN_VOCAB) for the run -- nets, searches, the Ray actors
+    -- restored after, so a sweep's next arm sees the env's count again.
+    Entered inside arm_config (it reads the arm's TOKEN_VOCAB)."""
+    global ACTIONS
+    saved = ACTIONS
+    if muzero.TOKEN_VOCAB is not None:
+        ACTIONS = len(muzero.TOKEN_VOCAB)
+    try:
+        yield
+    finally:
+        ACTIONS = saved
 
 
 def build_networks(spec):
@@ -1507,6 +1546,90 @@ def prior_temp_gate():
                          "temperature; it is inert under USE_SEARCH_ACTING")
 
 
+def play_token(env, token, stack):
+    """One TOKEN_VOCAB decision: the token's ALE action for frames /
+    TOKEN_BASE_FRAMES consecutive steps of the wrapper stack. Returns (obs,
+    reward, terminated, truncated, stack, base_steps): reward is the SUM of
+    the inner rewards (play_episode clips it as one step's), and every inner
+    frame but the last is pushed into the stack here -- the last is pushed
+    at the next decision, as a plain step's -- so the stack always holds the
+    last four base steps, whatever tokens were played. Stops early at a
+    terminal or truncation. A module function, not a Run method: the Ray
+    actor's Run shell provides only env / searcher / env_steps
+    (tests/test_ray_harness.py pins play_episode's self.* surface)."""
+    act, frames = muzero.TOKEN_VOCAB[int(token)]
+    n = int(frames) // muzero.TOKEN_BASE_FRAMES
+    total, done = 0.0, 0
+    for i in range(n):
+        obs, reward, term, trunc, _ = env.step(int(act))
+        total += float(reward)
+        done = i + 1
+        if term or trunc:
+            break
+        if i < n - 1:
+            stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
+    return obs, total, term, trunc, stack, done
+
+
+def token_bias_weights(b):
+    """TOKEN_LONG_BIAS sampling weights (frames / TOKEN_BASE_FRAMES) ** b per
+    TOKEN_VOCAB slot."""
+    return np.array([(int(f) / muzero.TOKEN_BASE_FRAMES) ** b
+                     for _, f in muzero.TOKEN_VOCAB], dtype=np.float64)
+
+
+def token_gate(spec, use_ray, cpu_actor, ray_workers):
+    """TOKEN_VOCAB (curriculum P2a) runs only on the path it was built and
+    tested on: policy-only acting with birth search, paper targets through
+    the target model, the vectorized communal refresh, TD value targets,
+    the paper wrapper stack at the base skip, --ray --cpu-actor without a
+    worker pool. Refuses at startup -- before any --overwrite deletion --
+    rather than training on a path that ignores the tokens' frames."""
+    vocab = muzero.TOKEN_VOCAB
+    if vocab is None:
+        return
+    base = int(muzero.TOKEN_BASE_FRAMES)
+    need = {"PAPER_TARGETS": True, "BIRTH_SEARCH": True,
+            "USE_TARGET_MODEL": True, "REFRESH_VTREE": True,
+            "USE_ATARI_WRAPPERS": True, "USE_SEARCH_ACTING": False,
+            "USE_GUMBEL_SEARCH": False, "ACTOR_GUMBEL_SEARCH": False,
+            "REFRESH_OFFLOAD": False, "REFRESH_SATURATE": False,
+            "ASYNC_LOOP": False, "VALUE_TARGET_MODE": "td"}
+    bad = [f"{k}={getattr(muzero, k)!r}" for k, v in need.items()
+           if getattr(muzero, k) != v]
+    if bad:
+        raise SystemExit("TOKEN_VOCAB runs only on the tested path "
+                         f"(policy-only acting + birth search, paper "
+                         f"targets, vectorized refresh); got {', '.join(bad)}")
+    if not (use_ray and cpu_actor) or ray_workers:
+        raise SystemExit("TOKEN_VOCAB runs with --ray --cpu-actor (no "
+                         "--ray-workers pool)")
+    if FRAMESKIP != base:
+        raise SystemExit(f"TOKEN_VOCAB plays tokens as steps of the wrapper "
+                         f"stack at --frameskip {base}; got {FRAMESKIP}")
+    n_env = env_actions(ENV_NAME)
+    for i, tok in enumerate(vocab):
+        a, f = tok
+        if not (isinstance(f, int) and f >= base and f % base == 0):
+            raise SystemExit(f"TOKEN_VOCAB[{i}] = {tok!r}: frames must be a "
+                             f"positive multiple of {base}")
+        if not (isinstance(a, int) and 0 <= a < n_env):
+            raise SystemExit(f"TOKEN_VOCAB[{i}] = {tok!r}: ALE action outside "
+                             f"{ENV_NAME}'s {n_env}")
+    if len(set(vocab)) != len(vocab):
+        raise SystemExit("TOKEN_VOCAB has duplicate tokens")
+
+
+def env_actions(env_id):
+    """The env's ALE action count."""
+    import gymnasium as gym
+    probe = gym.make(env_id)
+    try:
+        return int(probe.action_space.n)
+    finally:
+        probe.close()
+
+
 def eval_summary(episodes):
     """Row fields from greedy eval games given as (return, decisions,
     terminated) triples (Run.play_game). eval_len_mean / eval_capped exist
@@ -1667,6 +1790,11 @@ class Run:
         # EVAL_PRIOR_ONLY: a greedy episode never searches (per step or
         # tail) and records plain 3-field steps, as a non-search arm's.
         prior_eval = greedy and muzero.EVAL_PRIOR_ONLY
+        # TOKEN_VOCAB (curriculum P2a): each decision plays a token; `steps`
+        # (the cap, env_steps, eval lengths) then counts BASE steps --
+        # frames / TOKEN_BASE_FRAMES, the plain arms' decisions -- and the
+        # trajectory's length counts decisions.
+        tokens = muzero.TOKEN_VOCAB is not None
         while not done and steps < cap:
             stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
             if muzero.USE_SEARCH_ACTING and not prior_eval and (
@@ -1698,13 +1826,25 @@ class Run:
                     # Read per step so an arm override applies; identity at 1.0.
                     # PRIOR_ACT_STAGED_TEMP: the search's staged schedule,
                     # keyed on the same counter act_search reads.
-                    t = muzero.prior_acting_temperature(getattr(
-                        self.searcher.network_manager, "training_steps", 0))
+                    steps_at = getattr(self.searcher.network_manager,
+                                       "training_steps", 0)
+                    t = muzero.prior_acting_temperature(steps_at)
                     if t != 1.0:
                         policy = policy ** (1.0 / t)
                         policy = policy / policy.sum()
+                    b = muzero.token_long_bias(steps_at)
+                    if b:
+                        # The early long-token bias (TOKEN_LONG_BIAS):
+                        # weights x (frames / base) ** b.
+                        policy = policy * token_bias_weights(b)
+                        policy = policy / policy.sum()
                     action = int(np.random.choice(ACTIONS, p=policy))
-            obs, reward, term, trunc, _ = self.env.step(action)
+            if tokens:
+                obs, reward, term, trunc, stack, n_base = play_token(
+                    self.env, action, stack)
+            else:
+                obs, reward, term, trunc, _ = self.env.step(action)
+                n_base = 1
             done = term or trunc
             # 5-field records exist ONLY for the paper data path. Recording
             # them for every search-acting arm broke the pre-existing
@@ -1719,7 +1859,7 @@ class Run:
                 traj.append((stack, action, prev_reward, search_pol, search_val))
             prev_reward = muzero.clip_reward(reward)
             total += float(reward)
-            steps += 1
+            steps += n_base
         terminated = done
         if not greedy:
             self.env_steps += steps
@@ -1829,10 +1969,14 @@ class Run:
                 # for SVE's sve_value_age diagnostic.
                 out[-1]["root_value_step"] = born
         out[-1]["truncated"] = not terminated
+        z0s = []
         for idx, t in enumerate(out):
             z0 = muzero.paper_value_target(out, idx, muzero.TD_STEPS,
                                            muzero.DISCOUNT)
             t["priority"] = abs(t["root_value"] - z0) + muzero.PER_EPS
+            z0s.append(z0)
+        if muzero.TOKEN_VOCAB is not None:
+            self._note_tokens(out, z0s)
         if birth and not muzero.USE_SEARCH_ACTING:
             # The behaviour diagnostics describe PRIOR sampling; a
             # search-acting actor (SEARCH_ACT_BIRTH_TARGETS) did not sample
@@ -1958,6 +2102,11 @@ class Run:
         q = np.clip(priors.astype(np.float64), 1e-12, None)
         qT = q ** (1.0 / T)
         qT /= qT.sum(axis=1, keepdims=True)
+        b = muzero.token_long_bias(born)
+        if b:
+            # The distribution actually sampled includes the long-token bias.
+            qT = qT * token_bias_weights(b)
+            qT /= qT.sum(axis=1, keepdims=True)
         p_act = tgt[np.arange(len(act)), act]
         w = getattr(self, "_beh_window", None) or {"n": 0, "sums": {},
                                                     "counts": [0] * ACTIONS}
@@ -1979,6 +2128,35 @@ class Run:
             w["counts"], np.bincount(act, minlength=ACTIONS))]
         w["Ts"] = sorted(set(w.get("Ts", [])) | {T})
         self._beh_window = w
+
+    def _note_tokens(self, out, z0s):
+        """TOKEN_VOCAB row diagnostics (P2a read 4), accumulated per row
+        window like _beh_window: per token, how often it was played, its
+        payoff (mean z - V over the positions where it was played: the
+        age-0 n-step target against the birth search's root value), and
+        the birth search's visit mass on it; plus frames per decision and
+        decisions per game. Emitted and reset by _merge_row_stats."""
+        acted = out[:-1]
+        if not acted:
+            return
+        A = len(muzero.TOKEN_VOCAB)
+        act = np.array([int(t["action"]) for t in acted])
+        pay = np.array([z0s[i] - acted[i]["root_value"]
+                        for i in range(len(acted))], dtype=np.float64)
+        mass = np.stack([t["target_policy"] for t in acted]).sum(axis=0)
+        frames = sum(muzero.token_frames(a) for a in act)
+        w = getattr(self, "_tok_window", None) or {
+            "counts": np.zeros(A, dtype=np.int64),
+            "pay": np.zeros(A, dtype=np.float64),
+            "mass": np.zeros(A, dtype=np.float64),
+            "frames": 0, "decisions": 0, "games": 0}
+        w["counts"] += np.bincount(act, minlength=A)
+        w["pay"] += np.bincount(act, weights=pay, minlength=A)
+        w["mass"] += mass
+        w["frames"] += int(frames)
+        w["decisions"] += len(acted)
+        w["games"] += 1
+        self._tok_window = w
 
     def _search_traj_communal(self, traj, indices):
         """Communal refresh search (USE_COMMUNAL_REANALYSIS): re-search a
@@ -2614,6 +2792,33 @@ class Run:
             errs["beh_action_counts"] = list(w["counts"])
             errs["beh_T_values"] = list(w.get("Ts", []))
             self._beh_window = None
+        tw = getattr(self, "_tok_window", None)
+        if tw and tw["decisions"]:
+            # TOKEN_VOCAB (P2a read 4): per-token play counts, payoff and
+            # birth-search share; per-duration shares of play and of search;
+            # frames per decision and decisions per game. Per-row window,
+            # not checkpointed (like _beh_window).
+            vocab = muzero.TOKEN_VOCAB
+            n = tw["counts"]
+            errs["tok_counts"] = [int(c) for c in n]
+            errs["tok_payoff"] = [round(float(p / c), 4) if c else None
+                                  for p, c in zip(tw["pay"], n)]
+            share = tw["mass"] / tw["mass"].sum()
+            errs["tok_search_share"] = [round(float(s), 4) for s in share]
+            durs = sorted({int(f) for _, f in vocab})
+            errs["tok_duration_play_share"] = {
+                str(d): round(float(sum(c for (_, f), c in zip(vocab, n)
+                                        if f == d) / n.sum()), 4)
+                for d in durs}
+            errs["tok_duration_search_share"] = {
+                str(d): round(float(sum(s for (_, f), s in zip(vocab, share)
+                                        if f == d)), 4)
+                for d in durs}
+            errs["tok_frames_per_decision"] = round(
+                tw["frames"] / tw["decisions"], 3)
+            errs["tok_decisions_per_game"] = round(
+                tw["decisions"] / tw["games"], 1)
+            self._tok_window = None
         sv = getattr(getattr(self, "trainer", None), "_sve_window", None)
         if sv and sv["n_real"]:
             # SVE (VALUE_TARGET_MODE "mixed"): share of real value targets
@@ -3908,7 +4113,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             checkpoint_every=10, resume=False, overwrite=False,
             init_weights=None, use_ray=False, ray_workers=0,
             cpu_actor=False, snapshot_weights=False):
-    with arm_config(arm) as spec, _run_length_globals(iterations, train_steps):
+    with arm_config(arm) as spec, _run_length_globals(iterations, train_steps), \
+            token_actions():
         if use_ray:
             ray_scope_gate(spec)
         launch_gate(spec, use_ray, cpu_actor)
@@ -3918,6 +4124,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         search_act_birth_gate()
         birth_search_gate()
         sve_gate()
+        token_gate(spec, use_ray, cpu_actor, ray_workers)
         if muzero.REDO_EVERY:
             # Fail at startup -- before any --overwrite deletion (round-2
             # audit LOW-3) and not at step REDO_EVERY: import redo and
