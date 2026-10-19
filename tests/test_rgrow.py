@@ -867,6 +867,10 @@ def test_supervisor_no_wait_override_is_rg_only_and_logged(sup, monkeypatch,
     def stop(*a, **k):
         raise Stop
 
+    # the preflight runs this suite UNDER a live tk supervisor: pin both
+    # probes of the host, never read the real process table here
+    monkeypatch.setattr(sup, "run_done", lambda v, s: False)
+    monkeypatch.setattr(sup, "live_supervisors", lambda v, s: [])
     monkeypatch.setattr(sup, "wait_turn", no)
     monkeypatch.setattr(sup, "preflight", stop)
     with pytest.raises(Stop):
@@ -875,3 +879,38 @@ def test_supervisor_no_wait_override_is_rg_only_and_logged(sup, monkeypatch,
     monkeypatch.setattr(sup, "wait_turn", stop)     # without it: waits
     with pytest.raises(Stop):
         sup.main(["rg", "0"])
+    # audit r3 L4: refused while tk's supervisor is alive
+    monkeypatch.setattr(sup, "live_supervisors",
+                        lambda v, s: [42] if v == "tk" else [])
+    assert sup.main(["rg", "0", "--no-wait"]) == 2
+    assert "refusing --no-wait" in capsys.readouterr().out
+
+
+def test_supervisor_exits_at_once_when_its_run_is_complete(sup, monkeypatch,
+                                                           capsys):
+    """Audit r3 L3: a relaunch of a finished run (after a reboot) prints
+    RUN COMPLETE before any wait or CPU preflight."""
+    def no(*a, **k):
+        raise AssertionError("no wait or preflight for a finished run")
+
+    monkeypatch.setattr(sup, "run_done", lambda v, s: v == "tk")
+    monkeypatch.setattr(sup, "wait_turn", no)
+    monkeypatch.setattr(sup, "preflight", no)
+    assert sup.main(["tk", "0"]) == 0
+    assert "RUN COMPLETE tk s0" in capsys.readouterr().out
+
+
+def test_supervisor_finds_live_supervisors_by_variant(sup, monkeypatch):
+    procs = [
+        {"pid": 1, "cmdline": ["py", "Y:" + chr(92) + "run" + chr(92)
+                               + "supervise_rgrow.py", "tk", "0"]},
+        {"pid": 2, "cmdline": ["py", "supervise_rgrow.py", "rg", "0",
+                               "--no-wait"]},
+        {"pid": 3, "cmdline": ["py", "supervise_rgrow.py", "tk", "1"]},
+        {"pid": 4, "cmdline": ["py", "supervise_tokens.py", "tk", "0"]},
+        {"pid": 5, "cmdline": None}]
+    import psutil
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: [
+        SimpleNamespace(info=p) for p in procs])
+    assert sup.live_supervisors("tk", 0) == [1]
+    assert sup.live_supervisors("rg", 0) == [2]

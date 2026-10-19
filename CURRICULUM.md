@@ -876,7 +876,7 @@ WITHIN-RUN noise floor from one seed (rows are autocorrelated, lag-1 r ~
 Gumbel 1/2): a single-seed BETTER / WORSE reads "consistent with", and a
 permanent change to the base needs a seed-1 replicate first.
   NEAR RANDOM, per arm, first (audit r2 B-M1): an arm whose deployed
-    mean 60-90 has g < 0.2 (< 502.1) is diagnosed before any other read
+    mean 60-90 has g < 0.2 (< 502.08) is diagnosed before any other read
     of it.
   TOKENS (TK, Kai's question): HOLD UP if TK has g >= 0.2 AND is not
     WORSE than the twin AND not WORSE than RG -> P2b (the composition
@@ -885,13 +885,17 @@ permanent change to the base needs a seed-1 replicate first.
     -> the composition diagnosis first (does the model value X32 above
     X4 x 8, the same frames?). MIXED (TK not WORSE than the twin but WORSE
     than RG) -> Kai's call: tokens cost something here that growth alone
-    does not.
+    does not. INCONCLUSIVE (TK near random -- g < 0.2 -- but neither WORSE
+    than the twin nor than RG; audit r3 L1) -> the composition diagnosis,
+    then Kai's call; no P2b. (Every FAIL is also near random -- 417.3 <
+    502.08 -- and its diagnosis IS the composition diagnosis.) An
+    ABANDONED TK (stopped under the pace rule) is read descriptively from
+    the rows it has; no TOKENS verdict.
   GROWTH (RG): BETTER than the twin -> a seed-1 replicate, then it joins
     the Ms. Pac-Man base. NO DIFFERENT -> Kai's call (keep it for its
     intent, or retune the end ceiling / schedule). WORSE -> diagnose (the
     value scale) before any replicate; TK is then judged against the twin
     only.
-  Both near random (g < 0.2) -> diagnose before anything else.
 COST: one run after the other on the one GPU: TK ~12-17 h at Pong-like
 12-24 frames per decision, up to ~25-30 h if play drifts to 4-frame tokens
 or lives lengthen (the 36-token refresh, ~0.21 s per position, scales with
@@ -934,10 +938,17 @@ the COST range and the pace rule; supervise_rgrow.py ALERTs on a row whose
 reward_ceiling is off the schedule (the iteration-top re-clip did not run),
 on a pace past 25 min/iteration, and on a stored record reward past 400
 units; `rg 0 --no-wait` (logged) starts RG without TK's completion marker
-if TK is abandoned. RECOVERY: after a reboot, relaunch the hand-off and
-both supervisors the same way (they resume from the last checkpoint, rg
-re-waits); to pause, kill the running supervisor and its trainer by
-command line (never taskkill /T) and relaunch later.
+if TK is abandoned -- refused while TK's supervisor is alive (kill it and
+its trainer first); the hand-off then skips TK's evals. RECOVERY: after a
+reboot, relaunch the hand-off and the supervisors the same way (they
+resume from the last checkpoint; a finished run's supervisor exits at
+once; rg re-waits) -- but if TK was abandoned, relaunch only rg, with
+--no-wait. To pause, kill the running supervisor and its trainer by
+command line (never taskkill /T) and relaunch later. (Audit r3: nothing
+above LOW; its LOWs fixed -- the INCONCLUSIVE case, the abandoned-TK path
+in the supervisor / hand-off / RECOVERY, a finished run's supervisor
+exiting before its preflight, the hand-off echoing supervisor lines while
+its probes run.)
 
 ### Next experiment (pre-registered) -- P2a: duration tokens on Pong (Kai, 2026-10-17)
 

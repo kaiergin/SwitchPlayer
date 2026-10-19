@@ -15,8 +15,11 @@ reward-clip growth".
     python benchmarks/supervisors/supervise_rgrow.py --write-manifest
 
 --no-wait (rg only, logged): start rg without tk's completion marker --
-for an abandoned tk (Kai's call; audit r2 B-L2). The one-trainer guard
-still holds: rg never launches while tk's trainer runs.
+for an abandoned tk (Kai's call; audit r2 B-L2). Refused while a tk
+supervisor is alive (it would relaunch tk between rg's attempts; audit r3
+L4): kill it first. The one-trainer guard still holds: rg never launches
+while tk's trainer runs. A run already complete exits at once (RUN
+COMPLETE), before any wait or preflight.
 
 Both may be launched at once (rg waits). Create each run folder before a
 launch that redirects into it (`>> <folder>/supervisor.log`): the shell
@@ -399,6 +402,26 @@ def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
           f"-> deaths.log (gpu used {gpu})", flush=True)
 
 
+def live_supervisors(variant, seed):
+    """PIDs of running supervise_rgrow.py processes for `variant` at `seed`
+    (never this process)."""
+    import psutil
+    out = []
+    for p in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmd = p.info["cmdline"] or []
+        except (psutil.Error, KeyError):
+            continue
+        if p.info["pid"] == os.getpid():
+            continue
+        for i, c in enumerate(cmd):
+            if (c.replace(chr(92), "/").endswith("supervise_rgrow.py")
+                    and cmd[i + 1:i + 3] == [variant, str(seed)]):
+                out.append(p.info["pid"])
+                break
+    return out
+
+
 def wait_no_trainer(seed):
     """Block while ANY variant's trainer of this experiment runs at `seed`
     (an orphan of an earlier supervisor, the other variant, a duplicate):
@@ -432,10 +455,21 @@ def main(argv):
     variant, seed = argv[0], int(argv[1])
     arm = VARIANTS[variant]
     rel, base, jsonl, ckpt, deaths_log = paths(variant, seed)
-    if no_wait:
-        print(f"NO-WAIT override: {variant} s{seed} starts without "
-              f"{list(ORDER[:ORDER.index(variant)])}'s completion marker",
+    if run_done(variant, seed):
+        # Before any wait or preflight: a relaunch after a reboot must not
+        # run 15 CPU suites beside the other run's trainer (audit r3 L3).
+        print(f"RUN COMPLETE {variant} s{seed} (checkpoint is a marker)",
               flush=True)
+        return 0
+    if no_wait:
+        earlier = list(ORDER[:ORDER.index(variant)])
+        alive = [p for u in earlier for p in live_supervisors(u, seed)]
+        if alive:
+            print(f"refusing --no-wait: the supervisor of {earlier} is alive "
+                  f"(pids {alive}) -- kill it first", flush=True)
+            return 2
+        print(f"NO-WAIT override: {variant} s{seed} starts without "
+              f"{earlier}'s completion marker", flush=True)
     else:
         wait_turn(variant, seed)
 
