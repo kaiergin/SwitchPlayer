@@ -1,14 +1,21 @@
 """P2a on Ms. Pac-Man with reward-clip growth (Kai, 2026-10-19): two arms at
-SEED 0, run concurrently, one supervisor each --
-  rg: effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-rgrow
+SEED 0, run ONE AFTER THE OTHER (audit r1 B: two concurrent Ray runs press
+host commit, and the twin trained alone), one supervisor each --
   tk: effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow
+      (first: Kai's question)
+  rg: effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-rgrow
+      (waits for tk's completion marker before its preflight)
 --ray --cpu-actor (pinned by the arms). Design and pre-registered reads:
 CURRICULUM.md "Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with
 reward-clip growth".
 
-    python benchmarks/supervisors/supervise_rgrow.py rg 0
     python benchmarks/supervisors/supervise_rgrow.py tk 0
+    python benchmarks/supervisors/supervise_rgrow.py rg 0
     python benchmarks/supervisors/supervise_rgrow.py --write-manifest
+
+Both may be launched at once (rg waits). Create each run folder before a
+launch that redirects into it (`>> <folder>/supervisor.log`): the shell
+opens the redirect before this file runs.
 
 The runs execute from the RUN WORKTREE this file lives in (a checkout of
 the audited commit that nobody edits; development continues on branch
@@ -28,7 +35,9 @@ VARIANTS = {
     "tk": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
           "tokens-rgrow",
 }
-RUNS = {"rg": "mspacman-rgrow", "tk": "mspacman-tokens"}
+RUNS = {"rg": "mspacman-rgrow", "tk": "mspacman-tokens-rgrow"}
+# Run order: a variant starts only after every earlier one completed.
+ORDER = ("tk", "rg")
 MODE = ["--ray", "--cpu-actor"]
 ENV_ID = "MsPacmanNoFrameskip-v4"
 TAG = "-mspacmannoframeskip-skip4"        # ablation's TAG for ENV_ID, skip 4
@@ -161,6 +170,54 @@ def quick(variant):
             "assert hasattr(muzero, 'grown_reward')")
 
 
+def run_done(variant, seed):
+    """The run's completion marker: its checkpoint shrunk to a marker."""
+    try:
+        return os.path.getsize(paths(variant, seed)[3]) < 1_000_000
+    except OSError:
+        return False
+
+
+def wait_turn(variant, seed):
+    """Block until every variant before this one in ORDER has completed
+    (one run on the GPU at a time). Logs a WAITING line hourly (the
+    hand-off's stale-log ALERT reads the log's mtime) and ALERTs while an
+    earlier run's supervisor has given up."""
+    first, polls = True, 0
+    while True:
+        before = [u for u in ORDER[:ORDER.index(variant)]
+                  if not run_done(u, seed)]
+        if not before:
+            if not first:
+                print(f"{list(ORDER[:ORDER.index(variant)])} complete; "
+                      f"{variant} s{seed} may start", flush=True)
+            return
+        if first or polls % 60 == 0:
+            gave_up = []
+            for u in before:
+                try:
+                    with open(os.path.join(paths(u, seed)[1],
+                                           "supervisor.log"), "rb") as f:
+                        lines = f.read().splitlines()
+                except OSError:
+                    lines = []
+                fail = max((i for i, l in enumerate(lines) if l.startswith(
+                    (b"CRASH LOOP", b"MAX ATTEMPTS"))), default=-1)
+                live = max((i for i, l in enumerate(lines) if l.startswith(
+                    (b"LAUNCHED", b"preflight ok", b"PREFLIGHT"))),
+                    default=-1)
+                if fail > live:
+                    gave_up.append(u)
+            print(f"WAITING for {before} to complete before {variant} s{seed} "
+                  f"[{polls // 60} h]", flush=True)
+            if gave_up:
+                print(f"ALERT: the supervisor of {gave_up} gave up -- "
+                      f"{variant} keeps waiting", flush=True)
+        first = False
+        time.sleep(60)
+        polls += 1
+
+
 def preflight(variant):
     """(ok, reason): the manifest, the quick import probe, then the suites
     IN this tree."""
@@ -251,7 +308,8 @@ class Rows:
                 self.last = (el, r.get("iteration", 0))
             tok = ""
             if self.variant == "tk":
-                tok = (" | frames/decision %s  decisions/game %s  play share "
+                # decisions per TRAJECTORY = per life on Ms. Pac-Man
+                tok = (" | frames/decision %s  decisions/life %s  play share "
                        "%s  search share %s" % (
                            r.get("tok_frames_per_decision"),
                            r.get("tok_decisions_per_game"),
@@ -305,6 +363,7 @@ def main(argv):
     variant, seed = argv[0], int(argv[1])
     arm = VARIANTS[variant]
     rel, base, jsonl, ckpt, deaths_log = paths(variant, seed)
+    wait_turn(variant, seed)
 
     polls, told = 0, None
     while True:
@@ -354,11 +413,12 @@ def main(argv):
             polls += 1
         polls, told = 0, None
         while True:
-            pids = live_children(variant, seed)
+            pids = [p for v in VARIANTS for p in live_children(v, seed)]
             if not pids:
                 break
-            msg = (f"ALERT: an ablation.py of {arm} at seed {seed} is already "
-                   f"running (pids {pids}) -- not launching a second writer")
+            msg = (f"ALERT: an ablation.py of this experiment at seed {seed} "
+                   f"is already running (pids {pids}) -- one run on the GPU "
+                   f"at a time, and never a second writer")
             if msg != told or polls % 60 == 0:
                 print(f"{msg} [{polls} min]", flush=True)
                 told = msg

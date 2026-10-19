@@ -56,7 +56,12 @@ def test_tk_arm_delta_is_exactly_p2as_tokens():
     rg, tk = ablation.ARMS[RG_ARM], ablation.ARMS[TK_ARM]
     delta = {k for k in set(rg) | set(tk) if rg.get(k) != tk.get(k)}
     assert delta == {"TOKEN_VOCAB", "TOKEN_LONG_BIAS", "TOKEN_LONG_BIAS_END",
-                     "_doc"}
+                     "VTREE_REFRESH_BATCH", "VTREE_COMMUNAL_TRAJS", "_doc"}
+    # memory: 36-slot trees (audit r1 B-M2); RG keeps the base's shapes
+    assert (tk["VTREE_REFRESH_BATCH"], tk["VTREE_COMMUNAL_TRAJS"]) == (64, 1)
+    with ablation.arm_config(RG_ARM):
+        assert (muzero.VTREE_REFRESH_BATCH,
+                muzero.VTREE_COMMUNAL_TRAJS) == (256, 8)
     vocab = tk["TOKEN_VOCAB"]
     assert len(vocab) == 36 and len(set(vocab)) == 36
     assert vocab == tuple((a, f) for a in range(9) for f in (4, 8, 16, 32))
@@ -128,8 +133,11 @@ def test_the_arms_schedule_matches_the_preregistration(monkeypatch):
               for row in (1, 10, 23, 45, 46, 90)}
     assert at[1] == 1.0                         # the twin's sign clip
     assert at[10] == pytest.approx(160 ** 0.2, rel=1e-12)          # ~2.8
-    assert 11.9 < at[23] < 12.7                                    # ~12.6
-    assert at[45] < 160.0 and at[46] == 160.0 and at[90] == 160.0
+    # stepped from the iteration's STARTING step (audit r1 A-NIT3: ~12.0,
+    # not the mid-iteration 12.6)
+    assert at[23] == pytest.approx(160 ** (44 / 90), rel=1e-12)    # ~12.0
+    assert at[45] == pytest.approx(160 ** (88 / 90), rel=1e-12)    # ~142.9
+    assert at[46] == 160.0 and at[90] == 160.0
 
 
 MSP_REWARDS = (0.0, 10.0, 50.0, 60.0, 100.0, 200.0, 400.0, 800.0, 1600.0)
@@ -354,9 +362,10 @@ def test_plain_rows_gain_no_reward_fields():
 # --------------------------------------------------------------------------
 @pytest.fixture
 def rg_arm(monkeypatch):
-    for k in ablation.ARMS[RG_ARM]:
+    for k in list(ablation.ARMS[RG_ARM]) + ["UNROLL_STEPS"]:
         if hasattr(muzero, k):
             monkeypatch.setattr(muzero, k, getattr(muzero, k))
+    monkeypatch.setattr(ablation, "ENV_NAME", ENV_ID)
     with ablation.arm_config(RG_ARM) as spec:
         yield spec
 
@@ -383,6 +392,7 @@ def test_gate_passes_the_arm_and_ignores_plain_arms(rg_arm, monkeypatch):
     (("REWARD_GROWTH_END", 0.0), "REWARD_GROWTH_END"),
     (("REWARD_GROWTH_END", 1.5), "REWARD_GROWTH_END"),
     (("REWARD_GROWTH_CEILING", 1e6), "past the reward support"),
+    (("REWARD_UNIT", 1.0), "reward unit"),
 ])
 def test_gate_refusals(rg_arm, monkeypatch, change, match):
     monkeypatch.setattr(muzero, *change)
@@ -577,7 +587,7 @@ def test_supervisor_recipe_is_the_twins_with_the_growth_arms(sup):
                                           arm, "--seed"]
     rg, tk = sup.paths("rg", 0), sup.paths("tk", 0)
     assert rg[0] == "benchmarks/results/mspacman-rgrow-s0-2026-10-19"
-    assert tk[0] == "benchmarks/results/mspacman-tokens-s0-2026-10-19"
+    assert tk[0] == "benchmarks/results/mspacman-tokens-rgrow-s0-2026-10-19"
     for (rel, base, jsonl, ckpt, deaths), arm in ((rg, RG_ARM), (tk, TK_ARM)):
         assert jsonl.endswith("ablation-mspacmannoframeskip-skip4.jsonl")
         assert ckpt.endswith(
@@ -688,4 +698,116 @@ def test_supervisor_rows_print_the_growth_fields(sup, tmp_path, capsys):
     out = capsys.readouterr().out
     assert out.startswith("EVAL tk s0 iter 5")
     assert "ceiling 1.8  kept 0.42  max 3.6" in out
-    assert "frames/decision 9.5" in out
+    assert "frames/decision 9.5" in out and "decisions/life" in out
+
+
+# --------------------------------------------------------------------------
+# audit r1: mid-iteration records, the gate's env unit and prefix support,
+# a tokens + growth learner slice, tuple records across a process boundary,
+# the sequential supervisor
+# --------------------------------------------------------------------------
+def test_mid_iteration_records_clip_at_the_buffers_ceiling(growth):
+    """Audit r1 A-LOW3: a trajectory entering mid-iteration (an eager or
+    end-of-iteration collect) clips at the ceiling the buffer was clipped
+    at this iteration, not the live step's -- one ceiling at a time."""
+    run = _learner(steps=0)
+    run.replay.append(run.paper_targets(_five(RAW), terminated=True))
+    run.trainer.training_steps = 900              # live ceiling: 160
+    run.replay.append(run.paper_targets(_five(RAW), terminated=True))
+    assert run._reward_ceiling == 1.0
+    assert [t["reward"] for t in run.replay[1]] == [0.0, 1.0, 1.0, 0.0, 2.0]
+    assert [t["reward"] for t in run.replay[0]] == [0.0, 1.0, 1.0, 0.0, 2.0]
+    run.apply_reward_ceiling()                    # the next iteration's top
+    assert [t["reward"] for t in run.replay[1]] == [0.0, 1.0, 20.0, 0.0, 6.0]
+
+
+def test_gate_refuses_another_games_unit(rg_arm, monkeypatch):
+    monkeypatch.setattr(ablation, "ENV_NAME", "Pong-v4")
+    with pytest.raises(SystemExit, match="reward unit"):
+        ablation.reward_growth_gate(True, True, 0)
+    monkeypatch.setattr(ablation, "ENV_NAME", "MsPacman-v4")
+    ablation.reward_growth_gate(True, True, 0)
+
+
+def test_gate_checks_the_value_prefix_support(rg_arm, monkeypatch):
+    """Audit r1 A-NIT1: the per-step head is unused in the paper arms; the
+    prefix (UNROLL_STEPS records) must fit its own support."""
+    monkeypatch.setattr(muzero, "REWARD_GROWTH_CEILING", 300.0)
+    ablation.reward_growth_gate(True, True, 0)          # 300 x 5 = 1500
+    monkeypatch.setattr(muzero, "UNROLL_STEPS", 10)     # 3000 > 2000
+    with pytest.raises(SystemExit, match="prefix"):
+        ablation.reward_growth_gate(True, True, 0)
+
+
+def test_tuple_records_survive_the_actor_boundary(growth):
+    """Audit r1 A-LOW4: a record crosses from the actor by pickle (Ray's
+    object store) and _own_arrays; its raw tuple arrives a tuple, and
+    paper_targets accepts it."""
+    import pickle
+    traj = [(np.zeros((4, 2, 2), dtype=np.uint8), 0, ()),
+            (np.ones((4, 2, 2), dtype=np.uint8), 1, (10.0, 50.0))]
+    back = [ablation.RayPipeline._own_arrays(r)
+            for r in pickle.loads(pickle.dumps(traj))]
+    assert back[1][2] == (10.0, 50.0) and type(back[1][2]) is tuple
+    five = [r + (np.array([0.5, 0.5]), 0.0) for r in back]
+    out = _learner().paper_targets(five, terminated=True)
+    assert [t["reward"] for t in out] == [0.0, 2.0]
+
+
+@pytest.mark.slow
+def test_the_token_arm_learner_slice_on_real_mspacman(mspacman_slice,
+                                                      restore_rngs):  # noqa: F811
+    """Audit r1 A-LOW4: 36 tokens through birth search, paper_targets with
+    multi-step raw tuples, training and the communal refresh; every stored
+    reward is its raw tuple clipped at the buffer's ceiling, and each raw
+    tuple has one reward per base step of the token before it."""
+    nets, stored, env_steps, _, raw, c = _slice(TK_ARM, steps_after=100)
+    assert c == 160.0
+    muzero.REWARD_UNIT = 10.0
+    vocab = ablation.ARMS[TK_ARM]["TOKEN_VOCAB"]
+    steps = 0
+    for tr, rw in zip(stored, raw):
+        assert rw[0] == ()
+        for i, (rec, r) in enumerate(zip(tr, rw)):
+            assert rec[1] == muzero.grown_reward(r, 160.0)
+            if 0 < i < len(tr) - 1:
+                assert len(r) == vocab[tr[i - 1][0]][1] // 4
+        steps += sum(len(r) for r in rw)
+    assert steps == env_steps
+    assert len({a for tr in stored for (a, *_r) in tr}) > 3
+
+
+def test_supervisor_runs_tk_first_and_rg_after_it(sup, monkeypatch, tmp_path,
+                                                  capsys):
+    import os
+    assert sup.ORDER == ("tk", "rg")
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    sleeps = []
+
+    def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) == 3:                     # tk completes meanwhile
+            ck = sup.paths("tk", 0)[3]
+            os.makedirs(os.path.dirname(ck), exist_ok=True)
+            open(ck, "wb").close()               # a shrunk marker
+
+    monkeypatch.setattr(sup.time, "sleep", fake_sleep)
+    sup.wait_turn("tk", 0)                       # tk never waits
+    assert sleeps == []
+    tk_log = os.path.join(sup.paths("tk", 0)[1], "supervisor.log")
+    os.makedirs(os.path.dirname(tk_log), exist_ok=True)
+    with open(tk_log, "w") as f:
+        f.write("LAUNCHED tk s0 attempt 1" + chr(10) + "CRASH LOOP: 5 deaths"
+                + chr(10))
+    sup.wait_turn("rg", 0)
+    out = capsys.readouterr().out
+    assert len(sleeps) == 3 and "WAITING for ['tk']" in out
+    assert "ALERT: the supervisor of ['tk'] gave up" in out
+    assert "may start" in out
+
+
+def test_supervisor_guards_against_either_arms_live_trainer(sup):
+    src = inspect.getsource(sup.main)
+    assert "for v in VARIANTS for p in live_children(v, seed)" in src
+    assert "wait_turn(variant, seed)" in src
+    assert src.index("wait_turn(variant, seed)") < src.index("preflight(")

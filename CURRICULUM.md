@@ -785,8 +785,8 @@ QUESTIONS: (A) does reward-clip growth lift the real-time algorithm on Ms.
 Pac-Man over its sign-clipped twin? (B) on top of it, do duration tokens
 hold up in a game of held directions, where Pong's aim-the-return problem
 does not arise?
-TWO ARMS, SEED 0, run CONCURRENTLY (the GPU holds both: ~4.5 GB each of
-12 GB):
+TWO ARMS, SEED 0, run ONE AFTER THE OTHER -- TK first (Kai's question),
+then RG (amended before launch, audit r1: see AMENDMENTS):
   RG = effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-rgrow
     = the Ms. Pac-Man arm + REWARD_GROWTH.
   TK = effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow
@@ -812,8 +812,9 @@ REWARD-CLIP GROWTH (code, default OFF everywhere):
     that eats 4 pellets the same as one that eats 1.)
   - Ceiling c: log-linear from 1 at step 0 to 160 at 50% of training,
     c = 160 ** min(1, t / 90,000), stepped per iteration (from the
-    iteration's starting step): ~2.8 at row 10, ~12.6 at row 23, 160 from
-    row 46 on. At c = 1 every Ms. Pac-Man reward is 1 -- exactly the
+    iteration's starting step): ~2.8 at row 10, ~12.0 at row 23, ~143 at
+    row 45, 160 from row 46 on (row 50 the first logged at 160). At c = 1
+    every Ms. Pac-Man reward is 1 -- exactly the
     twin's sign clip. At 160 every reward of the first boards passes in
     pellet units: pellet 1, power pellet 5, ghosts 20 / 40 / 80 / 160,
     cherry 10, strawberry 20.
@@ -827,9 +828,14 @@ REWARD-CLIP GROWTH (code, default OFF everywhere):
   - Not normalized by c: pellets stay 1 throughout, so the value scale
     grows from the twin's (tens) to hundreds. The categorical supports
     already cover it -- built at import for raw ceilings 400 / 2000 / 5000
-    (reward / value prefix / value), the twin's network unchanged. A
-    stored reward above 400 (more than two late ghosts in one token)
-    saturates the reward support; rows log the largest (reward_max).
+    (reward / value prefix / value); RG's network is the twin's (TK's has
+    36 action slots). The heads the paper arms train are the value prefix
+    (per-step reward head unused, REWARD_LOSS_WEIGHT 0) and the value: a
+    5-record prefix past 2000 saturates -- only reachable when tokens
+    stack all four ghosts and fruit; rows log the largest stored record
+    reward (reward_max). The gate refuses a ceiling whose 5-step prefix
+    exceeds the prefix support, and a game whose reward unit is not
+    REWARD_UNIT (REWARD_UNITS: Ms. Pac-Man 10).
   - Rows also log reward_ceiling and reward_kept (clipped / raw-unit
     reward mass over the buffer).
   - REGRESSION (pinned in the tests): RG with the ceiling held at 1
@@ -846,27 +852,69 @@ secondary; g = (score - 307.3) / 973.9.
   (1) level: each arm's deployed mean 60-90 against the twin's 649.14,
       with bands from the twin's own row spread (SD 216.9 over rows
       60-90; 2 SE of a difference of two 7-row means = 232): BETTER >=
-      881.0 (g 0.59), WORSE <= 417.2 (g 0.11), else NO DIFFERENT. TK is
+      881.0 (g 0.59), WORSE <= 417.3 (g 0.11), else NO DIFFERENT. TK is
       also read against RG with the same +-232. Raw likewise (twin
       585.62; SD 129.3, +-138) as secondary.
   (2) data: score against env steps (base steps) beside the twin.
   (3) clip growth, descriptive: reward_ceiling, reward_kept, reward_max,
-      the row value scale.
+      the row value scale. The rows' value / value_control / prefix /
+      step-loss fields are in clipped-reward units, which grow with the
+      ceiling: not comparable with the twin's rows, nor across rows.
   (4) tokens, descriptive (P2a read 4): per-duration play and search
-      shares, frames per decision, decisions per game, payoff, the
-      deployed player's decisions per second against the twin's 15.
+      shares, frames per decision, decisions per game (from the probe:
+      the rows' tok_decisions_per_game counts per TRAJECTORY = per life on
+      Ms. Pac-Man), payoff, the deployed player's decisions per second
+      against the twin's 15.
   (5) stability: the largest drop between adjacent rows from row 45 (the
       twin's -443).
-DECISION AFTER:
-  RG: BETTER -> clip growth joins the Ms. Pac-Man base. NO DIFFERENT ->
-    Kai's call (keep it for its intent, or retune the end ceiling /
-    schedule). WORSE -> drop it; diagnose (the value scale).
-  TK vs RG: NO DIFFERENT or BETTER -> tokens hold up on Ms. Pac-Man (the
-    Pong failure is game-specific) -> P2b (the composition loss). WORSE ->
-    tokens fail in both games -> the composition diagnosis first (does the
-    model value X32 above X4 x 8, the same frames?).
-COST: two concurrent runs, ~17-24 h (the twin took 17.2 h alone), + ~1 h
-of evals (18 rows x 2 variants x 2 runs).
+DECISION AFTER (amended before launch, audit r1 B-M3/M4). The bands are a
+WITHIN-RUN noise floor from one seed (rows are autocorrelated, lag-1 r ~
+0.27, which widens the SE ~1.3x; seed spread is larger -- archfix 1-in-4,
+Gumbel 1/2): a single-seed BETTER / WORSE reads "consistent with", and a
+permanent change to the base needs a seed-1 replicate first.
+  TOKENS (TK, Kai's question): HOLD UP if TK is not WORSE than the twin
+    AND not WORSE than RG -> P2b (the composition loss) on the TK arm (on
+    tokens without growth if RG is WORSE). FAIL if TK is WORSE than the
+    twin -> tokens fail in both games -> the composition diagnosis first
+    (does the model value X32 above X4 x 8, the same frames?). MIXED (TK
+    not WORSE than the twin but WORSE than RG) -> Kai's call: tokens cost
+    something here that growth alone does not.
+  GROWTH (RG): BETTER than the twin -> a seed-1 replicate, then it joins
+    the Ms. Pac-Man base. NO DIFFERENT -> Kai's call (keep it for its
+    intent, or retune the end ceiling / schedule). WORSE -> diagnose (the
+    value scale) before any replicate; TK is then judged against the twin
+    only.
+  Both near random (g < 0.2) -> diagnose before anything else.
+COST: one run after the other on the one GPU: TK ~12-17 h (P2a's tokens
+ran faster than their estimate), then RG ~17 h (the twin's 17.2 h), + ~1 h
+of evals (18 rows x 2 variants x 2 runs; TK's run while RG trains).
+AMENDMENTS (audit r1, before launch):
+  - Sequential, not concurrent: two concurrent Ray runs took host commit
+    to ~1 GB free in the GPU smoke (each Ray instance prestarts ~16
+    workers; no earlier pair of full-length concurrent --ray runs), and
+    the twin trained ALONE -- the eager collect's timing (when a game joins
+    the buffer mid-block) depends on the actor's pace, so solo runs match
+    the twin's regime. rg's supervisor waits for tk's completion marker.
+  - TK's compute knobs (memory; the algorithm unchanged): both vectorized
+    engines hold A latents per expansion, so 36-slot trees at the base's
+    shapes overflow the 12 GB GPU (measured: birth search at 256 roots per
+    chunk peaked 11.4 GB; the communal refresh at 8 trajectories per forest
+    ran out of memory, at 2 reserved 8.9 GB). TK runs birth search in
+    chunks of 64 roots (VTREE_REFRESH_BATCH 64: 3.0 GB) and the refresh one
+    trajectory per forest (VTREE_COMMUNAL_TRAJS 1, the sequential engine's
+    exact batch shapes: 3.8 GB, ~0.21 s per position -- ~1-2 min per
+    iteration at Ms. Pac-Man's life lengths). RG keeps the base's 256 / 8.
+    Batch shapes change float numerics only (G = 8 vs 1: ~4% of roots
+    flip visit counts, DESIGN.md), not the search.
+  - Insertion priorities are not recomputed at a ceiling change (above);
+    training writebacks (~512k per iteration over ~31k positions) re-score
+    most positions within an iteration. A small PER tilt the twin lacks.
+  - The twin ran code b9e3af68 (Ms. Pac-Man manifest f07d1d44). The branch
+    code reproduces its iter-90 exact eval exactly (acting 642.33, raw
+    837.0; probe from the curriculum tree on a copy of the snapshot); the
+    training path at ceiling 1 is pinned by the regression tests.
+  - Kai's Switch-control sessions kill GPU pythons: pause the running
+    supervisor during them (supervisor v2 pattern), resume after.
 
 ### Next experiment (pre-registered) -- P2a: duration tokens on Pong (Kai, 2026-10-17)
 

@@ -1037,11 +1037,22 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgro
     "TOKEN_VOCAB": MSPACMAN_DURATION_TOKENS,
     "TOKEN_LONG_BIAS": 0.5,
     "TOKEN_LONG_BIAS_END": 0.25,
+    # Compute knobs only (audit r1 B-M2, measured on the RTX 4070): both
+    # vectorized engines hold A latents per expansion, so 36-slot trees at
+    # the base's shapes do not fit 12 GB -- birth search at 256 roots per
+    # chunk peaked 11.4 GB, the communal refresh at 8 trajectories per
+    # forest went out of memory (2 per forest: 8.9 GB reserved). At 64
+    # roots per chunk / 1 trajectory per forest (the sequential engine's
+    # exact batch shapes): 3.0 / 3.8 GB, the refresh ~0.21 s per position.
+    "VTREE_REFRESH_BATCH": 64,
+    "VTREE_COMMUNAL_TRAJS": 1,
     "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
             "-rgrow with TOKEN_VOCAB: 36 duration tokens -- Ms. Pac-Man's 9 "
             "actions x {4, 8, 16, 32} frames, P2a's mechanics (a token's "
             "reward is its inner base steps' clipped rewards summed) -- and "
-            "TOKEN_LONG_BIAS 0.5 falling to 0 at 25% of the run. Run as the "
+            "TOKEN_LONG_BIAS 0.5 falling to 0 at 25% of the run; birth "
+            "search in chunks of 64 roots and the communal refresh one "
+            "trajectory per forest (memory: 36-slot trees). Run as the "
             "rgrow arm.",
 }
 
@@ -1596,7 +1607,9 @@ def play_token(env, token, stack, inner=None):
     """One TOKEN_VOCAB decision: the token's ALE action for frames /
     TOKEN_BASE_FRAMES consecutive steps of the wrapper stack. Returns (obs,
     reward, terminated, truncated, stack, base_steps): reward is the SUM of
-    the inner rewards (play_episode clips it as one step's), and every inner
+    the inner rewards (play_episode clips it as one step's -- or, under
+    REWARD_GROWTH, records `inner` and the learner clips per base step),
+    and every inner
     frame but the last is pushed into the stack here -- the last is pushed
     at the next decision, as a plain step's -- so the stack always holds the
     last four base steps, whatever tokens were played. Stops early at a
@@ -1670,15 +1683,22 @@ def token_gate(spec, use_ray, cpu_actor, ray_workers):
         raise SystemExit("TOKEN_VOCAB has duplicate tokens")
 
 
+# REWARD_GROWTH's REWARD_UNIT per game (env_tag_fragment of the env id): the
+# smallest positive raw reward, so that ceiling 1 is the sign clip. A game
+# missing here is refused (audit r1 A-NIT2: Pong's +-1 at unit 10 would
+# silently store +-0.1).
+REWARD_UNITS = {"mspacman": 10.0, "mspacmannoframeskip": 10.0}
+
+
 def reward_growth_gate(use_ray, cpu_actor, ray_workers):
     """REWARD_GROWTH (P2a on Ms. Pac-Man) runs only on the path it was built
     and tested on: policy-only acting with birth search into paper targets
     (where raw reward tuples become clipped records), the inline vectorized
     refresh (reads the re-clipped records), TD value targets, the
     synchronous driver (re-clips at each iteration's top), --ray
-    --cpu-actor without a worker pool. Also a schedule that stays inside
-    the reward support. Refuses at startup -- before any --overwrite
-    deletion."""
+    --cpu-actor without a worker pool; on a game whose reward unit is
+    REWARD_UNIT; with a schedule whose ceiling stays inside the supports.
+    Refuses at startup -- before any --overwrite deletion."""
     if not muzero.REWARD_GROWTH:
         return
     need = {"PAPER_TARGETS": True, "BIRTH_SEARCH": True,
@@ -1702,10 +1722,22 @@ def reward_growth_gate(use_ray, cpu_actor, ray_workers):
     if not 0 < muzero.REWARD_GROWTH_END <= 1:
         raise SystemExit(f"REWARD_GROWTH_END {muzero.REWARD_GROWTH_END!r} is "
                          f"a fraction of the run in (0, 1]")
-    if muzero.scalar_categorical.support_for(hi) > muzero.REWARD_SUPPORT:
+    unit = REWARD_UNITS.get(env_tag_fragment(ENV_NAME))
+    if unit != muzero.REWARD_UNIT:
+        raise SystemExit(f"REWARD_GROWTH: REWARD_UNIT {muzero.REWARD_UNIT!r} "
+                         f"is not {ENV_NAME}'s reward unit ({unit!r}; "
+                         f"REWARD_UNITS)")
+    # One base step's clipped reward must fit the per-step reward support,
+    # and UNROLL_STEPS of them the value-prefix support (the head the paper
+    # arms train; a token's record sums several base steps -- a prefix past
+    # the support saturates, logged by reward_max per record).
+    sup = muzero.scalar_categorical.support_for
+    if (sup(hi) > muzero.REWARD_SUPPORT
+            or sup(hi * muzero.UNROLL_STEPS) > muzero.VALUE_PREFIX_SUPPORT):
         raise SystemExit(f"REWARD_GROWTH_CEILING {hi!r} lies past the reward "
-                         f"support (half-width {muzero.REWARD_SUPPORT:.4g} in "
-                         f"h-space)")
+                         f"support (half-widths {muzero.REWARD_SUPPORT:.4g} "
+                         f"per step, {muzero.VALUE_PREFIX_SUPPORT:.4g} per "
+                         f"{muzero.UNROLL_STEPS}-step prefix, h-space)")
 
 
 def env_actions(env_id):
@@ -2967,6 +2999,8 @@ class Run:
                 for d in durs}
             errs["tok_frames_per_decision"] = round(
                 tw["frames"] / tw["decisions"], 3)
+            # Per TRAJECTORY: a game on Pong, one LIFE on Ms. Pac-Man
+            # (EpisodicLifeEnv) -- the probe counts decisions per game.
             errs["tok_decisions_per_game"] = round(
                 tw["decisions"] / tw["games"], 1)
             self._tok_window = None
