@@ -953,6 +953,18 @@ above LOW; its LOWs fixed -- the INCONCLUSIVE case, the abandoned-TK path
 in the supervisor / hand-off / RECOVERY, a finished run's supervisor
 exiting before its preflight, the hand-off echoing supervisor lines while
 its probes run.)
+AUDIT + LAUNCH: four rounds. r1 -- A nothing above LOW; B four MEDIUM
+(host commit with two concurrent Ray runs -> sequential; TK's GPU memory
+unmeasured -> measured, TK's batch knobs; the decision rules' twin floor;
+the bands' seed variance) -> fcb2beed. r2 -- A nothing above LOW; B one
+MEDIUM (a per-arm near-random floor) -> 5965c105. r3 and r4 -- nothing
+above LOW (LOWs -> b5ad5128, 79d0edd5 and the hand-off). Manifest
+a81bcf39 (38 AUDITED files of 79d0edd5). The runs execute from the run
+worktree Y:\SwitchPlayer-rgrow-run, detached at a81bcf39; GPU smoke from it
+(tk then rg, each killed mid-iteration + resumed, probes raw + acting) OK.
+LAUNCHED 2026-10-19 15:57 (WMI, scratchpad launch_rgrow.ps1): the hand-off
+post_rgrow.py, then `supervise_rgrow.py tk 0` (preflight ok, attempt 1
+fresh at 16:03) and `supervise_rgrow.py rg 0` (waiting for tk's marker).
 
 ### Next experiment (pre-registered) -- P2a: duration tokens on Pong (Kai, 2026-10-17)
 
