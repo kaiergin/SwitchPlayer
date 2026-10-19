@@ -101,7 +101,12 @@ def test_run_one_wires_the_gate_and_the_iteration_top_reclip():
     assert "reward_growth_gate(use_ray, cpu_actor, ray_workers)" in src
     loop = src[src.index("for it in range(start_it + 1, iterations + 1):"):]
     # the re-clip comes first in the iteration: before the primed collect
-    # and the sequential play, before training
+    # and the sequential play, before training -- guarded by the flag alone
+    # (audit r2 A-L1: a narrower guard would leave RG at ceiling 1; the
+    # supervisor also ALERTs on a row whose ceiling is off the schedule)
+    hook = ("if muzero.REWARD_GROWTH:" + chr(10)
+            + "                run.apply_reward_ceiling()")
+    assert loop.count(hook) == 1
     i = loop.index("run.apply_reward_ceiling()")
     assert i < loop.index("pipeline.collect()")
     assert i < loop.index("run.play_episode()")
@@ -806,8 +811,67 @@ def test_supervisor_runs_tk_first_and_rg_after_it(sup, monkeypatch, tmp_path,
     assert "may start" in out
 
 
-def test_supervisor_guards_against_either_arms_live_trainer(sup):
+def test_supervisor_guards_against_either_arms_live_trainer(sup, monkeypatch,
+                                                            capsys):
+    seen = {"tk": [[7], []], "rg": [[], []]}
+    monkeypatch.setattr(sup, "live_children",
+                        lambda v, s: seen[v].pop(0) if seen[v] else [])
+    sleeps = []
+    monkeypatch.setattr(sup.time, "sleep", sleeps.append)
+    sup.wait_no_trainer(0)            # rg's launch waits out tk's trainer
+    out = capsys.readouterr().out
+    assert "ALERT: an ablation.py of this experiment at seed 0" in out
+    assert "[7]" in out and sleeps == [60]
     src = inspect.getsource(sup.main)
-    assert "for v in VARIANTS for p in live_children(v, seed)" in src
-    assert "wait_turn(variant, seed)" in src
+    assert src.count("wait_no_trainer(seed)") == 1
     assert src.index("wait_turn(variant, seed)") < src.index("preflight(")
+
+
+def test_supervisor_schedule_is_the_arms(sup):
+    with ablation.arm_config(RG_ARM), ablation._run_length_globals(90, 2000):
+        for it in range(1, 91):
+            want = muzero.reward_ceiling((it - 1) * 2000)
+            assert sup.expected_ceiling(it) == pytest.approx(want,
+                                                             rel=1e-12), it
+
+
+@pytest.mark.parametrize("row,per,want", [
+    ({"iteration": 1, "reward_ceiling": 1.0, "reward_max": 1.0}, "n/a", []),
+    ({"iteration": 50, "reward_ceiling": 160.0, "reward_max": 60.0}, "12.0",
+     []),
+    ({"iteration": 10, "reward_ceiling": round(160 ** 0.2, 4)}, "24.9", []),
+    ({"iteration": 5, "reward_ceiling": 1.0}, "n/a", ["reward_ceiling"]),
+    ({"iteration": 5}, "n/a", ["reward_ceiling"]),
+    ({"iteration": 50, "reward_ceiling": 160.0}, "25.5", ["min/iteration"]),
+    ({"iteration": 50, "reward_ceiling": 160.0, "reward_max": 450.0}, "n/a",
+     ["reward_max"]),
+])
+def test_supervisor_row_alerts(sup, row, per, want):
+    got = sup.row_alerts(row, per)
+    assert len(got) == len(want)
+    for g, w in zip(got, want):
+        assert w in g
+
+
+def test_supervisor_no_wait_override_is_rg_only_and_logged(sup, monkeypatch,
+                                                           capsys):
+    assert sup.main(["tk", "0", "--no-wait"]) == 2
+    assert sup.main(["rg", "0", "--wait"]) == 2
+
+    class Stop(Exception):
+        pass
+
+    def no(*a, **k):
+        raise AssertionError("wait_turn must not run under --no-wait")
+
+    def stop(*a, **k):
+        raise Stop
+
+    monkeypatch.setattr(sup, "wait_turn", no)
+    monkeypatch.setattr(sup, "preflight", stop)
+    with pytest.raises(Stop):
+        sup.main(["rg", "0", "--no-wait"])
+    assert "NO-WAIT override: rg s0" in capsys.readouterr().out
+    monkeypatch.setattr(sup, "wait_turn", stop)     # without it: waits
+    with pytest.raises(Stop):
+        sup.main(["rg", "0"])

@@ -11,7 +11,12 @@ reward-clip growth".
 
     python benchmarks/supervisors/supervise_rgrow.py tk 0
     python benchmarks/supervisors/supervise_rgrow.py rg 0
+    python benchmarks/supervisors/supervise_rgrow.py rg 0 --no-wait
     python benchmarks/supervisors/supervise_rgrow.py --write-manifest
+
+--no-wait (rg only, logged): start rg without tk's completion marker --
+for an abandoned tk (Kai's call; audit r2 B-L2). The one-trainer guard
+still holds: rg never launches while tk's trainer runs.
 
 Both may be launched at once (rg waits). Create each run folder before a
 launch that redirects into it (`>> <folder>/supervisor.log`): the shell
@@ -38,6 +43,20 @@ VARIANTS = {
 RUNS = {"rg": "mspacman-rgrow", "tk": "mspacman-tokens-rgrow"}
 # Run order: a variant starts only after every earlier one completed.
 ORDER = ("tk", "rg")
+# Row checks (ALERTs, audit r2): the ceiling each row must log -- the arms'
+# schedule, 1 -> 160 log-linear by half of 90 x 2000 steps, from the
+# iteration's starting step (pinned against muzero.reward_ceiling in the
+# tests) -- a pace past which TK's cost is Kai's call, and a stored record
+# reward past the per-step support's raw ceiling (400 units).
+CEILING, CEILING_END_STEPS, TRAIN_STEPS = 160.0, 90_000, 2000
+PACE_ALERT_MIN = 25.0
+REWARD_MAX_ALERT = 400.0
+
+
+def expected_ceiling(iteration):
+    """The reward ceiling row `iteration` must log."""
+    return CEILING ** min(1.0, (iteration - 1) * TRAIN_STEPS
+                          / CEILING_END_STEPS)
 MODE = ["--ray", "--cpu-actor"]
 ENV_ID = "MsPacmanNoFrameskip-v4"
 TAG = "-mspacmannoframeskip-skip4"        # ablation's TAG for ENV_ID, skip 4
@@ -325,6 +344,34 @@ class Rows:
                       r.get("reward_kept"), r.get("reward_max"), tok, el,
                       per),
                   flush=True)
+            for alert in row_alerts(r, per):
+                print(f"ALERT: {self.variant} s{self.seed} row "
+                      f"{r.get('iteration')}: {alert}", flush=True)
+
+
+def row_alerts(r, per):
+    """What a row shows that needs a human: a ceiling that is not the
+    schedule's (the re-clip did not run -- audit r2 A-L1), a pace past
+    PACE_ALERT_MIN min/iteration (pre-registered: Kai's call), a stored
+    record reward past REWARD_MAX_ALERT units."""
+    out = []
+    it, c = r.get("iteration"), r.get("reward_ceiling")
+    if isinstance(it, int) and it >= 1:
+        want = expected_ceiling(it)
+        if not isinstance(c, (int, float)) or abs(c - want) > 1e-3 * want:
+            out.append(f"reward_ceiling {c!r}, the schedule says "
+                       f"{want:.4f}")
+    try:
+        if float(per) > PACE_ALERT_MIN:
+            out.append(f"{per} min/iteration > {PACE_ALERT_MIN:g} -- the "
+                       f"pre-registered pace rule: Kai's call")
+    except ValueError:
+        pass
+    m = r.get("reward_max")
+    if isinstance(m, (int, float)) and m > REWARD_MAX_ALERT:
+        out.append(f"reward_max {m} > {REWARD_MAX_ALERT:g} units (past the "
+                   f"per-step support's raw ceiling)")
+    return out
 
 
 def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
@@ -352,18 +399,45 @@ def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
           f"-> deaths.log (gpu used {gpu})", flush=True)
 
 
+def wait_no_trainer(seed):
+    """Block while ANY variant's trainer of this experiment runs at `seed`
+    (an orphan of an earlier supervisor, the other variant, a duplicate):
+    one run on the GPU at a time, and never a second writer."""
+    polls, told = 0, None
+    while True:
+        pids = [p for v in VARIANTS for p in live_children(v, seed)]
+        if not pids:
+            return
+        msg = (f"ALERT: an ablation.py of this experiment at seed {seed} "
+               f"is already running (pids {pids}) -- one run on the GPU "
+               f"at a time, and never a second writer")
+        if msg != told or polls % 60 == 0:
+            print(f"{msg} [{polls} min]", flush=True)
+            told = msg
+        time.sleep(60)
+        polls += 1
+
+
 def main(argv):
     if "--write-manifest" in argv:
         return write_manifest()
-    if (len(argv) != 2 or argv[0] not in VARIANTS or not argv[1].isdigit()
-            or int(argv[1]) not in SEEDS):
+    no_wait = argv[2:] == ["--no-wait"]
+    if (len(argv) != (3 if no_wait else 2) or argv[0] not in VARIANTS
+            or not argv[1].isdigit() or int(argv[1]) not in SEEDS
+            or (no_wait and argv[0] == ORDER[0])):
         print(f"usage: supervise_rgrow.py <variant: {sorted(VARIANTS)}> "
-              f"<seed: {sorted(SEEDS)}> | --write-manifest", flush=True)
+              f"<seed: {sorted(SEEDS)}> [--no-wait: not {ORDER[0]}] | "
+              f"--write-manifest", flush=True)
         return 2
     variant, seed = argv[0], int(argv[1])
     arm = VARIANTS[variant]
     rel, base, jsonl, ckpt, deaths_log = paths(variant, seed)
-    wait_turn(variant, seed)
+    if no_wait:
+        print(f"NO-WAIT override: {variant} s{seed} starts without "
+              f"{list(ORDER[:ORDER.index(variant)])}'s completion marker",
+              flush=True)
+    else:
+        wait_turn(variant, seed)
 
     polls, told = 0, None
     while True:
@@ -411,19 +485,7 @@ def main(argv):
                 told = why
             time.sleep(60)
             polls += 1
-        polls, told = 0, None
-        while True:
-            pids = [p for v in VARIANTS for p in live_children(v, seed)]
-            if not pids:
-                break
-            msg = (f"ALERT: an ablation.py of this experiment at seed {seed} "
-                   f"is already running (pids {pids}) -- one run on the GPU "
-                   f"at a time, and never a second writer")
-            if msg != told or polls % 60 == 0:
-                print(f"{msg} [{polls} min]", flush=True)
-                told = msg
-            time.sleep(60)
-            polls += 1
+        wait_no_trainer(seed)
         args = command(variant, seed) + (["--resume"] if os.path.exists(ckpt)
                                          else [])
         log = open(os.path.join(base, f"supv2_{attempt}.log"), "ab")

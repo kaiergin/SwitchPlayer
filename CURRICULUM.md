@@ -863,8 +863,11 @@ secondary; g = (score - 307.3) / 973.9.
   (4) tokens, descriptive (P2a read 4): per-duration play and search
       shares, frames per decision, decisions per game (from the probe:
       the rows' tok_decisions_per_game counts per TRAJECTORY = per life on
-      Ms. Pac-Man), payoff, the deployed player's decisions per second
-      against the twin's 15.
+      Ms. Pac-Man), payoff (in clipped units at the insertion ceiling
+      against a birth value from nets trained on smaller ceilings: biased
+      up while the ceiling grows -- compare tokens within a row, not
+      across rows), the deployed player's decisions per second against
+      the twin's 15.
   (5) stability: the largest drop between adjacent rows from row 45 (the
       twin's -443).
 DECISION AFTER (amended before launch, audit r1 B-M3/M4). The bands are a
@@ -872,22 +875,33 @@ WITHIN-RUN noise floor from one seed (rows are autocorrelated, lag-1 r ~
 0.27, which widens the SE ~1.3x; seed spread is larger -- archfix 1-in-4,
 Gumbel 1/2): a single-seed BETTER / WORSE reads "consistent with", and a
 permanent change to the base needs a seed-1 replicate first.
-  TOKENS (TK, Kai's question): HOLD UP if TK is not WORSE than the twin
-    AND not WORSE than RG -> P2b (the composition loss) on the TK arm (on
-    tokens without growth if RG is WORSE). FAIL if TK is WORSE than the
-    twin -> tokens fail in both games -> the composition diagnosis first
-    (does the model value X32 above X4 x 8, the same frames?). MIXED (TK
-    not WORSE than the twin but WORSE than RG) -> Kai's call: tokens cost
-    something here that growth alone does not.
+  NEAR RANDOM, per arm, first (audit r2 B-M1): an arm whose deployed
+    mean 60-90 has g < 0.2 (< 502.1) is diagnosed before any other read
+    of it.
+  TOKENS (TK, Kai's question): HOLD UP if TK has g >= 0.2 AND is not
+    WORSE than the twin AND not WORSE than RG -> P2b (the composition
+    loss) on the TK arm (if RG is WORSE, the base P2b runs on is Kai's
+    call). FAIL if TK is WORSE than the twin -> tokens fail in both games
+    -> the composition diagnosis first (does the model value X32 above
+    X4 x 8, the same frames?). MIXED (TK not WORSE than the twin but WORSE
+    than RG) -> Kai's call: tokens cost something here that growth alone
+    does not.
   GROWTH (RG): BETTER than the twin -> a seed-1 replicate, then it joins
     the Ms. Pac-Man base. NO DIFFERENT -> Kai's call (keep it for its
     intent, or retune the end ceiling / schedule). WORSE -> diagnose (the
     value scale) before any replicate; TK is then judged against the twin
     only.
   Both near random (g < 0.2) -> diagnose before anything else.
-COST: one run after the other on the one GPU: TK ~12-17 h (P2a's tokens
-ran faster than their estimate), then RG ~17 h (the twin's 17.2 h), + ~1 h
-of evals (18 rows x 2 variants x 2 runs; TK's run while RG trains).
+COST: one run after the other on the one GPU: TK ~12-17 h at Pong-like
+12-24 frames per decision, up to ~25-30 h if play drifts to 4-frame tokens
+or lives lengthen (the 36-token refresh, ~0.21 s per position, scales with
+decisions per life: 0.8-1.6 min per iteration at the twin's ~230 base
+steps per life, ~5-8 min at 4 frames or ~400 steps), then RG ~17 h (the
+twin's 17.2 h), + ~1 h of evals (18 rows x 2 variants x 2 runs; TK's run
+at 2 CPU probes x 2 threads while RG preflights and starts -- a small CPU
+load beside RG's actor). PACE RULE: a row past 25 min/iteration is an
+ALERT in the supervisor and Kai's call (continue, or stop TK and start RG
+with the logged `rg 0 --no-wait` override).
 AMENDMENTS (audit r1, before launch):
   - Sequential, not concurrent: two concurrent Ray runs took host commit
     to ~1 GB free in the GPU smoke (each Ray instance prestarts ~16
@@ -915,6 +929,15 @@ AMENDMENTS (audit r1, before launch):
     training path at ceiling 1 is pinned by the regression tests.
   - Kai's Switch-control sessions kill GPU pythons: pause the running
     supervisor during them (supervisor v2 pattern), resume after.
+AMENDMENTS (audit r2, before launch): the per-arm near-random floor above;
+the COST range and the pace rule; supervise_rgrow.py ALERTs on a row whose
+reward_ceiling is off the schedule (the iteration-top re-clip did not run),
+on a pace past 25 min/iteration, and on a stored record reward past 400
+units; `rg 0 --no-wait` (logged) starts RG without TK's completion marker
+if TK is abandoned. RECOVERY: after a reboot, relaunch the hand-off and
+both supervisors the same way (they resume from the last checkpoint, rg
+re-waits); to pause, kill the running supervisor and its trainer by
+command line (never taskkill /T) and relaunch later.
 
 ### Next experiment (pre-registered) -- P2a: duration tokens on Pong (Kai, 2026-10-17)
 
