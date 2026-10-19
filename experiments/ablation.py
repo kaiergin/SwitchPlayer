@@ -1008,6 +1008,43 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-tokens"] = {
             "pong-bnrecal-s1-2026-10-08 (same arm, no tokens, seed 1).",
 }
 
+# P2a on Ms. Pac-Man with reward-clip growth (Kai, 2026-10-19; pre-registered
+# in CURRICULUM): the Ms. Pac-Man real-time arm with REWARD_GROWTH -- raw
+# rewards in pellets (REWARD_UNIT 10), clipped at a ceiling growing from 1
+# (the twin's sign clip) to 160 (a 1600-point ghost) by half the run -- alone
+# (RG) and with P2a's duration tokens over Ms. Pac-Man's 9 actions (TK).
+# Seed 0 (twin mspacman-s0-2026-10-16).
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-rgrow"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"],
+    "REWARD_GROWTH": True,
+    "REWARD_UNIT": 10.0,
+    "REWARD_GROWTH_START": 1.0,
+    "REWARD_GROWTH_CEILING": 160.0,
+    "REWARD_GROWTH_END": 0.5,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman "
+            "with REWARD_GROWTH: raw rewards / 10 (pellet = 1) clipped per "
+            "base step at a ceiling growing log-linearly from 1 (= the sign "
+            "clip) at step 0 to 160 at 50% of the run, the whole replay "
+            "re-clipped each iteration. Run as its twin "
+            "mspacman-s0-2026-10-16: --env MsPacmanNoFrameskip-v4 "
+            "--frameskip 4 --episode-cap 3000 --episodes-per-iter 3 --ray "
+            "--cpu-actor.",
+}
+MSPACMAN_DURATION_TOKENS = tuple((a, f) for a in range(9)
+                                 for f in (4, 8, 16, 32))
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-rgrow"],
+    "TOKEN_VOCAB": MSPACMAN_DURATION_TOKENS,
+    "TOKEN_LONG_BIAS": 0.5,
+    "TOKEN_LONG_BIAS_END": 0.25,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-rgrow with TOKEN_VOCAB: 36 duration tokens -- Ms. Pac-Man's 9 "
+            "actions x {4, 8, 16, 32} frames, P2a's mechanics (a token's "
+            "reward is its inner base steps' clipped rewards summed) -- and "
+            "TOKEN_LONG_BIAS 0.5 falling to 0 at 25% of the run. Run as the "
+            "rgrow arm.",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
@@ -1555,7 +1592,7 @@ def prior_temp_gate():
                          "temperature; it is inert under USE_SEARCH_ACTING")
 
 
-def play_token(env, token, stack):
+def play_token(env, token, stack, inner=None):
     """One TOKEN_VOCAB decision: the token's ALE action for frames /
     TOKEN_BASE_FRAMES consecutive steps of the wrapper stack. Returns (obs,
     reward, terminated, truncated, stack, base_steps): reward is the SUM of
@@ -1563,15 +1600,19 @@ def play_token(env, token, stack):
     frame but the last is pushed into the stack here -- the last is pushed
     at the next decision, as a plain step's -- so the stack always holds the
     last four base steps, whatever tokens were played. Stops early at a
-    terminal or truncation. A module function, not a Run method: the Ray
-    actor's Run shell provides only env / searcher / env_steps
-    (tests/test_ray_harness.py pins play_episode's self.* surface)."""
+    terminal or truncation. `inner`, a list, receives each inner step's raw
+    reward (REWARD_GROWTH clips per base step). A module function, not a
+    Run method: the Ray actor's Run shell provides only env / searcher /
+    env_steps (tests/test_ray_harness.py pins play_episode's self.*
+    surface)."""
     act, frames = muzero.TOKEN_VOCAB[int(token)]
     n = int(frames) // muzero.TOKEN_BASE_FRAMES
     total, done = 0.0, 0
     for i in range(n):
         obs, reward, term, trunc, _ = env.step(int(act))
         total += float(reward)
+        if inner is not None:
+            inner.append(float(reward))
         done = i + 1
         if term or trunc:
             break
@@ -1627,6 +1668,44 @@ def token_gate(spec, use_ray, cpu_actor, ray_workers):
                              f"{ENV_NAME}'s {n_env}")
     if len(set(vocab)) != len(vocab):
         raise SystemExit("TOKEN_VOCAB has duplicate tokens")
+
+
+def reward_growth_gate(use_ray, cpu_actor, ray_workers):
+    """REWARD_GROWTH (P2a on Ms. Pac-Man) runs only on the path it was built
+    and tested on: policy-only acting with birth search into paper targets
+    (where raw reward tuples become clipped records), the inline vectorized
+    refresh (reads the re-clipped records), TD value targets, the
+    synchronous driver (re-clips at each iteration's top), --ray
+    --cpu-actor without a worker pool. Also a schedule that stays inside
+    the reward support. Refuses at startup -- before any --overwrite
+    deletion."""
+    if not muzero.REWARD_GROWTH:
+        return
+    need = {"PAPER_TARGETS": True, "BIRTH_SEARCH": True,
+            "USE_SEARCH_ACTING": False, "REFRESH_VTREE": True,
+            "REFRESH_OFFLOAD": False, "REFRESH_SATURATE": False,
+            "ASYNC_LOOP": False, "VALUE_TARGET_MODE": "td"}
+    bad = [f"{k}={getattr(muzero, k)!r}" for k, v in need.items()
+           if getattr(muzero, k) != v]
+    if bad:
+        raise SystemExit("REWARD_GROWTH runs only on the tested path "
+                         "(policy-only acting + birth search, paper targets, "
+                         f"inline vectorized refresh); got {', '.join(bad)}")
+    if not (use_ray and cpu_actor) or ray_workers:
+        raise SystemExit("REWARD_GROWTH runs with --ray --cpu-actor (no "
+                         "--ray-workers pool)")
+    lo, hi = muzero.REWARD_GROWTH_START, muzero.REWARD_GROWTH_CEILING
+    if not (muzero.REWARD_UNIT > 0 and 0 < lo <= hi):
+        raise SystemExit(f"REWARD_GROWTH needs REWARD_UNIT > 0 and 0 < "
+                         f"START <= CEILING; got unit {muzero.REWARD_UNIT!r}, "
+                         f"{lo!r} -> {hi!r}")
+    if not 0 < muzero.REWARD_GROWTH_END <= 1:
+        raise SystemExit(f"REWARD_GROWTH_END {muzero.REWARD_GROWTH_END!r} is "
+                         f"a fraction of the run in (0, 1]")
+    if muzero.scalar_categorical.support_for(hi) > muzero.REWARD_SUPPORT:
+        raise SystemExit(f"REWARD_GROWTH_CEILING {hi!r} lies past the reward "
+                         f"support (half-width {muzero.REWARD_SUPPORT:.4g} in "
+                         f"h-space)")
 
 
 def env_actions(env_id):
@@ -1804,6 +1883,12 @@ class Run:
         # frames / TOKEN_BASE_FRAMES, the plain arms' decisions -- and the
         # trajectory's length counts decisions.
         tokens = muzero.TOKEN_VOCAB is not None
+        # REWARD_GROWTH: records carry the RAW per-base-step rewards as a
+        # tuple (none before the first decision); paper_targets clips them
+        # on the learner at the replay's current ceiling.
+        growth = muzero.REWARD_GROWTH
+        if growth:
+            prev_reward = ()
         while not done and steps < cap:
             stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
             if muzero.USE_SEARCH_ACTING and not prior_eval and (
@@ -1849,16 +1934,18 @@ class Run:
                         policy = policy / policy.sum()
                     action = int(np.random.choice(ACTIONS, p=policy))
             after = stack
+            inner = []
             if tokens:
                 # play_token pushes the token's inner frames into its own
                 # copy: the record below keeps the stack the decision was
                 # made on (audit r1 A-1), the next decision continues from
                 # `after`.
                 obs, reward, term, trunc, after, n_base = play_token(
-                    self.env, action, stack)
+                    self.env, action, stack, inner)
             else:
                 obs, reward, term, trunc, _ = self.env.step(action)
                 n_base = 1
+                inner.append(float(reward))
             done = term or trunc
             # 5-field records exist ONLY for the paper data path. Recording
             # them for every search-acting arm broke the pre-existing
@@ -1872,7 +1959,8 @@ class Run:
             else:
                 traj.append((stack, action, prev_reward, search_pol, search_val))
             stack = after
-            prev_reward = muzero.clip_reward(reward)
+            prev_reward = (tuple(inner) if growth
+                           else muzero.clip_reward(reward))
             total += float(reward)
             steps += n_base
         terminated = done
@@ -1934,6 +2022,33 @@ class Run:
             if not terminated or getattr(self.env, "was_real_done", True):
                 return total, steps, terminated
 
+    # -- reward-clip growth --------------------------------------------------
+    def apply_reward_ceiling(self):
+        """REWARD_GROWTH: re-clip every stored record at the ceiling for the
+        trainer's current step (muzero.reward_ceiling), when it changed --
+        called at the top of each iteration, before anything is collected,
+        so value / value-prefix targets, insertion priorities, the
+        refresh's chains and the diagnostics all read one ceiling at a
+        time. Stored priorities are not recomputed (training writebacks
+        and the refresh rotation update them). Not checkpointed: the first
+        call after a start or resume re-clips the loaded buffer."""
+        if not muzero.REWARD_GROWTH:
+            return
+        c = muzero.reward_ceiling(self.trainer.training_steps)
+        if c == getattr(self, "_reward_ceiling", None):
+            return
+        self._reward_ceiling = c
+        for traj in self.replay:
+            for t in traj:
+                t["reward"] = muzero.grown_reward(t["raw_reward"], c)
+
+    def reward_ceiling_now(self):
+        """The ceiling the replay is clipped at (applied on first use), for
+        records entering it."""
+        if getattr(self, "_reward_ceiling", None) is None:
+            self.apply_reward_ceiling()
+        return self._reward_ceiling
+
     # -- re-analysis -------------------------------------------------------
     def paper_targets(self, traj, terminated, born_step=None,
                       birth_nets=None, birth_prior_nets=None):
@@ -1968,17 +2083,32 @@ class Run:
                 "trajectories must carry per-step search records (5 fields), "
                 f"got {len(traj[0])}")
         out = []
+        growth = muzero.REWARD_GROWTH
+        ceiling = self.reward_ceiling_now() if growth else None
         for i, (obs, action, reward, pol, val) in enumerate(traj):
             # The terminal record of a TERMINATED episode carried no search
             # (uniform placeholder -> masked); a TRUNCATED tail's record is a
             # genuine greedy search and keeps its policy target.
             has_policy = (i < len(traj) - 1) or (not terminated)
+            raw = None
+            if growth:
+                # REWARD_GROWTH: the actor recorded raw per-base-step
+                # rewards; keep them and store the clip at the replay's
+                # current ceiling. A float here is a record clipped at
+                # record time -- refused rather than double-clipped.
+                if not isinstance(reward, tuple):
+                    raise ValueError(
+                        "REWARD_GROWTH records carry raw reward tuples; got "
+                        f"{type(reward).__name__} (an actor without the arm?)")
+                raw, reward = reward, muzero.grown_reward(reward, ceiling)
             out.append({"obs": obs, "action": action, "reward": reward,
                         "target_policy": np.asarray(pol, dtype=np.float64),
                         "root_value": float(val),
                         "target_value": float(val),  # for non-paper readers
                         "has_policy_target": has_policy,
                         "born_step": born})
+            if growth:
+                out[-1]["raw_reward"] = raw
             if muzero.VALUE_TARGET_MODE == "mixed":
                 # When root_value was computed (the actor's weights' step),
                 # for SVE's sve_value_age diagnostic.
@@ -2852,6 +2982,23 @@ class Run:
             errs["replay_records"] = int(sum(len(t) for t in replay))
             errs["replay_base_steps"] = int(sum(replay_units(t)
                                                 for t in replay))
+        if muzero.REWARD_GROWTH:
+            # Reward-clip growth (P2a on Ms. Pac-Man, read 3): the ceiling
+            # the buffer is clipped at, the share of its raw reward mass (in
+            # REWARD_UNITs) the clip keeps, and its largest stored reward
+            # (above the reward support's raw ceiling it saturates).
+            replay = getattr(self, "replay", None) or []
+            unit = float(muzero.REWARD_UNIT)
+            c = getattr(self, "_reward_ceiling", None)
+            mags = [abs(float(r)) / unit for t in replay for rec in t
+                    for r in rec["raw_reward"]]
+            raw = sum(mags)
+            errs["reward_ceiling"] = None if c is None else round(float(c), 4)
+            errs["reward_kept"] = (round(sum(min(m, c) for m in mags) / raw, 4)
+                                   if raw and c is not None else None)
+            errs["reward_max"] = round(max(
+                (abs(rec["reward"]) for t in replay for rec in t),
+                default=0.0), 4)
         sv = getattr(getattr(self, "trainer", None), "_sve_window", None)
         if sv and sv["n_real"]:
             # SVE (VALUE_TARGET_MODE "mixed"): share of real value targets
@@ -3131,6 +3278,9 @@ def load_run_checkpoint(run, path, expect):
         run.trainer._target_snapshot = state["target"]["snapshot"]
         run.trainer._target_synced_at = state["target"]["synced_at"]
     run.replay = state["replay"]
+    # REWARD_GROWTH: the loaded records were clipped at the saved run's
+    # ceiling; the next apply_reward_ceiling re-clips them all.
+    run._reward_ceiling = None
     run.env_steps = state["env_steps"]
     run.trainer.training_steps = state["training_steps"]
     for k, v in (state.get("diag_stats") or {}).items():
@@ -4173,6 +4323,13 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         birth_search_gate()
         sve_gate()
         token_gate(spec, use_ray, cpu_actor, ray_workers)
+        reward_growth_gate(use_ray, cpu_actor, ray_workers)
+        if muzero.REWARD_GROWTH:
+            print(f"  [{arm} s{seed}] REWARD_GROWTH: raw / "
+                  f"{muzero.REWARD_UNIT} clipped at a ceiling "
+                  f"{muzero.REWARD_GROWTH_START} -> "
+                  f"{muzero.REWARD_GROWTH_CEILING} (log-linear to "
+                  f"{muzero.REWARD_GROWTH_END:.0%} of the run)", flush=True)
         if muzero.TOKEN_VOCAB is not None:
             # main()'s banner printed the env's action count; this arm's
             # action space is its vocabulary (audit r1 B-NIT).
@@ -4560,6 +4717,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
             run.searcher.network_manager.training_steps = run.trainer.training_steps
+            # REWARD_GROWTH: this iteration's ceiling, over the whole buffer,
+            # before anything is collected or trained.
+            if muzero.REWARD_GROWTH:
+                run.apply_reward_ceiling()
             if pipeline:
                 primed_sequential = pipeline.pending is None
                 if primed_sequential:

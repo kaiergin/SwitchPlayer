@@ -406,6 +406,22 @@ TOKEN_BASE_FRAMES = 4
 # planned run (TEMPERATURE_TOTAL_STEPS). 0 = off.
 TOKEN_LONG_BIAS = 0.0
 TOKEN_LONG_BIAS_END = 0.25
+# Reward-clip growth (Kai, 2026-10-19; CURRICULUM "P2a on Ms. Pac-Man"):
+# "clip heavily in the beginning and over time decrease the amount
+# clipped". The actor records RAW rewards, one per base step (a token keeps
+# its inner steps'); the learner stores sign(r) * min(|r| / REWARD_UNIT, c)
+# summed over a record's base steps, with the ceiling c growing log-linearly
+# from REWARD_GROWTH_START at step 0 to REWARD_GROWTH_CEILING at
+# REWARD_GROWTH_END of the planned run (TEMPERATURE_TOTAL_STEPS), constant
+# after. The whole replay is re-clipped once per iteration
+# (Run.apply_reward_ceiling), so every reader of a record's "reward" sees
+# one ceiling at a time. False = rewards clipped at record time by
+# clip_reward, every path unchanged.
+REWARD_GROWTH = False
+REWARD_UNIT = 1.0
+REWARD_GROWTH_START = 1.0
+REWARD_GROWTH_CEILING = 1.0
+REWARD_GROWTH_END = 0.5
 # ---------------------------------------------------------------------------
 # Paper-reproduction mode (EfficientZero/MuZero data path), flag-gated like
 # everything else; the shipped product keeps all of these OFF. When the
@@ -714,6 +730,36 @@ def token_long_bias(training_steps):
     if end <= 0 or training_steps >= end:
         return 0.0
     return float(TOKEN_LONG_BIAS) * (1.0 - training_steps / end)
+
+
+def reward_ceiling(training_steps):
+    """REWARD_GROWTH's clip ceiling, in REWARD_UNITs, at `training_steps`:
+    log-linear from REWARD_GROWTH_START at step 0 to REWARD_GROWTH_CEILING
+    at REWARD_GROWTH_END of the planned run, constant after (and the start
+    value outside a run, where the total is unknown)."""
+    lo, hi = float(REWARD_GROWTH_START), float(REWARD_GROWTH_CEILING)
+    total = TEMPERATURE_TOTAL_STEPS
+    if not total:
+        return lo
+    end = float(REWARD_GROWTH_END) * total
+    if end <= 0 or training_steps >= end:
+        return hi
+    return lo * (hi / lo) ** (training_steps / end)
+
+
+def grown_reward(raw, ceiling):
+    """A record's reward under REWARD_GROWTH: sign(r) * min(|r| /
+    REWARD_UNIT, ceiling) summed over its raw per-base-step rewards (one
+    for a plain step, a token's inner steps, none for a trajectory's first
+    record). Equals clip_reward's sign clip when the ceiling is 1 and every
+    nonzero raw reward is at least one unit."""
+    unit = float(REWARD_UNIT)
+    total = 0.0
+    for r in raw:
+        r = float(r)
+        total += (min(r / unit, ceiling) if r >= 0
+                  else -min(-r / unit, ceiling))
+    return float(total)
 
 
 def paper_horizon(age_steps):
