@@ -895,6 +895,73 @@ scratchpad post_tokens.py (rows 45-90, acting + raw; logs "all done").
 Deferred, test-only: pin the probe's pooled frames_per_decision exactly
 (r4 NIT-1).
 
+### RESULT -- P2a: duration tokens on Pong (seed 1), 2026-10-18
+
+pong-tokens-s1-2026-10-17 trained the tokens arm from the run worktree
+(detached at 6a66298a) 10-18 00:18 -> 15:01 in one attempt (52,950 s,
+10.0 min/iteration against the estimated ~13.5 -- ~490 decisions per game
+instead of the twin's ~2,000; no deaths, supervisor.err empty). The
+hand-off ran the evals 15:01-15:14: code check ok (tokens manifest), all
+10 rows in both variants. EXACT eval, 30 noop starts, prior argmax over the
+12 tokens; DEPLOYED = acting states (primary), RAW secondary; "won" =
+phases won of 4; "capped" = games of 30 that hit the 3000-step cap; dps =
+the deployed player's decisions per second (60 / pooled frames per
+decision); TWIN = pong-bnrecal-s1-2026-10-08 deployed:
+  iter       45     50     55     60     65     70     75     80     85     90
+  deployed -17.0  -10.2  -10.3  -15.4  -11.8  -16.4   +3.7   -7.3   -2.9   +4.0
+    won     0/4    0/4    0/4    0/4    0/4    0/4    2/4    1/4    1/4    2/4
+    capped    6     24     18     24     19      9     22     22     23     20
+    dps     3.0    3.0    2.8    2.7    2.6    2.6    2.3    2.5    2.6    2.5
+  raw      -16.1  -11.3  -12.2  -14.9  -14.6  -13.9   -7.3  -10.9   -6.1   -1.9
+    won     0/4    0/4    0/4    0/4    0/4    0/4    1/4    0/4    1/4    1/4
+    capped    1     20     21      7     18      8     22     21     26     27
+  twin     -14.3  -13.6  -13.1  -13.1   -1.0   -3.8  +10.1   +9.5  +20.4  +18.4
+    capped    0      0      2      7     23      2      0      0      0      0
+  env k    65.4   78.5   92.2  106.0  119.8  133.8  146.7  160.7  175.4  189.9
+  twin k   68.0   79.8   92.1  104.2  117.2  130.9  145.2  158.3  168.9  179.3
+In-run eval (8 games): -17.0 @45, -10.5 @50, -12.4 @55, -16.4 @60, -10.6
+@65, -14.8 @70, -0.6 @75, -8.8 @80, -6.9 @85, +3.9 @90.
+READ (1) breakout: NONE. No row, deployed or raw, reached exact >= +10 or
+3/4 phases; the best deployed rows are +3.7 @75 and +4.0 @90 (2/4 each).
+The twin's deployed first success was @75 (+10.1, 3/4).
+READ (2) level: deployed mean 60-90 = -6.59 -> WORSE (< -2.32; the twin
++5.80). Raw -9.95 (the twin +5.47).
+READ (3) game time: matched -- 146.7k env steps @75 against the twin's
+145.2k, 189.9k @90 against 179.3k. Not a data shortfall: at the same game
+time the twin had broken out.
+READ (4) tokens:
+  - The 32-frame share of play rose from 0.20-0.33 (rows 5-25) to 0.51
+    @45 and 0.64 @90, most of it AFTER the long-token bias reached 0
+    (25% of training, row ~22), so the bias did not drive the late drift
+    (it may have seeded it). The birth search's 32-frame visit share sat at
+    0.44-0.51 from row 35 on; from row 60 the acting share ran 0.13-0.19
+    above it (the staged temperature 0.25 -> 0.125 sharpens the prior's
+    favourites). 8-frame tokens were nearly unused (2-5% of play from row 30, 6-13%
+    of search). Window counts @90: NOOP32 553, DOWN32 550, UP32 468, NOOP4
+    304, DOWN16 210, every other token <= 94.
+  - Frames per decision (acting) 11.9 @10 -> 23.6 @90; deployed 20.0-25.8,
+    i.e. 2.3-3.0 decisions per second against the twin's 15 (5-6x fewer --
+    the real-time quantity). Decisions per game 390-520 (rows 45-90); 38,199
+    decisions in all.
+  - Payoff (mean z - V where played): small (|.| <= 0.21 over all rows)
+    with no consistent sign by duration; each row's most negative token is
+    a 4-, 8- or 16-frame one, never a 32-frame one (UP8 @75 / @80 / @90:
+    -0.19 / -0.18 / -0.16). policy_entropy 1.0-1.5 over rows 45-90 (over
+    12 tokens; ln 12 = 2.48).
+READ (5) stability: no first success. Descriptively the deployed player
+fell from +3.7 @75 to -7.3 @80.
+GAME SHAPE (descriptive): the deployed games at 75-90 run 2,740-2,970 of the
+3,000-step cap and 20-23 of 30 hit it. Finished games went all one way per
+row -- all won @75, @85, @90 (8, 7, 10 games), all lost @80 (8) -- and
+most capped games were behind (15 of 20 @90). The twin's games at 75-90
+never hit the cap (1,710-2,240 steps). The token player keeps rallies
+going but rarely gets the ball past the CPU paddle; whether 32-frame holds
+(0.53 s) are too coarse to aim returns is a hypothesis, not tested here.
+PRE-REGISTERED DECISION: NO BREAKOUT -> diagnose before P2b: token usage
+(stuck on long tokens? -- the play shares say increasingly so, with the
+bias gone), the frame-time targets, the bias (ended at row ~22). The 6 -> 3
+action change stays unseparated. Kai picks the diagnosis.
+
 ### RESULT -- the real-time algorithm on Ms. Pac-Man (seed 0), 2026-10-17
 
 mspacman-s0-2026-10-16 trained the temperature + stabilizer arm
