@@ -938,8 +938,12 @@ the COST range and the pace rule; supervise_rgrow.py ALERTs on a row whose
 reward_ceiling is off the schedule (the iteration-top re-clip did not run),
 on a pace past 25 min/iteration, and on a stored record reward past 400
 units; `rg 0 --no-wait` (logged) starts RG without TK's completion marker
-if TK is abandoned -- refused while TK's supervisor is alive (kill it and
-its trainer first); the hand-off then skips TK's evals. RECOVERY: after a
+if TK is abandoned -- refused while TK's supervisor is alive. PROCEDURE:
+kill TK's supervisor, TK's trainer AND the waiting `rg 0` supervisor (by
+command line), then launch `rg 0 --no-wait`; the hand-off mutes TK and
+drops its evals only if TK is still unfinished once RG's evals are done
+(audit r4, nothing above LOW; its LOWs: this procedure, and the hand-off
+keeping TK's evals after a retracted override). RECOVERY: after a
 reboot, relaunch the hand-off and the supervisors the same way (they
 resume from the last checkpoint; a finished run's supervisor exits at
 once; rg re-waits) -- but if TK was abandoned, relaunch only rg, with
