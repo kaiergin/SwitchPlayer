@@ -775,6 +775,99 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
+
+DECISION (Kai, 2026-10-19): after P2a's Pong NO BREAKOUT, "try the exact
+same setup on ms pacman", with reward clipping added first ("reward
+clipping will be needed for ms pacman"; his rule of 10-17: "clip heavily
+in the beginning and over time decrease the amount clipped").
+QUESTIONS: (A) does reward-clip growth lift the real-time algorithm on Ms.
+Pac-Man over its sign-clipped twin? (B) on top of it, do duration tokens
+hold up in a game of held directions, where Pong's aim-the-return problem
+does not arise?
+TWO ARMS, SEED 0, run CONCURRENTLY (the GPU holds both: ~4.5 GB each of
+12 GB):
+  RG = effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-rgrow
+    = the Ms. Pac-Man arm + REWARD_GROWTH.
+  TK = effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow
+    = RG + TOKEN_VOCAB (Ms. Pac-Man's 9 actions x {4, 8, 16, 32} frames =
+    36 tokens) + P2a's long-token bias (b 0.5 -> 0 by 25% of training).
+  TWIN = mspacman-s0-2026-10-16 (the same arm without either; deployed
+    mean 60-90 649.14, g 0.351; raw 585.62; row 90 at 53.4k env steps).
+RG vs TWIN isolates the clip growth; TK vs RG isolates the tokens (the
+same 9 actions -- unlike Pong, no 6 -> 3 confound: the twin already acts
+over Ms. Pac-Man's minimal set); TK vs TWIN is Kai's question. Same
+recipe as the twin: MsPacmanNoFrameskip-v4 --frameskip 4, 90 x 2000
+train steps, 3 episodes (one game's lives) per iteration, --episode-cap
+3000 (per life, in base steps), eval every 5, --checkpoint-every 2,
+--snapshot-weights, --ray --cpu-actor.
+REWARD-CLIP GROWTH (code, default OFF everywhere):
+  - The actor records RAW rewards, one per base step (a token keeps its
+    inner steps' rewards); the learner clips them. Clipped reward per base
+    step = sign(r) x min(|r| / UNIT, c), UNIT = 10 (a pellet), summed over
+    a token's inner steps -- a token's reward is what the base player
+    would have collected over the same frames. (P2a's Pong tokens clipped
+    the token's sum; on Pong the two agree, as points never come twice
+    within 32 frames. On Ms. Pac-Man clipping the sum would pay a token
+    that eats 4 pellets the same as one that eats 1.)
+  - Ceiling c: log-linear from 1 at step 0 to 160 at 50% of training,
+    c = 160 ** min(1, t / 90,000), stepped per iteration (from the
+    iteration's starting step): ~2.8 at row 10, ~12.6 at row 23, 160 from
+    row 46 on. At c = 1 every Ms. Pac-Man reward is 1 -- exactly the
+    twin's sign clip. At 160 every reward of the first boards passes in
+    pellet units: pellet 1, power pellet 5, ghosts 20 / 40 / 80 / 160,
+    cherry 10, strawberry 20.
+  - The whole replay is re-clipped at each iteration's ceiling (every
+    stored record keeps its raw rewards), so the value and value-prefix
+    targets, insertion priorities, the communal refresh's chains and the
+    diagnostics see one ceiling at a time; Ms. Pac-Man's buffer spans ~50
+    iterations and never mixes ceilings. Stored priorities are not
+    recomputed at a ceiling change (training writebacks and the refresh
+    rotation update them).
+  - Not normalized by c: pellets stay 1 throughout, so the value scale
+    grows from the twin's (tens) to hundreds. The categorical supports
+    already cover it -- built at import for raw ceilings 400 / 2000 / 5000
+    (reward / value prefix / value), the twin's network unchanged. A
+    stored reward above 400 (more than two late ghosts in one token)
+    saturates the reward support; rows log the largest (reward_max).
+  - Rows also log reward_ceiling and reward_kept (clipped / raw-unit
+    reward mass over the buffer).
+  - REGRESSION (pinned in the tests): RG with the ceiling held at 1
+    reproduces the twin's arm bit for bit (actor records and a train +
+    refresh slice).
+TOKENS (TK): P2a's mechanics unchanged (frame-time discount and value
+targets, base-step accounting of env_steps / the episode cap / the replay
+cap / the BN window, the bias, prior-argmax eval) over 36 tokens. A life
+loss ends a token early (EpisodicLifeEnv), counted at its nominal length
+in the replay units as in P2a.
+READS. EXACT eval as the twin's: whole games (every life), 30 noop
+starts, prior argmax; rows 5-90; DEPLOYED (acting states) primary, raw
+secondary; g = (score - 307.3) / 973.9.
+  (1) level: each arm's deployed mean 60-90 against the twin's 649.14,
+      with bands from the twin's own row spread (SD 216.9 over rows
+      60-90; 2 SE of a difference of two 7-row means = 232): BETTER >=
+      881.0 (g 0.59), WORSE <= 417.2 (g 0.11), else NO DIFFERENT. TK is
+      also read against RG with the same +-232. Raw likewise (twin
+      585.62; SD 129.3, +-138) as secondary.
+  (2) data: score against env steps (base steps) beside the twin.
+  (3) clip growth, descriptive: reward_ceiling, reward_kept, reward_max,
+      the row value scale.
+  (4) tokens, descriptive (P2a read 4): per-duration play and search
+      shares, frames per decision, decisions per game, payoff, the
+      deployed player's decisions per second against the twin's 15.
+  (5) stability: the largest drop between adjacent rows from row 45 (the
+      twin's -443).
+DECISION AFTER:
+  RG: BETTER -> clip growth joins the Ms. Pac-Man base. NO DIFFERENT ->
+    Kai's call (keep it for its intent, or retune the end ceiling /
+    schedule). WORSE -> drop it; diagnose (the value scale).
+  TK vs RG: NO DIFFERENT or BETTER -> tokens hold up on Ms. Pac-Man (the
+    Pong failure is game-specific) -> P2b (the composition loss). WORSE ->
+    tokens fail in both games -> the composition diagnosis first (does the
+    model value X32 above X4 x 8, the same frames?).
+COST: two concurrent runs, ~17-24 h (the twin took 17.2 h alone), + ~1 h
+of evals (18 rows x 2 variants x 2 runs).
+
 ### Next experiment (pre-registered) -- P2a: duration tokens on Pong (Kai, 2026-10-17)
 
 DECISION (Kai, 2026-10-17): after Ms. Pac-Man, "go with my list" -- his
