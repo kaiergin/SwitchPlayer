@@ -21,8 +21,9 @@ checkpoint exists) skips that wait: its start was already sanctioned
 (audit r1 A-L1). --no-wait (logged, Kai's call) skips it too; it is refused
 while any supervise_rgrow.py process lives (an unfinished RG's supervisor
 would interleave RG's attempts with this run's). PROCEDURE for --no-wait:
-kill this run's waiting supervisor and RG's supervisor and trainer (by
-command line, never taskkill /T), then launch `tkx 0 --no-wait`. Before
+kill this run's waiting supervisor, RG's supervisor and trainer, and
+RG's hand-off post_rgrow.py (by command line, never taskkill /T), then
+launch `tkx 0 --no-wait`. Before
 EVERY launch attempt it also waits while ANY python runs an
 experiments/ablation.py (any tree, arm or seed: one ablation trainer on the
 GPU at a time, never a second writer; other GPU users -- a GPU probe,
@@ -31,6 +32,17 @@ supervise_rgrowx.py refuses to start (audit r1 A-L3 / B-M2). A run already
 complete exits at once (RUN COMPLETE), before any wait or preflight. Each
 row also ALERTs when host commit falls below 4 GB (a 3x run's memory creep
 is untested; audit r1 A-L6).
+
+Audit r2: a RESUME is "the checkpoint exists, or this run's supervisor.log
+already logged a LAUNCHED / NO-WAIT override line" (a --no-wait start that
+died before its first checkpoint does not wait for RG again). An ABANDONED
+file in the run folder (Kai's call: stop the supervisor and its trainer
+first, then create it) stops every later launch. A run folder holding
+snapshots but no checkpoint is refused: a fresh start there would mix two
+timelines (move the run folder and its two probe jsonls aside, or use a new
+folder). Each attempt waits for no trainer, THEN checks the manifest, then
+launches; rows keep streaming while it waits (an orphaned trainer of this
+run stays monitored).
 
 Create the run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
@@ -550,12 +562,15 @@ def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
           f"-> deaths.log (gpu used {gpu})", flush=True)
 
 
-def wait_no_trainer():
+def wait_no_trainer(rows=None):
     """Block while ANY python runs experiments/ablation.py (an orphan of an
     earlier supervisor, RG, a duplicate): one ablation trainer on the GPU at
-    a time, and never a second writer."""
+    a time, and never a second writer. `rows` keep streaming meanwhile (an
+    orphan of THIS run keeps its EVAL lines and ALERTs; audit r2 A-L4)."""
     polls, told = 0, None
     while True:
+        if rows is not None:
+            rows.emit()
         pids = live_trainers()
         if not pids:
             return
@@ -567,6 +582,29 @@ def wait_no_trainer():
             told = msg
         time.sleep(60)
         polls += 1
+
+
+def abandoned(base):
+    """Kai's call: an ABANDONED file in the run folder stops every launch."""
+    return os.path.exists(os.path.join(base, "ABANDONED"))
+
+
+def sanctioned(base, ckpt):
+    """This run already started once: its checkpoint exists, or its own
+    supervisor.log logged a launch or the --no-wait override."""
+    if os.path.exists(ckpt):
+        return True
+    return any(l.startswith(("LAUNCHED", "NO-WAIT override"))
+               for l in lines_of(os.path.join(base, "supervisor.log")))
+
+
+def stray_snapshots(base, ckpt):
+    """Snapshots in the run folder with no checkpoint beside them (a fresh
+    start there would mix two timelines; audit r2 A-M1)."""
+    import glob
+    if os.path.exists(ckpt):
+        return []
+    return sorted(glob.glob(os.path.join(base, "snapshots*", "*.pth")))
 
 
 def main(argv):
@@ -593,6 +631,16 @@ def main(argv):
         print(f"RUN COMPLETE {variant} s{seed} (checkpoint is a marker)",
               flush=True)
         return 0
+    if abandoned(base):
+        print(f"ABANDONED {variant} s{seed}: the run folder holds an "
+              f"ABANDONED file -- not launching", flush=True)
+        return 0
+    stray = stray_snapshots(base, ckpt)
+    if stray:
+        print(f"refusing: {len(stray)} snapshots but no checkpoint in "
+              f"{rel} -- a fresh start would mix two timelines; move the run "
+              f"folder and its two probe jsonls aside", flush=True)
+        return 2
     if no_wait:
         alive = live_rgrow_supervisors()
         if alive:
@@ -602,9 +650,9 @@ def main(argv):
             return 2
         print(f"NO-WAIT override: {variant} s{seed} starts without RG's "
               f"completion marker and evals", flush=True)
-    elif os.path.exists(ckpt):
-        print(f"RESUMING {variant} s{seed}: its checkpoint exists, so its "
-              f"start was already sanctioned -- no wait for RG", flush=True)
+    elif sanctioned(base, ckpt):
+        print(f"RESUMING {variant} s{seed}: it started before (checkpoint or "
+              f"launch logged) -- no wait for RG", flush=True)
     else:
         wait_external(variant, seed)
 
@@ -644,8 +692,15 @@ def main(argv):
             print(f"RUN COMPLETE {variant} s{seed} (checkpoint is a marker)",
                   flush=True)
             return 0
+        if abandoned(base):
+            print(f"ABANDONED {variant} s{seed}: the run folder holds an "
+                  f"ABANDONED file -- not relaunching", flush=True)
+            return 0
+        # The guard first, THEN the manifest (the guard can block for hours;
+        # the manifest is checked right before the launch; audit r2 A-L3).
         polls, told = 0, None
         while True:
+            wait_no_trainer(rows)
             ok, why = manifest_check()
             if ok:
                 break
@@ -655,7 +710,6 @@ def main(argv):
                 told = why
             time.sleep(60)
             polls += 1
-        wait_no_trainer()
         args = command(variant, seed) + (["--resume"] if os.path.exists(ckpt)
                                          else [])
         log = open(os.path.join(base, f"supv2_{attempt}.log"), "ab")

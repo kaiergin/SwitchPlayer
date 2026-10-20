@@ -289,6 +289,8 @@ def test_wait_external_blocks_until_rg_is_evaluated(sup, rg_files,
 
     def fake_sleep(s):
         sleeps.append(s)
+        if len(sleeps) > 200:                # fail, never hang (r2 A-L6)
+            raise AssertionError("wait_external never returned")
         if len(sleeps) == 3:                 # RG finishes and its evals land
             rg_files.marker.write_bytes(b"x")
             for p in rg_files.probes:
@@ -317,6 +319,8 @@ def test_wait_external_alerts_when_rg_is_done_but_unevaluated(
 
     def fake_sleep(s):
         sleeps.append(s)
+        if len(sleeps) > 200:                # fail, never hang (r2 A-L6)
+            raise AssertionError("wait_external never returned")
         if len(sleeps) == 61:
             _rows(rg_files.probes[1], range(5, 95, 5))
 
@@ -330,8 +334,14 @@ def test_wait_external_alerts_when_rg_is_done_but_unevaluated(
     rg_files.marker.write_bytes(b"x")
     _rows(rg_files.probes[1], range(5, 90, 5))
     sleeps.clear()
-    monkeypatch.setattr(sup.time, "sleep", lambda s: _rows(
-        rg_files.probes[1], range(5, 95, 5)))
+
+    def land(s):
+        sleeps.append(s)
+        if len(sleeps) > 200:
+            raise AssertionError("wait_external never returned")
+        _rows(rg_files.probes[1], range(5, 95, 5))
+
+    monkeypatch.setattr(sup.time, "sleep", land)
     sup.wait_external("tkx", 0)
     assert "ALERT" not in capsys.readouterr().out
 
@@ -355,12 +365,16 @@ def _stop(*a, **k):
 
 
 def test_no_wait_is_logged_and_refused_while_an_rgrow_supervisor_lives(
-        sup, monkeypatch, capsys):
+        sup, monkeypatch, tmp_path, capsys):
     def no(*a, **k):
         raise AssertionError("wait_external must not run under --no-wait")
 
     # the preflight runs this suite: pin the host probes, never read the
-    # real process table here
+    # real process table or the real run folder (whose supervisor.log may
+    # hold LAUNCHED lines on a relaunch) here, and never launch (r2 A-L7)
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup.subprocess, "Popen", no)
+    monkeypatch.setattr(sup, "wait_no_trainer", no)
     monkeypatch.setattr(sup, "run_done", lambda v, s: False)
     monkeypatch.setattr(sup, "other_supervisors", lambda: [])
     monkeypatch.setattr(sup, "live_rgrow_supervisors", lambda: [])
@@ -453,6 +467,9 @@ def test_one_supervisor_per_run(sup, monkeypatch, capsys):
                      "tkx", "0"]},
         {"pid": 12, "name": "cmd.exe",              # the WMI shell
          "cmdline": ["cmd.exe", "/c", "py supervise_rgrowx.py tkx 0 >> x"]},
+        {"pid": 14, "name": "notepad.exe",          # not python (r2 A-L7)
+         "cmdline": ["notepad", "benchmarks/supervisors/"
+                     "supervise_rgrowx.py"]},
         {"pid": 13, "name": "python.exe",           # RG's supervisor
          "cmdline": ["py", "benchmarks/supervisors/supervise_rgrow.py",
                      "rg", "0"]}])
@@ -507,7 +524,7 @@ def test_every_launch_attempt_waits_for_no_trainer(sup, monkeypatch,
     monkeypatch.setattr(sup, "preflight", lambda v: (True, ""))
     monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
     monkeypatch.setattr(sup, "wait_no_trainer",
-                        lambda: events.append("guard"))
+                        lambda *a: events.append("guard"))
     monkeypatch.setattr(sup, "snapshot", lambda *a: None)
     monkeypatch.setattr(sup.time, "sleep", lambda s: None)
 
@@ -539,10 +556,69 @@ def test_wait_no_trainer_waits_out_any_trainer(sup, monkeypatch, capsys):
                      "running (pids [7])") == 1      # told once, not per poll
     assert sleeps == [60, 60]
     src = inspect.getsource(sup.main)
-    assert src.count("wait_no_trainer()") == 1
+    assert src.count("wait_no_trainer(") == 1
     assert src.index("wait_external(variant, seed)") < src.index("preflight(")
-    assert src.index("manifest_check()") < src.index("wait_no_trainer()") \
+    # the guard, THEN the manifest, then the launch (audit r2 A-L3)
+    assert src.index("wait_no_trainer(rows)") < src.index("manifest_check()") \
         < src.index("subprocess.Popen(")
+
+
+def test_wait_no_trainer_keeps_rows_streaming(sup, monkeypatch, tmp_path,
+                                             capsys):
+    """An orphan of THIS run stays monitored while the guard waits on it
+    (audit r2 A-L4)."""
+    jsonl = tmp_path / "a.jsonl"
+    rows = sup.Rows(str(jsonl), "tkx", 0)
+    monkeypatch.setattr(sup, "commit_free_gb", lambda: None)
+    seen = [[7], [7], []]
+    monkeypatch.setattr(sup, "live_trainers",
+                        lambda: seen.pop(0) if seen else [])
+
+    def sleep(s):
+        jsonl.write_text(json.dumps({"iteration": 140, "reward_ceiling": 99.0,
+                                     "elapsed_s": 1.0}) + chr(10))
+
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    sup.wait_no_trainer(rows)
+    out = capsys.readouterr().out
+    assert "EVAL tkx s0 iter 140" in out
+    assert "ALERT: tkx s0 row 140: reward_ceiling 99.0" in out
+
+
+def test_abandoned_sanctioned_and_stray_snapshots(sup, monkeypatch, tmp_path,
+                                                  capsys):
+    def no(*a, **k):
+        raise AssertionError("must stop before any wait or launch")
+
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup, "other_supervisors", lambda: [])
+    rel, base, _j, ckpt, _d = sup.paths("tkx", 0)
+    base = pathlib.Path(base)
+    base.mkdir(parents=True)
+    # sanctioned: the checkpoint, or a LAUNCHED / NO-WAIT line in its log
+    assert not sup.sanctioned(str(base), ckpt)
+    (base / "supervisor.log").write_text("WAITING for RG" + chr(10))
+    assert not sup.sanctioned(str(base), ckpt)
+    (base / "supervisor.log").write_text("NO-WAIT override: tkx s0" + chr(10))
+    assert sup.sanctioned(str(base), ckpt)
+    (base / "supervisor.log").write_text("LAUNCHED tkx s0 attempt 1" + chr(10))
+    assert sup.sanctioned(str(base), ckpt)
+    # stray snapshots (a fresh start would mix timelines) are refused
+    snaps = base / "snapshots-x"
+    snaps.mkdir()
+    (snaps / "weights-iter005.pth").write_bytes(b"x")
+    for name in ("wait_external", "preflight", "wait_no_trainer",
+                 "live_rgrow_supervisors"):
+        monkeypatch.setattr(sup, name, no)
+    assert sup.main(["tkx", "0"]) == 2
+    assert "snapshots but no checkpoint" in capsys.readouterr().out
+    pathlib.Path(ckpt).write_bytes(b"x" * 1_000_001)
+    assert sup.stray_snapshots(str(base), ckpt) == []
+    # ABANDONED stops every launch, before any wait
+    (base / "ABANDONED").write_text("")
+    assert sup.main(["tkx", "0"]) == 0
+    assert sup.main(["tkx", "0", "--no-wait"]) == 0
+    assert "ABANDONED tkx s0" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
@@ -569,9 +645,12 @@ def test_supervisor_row_alerts(sup, row, per, want):
 
 
 def test_supervisor_rows_print_the_growth_and_token_fields(sup, tmp_path,
+                                                           monkeypatch,
                                                            capsys):
     jsonl = tmp_path / "a.jsonl"
     rows = sup.Rows(str(jsonl), "tkx", 0)
+    # never the real host's memory: < 4 GB would fail a preflight (r2 A-L5)
+    monkeypatch.setattr(sup, "commit_free_gb", lambda: None)
     jsonl.write_text(json.dumps({
         "iteration": 5, "return_mean": 500.0,
         "reward_ceiling": round(160 ** (8 / 270), 4),

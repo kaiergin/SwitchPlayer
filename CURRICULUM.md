@@ -832,7 +832,7 @@ DEPLOYED (acting states) primary, raw secondary; g = (score - 307.3) /
       windows; the band is the twin's row spread, wider than TK-90's own
       108.3): BETTER >= 1088.6 (g 0.80), WORSE <= 624.6 (g 0.33), else NO
       DIFFERENT. Raw likewise against TK-90's 830.81, +-205 (BETTER >=
-      1035.6, WORSE <= 626.0; amended, audit r1 A-L4: each band is 2 SE of
+      1035.8, WORSE <= 625.8; amended, audit r1 A-L4: each band is 2 SE of
       a 7-row difference from the LARGER of the two runs' row spreads --
       deployed the twin's 216.9 over TK-90's 108.3, raw TK-90's own 191.6
       over the twin's 129.3). Also g, and descriptively against
@@ -845,7 +845,7 @@ DEPLOYED (acting states) primary, raw secondary; g = (score - 307.3) /
       whose env_steps >= 100k (~row 155 at TK-90's pace), descriptively
       against EfficientZero's 1281.2.
   (4) same iterations, descriptive: TKX's rows 60-90 against TK-90's rows
-      60-90 (TKX still at temperature 0.5 and ceiling ~10-28 there): what
+      60-90 (TKX still at temperature 0.5 and ceiling ~9-28 there): what
       the stretch costs early.
   (5) tokens, descriptive (as TK-90's read 4): per-duration play and
       search shares over the run, frames per decision, decisions per life,
@@ -917,8 +917,9 @@ AMENDMENTS (audit r1, before launch; A and B nothing HIGH):
     skips a running component, so after a pause that killed only the
     supervisor and its trainer, rerunning it starts just the supervisor).
   - A-L1: a RESUME (TKX's own checkpoint exists) skips the wait for RG.
-    PROCEDURE for --no-wait: kill TKX's waiting supervisor and RG's
-    supervisor and trainer by command line, then launch `tkx 0 --no-wait`.
+    PROCEDURE for --no-wait: kill TKX's waiting supervisor, RG's supervisor
+    and trainer, and RG's hand-off post_rgrow.py by command line, then
+    launch `tkx 0 --no-wait`.
   - A-L2: RG complete for over 2 h with its evals still missing is an
     hourly ALERT (is RG's hand-off alive?).
   - A-L4: the raw band (above).
@@ -930,11 +931,42 @@ AMENDMENTS (audit r1, before launch; A and B nothing HIGH):
   - B-L1-L6 (hand-off): stdout cannot die on a non-ASCII echo; an error in
     its loop is an ALERT and a retry, not a dead hand-off; a probe running
     past 30 min (one snapshot) / 3 h (a group) is an hourly ALERT; the
-    final pass never runs two probes on one jsonl. ABANDON: create the
-    empty file ABANDONED in the run folder -- the hand-off then evaluates
-    the snapshots that exist and logs "all done". A FRESH restart into the
-    same folder must first move the run's two probe jsonls aside (rows
-    already there count as done).
+    final pass never runs two probes on one jsonl. ABANDON and FRESH
+    RESTART: see audit r2.
+AMENDMENTS (audit r2, before launch; A and B nothing HIGH; both MEDIUMs the
+same hole):
+  - A-M1 / B-M1: a fresh restart into the same run folder leaves the old
+    snapshots, which look settled by mtime once the new run checkpoints --
+    the dead timeline's evals would land as done. Now: the supervisor
+    refuses a run folder holding snapshots without a checkpoint; the
+    hand-off's settled also requires the run's own ablation jsonl to hold
+    row i (drained before its covering checkpoint: no delay). PROCEDURE
+    for a fresh restart: move the WHOLE run folder (checkpoint, ablation
+    jsonl, snapshots, logs) and the run's two probe jsonls aside, or use a
+    new folder.
+  - ABANDON (A-L1, B-L2): FIRST stop the supervisor and its trainer by
+    command line, THEN create the empty file ABANDONED in the run folder.
+    The supervisor refuses every launch while it exists; the hand-off
+    evaluates the snapshots that have an in-run row and logs "all done".
+    Un-abandoning (removing the flag, resuming) must first drop the probe
+    rows of snapshots newer than the checkpoint.
+  - A-L2: a RESUME is also "this run's supervisor.log logged a LAUNCHED /
+    NO-WAIT override line" (a --no-wait start that died before its first
+    checkpoint does not wait for RG again).
+  - A-L3 / A-L4: each attempt waits for no trainer, THEN checks the
+    manifest, then launches; rows keep streaming while it waits.
+  - A-L5-L7: tests never read host memory or the real run folder, fail
+    instead of hanging, and cover the python-only singleton filter.
+  - A-L8: raw thresholds from the rounded +-205 (above).
+  - A-L9 (noted, pre-existing): the shared venv is outside the manifest;
+    the hand-off ALERTs on a .venv change. No package installs into
+    Y:\SwitchPlayer\.venv while TKX runs.
+  - B-L1, B-L3-L7: "all done" only after a final pass ran (else "ALERT:
+    final pass FAILED"); single-snapshot final jobs; exact-name singleton
+    checks (the launcher's regex anchored); the health checks run while
+    probes run; only PROBE_ENV records count as landed, and no manual
+    probes into TKX's jsonls while the hand-off lives; the --no-wait
+    procedure also stops RG's hand-off (above).
 
 ### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
 
