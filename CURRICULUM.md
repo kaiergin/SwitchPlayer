@@ -965,6 +965,14 @@ worktree Y:\SwitchPlayer-rgrow-run, detached at a81bcf39; GPU smoke from it
 LAUNCHED 2026-10-19 15:57 (WMI, scratchpad launch_rgrow.ps1): the hand-off
 post_rgrow.py, then `supervise_rgrow.py tk 0` (preflight ok, attempt 1
 fresh at 16:03) and `supervise_rgrow.py rg 0` (waiting for tk's marker).
+TK DONE 2026-10-20 07:35 (attempt 1, no deaths, 15.4 h, 10.3-11.1 min per
+iteration; row 90 at 58.5k env steps against the twin's 53.4k); its 18 x 2
+evals done 07:42 (probe jsonls committed). INTERIM, read (1) against the
+twin only: deployed mean 60-90 = 856.62 (g 0.564) against 649.14, +207 --
+NO DIFFERENT (BETTER would be >= 881.0); raw 830.81 against 585.62, +245
+-- BETTER on the secondary read (band +-138). Not near random. The TOKENS
+verdict waits for RG (TK is WORSE than RG only if RG's deployed mean is
+>= 1088.6). RG started 07:35 (preflight ok, attempt 1 fresh).
 
 ### Next experiment (pre-registered) -- P2a: duration tokens on Pong (Kai, 2026-10-17)
 
