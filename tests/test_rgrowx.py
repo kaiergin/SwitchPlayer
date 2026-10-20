@@ -196,7 +196,14 @@ def test_supervisor_write_manifest_refuses_a_dirty_tree(sup, monkeypatch,
     assert not (tmp_path / "m.json").exists()
 
 
-def test_supervisor_refuses_bad_arguments(sup, capsys):
+def test_supervisor_refuses_bad_arguments(sup, monkeypatch, capsys):
+    def no(*a, **k):
+        raise AssertionError("a bad argv got past the usage check")
+
+    # a wrongly accepted argv fails here instead of waiting (audit r1 A-L7)
+    for name in ("other_supervisors", "run_done", "wait_external",
+                 "preflight", "live_rgrow_supervisors"):
+        monkeypatch.setattr(sup, name, no)
     for argv in ([], ["tkx"], ["0"], ["tkx", "1"], ["tk", "0"], ["rg", "0"],
                  ["tkx", "x"], ["tkx", "0", "1"], ["0", "tkx"],
                  ["tkx", "0", "--wait"], ["tkx", "0", "--no-wait", "x"]):
@@ -227,6 +234,16 @@ def test_rg_constants_name_the_live_rg_run(sup, tk90, monkeypatch):
         os.path.join(probes, f"probe_exhaustive_eval-{sup.RG_RUN}-acting.jsonl"),
         os.path.join(probes, f"probe_exhaustive_eval-{sup.RG_RUN}.jsonl"))
     assert sup.RG_ROWS == tuple(range(5, 95, 5))
+    # the literal live paths (audit r1 A-L7: not only self-consistent)
+    bs = chr(92)
+    assert sup.RG_TREE == "Y:" + bs + "SwitchPlayer-rgrow-run"
+    assert sup.RG_MARKER == bs.join([
+        "Y:", "SwitchPlayer-rgrow-run", "benchmarks", "results",
+        "mspacman-rgrow-s0-2026-10-19",
+        f"resume-mspacmannoframeskip-skip4-{RG_ARM}-seed0.ckpt"])
+    assert sup.RG_PROBES[0] == bs.join([
+        "Y:", "SwitchPlayer-rgrow-run", "benchmarks", "probes",
+        "probe_exhaustive_eval-mspacman-rgrow-s0-2026-10-19-acting.jsonl"])
 
 
 @pytest.fixture
@@ -289,6 +306,36 @@ def test_wait_external_blocks_until_rg_is_evaluated(sup, rg_files,
     assert sleeps == [] and capsys.readouterr().out == ""
 
 
+def test_wait_external_alerts_when_rg_is_done_but_unevaluated(
+        sup, rg_files, monkeypatch, capsys):
+    rg_files.marker.write_bytes(b"x")
+    _rows(rg_files.probes[0], range(5, 95, 5))
+    _rows(rg_files.probes[1], range(5, 90, 5))         # row 90 never lands
+    old = os.path.getmtime(rg_files.marker) - 3 * 3600
+    os.utime(rg_files.marker, (old, old))
+    sleeps = []
+
+    def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) == 61:
+            _rows(rg_files.probes[1], range(5, 95, 5))
+
+    monkeypatch.setattr(sup.time, "sleep", fake_sleep)
+    sup.wait_external("tkx", 0)
+    out = capsys.readouterr().out
+    assert out.count("ALERT: RG completed 3.0 h ago but its evals still "
+                     "lack rows") == 2                  # at once, then hourly
+    assert "post_rgrow.py" in out and "may start" in out
+    # a fresh marker (RG just finished): no ALERT yet
+    rg_files.marker.write_bytes(b"x")
+    _rows(rg_files.probes[1], range(5, 90, 5))
+    sleeps.clear()
+    monkeypatch.setattr(sup.time, "sleep", lambda s: _rows(
+        rg_files.probes[1], range(5, 95, 5)))
+    sup.wait_external("tkx", 0)
+    assert "ALERT" not in capsys.readouterr().out
+
+
 def test_rg_gave_up_reads_the_last_lines(sup, rg_files):
     assert not sup.rg_gave_up()                         # no log
     rg_files.suplog.write_text("CRASH LOOP: x" + chr(10) + "LAUNCHED rg"
@@ -315,6 +362,7 @@ def test_no_wait_is_logged_and_refused_while_an_rgrow_supervisor_lives(
     # the preflight runs this suite: pin the host probes, never read the
     # real process table here
     monkeypatch.setattr(sup, "run_done", lambda v, s: False)
+    monkeypatch.setattr(sup, "other_supervisors", lambda: [])
     monkeypatch.setattr(sup, "live_rgrow_supervisors", lambda: [])
     monkeypatch.setattr(sup, "wait_external", no)
     monkeypatch.setattr(sup, "preflight", _stop)
@@ -336,6 +384,7 @@ def test_supervisor_exits_at_once_when_its_run_is_complete(sup, monkeypatch,
         raise AssertionError("no wait or preflight for a finished run")
 
     monkeypatch.setattr(sup, "run_done", lambda v, s: True)
+    monkeypatch.setattr(sup, "other_supervisors", lambda: [])
     monkeypatch.setattr(sup, "wait_external", no)
     monkeypatch.setattr(sup, "live_rgrow_supervisors", no)
     monkeypatch.setattr(sup, "preflight", no)
@@ -369,18 +418,113 @@ def test_live_rgrow_supervisors_finds_either_variant_only(sup, monkeypatch):
 def test_live_trainers_finds_any_ablation_run(sup, monkeypatch):
     bs = chr(92)
     _procs(monkeypatch, [
-        {"pid": 1, "cmdline": ["py", "Y:" + bs + "run" + bs + "experiments"
-                               + bs + "ablation.py", "--arms", RG_ARM,
-                               "--seed", "0"]},
-        {"pid": 2, "cmdline": ["py", "experiments/ablation.py", "--arms",
-                               TK_ARM, "--seed", "1"]},
-        {"pid": 3, "cmdline": ["py", "experiments/ablation.py", "--arms",
-                               "pong-whatever"]},
-        {"pid": 4, "cmdline": ["py", "benchmarks/probes/"
-                               "probe_exhaustive_eval.py", "x.pth"]},
-        {"pid": 5, "cmdline": ["py", "-m", "pytest", "tests/test_rgrowx.py"]},
-        {"pid": 6, "cmdline": None}])
+        {"pid": 1, "name": "python.exe",
+         "cmdline": ["py", "Y:" + bs + "run" + bs + "experiments"
+                     + bs + "ablation.py", "--arms", RG_ARM, "--seed", "0"]},
+        {"pid": 2, "name": "python.exe",
+         "cmdline": ["py", "experiments/ablation.py", "--arms", TK_ARM,
+                     "--seed", "1"]},
+        {"pid": 3, "name": "Python3.12",
+         "cmdline": ["py", "experiments/ablation.py", "--arms",
+                     "pong-whatever"]},
+        {"pid": 4, "name": "python.exe",
+         "cmdline": ["py", "benchmarks/probes/probe_exhaustive_eval.py",
+                     "x.pth"]},
+        {"pid": 5, "name": "python.exe",
+         "cmdline": ["py", "-m", "pytest", "tests/test_rgrowx.py"]},
+        {"pid": 6, "name": "python.exe", "cmdline": None},
+        # not trainers: an editor, git, a shell naming the file (A-L5)
+        {"pid": 7, "name": "Code.exe",
+         "cmdline": ["code", "experiments/ablation.py"]},
+        {"pid": 8, "name": "git.exe",
+         "cmdline": ["git", "diff", "--", "experiments/ablation.py"]},
+        {"pid": 9, "name": None, "cmdline": ["experiments/ablation.py"]}])
     assert sup.live_trainers() == [1, 2, 3]
+
+
+def test_one_supervisor_per_run(sup, monkeypatch, capsys):
+    bs = chr(92)
+    _procs(monkeypatch, [
+        {"pid": 10, "name": "python.exe",           # this process
+         "cmdline": ["py", "benchmarks" + bs + "supervisors" + bs
+                     + "supervise_rgrowx.py", "tkx", "0"]},
+        {"pid": 11, "name": "python.exe",           # its venv launcher
+         "cmdline": ["py", "benchmarks/supervisors/supervise_rgrowx.py",
+                     "tkx", "0"]},
+        {"pid": 12, "name": "cmd.exe",              # the WMI shell
+         "cmdline": ["cmd.exe", "/c", "py supervise_rgrowx.py tkx 0 >> x"]},
+        {"pid": 13, "name": "python.exe",           # RG's supervisor
+         "cmdline": ["py", "benchmarks/supervisors/supervise_rgrow.py",
+                     "rg", "0"]}])
+    monkeypatch.setattr(sup, "_mine", lambda: {10, 11})
+    assert sup.other_supervisors() == []
+    _procs(monkeypatch, [
+        {"pid": 20, "name": "python.exe",           # a second launch
+         "cmdline": ["py", "benchmarks/supervisors/supervise_rgrowx.py",
+                     "tkx", "0", "--no-wait"]}])
+    assert sup.other_supervisors() == [20]
+
+    def no(*a, **k):
+        raise AssertionError("a second supervisor must stop at once")
+
+    for name in ("run_done", "wait_external", "preflight",
+                 "live_rgrow_supervisors"):
+        monkeypatch.setattr(sup, name, no)
+    assert sup.main(["tkx", "0"]) == 2
+    assert sup.main(["tkx", "0", "--no-wait"]) == 2
+    out = capsys.readouterr().out
+    assert "refusing: another supervise_rgrowx.py is alive (pids [20])" in out
+
+
+def test_a_resume_skips_the_wait_for_rg(sup, monkeypatch, tmp_path, capsys):
+    def no(*a, **k):
+        raise AssertionError("a resume must not wait for RG again")
+
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup, "other_supervisors", lambda: [])
+    monkeypatch.setattr(sup, "live_rgrow_supervisors", no)
+    monkeypatch.setattr(sup, "wait_external", no)
+    monkeypatch.setattr(sup, "preflight", _stop)
+    ckpt = pathlib.Path(sup.paths("tkx", 0)[3])
+    ckpt.parent.mkdir(parents=True)
+    ckpt.write_bytes(b"x" * 1_000_001)               # a real checkpoint
+    with pytest.raises(Stop):
+        sup.main(["tkx", "0"])
+    assert "RESUMING tkx s0" in capsys.readouterr().out
+    ckpt.unlink()                                    # fresh: it waits
+    monkeypatch.setattr(sup, "wait_external", _stop)
+    with pytest.raises(Stop):
+        sup.main(["tkx", "0"])
+
+
+def test_every_launch_attempt_waits_for_no_trainer(sup, monkeypatch,
+                                                   tmp_path, capsys):
+    """Behavioural (audit r1 A-L7): the guard runs before EVERY Popen."""
+    events = []
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup, "other_supervisors", lambda: [])
+    monkeypatch.setattr(sup, "wait_external", lambda v, s: None)
+    monkeypatch.setattr(sup, "preflight", lambda v: (True, ""))
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup, "wait_no_trainer",
+                        lambda: events.append("guard"))
+    monkeypatch.setattr(sup, "snapshot", lambda *a: None)
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+
+    class Dead:
+        pid, returncode = 99, 1
+
+        def poll(self):
+            return 1
+
+    def popen(args, **k):
+        events.append("popen")
+        return Dead()
+
+    monkeypatch.setattr(sup.subprocess, "Popen", popen)
+    assert sup.main(["tkx", "0"]) == 1              # 5 quick deaths
+    assert "CRASH LOOP" in capsys.readouterr().out
+    assert events == ["guard", "popen"] * 5
 
 
 def test_wait_no_trainer_waits_out_any_trainer(sup, monkeypatch, capsys):
@@ -440,3 +584,15 @@ def test_supervisor_rows_print_the_growth_and_token_fields(sup, tmp_path,
     assert "kept 0.42  max 1.1" in out
     assert "frames/decision 9.5  decisions/life 40.0" in out
     assert "ALERT" not in out
+
+
+def test_supervisor_rows_alert_on_low_host_commit(sup, tmp_path, monkeypatch,
+                                                  capsys):
+    jsonl = tmp_path / "a.jsonl"
+    rows = sup.Rows(str(jsonl), "tkx", 0)
+    monkeypatch.setattr(sup, "commit_free_gb", lambda: 3.2)
+    jsonl.write_text(json.dumps({
+        "iteration": 140, "reward_ceiling": 160.0, "elapsed_s": 1.0}) + chr(10))
+    rows.emit()
+    out = capsys.readouterr().out
+    assert "ALERT: tkx s0 row 140: host commit free 3.2 GB < 4 GB" in out

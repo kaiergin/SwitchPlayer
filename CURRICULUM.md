@@ -796,8 +796,8 @@ ARM: TKX = effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens
   5, --checkpoint-every 2, --snapshot-weights, --ray --cpu-actor; seed 0;
   folder mspacman-tokens-rgrow-x270-s0-2026-10-20. TK-90 = the 90-iteration
   run (mspacman-tokens-rgrow-s0-2026-10-19). Same seed as TK-90, but the
-  stretched schedules diverge from step 1 (ceiling, bias), so TKX's rows
-  are not a replay of TK-90's.
+  stretched schedules diverge -- PER beta from step 1, the ceiling and the
+  bias from iteration 2 -- so TKX's rows are not a replay of TK-90's.
 SCHEDULES, stretched (fractions of the planned 540k steps; computed with
 the arm's config under _run_length_globals(270, 2000) at each iteration's
 starting step (it - 1) x 2000; pinned in tests/test_rgrowx.py):
@@ -831,8 +831,11 @@ DEPLOYED (acting states) primary, raw secondary; g = (score - 307.3) /
       TK-90's rows 60-90, 856.62, with the same +-232 band (two 7-row
       windows; the band is the twin's row spread, wider than TK-90's own
       108.3): BETTER >= 1088.6 (g 0.80), WORSE <= 624.6 (g 0.33), else NO
-      DIFFERENT. Raw likewise against TK-90's 830.81, +-138 (BETTER >=
-      968.8, WORSE <= 692.8). Also g, and descriptively against
+      DIFFERENT. Raw likewise against TK-90's 830.81, +-205 (BETTER >=
+      1035.6, WORSE <= 626.0; amended, audit r1 A-L4: each band is 2 SE of
+      a 7-row difference from the LARGER of the two runs' row spreads --
+      deployed the twin's 216.9 over TK-90's 108.3, raw TK-90's own 191.6
+      over the twin's 129.3). Also g, and descriptively against
       EfficientZero's 1281.2 (g = 1).
   (2) still climbing: TKX's deployed mean of rows 240-270 against its rows
       150-180 (7 rows each, 90 iterations earlier): >= +232 STILL CLIMBING,
@@ -850,16 +853,30 @@ DEPLOYED (acting states) primary, raw secondary; g = (score - 307.3) /
   (6) stability: the largest drop between adjacent rows from row 140;
       rows below 502.08 after the first row >= 881.
   (7) clip growth, descriptive: reward_ceiling, reward_kept, reward_max.
-DECISION AFTER. Single seed: a BETTER / WORSE reads "consistent with".
+DECISION AFTER (completed before launch, audit r1 A-M2). Single seed: a
+BETTER / WORSE reads "consistent with". The DEPLOYED reads decide; raw is
+reported beside them, and a deployed / raw disagreement is reported, not
+acted on. Read (1) x read (2):
   BETTER + STILL CLIMBING -> longer still pays (Kai's call: 4x or more, or
     a seed-1 replicate first); the long length becomes the Ms. Pac-Man
     length for P2b / P3 comparisons.
   BETTER + PLATEAU -> 270 iterations is the Ms. Pac-Man length for P2b /
     P3 (Kai confirms).
-  NO DIFFERENT -> 90 iterations suffice at this recipe; the limit is
-    elsewhere (data per iteration, the replay cap) -> Kai's call.
-  WORSE -> diagnose (the stretched schedule: the longer high temperature,
-    the slower clip growth; the replay cap) before anything else.
+  BETTER + FALLING -> it peaked inside the run: diagnose the decline
+    (read 6; the 0.125 temperature stage from iteration 204; the replay
+    cap) before adopting any length; the best 7-row window is reported
+    descriptively.
+  NO DIFFERENT + STILL CLIMBING -> the stretch delayed learning and it is
+    still rising: NOT "90 suffice" -- Kai's call (longer still, or the
+    90-iteration schedules held and the run continued).
+  NO DIFFERENT + PLATEAU -> 90 iterations suffice at this recipe; the limit
+    is elsewhere (data per iteration, the replay cap) -> Kai's call.
+  NO DIFFERENT + FALLING -> diagnose the decline as above.
+  WORSE (any trend) -> diagnose (the stretched schedule: the longer high
+    temperature, the slower clip growth; the replay cap) before anything
+    else; with STILL CLIMBING the stretch may only have delayed learning.
+  ABANDONED (stopped under the pace rule or after a crash loop, Kai's
+    call) -> read descriptively from the rows it has; no verdict.
   The TOKENS verdict of the 90-iteration pair (TK against RG, scored when
   RG's evals land) is separate and unchanged.
 COST: ~48 h at TK-90's 10.3-11.1 min per iteration (its pace stayed flat
@@ -867,10 +884,11 @@ while decisions per life went 40 -> 84); up to ~60-70 h if lives lengthen
 (the 36-token refresh scales with decisions per life). PACE RULE: a row
 past 25 min/iteration is an ALERT in the supervisor and Kai's call.
 Interim evals: the hand-off (scratchpad post_rgrowx.py) evaluates each
-snapshot as it lands, ONE probe at a time on the CPU while TKX trains
-(~2-4 min per probe, two per 5 iterations ~ 53 min: a small CPU load
-beside the actor -- a deviation from TK-90, whose evals ran after it), the
-rest at 4 probes at a time after completion. ~3 GB of snapshots (54 x ~55
+snapshot once it is SETTLED (the resume checkpoint is newer than it -- see
+AMENDMENTS), ONE probe at a time on the CPU while TKX trains (~1-4 min per
+probe, two per 5 iterations ~ 53 min: a small CPU load beside the actor --
+a deviation from TK-90, whose evals ran after it), the rest 2 at a time
+after completion. ~3 GB of snapshots (54 x ~55
 MB). Known risks: a Windows Update restart (relaunch: scratchpad
 launch_rgrowx.ps1; the supervisor resumes from the last checkpoint, the
 hand-off reruns only missing rows) and Kai's Switch-control sessions,
@@ -882,7 +900,41 @@ muzero_vtree.py, networks.py, scalar_categorical.py, memory.py,
 EpisodicLifeEnv.py, atari_wrappers.py, residual_block.py, experiments/,
 the probe; checked 2026-10-20 at 756f34ff), and TK-90 completed its 90
 iterations with no deaths. The only change is --iterations, whose effects
-(the schedules above) are pinned by CPU tests at 270 x 2000.
+(the schedules above) are pinned by CPU tests at 270 x 2000. The probe
+pins _run_length_globals(90, 2000) for its own process; that has no effect
+on its greedy prior-argmax play (no temperature, no bias), so TKX's evals
+are exactly TK-90's.
+AMENDMENTS (audit r1, before launch; A and B nothing HIGH):
+  - A-M1 / B-M1 (both auditors): a resume replays the iterations after its
+    checkpoint and rewrites their snapshots, so a row probed before its
+    covering checkpoint could keep a dead timeline's result for good. The
+    hand-off probes a snapshot only once the resume checkpoint is newer
+    than it (checkpoints every 2 iterations: a resume starts at most 2
+    back, so a settled snapshot is final; <= 1 iteration of delay).
+  - A-M2: the decision table completed (above); the deployed reads decide.
+  - B-M2 / A-L3: one supervisor and one hand-off per run -- each refuses a
+    second instance of itself, and launch_rgrowx.ps1 is idempotent (it
+    skips a running component, so after a pause that killed only the
+    supervisor and its trainer, rerunning it starts just the supervisor).
+  - A-L1: a RESUME (TKX's own checkpoint exists) skips the wait for RG.
+    PROCEDURE for --no-wait: kill TKX's waiting supervisor and RG's
+    supervisor and trainer by command line, then launch `tkx 0 --no-wait`.
+  - A-L2: RG complete for over 2 h with its evals still missing is an
+    hourly ALERT (is RG's hand-off alive?).
+  - A-L4: the raw band (above).
+  - A-L5: the trainer guard counts python processes only, and sees only
+    experiments/ablation.py trainers (a GPU probe or Kai's Switch code is
+    not seen -- the Switch rule above still applies).
+  - A-L6: no --ray --cpu-actor run has gone past 90 iterations (~16 h);
+    each row ALERTs when host commit falls below 4 GB (memory creep).
+  - B-L1-L6 (hand-off): stdout cannot die on a non-ASCII echo; an error in
+    its loop is an ALERT and a retry, not a dead hand-off; a probe running
+    past 30 min (one snapshot) / 3 h (a group) is an hourly ALERT; the
+    final pass never runs two probes on one jsonl. ABANDON: create the
+    empty file ABANDONED in the run folder -- the hand-off then evaluates
+    the snapshots that exist and logs "all done". A FRESH restart into the
+    same folder must first move the run's two probe jsonls aside (rows
+    already there count as done).
 
 ### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
 

@@ -15,12 +15,22 @@ It starts only once the GPU and the CPUs are free: before its preflight it
 waits (wait_external) for RG -- the 90-iteration clip-growth run, training
 from the OTHER run worktree (RG_TREE) -- to have its completion marker AND
 both of its probe jsonls (acting + raw) to hold every row 5-90, i.e. RG's
-evals have landed. --no-wait (logged, Kai's call) skips that wait; it is
-refused while any supervise_rgrow.py process lives (RG's supervisor would
-relaunch RG beside this run). Before EVERY launch attempt it also waits
-while ANY experiments/ablation.py runs (any tree, arm or seed: one run on
-the GPU at a time, never a second writer). A run already complete exits at
-once (RUN COMPLETE), before any wait or preflight.
+evals have landed; RG complete for over 2 h with its evals still missing
+is an hourly ALERT (is RG's hand-off alive?). A RESUME (this run's own
+checkpoint exists) skips that wait: its start was already sanctioned
+(audit r1 A-L1). --no-wait (logged, Kai's call) skips it too; it is refused
+while any supervise_rgrow.py process lives (an unfinished RG's supervisor
+would interleave RG's attempts with this run's). PROCEDURE for --no-wait:
+kill this run's waiting supervisor and RG's supervisor and trainer (by
+command line, never taskkill /T), then launch `tkx 0 --no-wait`. Before
+EVERY launch attempt it also waits while ANY python runs an
+experiments/ablation.py (any tree, arm or seed: one ablation trainer on the
+GPU at a time, never a second writer; other GPU users -- a GPU probe,
+Kai's Switch code -- are not seen). One supervisor per run: a second
+supervise_rgrowx.py refuses to start (audit r1 A-L3 / B-M2). A run already
+complete exits at once (RUN COMPLETE), before any wait or preflight. Each
+row also ALERTs when host commit falls below 4 GB (a 3x run's memory creep
+is untested; audit r1 A-L6).
 
 Create the run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
@@ -53,6 +63,8 @@ ITERATIONS = 270
 CEILING, CEILING_END_STEPS, TRAIN_STEPS = 160.0, 270_000, 2000
 PACE_ALERT_MIN = 25.0
 REWARD_MAX_ALERT = 400.0
+COMMIT_ALERT_GB = 4.0
+RG_EVALS_ALERT_S = 2 * 3600     # RG done this long, its evals still missing
 
 
 def expected_ceiling(iteration):
@@ -247,6 +259,17 @@ def rg_missing():
     return out
 
 
+def rg_marker_age():
+    """Seconds since RG's checkpoint became the completion marker (its
+    mtime), or None while it is not one."""
+    try:
+        if os.path.getsize(RG_MARKER) < 1_000_000:
+            return time.time() - os.path.getmtime(RG_MARKER)
+    except OSError:
+        pass
+    return None
+
+
 def rg_gave_up():
     """RG's supervisor logged CRASH LOOP / MAX ATTEMPTS after its last
     launch or preflight line."""
@@ -278,6 +301,13 @@ def wait_external(variant, seed):
             if rg_gave_up():
                 print("ALERT: RG's supervisor gave up (CRASH LOOP / MAX "
                       f"ATTEMPTS) -- {variant} keeps waiting", flush=True)
+            age = rg_marker_age()
+            if age is not None and age > RG_EVALS_ALERT_S:
+                print(f"ALERT: RG completed {age / 3600:.1f} h ago but its "
+                      "evals still lack rows -- is RG's hand-off (scratchpad "
+                      "post_rgrow.py) alive? Rerun its missing probes, or "
+                      f"start {variant} with --no-wait (Kai's call)",
+                      flush=True)
         first = False
         time.sleep(60)
         polls += 1
@@ -314,20 +344,80 @@ def preflight(variant):
 
 
 def live_trainers():
-    """PIDs of ANY running experiments/ablation.py (any tree, arm or seed):
-    an orphan of an earlier supervisor (the child is detached and survives
-    a supervisor kill), RG, a duplicate launch, anything else on the GPU."""
+    """PIDs of ANY python running experiments/ablation.py (any tree, arm or
+    seed): an orphan of an earlier supervisor (the child is detached and
+    survives a supervisor kill), RG, a duplicate launch. Python processes
+    only: an editor or a git command naming the file is not a trainer
+    (audit r1 A-L5)."""
     import psutil
     out = []
-    for p in psutil.process_iter(["pid", "cmdline"]):
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
+            name = (p.info.get("name") or "").lower()
             cmd = p.info["cmdline"] or []
         except (psutil.Error, KeyError):
             continue
-        if any(c.replace(chr(92), "/").endswith("experiments/ablation.py")
+        if name.startswith("python") and any(
+                c.replace(chr(92), "/").endswith("experiments/ablation.py")
+                for c in cmd):
+            out.append(p.info["pid"])
+    return out
+
+
+def _mine():
+    """This process and its ancestors (the venv's python.exe is a launcher
+    whose child runs the script with the same command line)."""
+    import psutil
+    out = {os.getpid()}
+    try:
+        out.update(a.pid for a in psutil.Process().parents())
+    except psutil.Error:
+        pass
+    return out
+
+
+def other_supervisors():
+    """PIDs of OTHER python processes running supervise_rgrowx.py (never
+    this process or its ancestors)."""
+    import psutil
+    mine = _mine()
+    out = []
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            name = (p.info.get("name") or "").lower()
+            cmd = p.info["cmdline"] or []
+        except (psutil.Error, KeyError):
+            continue
+        if p.info["pid"] in mine or not name.startswith("python"):
+            continue
+        if any(c.replace(chr(92), "/").endswith("supervise_rgrowx.py")
                for c in cmd):
             out.append(p.info["pid"])
     return out
+
+
+def commit_free_gb():
+    """Free host commit (page file + RAM), GB; None off Windows."""
+    import ctypes
+
+    class MEMSTAT(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+    try:
+        m = MEMSTAT()
+        m.dwLength = ctypes.sizeof(MEMSTAT)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+            return None
+        return m.ullAvailPageFile / 2**30
+    except (AttributeError, OSError):
+        return None
 
 
 def live_rgrow_supervisors():
@@ -403,6 +493,11 @@ class Rows:
             for alert in row_alerts(r, per):
                 print(f"ALERT: {self.variant} s{self.seed} row "
                       f"{r.get('iteration')}: {alert}", flush=True)
+            free = commit_free_gb()
+            if free is not None and free < COMMIT_ALERT_GB:
+                print(f"ALERT: {self.variant} s{self.seed} row "
+                      f"{r.get('iteration')}: host commit free {free:.1f} GB "
+                      f"< {COMMIT_ALERT_GB:g} GB -- memory creep?", flush=True)
 
 
 def row_alerts(r, per):
@@ -456,9 +551,9 @@ def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
 
 
 def wait_no_trainer():
-    """Block while ANY experiments/ablation.py runs (an orphan of an earlier
-    supervisor, RG, a duplicate, anything else): one run on the GPU at a
-    time, and never a second writer."""
+    """Block while ANY python runs experiments/ablation.py (an orphan of an
+    earlier supervisor, RG, a duplicate): one ablation trainer on the GPU at
+    a time, and never a second writer."""
     polls, told = 0, None
     while True:
         pids = live_trainers()
@@ -487,6 +582,11 @@ def main(argv):
     variant, seed = argv[0], int(argv[1])
     arm = VARIANTS[variant]
     rel, base, jsonl, ckpt, deaths_log = paths(variant, seed)
+    others = other_supervisors()
+    if others:
+        print(f"refusing: another supervise_rgrowx.py is alive (pids "
+              f"{others}) -- one supervisor per run", flush=True)
+        return 2
     if run_done(variant, seed):
         # Before any wait or preflight: a relaunch after a reboot must not
         # run the CPU suites for nothing.
@@ -502,6 +602,9 @@ def main(argv):
             return 2
         print(f"NO-WAIT override: {variant} s{seed} starts without RG's "
               f"completion marker and evals", flush=True)
+    elif os.path.exists(ckpt):
+        print(f"RESUMING {variant} s{seed}: its checkpoint exists, so its "
+              f"start was already sanctioned -- no wait for RG", flush=True)
     else:
         wait_external(variant, seed)
 
