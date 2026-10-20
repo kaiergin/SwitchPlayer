@@ -1030,6 +1030,10 @@ closes; its LOWs fixed, then a confirmation round):
     is an ALERT; ABANDONED while this run's trainer lives is an ALERT and a
     wait; `launch_rgrowx.ps1 -NoWait` beside a running supervisor says it
     is ignored.
+  - Confirmation round (r5): nothing above LOW; its LOW (a locked probe
+    jsonl at the hand-off's start would kill it outside the retry loop)
+    fixed in the hand-off. The audited repo code is the manifest commit
+    below.
 
 ### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
 
