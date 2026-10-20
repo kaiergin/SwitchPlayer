@@ -775,6 +775,115 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
+
+DECISION (Kai, 2026-10-20): after TK's 90 iterations (deployed mean 60-90
+856.62 against the twin's 649.14, NO DIFFERENT at +207; raw BETTER) -- "it
+takes much longer for ms Pac-Man to truly converge compared to other
+games" -- an extended run: the TK arm (tokens + clip growth), 270
+iterations (3x), FRESH, every run-length schedule stretched. He keeps
+developing the token line even where it does not yet win outright: tokens
+are the route to large, combinatorial action spaces (robotics' combined
+actions; Smash Bros / Mario Maker's many joystick directions combined with
+buttons), learned partly from WATCHING others' play, where a simple
+tokenization of inputs is what a third-person observer can search over.
+QUESTION: does the token arm keep improving on Ms. Pac-Man when the run is
+planned 3x longer?
+ARM: TKX = effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow
+  (TK, unchanged). Recipe = TK's (supervise_rgrow.py tk) with --iterations
+  270: MsPacmanNoFrameskip-v4 --frameskip 4, 270 x 2000 train steps, 3
+  episodes (one game's lives) per iteration, --episode-cap 3000, eval every
+  5, --checkpoint-every 2, --snapshot-weights, --ray --cpu-actor; seed 0;
+  folder mspacman-tokens-rgrow-x270-s0-2026-10-20. TK-90 = the 90-iteration
+  run (mspacman-tokens-rgrow-s0-2026-10-19). Same seed as TK-90, but the
+  stretched schedules diverge from step 1 (ceiling, bias), so TKX's rows
+  are not a replay of TK-90's.
+SCHEDULES, stretched (fractions of the planned 540k steps; computed with
+the arm's config under _run_length_globals(270, 2000) at each iteration's
+starting step (it - 1) x 2000; pinned in tests/test_rgrowx.py):
+  - reward ceiling log-linear 1 -> 160 by 50% (iteration 136): ~5.2 at
+    row 45, ~12.4 at 68, ~28.4 at 90, ~154 at 135; 160 from iteration 136
+    on (row 140 the first logged at 160). TK-90 reached 160 at iteration 46.
+  - long-token bias 0.5 -> 0 by 25%: 0 from iteration 69 (TK-90: 24).
+  - prior-acting temperature (0.5 x the staged 1 / 0.5 / 0.25): 0.5 to
+    iteration 135, 0.25 from 136, 0.125 from 204 (step 405k falls inside
+    iteration 203; TK-90: 46 and 69).
+  - PER beta 0.4 -> 1.0 over the run; the off-policy horizon decay
+    (OFFPOLICY_DECAY_STEPS = 0.3 x total) over 162k steps (TK-90: 54k).
+  UNCHANGED: the replay cap, 31,250 transitions (~48 iterations of data at
+  TK-90's ~650 base steps per iteration: the last ~18% of TKX's run against
+  about half of TK-90's); LR 0.2 constant after the 1k-step warmup (no
+  decay, as in TK-90); 2000 train steps and 3 episodes per iteration; TK's
+  compute knobs (VTREE_REFRESH_BATCH 64, VTREE_COMMUNAL_TRAJS 1).
+START: after RG has completed AND its 36 evals have landed -- the
+supervisor (supervise_rgrowx.py tkx 0) waits for RG's completion marker
+and for both RG probe jsonls holding rows 5-90, then for no ablation.py at
+all, so the GPU and the CPUs are free (expected ~00:30 2026-10-21). A
+logged `--no-wait` override exists (Kai's call), refused while any
+supervise_rgrow.py process lives.
+READS. EXACT eval as TK-90's: whole games (every life), 30 noop starts,
+prior argmax, PROBE_ENV=MsPacmanNoFrameskip-v4; rows 5-270 (54 rows);
+DEPLOYED (acting states) primary, raw secondary; g = (score - 307.3) /
+973.9.
+  NEAR RANDOM first: a last-7-row deployed mean with g < 0.2 (< 502.08) is
+      diagnosed before any other read.
+  (1) level: TKX's deployed mean of its last 7 rows (240-270) against
+      TK-90's rows 60-90, 856.62, with the same +-232 band (two 7-row
+      windows; the band is the twin's row spread, wider than TK-90's own
+      108.3): BETTER >= 1088.6 (g 0.80), WORSE <= 624.6 (g 0.33), else NO
+      DIFFERENT. Raw likewise against TK-90's 830.81, +-138 (BETTER >=
+      968.8, WORSE <= 692.8). Also g, and descriptively against
+      EfficientZero's 1281.2 (g = 1).
+  (2) still climbing: TKX's deployed mean of rows 240-270 against its rows
+      150-180 (7 rows each, 90 iterations earlier): >= +232 STILL CLIMBING,
+      <= -232 FALLING, else PLATEAU.
+  (3) data: score against env steps (base steps) beside TK-90 and the
+      twin; the Atari-100k read: the 7-row window centred on the first row
+      whose env_steps >= 100k (~row 155 at TK-90's pace), descriptively
+      against EfficientZero's 1281.2.
+  (4) same iterations, descriptive: TKX's rows 60-90 against TK-90's rows
+      60-90 (TKX still at temperature 0.5 and ceiling ~10-28 there): what
+      the stretch costs early.
+  (5) tokens, descriptive (as TK-90's read 4): per-duration play and
+      search shares over the run, frames per decision, decisions per life,
+      the deployed player's decisions per second.
+  (6) stability: the largest drop between adjacent rows from row 140;
+      rows below 502.08 after the first row >= 881.
+  (7) clip growth, descriptive: reward_ceiling, reward_kept, reward_max.
+DECISION AFTER. Single seed: a BETTER / WORSE reads "consistent with".
+  BETTER + STILL CLIMBING -> longer still pays (Kai's call: 4x or more, or
+    a seed-1 replicate first); the long length becomes the Ms. Pac-Man
+    length for P2b / P3 comparisons.
+  BETTER + PLATEAU -> 270 iterations is the Ms. Pac-Man length for P2b /
+    P3 (Kai confirms).
+  NO DIFFERENT -> 90 iterations suffice at this recipe; the limit is
+    elsewhere (data per iteration, the replay cap) -> Kai's call.
+  WORSE -> diagnose (the stretched schedule: the longer high temperature,
+    the slower clip growth; the replay cap) before anything else.
+  The TOKENS verdict of the 90-iteration pair (TK against RG, scored when
+  RG's evals land) is separate and unchanged.
+COST: ~48 h at TK-90's 10.3-11.1 min per iteration (its pace stayed flat
+while decisions per life went 40 -> 84); up to ~60-70 h if lives lengthen
+(the 36-token refresh scales with decisions per life). PACE RULE: a row
+past 25 min/iteration is an ALERT in the supervisor and Kai's call.
+Interim evals: the hand-off (scratchpad post_rgrowx.py) evaluates each
+snapshot as it lands, ONE probe at a time on the CPU while TKX trains
+(~2-4 min per probe, two per 5 iterations ~ 53 min: a small CPU load
+beside the actor -- a deviation from TK-90, whose evals ran after it), the
+rest at 4 probes at a time after completion. ~3 GB of snapshots (54 x ~55
+MB). Known risks: a Windows Update restart (relaunch: scratchpad
+launch_rgrowx.ps1; the supervisor resumes from the last checkpoint, the
+hand-off reruns only missing rows) and Kai's Switch-control sessions,
+which kill GPU pythons (pause the supervisor and its trainer by command
+line, relaunch after).
+NO GPU SMOKE: the run executes code byte-identical to TK-90's -- `git diff
+a81bcf39` is empty for every core file it runs (muzero.py, redo.py,
+muzero_vtree.py, networks.py, scalar_categorical.py, memory.py,
+EpisodicLifeEnv.py, atari_wrappers.py, residual_block.py, experiments/,
+the probe; checked 2026-10-20 at 756f34ff), and TK-90 completed its 90
+iterations with no deaths. The only change is --iterations, whose effects
+(the schedules above) are pinned by CPU tests at 270 x 2000.
+
 ### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
 
 DECISION (Kai, 2026-10-19): after P2a's Pong NO BREAKOUT, "try the exact
