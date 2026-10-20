@@ -1034,6 +1034,15 @@ closes; its LOWs fixed, then a confirmation round):
     jsonl at the hand-off's start would kill it outside the retry loop)
     fixed in the hand-off. The audited repo code is the manifest commit
     below.
+AUDIT + LAUNCH: five rounds (r1-r3 each one MEDIUM, fixed; r4 nothing above
+LOW -- the loop closed; r5 confirmed r4's LOW fixes, nothing above LOW; a
+last check of r5's one-line LOW fix, nothing above LOW). Manifest dd5a7ce2
+(40 AUDITED files); the core files are byte-identical to TK-90's a81bcf39
+(`git diff --stat a81bcf39 dd5a7ce2 -- <core>` empty). Run worktree
+Y:\SwitchPlayer-rgrowx-run, detached at dd5a7ce2. LAUNCHED 2026-10-20 15:24
+(WMI, scratchpad launch_rgrowx.ps1): the hand-off post_rgrowx.py, then
+`supervise_rgrowx.py tkx 0`, WAITING for RG's marker and its 36 evals
+(expected ~00:30-01:00 2026-10-21).
 
 ### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
 
