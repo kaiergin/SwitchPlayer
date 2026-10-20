@@ -833,7 +833,8 @@ DEPLOYED (acting states) primary, raw secondary; g = (score - 307.3) /
       108.3): BETTER >= 1088.6 (g 0.80), WORSE <= 624.6 (g 0.33), else NO
       DIFFERENT. Raw likewise against TK-90's 830.81, +-205 (BETTER >=
       1035.8, WORSE <= 625.8; amended, audit r1 A-L4: each band is 2 SE of
-      a 7-row difference from the LARGER of the two runs' row spreads --
+      a 7-row difference from the LARGER of TK-90's and the twin's row
+      spreads --
       deployed the twin's 216.9 over TK-90's 108.3, raw TK-90's own 191.6
       over the twin's 129.3). Also g, and descriptively against
       EfficientZero's 1281.2 (g = 1).
@@ -851,7 +852,8 @@ DEPLOYED (acting states) primary, raw secondary; g = (score - 307.3) /
       search shares over the run, frames per decision, decisions per life,
       the deployed player's decisions per second.
   (6) stability: the largest drop between adjacent rows from row 140;
-      rows below 502.08 after the first row >= 881.
+      rows below 502.08 (the near-random floor) after the first row >=
+      881 (the twin's BETTER threshold, 649.14 + 232).
   (7) clip growth, descriptive: reward_ceiling, reward_kept, reward_max.
 DECISION AFTER (completed before launch, audit r1 A-M2). Single seed: a
 BETTER / WORSE reads "consistent with". The DEPLOYED reads decide; raw is
@@ -967,6 +969,44 @@ same hole):
     probes run; only PROBE_ENV records count as landed, and no manual
     probes into TKX's jsonls while the hand-off lives; the --no-wait
     procedure also stops RG's hand-off (above).
+AMENDMENTS (audit r3, before launch; A and B nothing HIGH; both MEDIUMs the
+fresh-restart procedure again):
+  - A-M1 / B-M1: the supervisor also refuses a run folder with no
+    checkpoint while TKX's probe jsonls hold records (a restart that
+    forgot to move them would keep the old scores); the hand-off, if a
+    probe row it saw land ever VANISHES (a jsonl moved under it), ALERTs,
+    starts no further probe and exits. PROCEDURE for a FRESH RESTART
+    (supersedes r2's): (1) stop the supervisor and its trainer, (2) stop
+    the hand-off and its probes (python processes running post_rgrowx.py /
+    probe_exhaustive_eval.py on this run) and wait for them to exit, (3)
+    move the whole run folder AND the run's two probe jsonls aside (or use
+    a new folder), (4) relaunch with launch_rgrowx.ps1.
+  - A-L1: while RG has no marker and nothing drives it (no live
+    supervise_rgrow.py, or its log silent > 4 h) the wait ALERTs hourly.
+    RECOVERY after a reboot while RG is unfinished: rerun RG's launcher
+    (scratchpad launch_rgrow.ps1) AND launch_rgrowx.ps1.
+  - A-L2 / A-L3: completion and ABANDONED are re-checked right before
+    every launch; rows stream from before the preflight.
+  - A-L4: RG's eval rows count only as Ms. Pac-Man records (env).
+  - A-L5 / B-L4: --no-wait is also refused while RG's hand-off
+    post_rgrow.py lives. PROCEDURE for --no-wait (supersedes r1's): kill
+    TKX's waiting supervisor, RG's supervisor and trainer, and RG's
+    hand-off -- matching the exact script names (post_rgrow.py is NOT
+    post_rgrowx.py) -- then run `launch_rgrowx.ps1 -NoWait` (it starts the
+    supervisor with --no-wait and keeps TKX's hand-off). RETRACTING a
+    --no-wait (once logged, every relaunch counts as a resume): stop TKX's
+    supervisor and trainer, move TKX's run folder and its two probe jsonls
+    aside, relaunch.
+  - A-L6: the supervisor's stdout cannot die on a non-ASCII character.
+  - A-L7: tests: a failing manifest blocks the launch; a flag or marker
+    appearing during an attempt's waits stops it; tests never hang.
+  - B-L1-L3, B-L5, B-L6: the hand-off's start position counts whole lines;
+    "all done -- N rows missing" when rows are missing; the abandon pass
+    logs the rows newer than the checkpoint (drop their probe rows before
+    any un-abandon, then relaunch with launch_rgrowx.ps1); a supervisor
+    refusal is an ALERT; interim probes need 8 GB of free commit beside
+    the trainer (the final pass 4).
+  - The NO GPU SMOKE core-file diff is re-run at the manifest commit.
 
 ### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
 

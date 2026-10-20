@@ -44,6 +44,16 @@ folder). Each attempt waits for no trainer, THEN checks the manifest, then
 launches; rows keep streaming while it waits (an orphaned trainer of this
 run stays monitored).
 
+Audit r3: a run folder with no checkpoint while this run's probe jsonls
+hold records is refused too (a fresh restart that forgot to move them would
+keep the dead timeline's scores). While RG has no marker and no live
+supervise_rgrow.py (or its log is silent > 4 h) the wait ALERTs hourly:
+after a reboot RG's own launcher must be rerun too. --no-wait is also
+refused while RG's hand-off post_rgrow.py lives. RETRACTING a --no-wait:
+stop this supervisor and its trainer, move this run's folder and its two
+probe jsonls aside, relaunch. Completion and ABANDONED are re-checked right
+before every launch. Rows stream from before the preflight.
+
 Create the run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
 runs.
@@ -77,6 +87,7 @@ PACE_ALERT_MIN = 25.0
 REWARD_MAX_ALERT = 400.0
 COMMIT_ALERT_GB = 4.0
 RG_EVALS_ALERT_S = 2 * 3600     # RG done this long, its evals still missing
+RG_SILENT_ALERT_S = 4 * 3600    # RG unfinished, its supervisor.log silent
 
 
 def expected_ceiling(iteration):
@@ -248,8 +259,9 @@ def lines_of(path):
 
 def rg_missing():
     """What RG still lacks before this run may start: [] once its marker is
-    there and both probe jsonls hold a full-range record (a dict without
-    "max_noop", as the hand-off reads them) of every row in RG_ROWS."""
+    there and both probe jsonls hold a full-range Ms. Pac-Man record (a
+    dict without "max_noop" whose env is ENV_ID) of every row in
+    RG_ROWS."""
     out = []
     try:
         if os.path.getsize(RG_MARKER) >= 1_000_000:
@@ -263,7 +275,8 @@ def rg_missing():
                 r = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(r, dict) and "max_noop" not in r:
+            if (isinstance(r, dict) and "max_noop" not in r
+                    and r.get("env") == ENV_ID):
                 got.add(r.get("iteration"))
         lack = [i for i in RG_ROWS if i not in got]
         if lack:
@@ -280,6 +293,23 @@ def rg_marker_age():
     except OSError:
         pass
     return None
+
+
+def rg_unattended():
+    """RG has no completion marker AND nothing is driving it: no live
+    supervise_rgrow.py, or its supervisor.log silent for RG_SILENT_ALERT_S
+    (e.g. a reboot that relaunched only this run)."""
+    try:
+        if os.path.getsize(RG_MARKER) < 1_000_000:
+            return False
+    except OSError:
+        pass
+    if not live_rgrow_supervisors():
+        return True
+    try:
+        return time.time() - os.path.getmtime(RG_SUPLOG) > RG_SILENT_ALERT_S
+    except OSError:
+        return False
 
 
 def rg_gave_up():
@@ -313,6 +343,12 @@ def wait_external(variant, seed):
             if rg_gave_up():
                 print("ALERT: RG's supervisor gave up (CRASH LOOP / MAX "
                       f"ATTEMPTS) -- {variant} keeps waiting", flush=True)
+            if rg_unattended():
+                print("ALERT: RG is unfinished and nothing drives it (no "
+                      "live supervise_rgrow.py, or its log silent > 4 h) -- "
+                      "rerun RG's launcher (scratchpad launch_rgrow.ps1), or "
+                      f"start {variant} with --no-wait (Kai's call)",
+                      flush=True)
             age = rg_marker_age()
             if age is not None and age > RG_EVALS_ALERT_S:
                 print(f"ALERT: RG completed {age / 3600:.1f} h ago but its "
@@ -444,6 +480,24 @@ def live_rgrow_supervisors():
             continue
         if any(c.replace(chr(92), "/").endswith("/supervise_rgrow.py")
                or c == "supervise_rgrow.py" for c in cmd):
+            out.append(p.info["pid"])
+    return out
+
+
+def live_rgrow_handoffs():
+    """PIDs of python processes running RG's hand-off post_rgrow.py (exact
+    name: never post_rgrowx.py)."""
+    import psutil
+    out = []
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            name = (p.info.get("name") or "").lower()
+            cmd = p.info["cmdline"] or []
+        except (psutil.Error, KeyError):
+            continue
+        if name.startswith("python") and any(
+                os.path.basename(c.replace(chr(92), "/")) == "post_rgrow.py"
+                for c in cmd):
             out.append(p.info["pid"])
     return out
 
@@ -607,7 +661,29 @@ def stray_snapshots(base, ckpt):
     return sorted(glob.glob(os.path.join(base, "snapshots*", "*.pth")))
 
 
+def stray_probe_rows(variant, seed, ckpt):
+    """This run's probe jsonls holding records while no checkpoint exists
+    (probe rows only exist for settled snapshots, i.e. after a checkpoint;
+    audit r3 A-M1)."""
+    if os.path.exists(ckpt):
+        return []
+    run = f"{RUNS[variant]}-s{seed}-{SEEDS[seed]}"
+    out = []
+    for suffix in ("-acting", ""):
+        path = os.path.join(REPO, "benchmarks", "probes",
+                            f"probe_exhaustive_eval-{run}{suffix}.jsonl")
+        if any(l.strip() for l in lines_of(path)):
+            out.append(os.path.basename(path))
+    return out
+
+
 def main(argv):
+    try:
+        # cp1252 under the launcher's redirect: a non-ASCII character in a
+        # PREFLIGHT line must not kill the supervisor (audit r3 A-L6)
+        sys.stdout.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
     if "--write-manifest" in argv:
         return write_manifest()
     no_wait = argv[2:] == ["--no-wait"]
@@ -641,12 +717,24 @@ def main(argv):
               f"{rel} -- a fresh start would mix two timelines; move the run "
               f"folder and its two probe jsonls aside", flush=True)
         return 2
+    stray = stray_probe_rows(variant, seed, ckpt)
+    if stray:
+        print(f"refusing: probe rows ({', '.join(stray)}) but no checkpoint "
+              f"-- a fresh start would keep the old timeline's scores; move "
+              f"them (and the run folder) aside", flush=True)
+        return 2
     if no_wait:
         alive = live_rgrow_supervisors()
         if alive:
             print(f"refusing --no-wait: a supervise_rgrow.py is alive (pids "
                   f"{alive}) -- it would relaunch RG beside this run; kill it "
                   f"first", flush=True)
+            return 2
+        alive = live_rgrow_handoffs()
+        if alive:
+            print(f"refusing --no-wait: RG's hand-off post_rgrow.py is alive "
+                  f"(pids {alive}) -- its probes would run beside this run; "
+                  f"kill it first", flush=True)
             return 2
         print(f"NO-WAIT override: {variant} s{seed} starts without RG's "
               f"completion marker and evals", flush=True)
@@ -656,6 +744,11 @@ def main(argv):
     else:
         wait_external(variant, seed)
 
+    os.makedirs(base, exist_ok=True)
+    # Before the preflight: rows an orphan of this run writes meanwhile are
+    # still printed and checked (audit r3 A-L3).
+    rows = Rows(jsonl, variant, seed)
+    rows.prime()
     polls, told = 0, None
     while True:
         ok, why = preflight(variant)
@@ -670,9 +763,6 @@ def main(argv):
           f"starting {variant} s{seed} ({arm}, {ITERATIONS} iterations)",
           flush=True)
 
-    os.makedirs(base, exist_ok=True)
-    rows = Rows(jsonl, variant, seed)
-    rows.prime()
     # CUDA_VISIBLE_DEVICES is dropped: inherited from a shell that set -1 it
     # would silently train on the CPU.
     env = {**{k: v for k, v in os.environ.items()
@@ -710,6 +800,16 @@ def main(argv):
                 told = why
             time.sleep(60)
             polls += 1
+        # The waits above can last hours: completion (an orphan finished)
+        # and ABANDONED are re-checked right before the launch (r3 A-L2).
+        if completed():
+            print(f"RUN COMPLETE {variant} s{seed} (checkpoint is a marker)",
+                  flush=True)
+            return 0
+        if abandoned(base):
+            print(f"ABANDONED {variant} s{seed}: the run folder holds an "
+                  f"ABANDONED file -- not relaunching", flush=True)
+            return 0
         args = command(variant, seed) + (["--resume"] if os.path.exists(ckpt)
                                          else [])
         log = open(os.path.join(base, f"supv2_{attempt}.log"), "ab")

@@ -254,11 +254,14 @@ def rg_files(sup, monkeypatch, tmp_path):
     monkeypatch.setattr(sup, "RG_MARKER", str(marker))
     monkeypatch.setattr(sup, "RG_PROBES", tuple(str(p) for p in probes))
     monkeypatch.setattr(sup, "RG_SUPLOG", str(suplog))
+    # RG is driven (a live supervisor): never the real process table here
+    monkeypatch.setattr(sup, "live_rgrow_supervisors", lambda: [1])
     return SimpleNamespace(marker=marker, probes=probes, suplog=suplog)
 
 
 def _rows(path, iterations, extra=()):
-    lines = [json.dumps({"iteration": i, "exact_mean": 500.0})
+    lines = [json.dumps({"iteration": i, "exact_mean": 500.0,
+                         "env": "MsPacmanNoFrameskip-v4"})
              for i in iterations]
     lines += list(extra)
     path.write_text("".join(l + chr(10) for l in lines))
@@ -273,7 +276,9 @@ def test_rg_missing_needs_the_marker_and_every_row_of_both_evals(sup,
     rg_files.marker.write_bytes(b"x" * 100)             # the marker
     _rows(rg_files.probes[0], range(5, 95, 5))
     _rows(rg_files.probes[1], range(5, 90, 5), extra=[
-        json.dumps({"iteration": 90, "max_noop": 2}),     # a smoke record
+        json.dumps({"iteration": 90, "max_noop": 2,       # a smoke record
+                    "env": "MsPacmanNoFrameskip-v4"}),
+        json.dumps({"iteration": 90, "exact_mean": 1.0}),  # Pong default
         "not json", json.dumps([90])])
     got = sup.rg_missing()
     assert got == ["p.jsonl rows [90]"]
@@ -378,6 +383,7 @@ def test_no_wait_is_logged_and_refused_while_an_rgrow_supervisor_lives(
     monkeypatch.setattr(sup, "run_done", lambda v, s: False)
     monkeypatch.setattr(sup, "other_supervisors", lambda: [])
     monkeypatch.setattr(sup, "live_rgrow_supervisors", lambda: [])
+    monkeypatch.setattr(sup, "live_rgrow_handoffs", lambda: [])
     monkeypatch.setattr(sup, "wait_external", no)
     monkeypatch.setattr(sup, "preflight", _stop)
     with pytest.raises(Stop):
@@ -390,6 +396,59 @@ def test_no_wait_is_logged_and_refused_while_an_rgrow_supervisor_lives(
     assert sup.main(["tkx", "0", "--no-wait"]) == 2
     out = capsys.readouterr().out
     assert "refusing --no-wait" in out and "[42]" in out
+    # RG's hand-off alive: refused too (audit r3 A-L5)
+    monkeypatch.setattr(sup, "live_rgrow_supervisors", lambda: [])
+    monkeypatch.setattr(sup, "live_rgrow_handoffs", lambda: [43])
+    assert sup.main(["tkx", "0", "--no-wait"]) == 2
+    out = capsys.readouterr().out
+    assert "post_rgrow.py is alive" in out and "[43]" in out
+
+
+def test_live_rgrow_handoffs_exact_name(sup, monkeypatch):
+    bs = chr(92)
+    _procs(monkeypatch, [
+        {"pid": 1, "name": "python.exe",
+         "cmdline": ["py", "-u", "C:" + bs + "s" + bs + "post_rgrow.py",
+                     "Y:" + bs + "w"]},
+        {"pid": 2, "name": "python.exe",
+         "cmdline": ["py", "-u", "C:/s/post_rgrowx.py", "Y:/w"]},
+        {"pid": 3, "name": "python.exe",
+         "cmdline": ["py", "check_post_rgrow.py"]},
+        {"pid": 4, "name": "cmd.exe",
+         "cmdline": ["cmd", "/c", "post_rgrow.py"]}])
+    assert sup.live_rgrow_handoffs() == [1]
+
+
+def test_wait_external_alerts_when_nothing_drives_rg(sup, rg_files,
+                                                    monkeypatch, capsys):
+    """A reboot that relaunched only TKX (audit r3 A-L1)."""
+    rg_files.marker.write_bytes(b"x" * 1_000_000)      # RG unfinished
+    monkeypatch.setattr(sup, "live_rgrow_supervisors", lambda: [])
+    sleeps = []
+
+    def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) > 200:
+            raise AssertionError("wait_external never returned")
+        if len(sleeps) == 2:
+            rg_files.marker.write_bytes(b"x")
+            for p in rg_files.probes:
+                _rows(p, range(5, 95, 5))
+
+    monkeypatch.setattr(sup.time, "sleep", fake_sleep)
+    sup.wait_external("tkx", 0)
+    out = capsys.readouterr().out
+    assert "ALERT: RG is unfinished and nothing drives it" in out
+    # a live supervisor with a fresh log: no ALERT; a silent log: ALERT
+    monkeypatch.setattr(sup, "live_rgrow_supervisors", lambda: [1])
+    rg_files.marker.write_bytes(b"x" * 1_000_000)
+    rg_files.suplog.write_text("EVAL rg" + chr(10))
+    assert not sup.rg_unattended()
+    old = os.path.getmtime(rg_files.suplog) - 5 * 3600
+    os.utime(rg_files.suplog, (old, old))
+    assert sup.rg_unattended()
+    rg_files.marker.write_bytes(b"x")                  # finished: never
+    assert not sup.rg_unattended()
 
 
 def test_supervisor_exits_at_once_when_its_run_is_complete(sup, monkeypatch,
@@ -502,6 +561,10 @@ def test_a_resume_skips_the_wait_for_rg(sup, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sup, "live_rgrow_supervisors", no)
     monkeypatch.setattr(sup, "wait_external", no)
     monkeypatch.setattr(sup, "preflight", _stop)
+    # a regression past the preflight fails here, never hangs (r3 A-L7)
+    for name in ("wait_no_trainer", "manifest_check"):
+        monkeypatch.setattr(sup, name, no)
+    monkeypatch.setattr(sup.subprocess, "Popen", no)
     ckpt = pathlib.Path(sup.paths("tkx", 0)[3])
     ckpt.parent.mkdir(parents=True)
     ckpt.write_bytes(b"x" * 1_000_001)               # a real checkpoint
@@ -619,6 +682,89 @@ def test_abandoned_sanctioned_and_stray_snapshots(sup, monkeypatch, tmp_path,
     assert sup.main(["tkx", "0"]) == 0
     assert sup.main(["tkx", "0", "--no-wait"]) == 0
     assert "ABANDONED tkx s0" in capsys.readouterr().out
+
+
+def test_probe_rows_without_a_checkpoint_are_refused(sup, monkeypatch,
+                                                     tmp_path, capsys):
+    """A fresh restart that forgot the probe jsonls (audit r3 A-M1)."""
+    def no(*a, **k):
+        raise AssertionError("must stop before any wait or launch")
+
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup, "other_supervisors", lambda: [])
+    for name in ("wait_external", "preflight", "wait_no_trainer",
+                 "live_rgrow_supervisors", "live_rgrow_handoffs"):
+        monkeypatch.setattr(sup, name, no)
+    rel, base, _j, ckpt, _d = sup.paths("tkx", 0)
+    probes = tmp_path / "benchmarks" / "probes"
+    probes.mkdir(parents=True)
+    f = probes / ("probe_exhaustive_eval-mspacman-tokens-rgrow-x270-s0-"
+                  "2026-10-20-acting.jsonl")
+    f.write_text(json.dumps({"iteration": 5}) + chr(10))
+    assert sup.stray_probe_rows("tkx", 0, ckpt) == [f.name]
+    assert sup.main(["tkx", "0"]) == 2
+    assert sup.main(["tkx", "0", "--no-wait"]) == 2
+    assert "probe rows" in capsys.readouterr().out
+    pathlib.Path(base).mkdir(parents=True)
+    pathlib.Path(ckpt).write_bytes(b"x" * 1_000_001)  # a legit resume
+    assert sup.stray_probe_rows("tkx", 0, ckpt) == []
+    f.write_text("")                                  # empty: not a record
+    pathlib.Path(ckpt).unlink()
+    assert sup.stray_probe_rows("tkx", 0, ckpt) == []
+
+
+def _attempt_loop(sup, monkeypatch, tmp_path):
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    monkeypatch.setattr(sup, "other_supervisors", lambda: [])
+    monkeypatch.setattr(sup, "wait_external", lambda v, s: None)
+    monkeypatch.setattr(sup, "preflight", lambda v: (True, ""))
+    monkeypatch.setattr(sup, "snapshot", lambda *a: None)
+    monkeypatch.setattr(sup, "commit_free_gb", lambda: None)
+    rel, base, _j, ckpt, _d = sup.paths("tkx", 0)
+    return pathlib.Path(base), pathlib.Path(ckpt)
+
+
+def test_a_failing_manifest_blocks_the_launch(sup, monkeypatch, tmp_path):
+    """Behavioural (audit r3 A-L7): no Popen until the manifest passes."""
+    _attempt_loop(sup, monkeypatch, tmp_path)
+    events = []
+    checks = [(False, "not the audited revision: x"),
+              (False, "not the audited revision: x"), (True, "")]
+    monkeypatch.setattr(sup, "wait_no_trainer",
+                        lambda *a: events.append("guard"))
+    monkeypatch.setattr(sup, "manifest_check",
+                        lambda: events.append("manifest") or checks.pop(0))
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+
+    def popen(args, **k):
+        events.append("popen")
+        raise Stop
+
+    monkeypatch.setattr(sup.subprocess, "Popen", popen)
+    with pytest.raises(Stop):
+        sup.main(["tkx", "0"])
+    assert events == ["guard", "manifest"] * 3 + ["popen"]
+
+
+def test_completion_and_abandon_rechecked_before_each_launch(
+        sup, monkeypatch, tmp_path, capsys):
+    """Behavioural (audit r3 A-L2/L7): a flag or a marker that appears while
+    an attempt waits stops the launch."""
+    base, ckpt = _attempt_loop(sup, monkeypatch, tmp_path)
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    # ABANDONED created during the guard's wait
+    monkeypatch.setattr(sup, "wait_no_trainer",
+                        lambda *a: (base / "ABANDONED").write_text(""))
+    assert sup.main(["tkx", "0"]) == 0
+    assert "ABANDONED tkx s0" in capsys.readouterr().out
+    (base / "ABANDONED").unlink()
+    # an orphan of this run completed during the guard's wait
+    monkeypatch.setattr(sup, "wait_no_trainer",
+                        lambda *a: ckpt.write_bytes(b"done"))
+    assert sup.main(["tkx", "0"]) == 0
+    assert "RUN COMPLETE tkx s0" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
