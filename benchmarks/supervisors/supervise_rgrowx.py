@@ -21,9 +21,10 @@ checkpoint exists) skips that wait: its start was already sanctioned
 (audit r1 A-L1). --no-wait (logged, Kai's call) skips it too; it is refused
 while any supervise_rgrow.py process lives (an unfinished RG's supervisor
 would interleave RG's attempts with this run's). PROCEDURE for --no-wait:
-kill this run's waiting supervisor, RG's supervisor and trainer, and
-RG's hand-off post_rgrow.py (by command line, never taskkill /T), then
-launch `tkx 0 --no-wait`. Before
+kill this run's waiting supervisor, RG's supervisor and trainer, and RG's
+hand-off post_rgrow.py and its probes (by command line, exact script names,
+never taskkill /T), then run `launch_rgrowx.ps1 -NoWait`; RG's missing
+evals run after this run completes (or beside it with Kai's approval). Before
 EVERY launch attempt it also waits while ANY python runs an
 experiments/ablation.py (any tree, arm or seed: one ablation trainer on the
 GPU at a time, never a second writer; other GPU users -- a GPU probe,
@@ -50,9 +51,12 @@ keep the dead timeline's scores). While RG has no marker and no live
 supervise_rgrow.py (or its log is silent > 4 h) the wait ALERTs hourly:
 after a reboot RG's own launcher must be rerun too. --no-wait is also
 refused while RG's hand-off post_rgrow.py lives. RETRACTING a --no-wait:
-stop this supervisor and its trainer, move this run's folder and its two
-probe jsonls aside, relaunch. Completion and ABANDONED are re-checked right
-before every launch. Rows stream from before the preflight.
+follow the FRESH RESTART procedure (CURRICULUM amendments r3, steps 1-4:
+stop the supervisor and trainer, stop the hand-off and its probes, move the
+run folder and its two probe jsonls aside, relaunch). Completion and
+ABANDONED are re-checked right before every launch, and a launch without a
+checkpoint re-checks the stray snapshots / probe rows there too (audit r4
+A-L1). Rows stream from before the preflight, also between its retries.
 
 Create the run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
@@ -296,20 +300,29 @@ def rg_marker_age():
 
 
 def rg_unattended():
-    """RG has no completion marker AND nothing is driving it: no live
-    supervise_rgrow.py, or its supervisor.log silent for RG_SILENT_ALERT_S
-    (e.g. a reboot that relaunched only this run)."""
+    """None while RG is finished or driven; else why not: no live
+    supervise_rgrow.py (e.g. a reboot that relaunched only this run), or a
+    live one whose supervisor.log is silent for RG_SILENT_ALERT_S."""
     try:
         if os.path.getsize(RG_MARKER) < 1_000_000:
-            return False
+            return None
     except OSError:
         pass
-    if not live_rgrow_supervisors():
-        return True
+    alive = live_rgrow_supervisors()
+    if not alive:
+        return ("no live supervise_rgrow.py -- rerun RG's launcher "
+                "(scratchpad launch_rgrow.ps1)")
     try:
-        return time.time() - os.path.getmtime(RG_SUPLOG) > RG_SILENT_ALERT_S
+        quiet = time.time() - os.path.getmtime(RG_SUPLOG)
     except OSError:
-        return False
+        return None
+    if quiet > RG_SILENT_ALERT_S:
+        # launch_rgrow.ps1 is NOT idempotent: never rerun it beside a live
+        # RG supervisor (audit r4 A-L2)
+        return (f"RG's supervisor (pids {alive}) is alive but its log is "
+                f"silent for {quiet / 3600:.1f} h -- check it; do NOT rerun "
+                f"launch_rgrow.ps1 beside it")
+    return None
 
 
 def rg_gave_up():
@@ -343,11 +356,10 @@ def wait_external(variant, seed):
             if rg_gave_up():
                 print("ALERT: RG's supervisor gave up (CRASH LOOP / MAX "
                       f"ATTEMPTS) -- {variant} keeps waiting", flush=True)
-            if rg_unattended():
-                print("ALERT: RG is unfinished and nothing drives it (no "
-                      "live supervise_rgrow.py, or its log silent > 4 h) -- "
-                      "rerun RG's launcher (scratchpad launch_rgrow.ps1), or "
-                      f"start {variant} with --no-wait (Kai's call)",
+            why = rg_unattended()
+            if why:
+                print(f"ALERT: RG is unfinished and nothing drives it: {why}"
+                      f"; or start {variant} with --no-wait (Kai's call)",
                       flush=True)
             age = rg_marker_age()
             if age is not None and age > RG_EVALS_ALERT_S:
@@ -469,17 +481,20 @@ def commit_free_gb():
 
 
 def live_rgrow_supervisors():
-    """PIDs of running supervise_rgrow.py processes (either variant, any
-    seed; never supervise_rgrowx.py)."""
+    """PIDs of PYTHON processes running supervise_rgrow.py (either variant,
+    any seed; never supervise_rgrowx.py; an editor naming the file is not
+    one -- audit r4 A-L4)."""
     import psutil
     out = []
-    for p in psutil.process_iter(["pid", "cmdline"]):
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
+            name = (p.info.get("name") or "").lower()
             cmd = p.info["cmdline"] or []
         except (psutil.Error, KeyError):
             continue
-        if any(c.replace(chr(92), "/").endswith("/supervise_rgrow.py")
-               or c == "supervise_rgrow.py" for c in cmd):
+        if name.startswith("python") and any(
+                c.replace(chr(92), "/").endswith("/supervise_rgrow.py")
+                or c == "supervise_rgrow.py" for c in cmd):
             out.append(p.info["pid"])
     return out
 
@@ -759,6 +774,7 @@ def main(argv):
             told = why
         time.sleep(600)
         polls += 1
+        rows.emit()          # an orphan's rows between retries (r4 A-L3)
     print(f"preflight ok (manifest + quick probe + {len(SUITES)} suites); "
           f"starting {variant} s{seed} ({arm}, {ITERATIONS} iterations)",
           flush=True)
@@ -810,6 +826,16 @@ def main(argv):
             print(f"ABANDONED {variant} s{seed}: the run folder holds an "
                   f"ABANDONED file -- not relaunching", flush=True)
             return 0
+        # A launch without a checkpoint: no old timeline may sit beside it
+        # (a retraction done while this supervisor waited; r4 A-L1).
+        stray = (stray_snapshots(base, ckpt)
+                 + stray_probe_rows(variant, seed, ckpt))
+        if stray:
+            names = ", ".join(os.path.basename(x) for x in stray[:4])
+            print(f"refusing: {len(stray)} stray snapshots / probe jsonls "
+                  f"but no checkpoint ({names}) -- not launching; follow the "
+                  f"fresh-restart procedure", flush=True)
+            return 2
         args = command(variant, seed) + (["--resume"] if os.path.exists(ckpt)
                                          else [])
         log = open(os.path.join(base, f"supv2_{attempt}.log"), "ab")

@@ -1007,6 +1007,29 @@ fresh-restart procedure again):
     refusal is an ALERT; interim probes need 8 GB of free commit beside
     the trainer (the final pass 4).
   - The NO GPU SMOKE core-file diff is re-run at the manifest commit.
+AMENDMENTS (audit r4, before launch: A and B NOTHING ABOVE LOW -- the loop
+closes; its LOWs fixed, then a confirmation round):
+  - A-L1: RETRACTING a --no-wait = the FRESH RESTART procedure (r3 steps
+    1-4), and a launch without a checkpoint re-checks the stray snapshots /
+    probe rows right before it starts.
+  - A-L2: the "nothing drives RG" ALERT says which: no live RG supervisor
+    (rerun launch_rgrow.ps1) or a live but silent one (check it; do NOT
+    rerun launch_rgrow.ps1 beside it -- RG's launcher is not idempotent).
+  - A-L3 / A-L4: rows also stream between preflight retries; the RG
+    supervisor check counts python processes only.
+  - A-L5: the --no-wait procedure also stops RG's hand-off's probes; RG's
+    missing evals then run after TKX completes (or beside it with Kai's
+    approval).
+  - B-L1-L9 (hand-off): a probe jsonl that cannot be read (anything but
+    "not found") raises -- the loop ALERTs and retries -- so a transient
+    lock never reads as vanished or missing rows; a vanish during the final
+    pass ends "stopped", not "all done"; interim probes need 6 GB of free
+    commit (the 4-GB ALERT line + a probe + margin; the final pass 4); the
+    run's own jsonl is read only when some missing row could settle;
+    supervisor.err echoes start at a whole line; a PREFLIGHT failure line
+    is an ALERT; ABANDONED while this run's trainer lives is an ALERT and a
+    wait; `launch_rgrowx.ps1 -NoWait` beside a running supervisor says it
+    is ignored.
 
 ### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
 

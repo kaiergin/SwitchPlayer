@@ -439,16 +439,19 @@ def test_wait_external_alerts_when_nothing_drives_rg(sup, rg_files,
     sup.wait_external("tkx", 0)
     out = capsys.readouterr().out
     assert "ALERT: RG is unfinished and nothing drives it" in out
-    # a live supervisor with a fresh log: no ALERT; a silent log: ALERT
+    assert "rerun RG's launcher" in out
+    # a live supervisor with a fresh log: no ALERT; a silent log: ALERT,
+    # and NOT the advice to rerun the non-idempotent launcher (r4 A-L2)
     monkeypatch.setattr(sup, "live_rgrow_supervisors", lambda: [1])
     rg_files.marker.write_bytes(b"x" * 1_000_000)
     rg_files.suplog.write_text("EVAL rg" + chr(10))
-    assert not sup.rg_unattended()
+    assert sup.rg_unattended() is None
     old = os.path.getmtime(rg_files.suplog) - 5 * 3600
     os.utime(rg_files.suplog, (old, old))
-    assert sup.rg_unattended()
+    why = sup.rg_unattended()
+    assert "alive" in why and "do NOT rerun" in why
     rg_files.marker.write_bytes(b"x")                  # finished: never
-    assert not sup.rg_unattended()
+    assert sup.rg_unattended() is None
 
 
 def test_supervisor_exits_at_once_when_its_run_is_complete(sup, monkeypatch,
@@ -474,17 +477,24 @@ def _procs(monkeypatch, procs):
 
 def test_live_rgrow_supervisors_finds_either_variant_only(sup, monkeypatch):
     bs = chr(92)
+    py = "python.exe"
     _procs(monkeypatch, [
-        {"pid": 1, "cmdline": ["py", "Y:" + bs + "run" + bs + "benchmarks"
-                               + bs + "supervisors" + bs
-                               + "supervise_rgrow.py", "tk", "0"]},
-        {"pid": 2, "cmdline": ["py", "supervise_rgrow.py", "rg", "0",
-                               "--no-wait"]},
-        {"pid": 3, "cmdline": ["py", "benchmarks/supervisors/"
-                               "supervise_rgrowx.py", "tkx", "0"]},
-        {"pid": 4, "cmdline": ["py", "supervise_tokens.py", "tk", "0"]},
-        {"pid": 5, "cmdline": ["py", "notsupervise_rgrow.py", "rg", "0"]},
-        {"pid": 6, "cmdline": None}])
+        {"pid": 1, "name": py,
+         "cmdline": ["py", "Y:" + bs + "run" + bs + "benchmarks" + bs
+                     + "supervisors" + bs + "supervise_rgrow.py", "tk", "0"]},
+        {"pid": 2, "name": py,
+         "cmdline": ["py", "supervise_rgrow.py", "rg", "0", "--no-wait"]},
+        {"pid": 3, "name": py,
+         "cmdline": ["py", "benchmarks/supervisors/supervise_rgrowx.py",
+                     "tkx", "0"]},
+        {"pid": 4, "name": py,
+         "cmdline": ["py", "supervise_tokens.py", "tk", "0"]},
+        {"pid": 5, "name": py,
+         "cmdline": ["py", "notsupervise_rgrow.py", "rg", "0"]},
+        {"pid": 6, "name": py, "cmdline": None},
+        # an editor naming the file is not a supervisor (r4 A-L4)
+        {"pid": 7, "name": "Code.exe",
+         "cmdline": ["code", "benchmarks/supervisors/supervise_rgrow.py"]}])
     assert sup.live_rgrow_supervisors() == [1, 2]
 
 
@@ -624,6 +634,11 @@ def test_wait_no_trainer_waits_out_any_trainer(sup, monkeypatch, capsys):
     # the guard, THEN the manifest, then the launch (audit r2 A-L3)
     assert src.index("wait_no_trainer(rows)") < src.index("manifest_check()") \
         < src.index("subprocess.Popen(")
+    # rows primed before the preflight and emitted between its retries
+    # (audit r3 A-L3 / r4 A-L3)
+    pre = src.index("ok, why = preflight(variant)")
+    assert src.index("rows.prime()") < pre < src.index("rows.emit()")
+    assert src.index("rows.emit()") < src.index("preflight ok")
 
 
 def test_wait_no_trainer_keeps_rows_streaming(sup, monkeypatch, tmp_path,
@@ -744,6 +759,26 @@ def test_a_failing_manifest_blocks_the_launch(sup, monkeypatch, tmp_path):
     with pytest.raises(Stop):
         sup.main(["tkx", "0"])
     assert events == ["guard", "manifest"] * 3 + ["popen"]
+
+
+def test_stray_state_rechecked_before_a_launch_without_checkpoint(
+        sup, monkeypatch, tmp_path, capsys):
+    """A retraction done while this supervisor waited (audit r4 A-L1)."""
+    base, ckpt = _attempt_loop(sup, monkeypatch, tmp_path)
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    probes = tmp_path / "benchmarks" / "probes"
+
+    def old_rows_appear(*a):
+        probes.mkdir(parents=True, exist_ok=True)
+        (probes / ("probe_exhaustive_eval-mspacman-tokens-rgrow-x270-s0-"
+                   "2026-10-20.jsonl")).write_text("{}" + chr(10))
+
+    monkeypatch.setattr(sup, "wait_no_trainer", old_rows_appear)
+    assert sup.main(["tkx", "0"]) == 2
+    assert "stray snapshots / probe jsonls but no checkpoint" in \
+        capsys.readouterr().out
 
 
 def test_completion_and_abandon_rechecked_before_each_launch(
