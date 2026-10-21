@@ -1018,6 +1018,15 @@ TKX / TK-90 path is now redirected in the tests' fixture, and the suite is
 run under simulated TKX states (live, completed, abandoned: all pass). Also
 a finished prep without a readable master.json stops the prep (a
 half-retraction).
+AMENDMENTS (audit r6, confirmation: ONE HIGH, in a test -- fixed): the run
+worktree checks out CRLF (autocrlf) while the dev tree is LF; the manifest
+test flipped LF -> CRLF, which on a CRLF file writes 
+ -- DS's
+preflight would have failed in the run worktree (r5's "all pass" was in
+the LF dev tree only). The test now flips whichever way differs, and the
+preflight SUITES are verified in a CRLF export of the commit (git archive)
+under the completed and abandoned TKX states. Its LOW (the master.json read
+retried like the integrity check) fixed.
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 

@@ -581,20 +581,23 @@ def run_prep(env, redo_ok=True):
               flush=True)
         return True
     if prep_done():
+        pick_bad = False
         for k in range(3):
             ok, why = set_intact()
-            if ok:
-                if redo_ok and read_pick(os.path.join(
-                        prep_dir(), "master.json")) is None:
-                    # (audit r5 NIT: a half-retraction that moved only
-                    # master.json aside -- the set's master is unknown)
-                    print("PREP FAILED: a finished prep without a readable "
-                          "master.json -- follow the retraction procedure "
-                          "(move the prep folder aside)", flush=True)
-                    return False
+            # (audit r5 NIT: a half-retraction that moved only master.json
+            # aside -- the set's master is unknown; read in the same retry
+            # loop, so a transient lock is not fatal: r6 LOW)
+            pick_bad = ok and redo_ok and read_pick(os.path.join(
+                prep_dir(), "master.json")) is None
+            if ok and not pick_bad:
                 return True
             if k < 2:
                 time.sleep(60)
+        if pick_bad:
+            print("PREP FAILED: a finished prep without a readable "
+                  "master.json -- follow the retraction procedure (move the "
+                  "prep folder aside)", flush=True)
+            return False
         if not redo_ok:
             print(f"ALERT: PREP not intact ({why}) after this run started -- "
                   f"never redone now; the launch waits for it", flush=True)

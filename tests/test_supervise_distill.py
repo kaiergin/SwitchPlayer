@@ -166,7 +166,13 @@ def test_supervisor_manifest_catches_an_edit(sup, monkeypatch, tmp_path):
         p.write_bytes(orig + b"\n# edit\n")
         ok, why = sup.manifest_check()
         assert not ok and rel in why
-        p.write_bytes(orig.replace(b"\n", b"\r\n"))    # CRLF vs LF: same
+        # CRLF vs LF: same. Flip whichever way differs -- the run worktree
+        # is CRLF (autocrlf), the dev tree LF (audit r6 HIGH: LF -> CRLF on
+        # a CRLF file wrote \r\r\n and failed DS's preflight there).
+        lf = orig.replace(b"\r\n", b"\n")
+        flipped = lf if lf != orig else lf.replace(b"\n", b"\r\n")
+        assert flipped != orig
+        p.write_bytes(flipped)
         assert sup.manifest_check() == (True, "")
 
 
