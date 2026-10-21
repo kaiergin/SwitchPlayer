@@ -43,9 +43,9 @@ curve's) or probe rows but no checkpoint is refused (move them aside).
 
 Audit r1 (B): the prep (experiments/distill.py) counts as a trainer for
 the any-trainer guard, so an orphaned prep (its supervisor killed) blocks a
-second one; a prep is never redone once this run was sanctioned (a
-checkpoint, or a launch logged) -- the integrity gate then ALERTs and
-waits; before that a transient read error is retried before the files are
+second one; a prep is never redone once this run was launched (a
+checkpoint, or a LAUNCHED line; r2: nor started at all) -- the integrity
+gate then ALERTs and waits; before that a transient read error is retried before the files are
 judged damaged, and damaged files are moved aside, not overwritten.
 master.json is written atomically; a TKX that completed with rows 240-270
 incomplete stops the prep (PREP FAILED: the rule needs them) instead of
@@ -404,7 +404,7 @@ def pred_unattended(variant, seed):
 
 def pred_gave_up(variant, seed):
     """The predecessor's supervisor logged CRASH LOOP / MAX ATTEMPTS / PREP
-    FAILED after its last launch or preflight line."""
+    FAILED / NO PROGRESS after its last launch or preflight line."""
     lines = lines_of(predecessor(variant, seed)[3])
     fail = max((i for i, l in enumerate(lines) if l.startswith(
         ("CRASH LOOP", "MAX ATTEMPTS", "PREP FAILED", "NO PROGRESS"))),
@@ -548,7 +548,7 @@ def run_prep(env, redo_ok=True):
     Returns True when the prep is done. A done prep that does not check out
     intact is retried for a few minutes (a transient lock), then -- only
     when `redo_ok` (this run was never sanctioned: nothing is bound to the
-    set yet) -- moved aside and redone; once sanctioned it is NEVER redone
+    set yet) -- moved aside and redone; once launched it is NEVER redone
     (a launched DS's checkpoint is bound to the set's sha256 and FS to its
     vocabulary; the attempt loop's integrity gate ALERTs and waits; audit
     r1 B-M2)."""
@@ -581,6 +581,15 @@ def run_prep(env, redo_ok=True):
     # A restarted supervisor keeps the first choice (written atomically;
     # an unreadable one is chosen again -- nothing ran on it yet).
     pick = read_pick(pick_path) if os.path.exists(pick_path) else None
+    if (pick is not None and pick["tkx_mean_240_270"] is None
+            and not marker_missing(TKX_MARKER)):
+        # Chosen while TKX had no marker (a --no-wait), but TKX has completed
+        # since: the pre-registered rule must see TKX's rows (audit r3 LOW-2;
+        # the retraction procedure moves the prep folder aside).
+        print("PREP FAILED: master.json was chosen before TKX completed -- "
+              "follow the --no-wait retraction procedure (move the DS run "
+              "folder and the prep folder aside)", flush=True)
+        return False
     if pick is None:
         try:
             pick = choose_master()
@@ -939,6 +948,12 @@ def launched(base, ckpt):
                for l in lines_of(os.path.join(base, "supervisor.log")))
 
 
+def tkx_unsettled():
+    """TKX has neither its completion marker nor its ABANDONED file."""
+    return bool(marker_missing(TKX_MARKER)) and not os.path.exists(
+        TKX_ABANDONED)
+
+
 def no_wait_refusal():
     """Why ds's --no-wait may not (any longer) skip the wait, or None: a
     live TKX supervisor or hand-off, or a TKX with neither its completion
@@ -947,7 +962,7 @@ def no_wait_refusal():
         alive = live_scripts(script)
         if alive:
             return f"{script} is alive (pids {alive}) -- kill it first"
-    if marker_missing(TKX_MARKER) and not os.path.exists(TKX_ABANDONED):
+    if tkx_unsettled():
         return ("TKX has neither its completion marker nor an ABANDONED "
                 "file -- abandon it first (its supervisor's procedure)")
     return None
@@ -1045,25 +1060,33 @@ def main(argv):
               f"-- a fresh start would keep the old timeline's scores; move "
               f"them (and the run folder) aside", flush=True)
         return 2
-    if no_wait:
+    if launched(base, ckpt):
+        # (before --no-wait: a launched run resumes without any wait, so a
+        # -NoWait relaunch must not be refused over TKX's processes; audit r3
+        # NIT-2)
+        print(f"RESUMING {variant} s{seed}: it started before (checkpoint or "
+              f"launch logged) -- no wait", flush=True)
+    elif no_wait:
         why = no_wait_refusal()
         if why:
             print(f"refusing --no-wait: {why}", flush=True)
             return 2
         print(f"NO-WAIT override: {variant} s{seed} starts without TKX's "
               f"completion marker and evals", flush=True)
-    elif launched(base, ckpt):
-        print(f"RESUMING {variant} s{seed}: it started before (checkpoint or "
-              f"launch logged) -- no wait", flush=True)
-    elif sanctioned(base, ckpt) and no_wait_refusal() is None:
+    elif sanctioned(base, ckpt) and not tkx_unsettled():
+        # A logged NO-WAIT whose PERSISTENT precondition still holds (TKX's
+        # marker or ABANDONED file; a briefly live TKX supervisor after a
+        # reboot does not matter -- an ABANDONED TKX never relaunches; audit
+        # r3 LOW-1).
         print(f"RESUMING {variant} s{seed}: its logged NO-WAIT override still "
               f"holds -- no wait", flush=True)
     else:
         if sanctioned(base, ckpt):
-            # A NO-WAIT line whose preconditions no longer hold (a half-done
-            # retraction; audit r2 B-L3) waits like a fresh start.
-            print(f"a logged NO-WAIT override no longer holds "
-                  f"({no_wait_refusal()}) -- waiting for TKX", flush=True)
+            # A NO-WAIT line while TKX has neither its marker nor ABANDONED
+            # (a half-done retraction; audit r2 B-L3): wait like a fresh start.
+            print(f"ALERT: a logged NO-WAIT override no longer holds (TKX "
+                  f"has neither its completion marker nor an ABANDONED "
+                  f"file) -- waiting for TKX", flush=True)
         if not wait_external(variant, seed):
             print(f"ABANDONED {variant} s{seed}: the run folder holds an "
                   f"ABANDONED file -- not launching", flush=True)

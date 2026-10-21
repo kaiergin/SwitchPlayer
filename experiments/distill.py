@@ -242,7 +242,10 @@ def write_set(path, header, lives):
         os.replace(tmp, path)
     finally:
         if tmp.exists():                # a failed write leaves no ~1 GB tmp
-            tmp.unlink()
+            try:
+                tmp.unlink()
+            except OSError:             # never mask the write's own error
+                pass
 
 
 def read_header(path):

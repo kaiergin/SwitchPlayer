@@ -987,6 +987,7 @@ def test_a_no_wait_start_still_runs_its_prep(sup, monkeypatch, tmp_path):
     events = []
     _loop(sup, monkeypatch, tmp_path, events)
     monkeypatch.setattr(sup, "no_wait_refusal", lambda: None)
+    monkeypatch.setattr(sup, "tkx_unsettled", lambda: False)
     base = pathlib.Path(sup.paths("ds", 0)[1])
     base.mkdir(parents=True)
     (base / "supervisor.log").write_text("NO-WAIT override: ds s0\n")
@@ -996,11 +997,80 @@ def test_a_no_wait_start_still_runs_its_prep(sup, monkeypatch, tmp_path):
     assert ("prep", True) in events and "wait" not in events
 
 
+def test_a_no_wait_argv_first_start_runs_its_prep(sup, monkeypatch,
+                                                  tmp_path, capsys):
+    """r3 NIT-3: the argv branch itself."""
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup, "no_wait_refusal", lambda: None)
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    with pytest.raises(Stop):
+        sup.main(["ds", "0", "--no-wait"])
+    assert ("prep", True) in events and "wait" not in events
+    assert "NO-WAIT override: ds s0" in capsys.readouterr().out
+
+
+def test_a_launched_ds_resumes_even_with_no_wait(sup, monkeypatch, tmp_path,
+                                                 capsys):
+    """r3 NIT-2: -NoWait on a launched run is not refused over TKX's
+    processes; it simply resumes."""
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup, "no_wait_refusal",
+                        lambda: "supervise_rgrowx.py is alive (pids [5])")
+    base = pathlib.Path(sup.paths("ds", 0)[1])
+    base.mkdir(parents=True)
+    (base / "supervisor.log").write_text("LAUNCHED ds s0 attempt 1\n")
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    with pytest.raises(Stop):
+        sup.main(["ds", "0", "--no-wait"])
+    assert "RESUMING ds s0" in capsys.readouterr().out
+    assert ("prep", False) in events
+
+
+def test_a_no_wait_line_resumes_on_tkxs_persistent_state(sup, monkeypatch,
+                                                         tmp_path, capsys):
+    """r3 LOW-1: a TKX supervisor briefly alive after a reboot does not
+    matter while TKX is ABANDONED (or complete)."""
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup, "tkx_unsettled", lambda: False)
+    monkeypatch.setattr(sup, "no_wait_refusal",
+                        lambda: "supervise_rgrowx.py is alive (pids [5])")
+    base = pathlib.Path(sup.paths("ds", 0)[1])
+    base.mkdir(parents=True)
+    (base / "supervisor.log").write_text("NO-WAIT override: ds s0\n")
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    with pytest.raises(Stop):
+        sup.main(["ds", "0"])
+    assert "wait" not in events
+    assert "NO-WAIT override still holds" in capsys.readouterr().out
+
+
+def test_a_master_chosen_before_tkx_completed_stops_the_prep(
+        sup, prep_env, monkeypatch, capsys, fake_tkx):
+    """r3 LOW-2."""
+    marker, _ = fake_tkx
+    d = pathlib.Path(sup.prep_dir())
+    d.mkdir(parents=True)
+    (d / "master.json").write_text(json.dumps({
+        "which": "TK-90", "snapshot": "m.pth", "iterations": 90,
+        "tkx_mean_240_270": None, "tk90_mean_60_90": 856.62}))
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    marker.write_bytes(b"done")                      # TKX completed since
+    assert sup.run_prep({}) is False
+    assert "chosen before TKX completed" in capsys.readouterr().out
+    marker.unlink()                                   # still unfinished: ok
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup))])
+    assert sup.run_prep({}) is True
+
+
 def test_a_stale_no_wait_line_waits_again(sup, monkeypatch, tmp_path,
                                           capsys):
     """r2 B-L3: a NO-WAIT line whose preconditions no longer hold."""
     events = []
     _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup, "tkx_unsettled", lambda: True)
     monkeypatch.setattr(sup, "no_wait_refusal",
                         lambda: "supervise_rgrowx.py is alive (pids [5])")
     base = pathlib.Path(sup.paths("ds", 0)[1])

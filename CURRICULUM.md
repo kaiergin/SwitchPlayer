@@ -994,6 +994,18 @@ closes; its LOWs fixed, then a confirmation round):
   - Known, accepted: the offline curve's snapshot path is ~289 characters
     (Windows long paths are enabled on this machine; tools that are not
     long-path aware may fail to copy the folder).
+AMENDMENTS (audit r3, the confirmation round: nothing above LOW; its two
+LOWs -- both behind a --no-wait slip -- fixed): a logged NO-WAIT is judged
+on TKX's persistent state (its marker or ABANDONED file), not on whether a
+TKX script is briefly alive after a reboot; a master.json chosen while TKX
+had no marker stops the prep (PREP FAILED) once TKX has completed (the
+retraction procedure moves it aside); a launched DS resumes even under
+-NoWait. GPU smoke (2026-10-21, beside TKX, no Ray): prefill from a tiny
+TK-90-master set, 20 offline steps, row-0 and offline-curve snapshots with
+acting states, a student life with birth search over its 13 tokens and a
+communal refresh, all on CUDA -- OK (28 s, peak 1.0 GB). The Ray path is
+TK's, unchanged but for the vocabulary size; DS's first iteration is its
+first Ray run.
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 
