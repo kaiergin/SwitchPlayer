@@ -651,6 +651,7 @@ def test_no_wait_is_logged_and_refused_while_tkx_is_driven(sup, monkeypatch,
     monkeypatch.setattr(sup, "REPO", str(tmp_path))
     monkeypatch.setattr(sup, "other_supervisors", lambda v: [])
     monkeypatch.setattr(sup, "wait_external", _stop)
+    monkeypatch.setattr(sup, "live_trainers", lambda: [])   # (TKX is live)
     marker = tmp_path / "tkx" / "resume.ckpt"
     marker.parent.mkdir()
     monkeypatch.setattr(sup, "TKX_MARKER", str(marker))
@@ -1060,7 +1061,22 @@ def test_a_master_chosen_before_tkx_completed_stops_the_prep(
     marker.write_bytes(b"done")                      # TKX completed since
     assert sup.run_prep({}) is False
     assert "chosen before TKX completed" in capsys.readouterr().out
+    # ... also over a FINISHED prep (audit r4 LOW-1)
+    _write_prep(sup)
+    assert sup.run_prep({}) is False
+    assert "chosen before TKX completed" in capsys.readouterr().out
+    # ... but never for a launched run (bound to its set)
+    assert sup.run_prep({}, redo_ok=False) is True
+    # ... and when TKX completes during a guard wait
+    marker.unlink()
+    (pathlib.Path(sup.prep_dir()) / "vocab.json").unlink()
+    monkeypatch.setattr(sup, "wait_no_trainer",
+                        lambda *a: marker.write_bytes(b"done"))
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    assert sup.run_prep({}) is False
+    assert "chosen before TKX completed" in capsys.readouterr().out
     marker.unlink()                                   # still unfinished: ok
+    monkeypatch.setattr(sup, "wait_no_trainer", lambda *a: None)
     _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup))])
     assert sup.run_prep({}) is True
 
@@ -1143,3 +1159,27 @@ def test_a_checkpoint_resets_the_no_progress_count(sup, monkeypatch,
     with pytest.raises(Stop):
         sup.main(["ds", "0"])
     assert "NO PROGRESS" not in capsys.readouterr().out
+
+
+def test_the_launch_gate_rechecks_a_stale_master(sup, monkeypatch, tmp_path,
+                                                 capsys):
+    """audit r4 NIT-1: TKX completed after the prep, before DS launched."""
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup, "stale_pick", lambda: True)
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    assert sup.main(["ds", "0"]) == 1
+    assert "chosen before TKX completed" in capsys.readouterr().out
+    ck = pathlib.Path(sup.paths("ds", 0)[3])        # launched: no check
+    ck.write_bytes(b"x" * 1_000_001)
+    with pytest.raises(Stop):
+        sup.main(["ds", "0"])
+
+
+def test_no_wait_is_refused_while_a_trainer_lives(sup, monkeypatch):
+    monkeypatch.setattr(sup, "live_scripts", lambda s, v=None: [])
+    monkeypatch.setattr(sup, "tkx_unsettled", lambda: False)
+    monkeypatch.setattr(sup, "live_trainers", lambda: [12])
+    assert "a trainer or prep is alive" in sup.no_wait_refusal()
+    monkeypatch.setattr(sup, "live_trainers", lambda: [])
+    assert sup.no_wait_refusal() is None

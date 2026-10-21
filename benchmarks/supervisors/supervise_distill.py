@@ -28,11 +28,12 @@ vocab.json is its completion signal). Then DS launches. fs waits for DS's comple
 marker AND both DS probe jsonls holding rows 0 and 5-90, both offline-curve
 jsonls holding rows 1-4 (and the prep's vocab.json), then its preflight,
 then FS launches. A RESUME (this run's checkpoint exists, or its
-supervisor.log logged a LAUNCHED line -- or a NO-WAIT line while the
---no-wait preconditions still hold) skips the wait. --no-wait (ds only; logged, Kai's call: TKX abandoned or
-stuck) skips it too and is refused while any supervise_rgrowx.py or
-post_rgrowx.py lives, and unless TKX has its completion marker or its
-ABANDONED file; the master is then TK-90 when TKX has no marker, and the
+supervisor.log logged a LAUNCHED line -- or a NO-WAIT line while TKX has
+its completion marker or ABANDONED file) skips the wait. --no-wait (ds only; logged, Kai's call: TKX abandoned or
+stuck) skips it too and is refused (unless this run was already
+launched: then it just resumes) while any supervise_rgrowx.py,
+post_rgrowx.py or trainer lives, and unless TKX has its completion marker
+or its ABANDONED file; the master is then TK-90 when TKX has no marker, and the
 prep stops (PREP FAILED) when TKX completed without rows 240-270. Before
 EVERY launch attempt (and before the prep) it waits while ANY python runs
 experiments/ablation.py or experiments/distill.py. One supervisor per run: a second
@@ -542,16 +543,37 @@ def set_intact():
     return True, ""
 
 
+STALE_PICK = ("PREP FAILED: master.json was chosen before TKX completed -- "
+              "follow the --no-wait retraction procedure (move the DS run "
+              "folder and the prep folder aside)")
+
+
+def stale_pick():
+    """master.json was chosen while TKX had no completion marker (a
+    --no-wait: TK-90 by rule), and TKX has completed since -- the
+    pre-registered rule must then see TKX's rows (a half-done retraction;
+    audit r3 LOW-2)."""
+    path = os.path.join(prep_dir(), "master.json")
+    pick = read_pick(path) if os.path.exists(path) else None
+    return (pick is not None and pick["tkx_mean_240_270"] is None
+            and not marker_missing(TKX_MARKER))
+
+
 def run_prep(env, redo_ok=True):
     """The prep, once (vocab.json is its completion signal): choose and log
     the master, then experiments/distill.py up to PREP_ATTEMPTS times.
     Returns True when the prep is done. A done prep that does not check out
     intact is retried for a few minutes (a transient lock), then -- only
-    when `redo_ok` (this run was never sanctioned: nothing is bound to the
+    when `redo_ok` (this run was never LAUNCHED: nothing is bound to the
     set yet) -- moved aside and redone; once launched it is NEVER redone
     (a launched DS's checkpoint is bound to the set's sha256 and FS to its
     vocabulary; the attempt loop's integrity gate ALERTs and waits; audit
-    r1 B-M2)."""
+    r1 B-M2). Before a launch, a master.json chosen while TKX had no marker
+    stops the prep once TKX has completed -- also over a finished prep, and
+    again after every guard wait (audit r3 LOW-2, r4 LOW-1 / NIT-1)."""
+    if redo_ok and stale_pick():
+        print(STALE_PICK, flush=True)
+        return False
     if not redo_ok and not prep_done():
         # (audit r2 B-L2: nothing missing is ever re-recorded once DS ran)
         print("ALERT: the prep's vocab.json is missing after this run was "
@@ -581,15 +603,6 @@ def run_prep(env, redo_ok=True):
     # A restarted supervisor keeps the first choice (written atomically;
     # an unreadable one is chosen again -- nothing ran on it yet).
     pick = read_pick(pick_path) if os.path.exists(pick_path) else None
-    if (pick is not None and pick["tkx_mean_240_270"] is None
-            and not marker_missing(TKX_MARKER)):
-        # Chosen while TKX had no marker (a --no-wait), but TKX has completed
-        # since: the pre-registered rule must see TKX's rows (audit r3 LOW-2;
-        # the retraction procedure moves the prep folder aside).
-        print("PREP FAILED: master.json was chosen before TKX completed -- "
-              "follow the --no-wait retraction procedure (move the DS run "
-              "folder and the prep folder aside)", flush=True)
-        return False
     if pick is None:
         try:
             pick = choose_master()
@@ -602,6 +615,9 @@ def run_prep(env, redo_ok=True):
           f"{pick['tk90_mean_60_90']})", flush=True)
     for attempt in range(1, PREP_ATTEMPTS + 1):
         wait_no_trainer()
+        if stale_pick():                 # TKX completed during the wait
+            print(STALE_PICK, flush=True)
+            return False
         # An orphaned prep may have finished while the guard waited (audit
         # r2 B-L1): it counts. With no prep alive, its tmp files are stale.
         if prep_done() and set_intact()[0]:
@@ -962,6 +978,10 @@ def no_wait_refusal():
         alive = live_scripts(script)
         if alive:
             return f"{script} is alive (pids {alive}) -- kill it first"
+    alive = live_trainers()
+    if alive:
+        return (f"a trainer or prep is alive (pids {alive}) -- stop it first "
+                f"(audit r4 NIT-1)")
     if tkx_unsettled():
         return ("TKX has neither its completion marker nor an ABANDONED "
                 "file -- abandon it first (its supervisor's procedure)")
@@ -1149,6 +1169,10 @@ def main(argv):
         polls, told = 0, None
         while True:
             wait_no_trainer(rows)
+            if (variant == "ds" and not launched(base, ckpt)
+                    and stale_pick()):
+                print(STALE_PICK, flush=True)       # (audit r4 NIT-1)
+                return 1
             ok, why = manifest_check()
             if ok and variant == "ds":
                 ok, why = set_intact()

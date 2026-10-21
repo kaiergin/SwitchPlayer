@@ -1006,6 +1006,10 @@ acting states, a student life with birth search over its 13 tokens and a
 communal refresh, all on CUDA -- OK (28 s, peak 1.0 GB). The Ray path is
 TK's, unchanged but for the vocabulary size; DS's first iteration is its
 first Ray run.
+AMENDMENTS (audit r4, confirmation: nothing above LOW; its LOW fixed): the
+stale-master.json stop also covers a FINISHED prep, and is re-checked after
+every guard wait and before DS's first launch; --no-wait is also refused
+while any trainer or prep lives.
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 
