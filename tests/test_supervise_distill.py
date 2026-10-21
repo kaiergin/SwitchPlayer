@@ -38,8 +38,29 @@ def _load(path, name):
 
 
 @pytest.fixture
-def sup():
+def real_sup():
+    """The module as deployed: its constants name the LIVE predecessor
+    runs. Only the constants test reads them."""
     return _load(SUPERVISORS / "supervise_distill.py", "supervise_distill")
+
+
+@pytest.fixture
+def sup(real_sup, monkeypatch, tmp_path):
+    """The module with every path into the live TKX / TK-90 runs redirected
+    to an empty temp folder (TKX "unfinished, not abandoned"): no test may
+    depend on the real TKX's state -- DS's preflight runs this suite after
+    TKX has completed (or been abandoned) (audit r5 HIGH-1 / MEDIUM-1).
+    Tests that need a TKX state build it with fake_tkx."""
+    live = tmp_path / "_no_live_runs"
+    for name, rel in (("TKX_MARKER", "tkx/resume.ckpt"),
+                      ("TKX_ABANDONED", "tkx/ABANDONED"),
+                      ("TKX_SUPLOG", "tkx/supervisor.log"),
+                      ("TKX_SNAPSHOT", "tkx/weights-iter270.pth"),
+                      ("TK90_SNAPSHOT", "tk90/weights-iter090.pth")):
+        monkeypatch.setattr(real_sup, name, str(live / rel))
+    monkeypatch.setattr(real_sup, "TKX_PROBES", (
+        str(live / "tkx" / "p-acting.jsonl"), str(live / "tkx" / "p.jsonl")))
+    return real_sup
 
 
 @pytest.fixture
@@ -185,7 +206,8 @@ def test_supervisor_quick_probe_passes(sup, variant):
 # --------------------------------------------------------------------------
 # the predecessors, the master
 # --------------------------------------------------------------------------
-def test_tkx_constants_name_the_live_tkx_run(sup, tkx, monkeypatch):
+def test_tkx_constants_name_the_live_tkx_run(real_sup, tkx, monkeypatch):
+    sup = real_sup
     monkeypatch.setattr(tkx, "REPO", sup.TKX_TREE)
     rel, base, _jsonl, ckpt, _d = tkx.paths("tkx", 0)
     assert sup.TKX_RUN == rel.split("/")[-1]
@@ -218,6 +240,7 @@ def fake_tkx(sup, monkeypatch, tmp_path):
     probes = (tmp_path / "tkx" / "p-acting.jsonl",
               tmp_path / "tkx" / "p.jsonl")
     monkeypatch.setattr(sup, "TKX_MARKER", str(marker))
+    monkeypatch.setattr(sup, "TKX_ABANDONED", str(tmp_path / "tkx" / "AB"))
     monkeypatch.setattr(sup, "TKX_PROBES", tuple(map(str, probes)))
     monkeypatch.setattr(sup, "TKX_SUPLOG", str(tmp_path / "tkx" / "sup.log"))
     monkeypatch.setattr(sup, "REPO", str(tmp_path / "repo"))
@@ -550,6 +573,9 @@ def test_a_sanctioned_run_never_redoes_its_prep(sup, prep_env, monkeypatch,
     assert not list(pathlib.Path(sup.prep_dir()).glob("*.damaged-*"))
     # a transient read failure that clears is not damage
     _write_prep(sup)
+    sup.write_pick(os.path.join(sup.prep_dir(), "master.json"), {
+        "which": "TK-90", "snapshot": "m.pth", "iterations": 90,
+        "tkx_mean_240_270": None, "tk90_mean_60_90": 856.62})
     real = sup.set_intact
     flaky = [(False, "prep files: [Errno 13] locked"), None]
 
@@ -1183,3 +1209,29 @@ def test_no_wait_is_refused_while_a_trainer_lives(sup, monkeypatch):
     assert "a trainer or prep is alive" in sup.no_wait_refusal()
     monkeypatch.setattr(sup, "live_trainers", lambda: [])
     assert sup.no_wait_refusal() is None
+
+
+def test_the_normal_flow_passes_the_new_checks(sup, prep_env, fake_tkx,
+                                               monkeypatch, tmp_path):
+    """audit r5: TKX COMPLETED (the state DS's preflight runs in) and a pick
+    the rule made with TKX's rows: the prep runs and the launch gate
+    passes."""
+    marker, probes = fake_tkx
+    marker.write_bytes(b"done")
+    monkeypatch.setattr(sup, "choose_master", lambda: {
+        "which": "TKX", "snapshot": "x.pth", "iterations": 270,
+        "tkx_mean_240_270": 1000.0, "tk90_mean_60_90": 856.62})
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup))])
+    assert sup.run_prep({}) is True
+    assert not sup.stale_pick()
+    assert sup.run_prep({}) is True                  # done: fast path
+
+
+def test_a_finished_prep_without_its_master_json_is_refused(
+        sup, prep_env, monkeypatch, capsys):
+    """audit r5 NIT: a half-retraction that moved only master.json."""
+    _write_prep(sup)
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    assert sup.run_prep({}) is False
+    assert "without a readable master.json" in capsys.readouterr().out
+    assert sup.run_prep({}, redo_ok=False) is True   # launched: bound

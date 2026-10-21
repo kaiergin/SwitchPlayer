@@ -1010,6 +1010,14 @@ AMENDMENTS (audit r4, confirmation: nothing above LOW; its LOW fixed): the
 stale-master.json stop also covers a FINISHED prep, and is re-checked after
 every guard wait and before DS's first launch; --no-wait is also refused
 while any trainer or prep lives.
+AMENDMENTS (audit r5, confirmation: ONE HIGH, in the tests -- fixed): the
+supervisor's tests read the live TKX run's real paths, so they passed only
+while TKX was unfinished -- DS's own preflight (which runs them after TKX
+completes, or with TKX abandoned) could never have passed. Every live
+TKX / TK-90 path is now redirected in the tests' fixture, and the suite is
+run under simulated TKX states (live, completed, abandoned: all pass). Also
+a finished prep without a readable master.json stops the prep (a
+half-retraction).
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 

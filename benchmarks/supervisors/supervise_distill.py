@@ -584,6 +584,14 @@ def run_prep(env, redo_ok=True):
         for k in range(3):
             ok, why = set_intact()
             if ok:
+                if redo_ok and read_pick(os.path.join(
+                        prep_dir(), "master.json")) is None:
+                    # (audit r5 NIT: a half-retraction that moved only
+                    # master.json aside -- the set's master is unknown)
+                    print("PREP FAILED: a finished prep without a readable "
+                          "master.json -- follow the retraction procedure "
+                          "(move the prep folder aside)", flush=True)
+                    return False
                 return True
             if k < 2:
                 time.sleep(60)
