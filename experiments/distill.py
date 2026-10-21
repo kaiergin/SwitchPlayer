@@ -93,12 +93,14 @@ def set_rep_pred(run, states):
     run.set_train_mode(False)
 
 
-def check_life(traj, inner, channels=3):
+def check_life(traj, inner, frames=4):
     """Raw-step consistency of one recorded life: one inner-frame list per
     acted decision, len(inner[i]) == base steps played - 1 (the raw reward
     tuple the next record carries), and decision i's stack with its inner
-    frames pushed equals decision i+1's stack minus its newest frame.
+    frames pushed equals decision i+1's stack minus its newest frame (a
+    stack holds `frames` frames: muzero.initial_frame_stack's default).
     Raises AssertionError otherwise."""
+    channels = traj[0][0].shape[0] // frames
     assert len(inner) == len(traj) - 1, (len(inner), len(traj))
     for i in range(len(traj) - 1):
         m = len(traj[i + 1][2])
@@ -231,12 +233,16 @@ def write_set(path, header, lives):
     # per-process tmp name: two preps can never interleave one file (audit
     # r1 B-M1; the supervisor's guard also counts a live prep)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    with open(tmp, "wb", buffering=16 * 1024 * 1024) as f:
-        f.write(SET_MAGIC)
-        pickle.dump({**header, "lives": len(lives)}, f, protocol=5)
-        for life in lives:
-            pickle.dump(life, f, protocol=5)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb", buffering=16 * 1024 * 1024) as f:
+            f.write(SET_MAGIC)
+            pickle.dump({**header, "lives": len(lives)}, f, protocol=5)
+            for life in lives:
+                pickle.dump(life, f, protocol=5)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():                # a failed write leaves no ~1 GB tmp
+            tmp.unlink()
 
 
 def read_header(path):

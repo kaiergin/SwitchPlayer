@@ -572,7 +572,9 @@ def test_the_prep_needs_the_audited_tree(sup, prep_env, monkeypatch, capsys):
 
 
 def test_fs_launches_only_on_dss_vocabulary(sup, monkeypatch, tmp_path):
-    import torch
+    """The marker is built the way run_one builds it (mark_run_completed of
+    run_expect with student_expect's keys), and the check runs in a child
+    process (r2 B-L4)."""
     monkeypatch.setattr(sup, "REPO", str(tmp_path))
     os.makedirs(sup.prep_dir())
     vocab = [[0, 4], [1, 4], [1, 16]]
@@ -582,11 +584,15 @@ def test_fs_launches_only_on_dss_vocabulary(sup, monkeypatch, tmp_path):
     ck.parent.mkdir(parents=True)
     ok, why = sup.vocab_is_ds(0)
     assert not ok and "vocab check" in why            # no marker yet
-    torch.save({"completed": True, "token_vocab": vocab}, ck)
+    expect = ablation.run_expect(sup.VARIANTS["ds"], 0, 90, 2000, 3, 5,
+                                 student={"token_vocab": vocab,
+                                          "distill_set_sha256": "x"})
+    ablation.mark_run_completed(ck, expect)
     assert sup.vocab_is_ds(0) == (True, "")
-    torch.save({"completed": True, "token_vocab": vocab[:2]}, ck)
+    ablation.mark_run_completed(ck, {**expect, "token_vocab": vocab[:2]})
     ok, why = sup.vocab_is_ds(0)
     assert not ok and "not the vocabulary DS trained with" in why
+    assert not hasattr(sup, "torch")      # no torch in the supervisor
 
 
 def test_the_trainer_guard_counts_the_prep(sup, monkeypatch):
@@ -884,7 +890,7 @@ def test_main_source_order(sup):
     assert loop.index("wait_no_trainer(rows)") < loop.index(
         "manifest_check()") < loop.index("set_intact()") < loop.index(
         "vocab_is_ds(seed)") < loop.index("subprocess.Popen(")
-    assert "redo_ok=not sanctioned(base, ckpt)" in src
+    assert "redo_ok=not launched(base, ckpt)" in src
 
 
 @pytest.mark.parametrize("variant, row, per, want", [
@@ -914,3 +920,156 @@ def test_rows_print_and_alert(sup, tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "EVAL ds s0 iter 5" in out and "frames/decision 12" in out
     assert "host commit free 3.0 GB" in out
+
+
+# --------------------------------------------------------------------------
+# audit r2 (B)
+# --------------------------------------------------------------------------
+def test_an_orphaned_prep_that_finished_counts(sup, prep_env, monkeypatch,
+                                               capsys):
+    """r2 B-L1: the next attempt's guard waited out an orphaned prep that
+    wrote the prep: no second prep."""
+    monkeypatch.setattr(sup, "wait_no_trainer", lambda *a: _write_prep(sup))
+    _popen(monkeypatch, sup, [])
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    assert sup.run_prep({}) is True
+    assert "PREP done (by an earlier prep)" in capsys.readouterr().out
+
+
+def test_stale_prep_tmp_files_are_swept(sup, prep_env, monkeypatch):
+    d = pathlib.Path(sup.prep_dir())
+    d.mkdir(parents=True)
+    (d / "set.pkl.4242.tmp").write_bytes(b"x")
+    (d / "keep.txt").write_bytes(b"x")
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup))])
+    assert sup.run_prep({}) is True
+    assert not list(d.glob("*.tmp")) and (d / "keep.txt").exists()
+
+
+def test_a_launched_run_never_starts_a_prep(sup, prep_env, monkeypatch,
+                                            capsys):
+    """r2 B-L2: vocab.json missing after DS was launched: no prep at all."""
+    calls = prep_env
+    d = pathlib.Path(sup.prep_dir())
+    d.mkdir(parents=True)
+    (d / "set.pkl").write_bytes(b"bound")
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    assert sup.run_prep({}, redo_ok=False) is True
+    assert "never redone" in capsys.readouterr().out and calls == []
+    assert (d / "set.pkl").read_bytes() == b"bound"
+
+
+def test_the_prep_retries_15_min_apart(sup, prep_env, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(sup.time, "sleep", sleeps.append)
+    _popen(monkeypatch, sup, [(1, None)] * 3)
+    assert sup.run_prep({}) is False
+    assert sleeps.count(sup.PREP_RETRY_S) == 2 and sup.PREP_RETRY_S == 900
+
+
+def test_launched_vs_sanctioned(sup, tmp_path):
+    base, ck = tmp_path / "b", tmp_path / "b" / "c.ckpt"
+    base.mkdir()
+    assert not sup.launched(str(base), str(ck))
+    (base / "supervisor.log").write_text("NO-WAIT override: ds s0 x\n")
+    assert sup.sanctioned(str(base), str(ck))
+    assert not sup.launched(str(base), str(ck))
+    (base / "supervisor.log").write_text("LAUNCHED ds s0 attempt 1\n")
+    assert sup.launched(str(base), str(ck))
+    (base / "supervisor.log").write_text("")
+    ck.write_bytes(b"x")
+    assert sup.launched(str(base), str(ck))
+
+
+def test_a_no_wait_start_still_runs_its_prep(sup, monkeypatch, tmp_path):
+    """The first --no-wait start: sanctioned by its own NO-WAIT line, but
+    not launched -- the prep must run (redo_ok)."""
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup, "no_wait_refusal", lambda: None)
+    base = pathlib.Path(sup.paths("ds", 0)[1])
+    base.mkdir(parents=True)
+    (base / "supervisor.log").write_text("NO-WAIT override: ds s0\n")
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    with pytest.raises(Stop):
+        sup.main(["ds", "0"])
+    assert ("prep", True) in events and "wait" not in events
+
+
+def test_a_stale_no_wait_line_waits_again(sup, monkeypatch, tmp_path,
+                                          capsys):
+    """r2 B-L3: a NO-WAIT line whose preconditions no longer hold."""
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup, "no_wait_refusal",
+                        lambda: "supervise_rgrowx.py is alive (pids [5])")
+    base = pathlib.Path(sup.paths("ds", 0)[1])
+    base.mkdir(parents=True)
+    (base / "supervisor.log").write_text("NO-WAIT override: ds s0\n")
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    with pytest.raises(Stop):
+        sup.main(["ds", "0"])
+    assert events[0] == "wait"
+    assert "no longer holds" in capsys.readouterr().out
+
+
+def test_no_progress_stops_after_3_deaths_without_a_checkpoint(
+        sup, monkeypatch, tmp_path, capsys):
+    """r2 B-L6: long-lived deaths that never write a new checkpoint."""
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    import time as real_time
+    clock = [1_000_000.0]
+
+    def sleep(sec):
+        clock[0] += max(sec, 1.0)
+
+    monkeypatch.setattr(sup, "time", SimpleNamespace(
+        time=lambda: clock[0], sleep=sleep, strftime=real_time.strftime))
+
+    class LongDeath:
+        pid, returncode = 99, 1
+
+        def poll(self):
+            clock[0] += 3 * 3600                     # dies 3 h in
+            return 1
+
+    monkeypatch.setattr(sup.subprocess, "Popen",
+                        lambda args, **k: events.append("popen") or
+                        LongDeath())
+    assert sup.main(["ds", "0"]) == 1
+    out = capsys.readouterr().out
+    assert "NO PROGRESS: 3 consecutive attempts" in out
+    assert events.count("popen") == 3
+
+
+def test_a_checkpoint_resets_the_no_progress_count(sup, monkeypatch,
+                                                   tmp_path, capsys):
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    import time as real_time
+    clock = [1_000_000.0]
+    monkeypatch.setattr(sup, "time", SimpleNamespace(
+        time=lambda: clock[0],
+        sleep=lambda sec: clock.__setitem__(0, clock[0] + 1),
+        strftime=real_time.strftime))
+    ck = pathlib.Path(sup.paths("ds", 0)[3])
+    n = [0]
+
+    class Death:
+        pid, returncode = 99, 1
+
+        def poll(self):
+            clock[0] += 3 * 3600
+            n[0] += 1
+            if n[0] % 2 == 0:                       # every other attempt
+                ck.write_bytes(b"x" * 2_000_000)    # writes a checkpoint
+                os.utime(ck, (clock[0], clock[0]))
+            if n[0] >= 7:
+                raise Stop
+            return 1
+
+    monkeypatch.setattr(sup.subprocess, "Popen", lambda args, **k: Death())
+    with pytest.raises(Stop):
+        sup.main(["ds", "0"])
+    assert "NO PROGRESS" not in capsys.readouterr().out

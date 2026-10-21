@@ -123,7 +123,7 @@ def test_every_startup_gate_passes_for_the_students(arm, monkeypatch,
         ablation.sve_gate()
         ablation.token_gate(spec, True, True, 0)
         ablation.reward_growth_gate(True, True, 0)
-        ablation.student_gate(spec, dset)
+        ablation.student_gate(spec, dset, True)
 
 
 def _header(vocab=None, master=None):
@@ -211,17 +211,17 @@ def test_student_gate_refusals(tmp_path, student):
         gate(FS_ARM, good)
     with pytest.raises(SystemExit, match="-student-distill arm only"):
         with ablation.arm_config(TK_ARM) as spec:
-            ablation.student_gate(spec, good)
+            ablation.student_gate(spec, good, True)
     gate(DS_ARM, good)
     gate(FS_ARM, None)
     gate(FS_ARM, None, snaps=False)       # FS's snapshots are the usual ones
     with ablation.arm_config(TK_ARM) as spec:
-        ablation.student_gate(spec, None)            # other arms: no-op
+        ablation.student_gate(spec, None, True)      # other arms: no-op
     # a vocab.json without the set's hash refuses DS
     ablation.student_arm(DS_ARM, _vocab_file(tmp_path))
     with ablation.arm_config(DS_ARM) as spec:
         with pytest.raises(SystemExit, match="set_sha256"):
-            ablation.student_gate(spec, good)
+            ablation.student_gate(spec, good, True)
 
 
 def test_student_gate_refuses_a_growing_ceiling_or_bad_offline_steps(
@@ -232,7 +232,7 @@ def test_student_gate_refuses_a_growing_ceiling_or_bad_offline_steps(
     with ablation.arm_config(DS_ARM) as spec:
         muzero.REWARD_GROWTH_START = 1.0
         with pytest.raises(SystemExit, match="end-state ceiling"):
-            ablation.student_gate(spec, dset)
+            ablation.student_gate(spec, dset, True)
     applied = ablation.ARMS[DS_ARM]
     for steps, every in ((20000, 3000), (0, 0), (4000, 8000)):
         monkeypatch.setitem(ablation.ARMS, DS_ARM, {
@@ -240,7 +240,7 @@ def test_student_gate_refuses_a_growing_ceiling_or_bad_offline_steps(
             "_distill_snapshot_every": every})
         with ablation.arm_config(DS_ARM) as spec:
             with pytest.raises(SystemExit, match="multiple"):
-                ablation.student_gate(spec, dset)
+                ablation.student_gate(spec, dset, True)
 
 
 def test_the_resume_recipe_carries_the_vocabulary_and_the_set(tmp_path,
@@ -280,6 +280,8 @@ def test_run_one_wires_the_students():
     assert i < src.index("for it in range(start_it + 1, iterations + 1):")
     block = src[i:src.index("def write_row(")]
     assert "distill_prefill(run, lives)" in block
+    assert block.index("if run.replay or run.trainer.training_steps:") < \
+        block.index("distill_prefill(")
     assert block.index("distill_prefill(") < block.index("distill_offline(")
     main = inspect.getsource(ablation.main)
     assert "student_arm(arm, args.token_vocab)" in main
@@ -672,7 +674,7 @@ def test_the_distilled_student_prefills_and_trains_offline(
     with ablation.arm_config(DS_ARM) as spec, \
             ablation._run_length_globals(2, 3), ablation.token_actions():
         muzero.TRAINING_BATCHES = 8
-        ablation.student_gate(spec, out / "set.pkl")
+        ablation.student_gate(spec, out / "set.pkl", True)
         run = ablation.Run(DS_ARM, 0, spec)
         try:
             ablation.distill_prefill(run, lives)
@@ -834,3 +836,15 @@ def test_a_resume_under_another_set_is_refused(prepped, monkeypatch,
     with pytest.raises(ValueError, match="resume mismatch.*distill_set_sha256"):
         ablation.run_one(DS_ARM, 0, 4, 1, 3, 2, jsonl, resume=True,
                          distill_set=str(other), **kw)
+
+
+def test_a_failed_set_write_leaves_no_tmp(tmp_path):
+    class Boom:
+        def __reduce__(self):
+            raise RuntimeError("unpicklable")
+
+    p = tmp_path / "set.pkl"
+    with pytest.raises(RuntimeError):
+        distill.write_set(p, _header(), [{"traj": [Boom()],
+                                          "terminated": True}])
+    assert not p.exists() and not list(tmp_path.iterdir())

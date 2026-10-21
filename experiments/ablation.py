@@ -1843,14 +1843,19 @@ def validate_student_vocab(vocab, master_vocab):
 def load_student_vocab(path, master_vocab):
     """--token-vocab: the vocab.json experiments/distill.py wrote (its
     "vocab" list), validated against the arm's master vocabulary. Returns
-    (vocab, sha256 of the file)."""
-    with open(path, encoding="utf-8") as f:
-        doc = json.load(f)
+    (vocab, sha256 of the file, its "set_sha256" or None) -- one read."""
+    import hashlib
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except ValueError:
+        doc = None
     if not isinstance(doc, dict) or "vocab" not in doc:
         raise SystemExit(f"{path}: no 'vocab' list (not a distill.py "
                          f"vocab.json)")
-    return validate_student_vocab(doc["vocab"], master_vocab), \
-        file_sha256(path)
+    return (validate_student_vocab(doc["vocab"], master_vocab),
+            hashlib.sha256(data).hexdigest(), doc.get("set_sha256"))
 
 
 def student_arm(arm, path):
@@ -1862,15 +1867,13 @@ def student_arm(arm, path):
     if spec.get("_student") not in ("distill", "fresh"):
         raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
                          f"arms only; '{arm}' is not one")
-    vocab, sha = load_student_vocab(path, spec["TOKEN_VOCAB"])
-    with open(path, encoding="utf-8") as f:
-        set_sha = json.load(f).get("set_sha256")
+    vocab, sha, set_sha = load_student_vocab(path, spec["TOKEN_VOCAB"])
     ARMS[arm] = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha,
                  "_vocab_set_sha256": set_sha}
     return ARMS[arm]
 
 
-def student_gate(spec, distill_set, snapshot_weights=True):
+def student_gate(spec, distill_set, snapshot_weights):
     """The P3 student arms' inputs, checked at startup (before any
     --overwrite deletion): a student arm needs its --token-vocab applied
     (student_arm); DS needs --distill-set, whose vocabulary is this run's,
@@ -4830,6 +4833,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             # nets instead; a restart without a checkpoint runs it again).
             # Before the pipeline exists: its first sync ships the trained
             # weights and BN states calibrated on these frames.
+            if run.replay or run.trainer.training_steps:
+                # (no checkpoint lands at iteration 0 today; one that did
+                # would make this a double prefill -- audit r2 A-NIT3)
+                run.env.close()
+                raise SystemExit("the distillation prefill needs a fresh "
+                                 "run (empty replay, step 0)")
             import distill
             try:
                 header, lives = distill.read_set(distill_set)

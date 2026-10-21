@@ -23,19 +23,19 @@ choose_master picks the master (the final snapshot of whichever of TKX and
 TK-90 has the higher 7-row deployed mean; TK-90 when TKX has no complete
 row window), logged in PREP/master.json, and experiments/distill.py
 records it, derives the student vocabulary, re-tokenizes and searches
-(GPU, ~0.5 h; log PREP/prep.log; up to PREP_ATTEMPTS tries; vocab.json is
-its completion signal). Then DS launches. fs waits for DS's completion
+(GPU, ~0.5 h; log PREP/prep.log; up to PREP_ATTEMPTS tries 15 min apart;
+vocab.json is its completion signal). Then DS launches. fs waits for DS's completion
 marker AND both DS probe jsonls holding rows 0 and 5-90, both offline-curve
 jsonls holding rows 1-4 (and the prep's vocab.json), then its preflight,
-then FS launches. A RESUME (this run's
-checkpoint exists, or its supervisor.log logged a LAUNCHED / NO-WAIT line)
-skips the wait. --no-wait (ds only; logged, Kai's call: TKX abandoned or
+then FS launches. A RESUME (this run's checkpoint exists, or its
+supervisor.log logged a LAUNCHED line -- or a NO-WAIT line while the
+--no-wait preconditions still hold) skips the wait. --no-wait (ds only; logged, Kai's call: TKX abandoned or
 stuck) skips it too and is refused while any supervise_rgrowx.py or
 post_rgrowx.py lives, and unless TKX has its completion marker or its
 ABANDONED file; the master is then TK-90 when TKX has no marker, and the
-prep stops (PREP FAILED) when TKX completed without rows 240-270. Before EVERY launch
-attempt (and before the prep) it waits while ANY python runs an
-experiments/ablation.py. One supervisor per run: a second
+prep stops (PREP FAILED) when TKX completed without rows 240-270. Before
+EVERY launch attempt (and before the prep) it waits while ANY python runs
+experiments/ablation.py or experiments/distill.py. One supervisor per run: a second
 supervise_distill.py of the same variant refuses to start. A run already
 complete exits at once (RUN COMPLETE). ABANDONED in the run folder stops
 every launch; a run folder holding snapshots (its own or its offline
@@ -59,9 +59,23 @@ waiting and before the prep. --no-wait needs TKX's completion marker or its
 ABANDONED file. Missing master snapshots are an hourly ALERT while ds waits.
 PAUSE (a Switch session): kill the supervisor, then its trainer
 (experiments/ablation.py) or prep (experiments/distill.py), by command
-line. RETRACTING a --no-wait: also move the prep folder aside (its
-master.json holds the first choice). After a REBOOT rerun BOTH launchers
-(launch_rgrowx.ps1 while TKX is unfinished, and launch_distill.ps1).
+line. RETRACTING a --no-wait = the fresh-restart procedure: stop the ds
+supervisor, its trainer or prep and the hand-off, move the DS run folder
+(its supervisor.log holds the NO-WAIT line) AND the prep folder (its
+master.json holds the first choice) aside, relaunch. After a REBOOT rerun
+BOTH launchers (launch_rgrowx.ps1 while TKX is unfinished, and
+launch_distill.ps1).
+
+Audit r2 (B, nothing above LOW; its LOWs): an orphaned prep that finishes
+while the next attempt waits on the guard counts (no second prep); once DS
+was LAUNCHED (a checkpoint or a LAUNCHED line) no prep is ever started
+again, whatever is missing; a NO-WAIT line alone sanctions a skip of the
+wait only while the --no-wait preconditions still hold; fs checks DS's
+vocabulary in a child process (no torch in the long-lived supervisor);
+3 consecutive long-lived attempts (>= 10 min) that die without writing a
+new checkpoint stop the supervisor (NO PROGRESS: DS's attempts each cost
+the ~1 h offline phase until its first checkpoint); stale prep tmp files are swept before a prep
+attempt.
 
 The runs execute from the RUN WORKTREE this file lives in (a checkout of
 the audited commit that nobody edits), so REPO is this file's own tree.
@@ -90,6 +104,8 @@ COMMIT_ALERT_GB = 4.0
 PRED_EVALS_ALERT_S = 2 * 3600    # predecessor done this long, evals missing
 PRED_SILENT_ALERT_S = 4 * 3600   # predecessor unfinished, its log silent
 PREP_ATTEMPTS = 3
+PREP_RETRY_S = 900
+NO_PROGRESS_DEATHS = 3
 
 
 def expected_ceiling(variant, iteration):
@@ -391,7 +407,8 @@ def pred_gave_up(variant, seed):
     FAILED after its last launch or preflight line."""
     lines = lines_of(predecessor(variant, seed)[3])
     fail = max((i for i, l in enumerate(lines) if l.startswith(
-        ("CRASH LOOP", "MAX ATTEMPTS", "PREP FAILED"))), default=-1)
+        ("CRASH LOOP", "MAX ATTEMPTS", "PREP FAILED", "NO PROGRESS"))),
+               default=-1)
     live = max((i for i, l in enumerate(lines) if l.startswith(
         ("LAUNCHED", "preflight ok", "PREFLIGHT"))), default=-1)
     return fail > live
@@ -535,6 +552,12 @@ def run_prep(env, redo_ok=True):
     (a launched DS's checkpoint is bound to the set's sha256 and FS to its
     vocabulary; the attempt loop's integrity gate ALERTs and waits; audit
     r1 B-M2)."""
+    if not redo_ok and not prep_done():
+        # (audit r2 B-L2: nothing missing is ever re-recorded once DS ran)
+        print("ALERT: the prep's vocab.json is missing after this run was "
+              "launched -- never redone now; the launch waits for it",
+              flush=True)
+        return True
     if prep_done():
         for k in range(3):
             ok, why = set_intact()
@@ -570,6 +593,17 @@ def run_prep(env, redo_ok=True):
           f"{pick['tk90_mean_60_90']})", flush=True)
     for attempt in range(1, PREP_ATTEMPTS + 1):
         wait_no_trainer()
+        # An orphaned prep may have finished while the guard waited (audit
+        # r2 B-L1): it counts. With no prep alive, its tmp files are stale.
+        if prep_done() and set_intact()[0]:
+            print(f"PREP done (by an earlier prep): {PREP_REL}", flush=True)
+            return True
+        for name in os.listdir(prep_dir()):
+            if name.endswith(".tmp"):
+                try:
+                    os.remove(os.path.join(prep_dir(), name))
+                except OSError:
+                    pass
         ok, why = manifest_check()
         if not ok:
             print(f"PREP FAILED: {why}", flush=True)
@@ -605,26 +639,40 @@ def run_prep(env, redo_ok=True):
         else:
             print(f"PREP attempt {attempt} failed (rc={r.returncode}; see "
                   f"{PREP_REL}/prep.log)", flush=True)
-        time.sleep(60)
+        if attempt < PREP_ATTEMPTS:
+            time.sleep(PREP_RETRY_S)          # (audit r2 B-L5)
     print(f"PREP FAILED after {PREP_ATTEMPTS} attempts -- see "
           f"{PREP_REL}/prep.log", flush=True)
     return False
 
 
+VOCAB_CHECK = (
+    "import json, sys, torch; "
+    "want = json.load(open(sys.argv[1], encoding='utf-8'))['vocab']; "
+    "m = torch.load(sys.argv[2], map_location='cpu', weights_only=False); "
+    "have = m.get('token_vocab') if isinstance(m, dict) else None; "
+    "ok = have is not None and "
+    "[list(t) for t in have] == [list(t) for t in want]; "
+    "print('VOCAB OK' if ok else 'VOCAB MISMATCH')")
+
+
 def vocab_is_ds(seed):
     """(ok, reason): vocab.json's vocabulary is the one DS trained with (the
-    token_vocab its completion marker's recipe holds; audit r1 B-L1)."""
+    token_vocab its completion marker's recipe holds; audit r1 B-L1) --
+    checked in a child process, so the long-lived fs supervisor never holds
+    torch's ~1.3 GB of commit (audit r2 B-L4)."""
     try:
-        with open(os.path.join(prep_dir(), "vocab.json"),
-                  encoding="utf-8") as f:
-            want = json.load(f)["vocab"]
-        import torch
-        marker = torch.load(paths("ds", seed)[3], map_location="cpu",
-                            weights_only=False)
-        have = marker.get("token_vocab") if isinstance(marker, dict) else None
-    except Exception as e:      # noqa: BLE001 -- any failure blocks
+        r = subprocess.run(
+            [PY, "-c", VOCAB_CHECK, os.path.join(prep_dir(), "vocab.json"),
+             paths("ds", seed)[3]], cwd=REPO, capture_output=True, text=True,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": "-1"}, timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as e:
         return False, f"vocab check: {type(e).__name__}: {e}"
-    if have is None or [list(t) for t in have] != [list(t) for t in want]:
+    out = r.stdout.strip().splitlines()
+    if r.returncode or not out:
+        return False, ("vocab check: rc=%s %s" % (r.returncode, (
+            r.stderr.strip().splitlines() or ["?"])[-1]))
+    if out[-1] != "VOCAB OK":
         return False, ("vocab.json is not the vocabulary DS trained with "
                        "(DS's completion marker)")
     return True, ""
@@ -857,8 +905,9 @@ def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
 
 
 def wait_no_trainer(rows=None):
-    """Block while ANY python runs experiments/ablation.py; `rows` keep
-    streaming meanwhile."""
+    """Block while ANY python runs experiments/ablation.py or
+    experiments/distill.py (live_trainers); `rows` keep streaming
+    meanwhile."""
     polls, told = 0, None
     while True:
         if rows is not None:
@@ -879,6 +928,29 @@ def wait_no_trainer(rows=None):
 def abandoned(base):
     """Kai's call: an ABANDONED file in the run folder stops every launch."""
     return os.path.exists(os.path.join(base, "ABANDONED"))
+
+
+def launched(base, ckpt):
+    """This run's trainer was launched before: its checkpoint exists, or its
+    own supervisor.log logged a LAUNCHED line."""
+    if os.path.exists(ckpt):
+        return True
+    return any(l.startswith("LAUNCHED")
+               for l in lines_of(os.path.join(base, "supervisor.log")))
+
+
+def no_wait_refusal():
+    """Why ds's --no-wait may not (any longer) skip the wait, or None: a
+    live TKX supervisor or hand-off, or a TKX with neither its completion
+    marker nor an ABANDONED file (audit r1 B-L11)."""
+    for script in ("supervise_rgrowx.py", "post_rgrowx.py"):
+        alive = live_scripts(script)
+        if alive:
+            return f"{script} is alive (pids {alive}) -- kill it first"
+    if marker_missing(TKX_MARKER) and not os.path.exists(TKX_ABANDONED):
+        return ("TKX has neither its completion marker nor an ABANDONED "
+                "file -- abandon it first (its supervisor's procedure)")
+    return None
 
 
 def sanctioned(base, ckpt):
@@ -974,28 +1046,28 @@ def main(argv):
               f"them (and the run folder) aside", flush=True)
         return 2
     if no_wait:
-        for script in ("supervise_rgrowx.py", "post_rgrowx.py"):
-            alive = live_scripts(script)
-            if alive:
-                print(f"refusing --no-wait: {script} is alive (pids {alive}) "
-                      f"-- kill it first", flush=True)
-                return 2
-        if marker_missing(TKX_MARKER) and not os.path.exists(TKX_ABANDONED):
-            # (audit r1 B-L11: a reboot rerunning TKX's launcher would
-            # otherwise interleave TKX with DS)
-            print("refusing --no-wait: TKX has neither its completion marker "
-                  "nor an ABANDONED file -- abandon it first (its "
-                  "supervisor's procedure)", flush=True)
+        why = no_wait_refusal()
+        if why:
+            print(f"refusing --no-wait: {why}", flush=True)
             return 2
         print(f"NO-WAIT override: {variant} s{seed} starts without TKX's "
               f"completion marker and evals", flush=True)
-    elif sanctioned(base, ckpt):
+    elif launched(base, ckpt):
         print(f"RESUMING {variant} s{seed}: it started before (checkpoint or "
               f"launch logged) -- no wait", flush=True)
-    elif not wait_external(variant, seed):
-        print(f"ABANDONED {variant} s{seed}: the run folder holds an "
-              f"ABANDONED file -- not launching", flush=True)
-        return 0
+    elif sanctioned(base, ckpt) and no_wait_refusal() is None:
+        print(f"RESUMING {variant} s{seed}: its logged NO-WAIT override still "
+              f"holds -- no wait", flush=True)
+    else:
+        if sanctioned(base, ckpt):
+            # A NO-WAIT line whose preconditions no longer hold (a half-done
+            # retraction; audit r2 B-L3) waits like a fresh start.
+            print(f"a logged NO-WAIT override no longer holds "
+                  f"({no_wait_refusal()}) -- waiting for TKX", flush=True)
+        if not wait_external(variant, seed):
+            print(f"ABANDONED {variant} s{seed}: the run folder holds an "
+                  f"ABANDONED file -- not launching", flush=True)
+            return 0
 
     os.makedirs(base, exist_ok=True)
     rows = Rows(jsonl, variant, seed)
@@ -1025,10 +1097,16 @@ def main(argv):
             return 0
         if not run_prep({k: v for k, v in env.items()
                          if k != "ABLATION_RESULTS"},
-                        redo_ok=not sanctioned(base, ckpt)):
+                        redo_ok=not launched(base, ckpt)):
             return 1
     stall_s = 2 * 3600
-    deaths, quick_deaths = [], 0
+    deaths, quick_deaths, stalls = [], 0, 0
+
+    def ckpt_stamp():
+        try:
+            return os.path.getmtime(ckpt)
+        except OSError:
+            return None
 
     def completed():
         try:
@@ -1082,7 +1160,7 @@ def main(argv):
         args = command(variant, seed) + (["--resume"] if os.path.exists(ckpt)
                                          else [])
         log = open(os.path.join(base, f"supv2_{attempt}.log"), "ab")
-        born = time.time()
+        born, stamp0 = time.time(), ckpt_stamp()
         p = subprocess.Popen(args, cwd=REPO, env=env, stdout=log,
                              stderr=subprocess.STDOUT, creationflags=0x08000000)
         print(f"LAUNCHED {variant} s{seed} attempt {attempt} "
@@ -1112,6 +1190,17 @@ def main(argv):
         if len([t for t in deaths if time.time() - t < 3600]) >= 5:
             print("CRASH LOOP: 5 deaths within 60 min -- stopping for "
                   "diagnosis", flush=True)
+            return 1
+        # Long-lived deaths without a new checkpoint (quick ones are CRASH
+        # LOOP's): DS's each cost the ~1 h offline phase (audit r2 B-L6).
+        if ckpt_stamp() != stamp0:
+            stalls = 0
+        elif lifetime >= 600:
+            stalls += 1
+        if stalls >= NO_PROGRESS_DEATHS:
+            print(f"NO PROGRESS: {stalls} consecutive attempts died without "
+                  f"writing a new checkpoint -- stopping for diagnosis "
+                  f"(audit r2 B-L6)", flush=True)
             return 1
         if lifetime < 600:
             quick_deaths += 1

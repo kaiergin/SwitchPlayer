@@ -976,6 +976,24 @@ B -- the supervisor / hand-off -- two MEDIUM, fixed):
     launchers (launch_rgrowx.ps1 while TKX is unfinished;
     launch_distill.ps1). Retracting a --no-wait also moves the prep folder
     aside (its master.json holds the first choice).
+AMENDMENTS (audit r2, before launch: A and B NOTHING ABOVE LOW -- the loop
+closes; its LOWs fixed, then a confirmation round):
+  - Once DS was LAUNCHED no prep is ever started again, whatever is missing;
+    an orphaned prep that finished while the next attempt waited counts;
+    stale prep tmp files are swept; prep attempts are 15 min apart.
+  - NO PROGRESS: 3 consecutive long-lived DS / FS attempts (>= 10 min) that
+    die without writing a new checkpoint stop the supervisor (DS's attempts
+    each cost the ~1 h offline phase until its first checkpoint).
+  - fs checks DS's vocabulary in a child process (the long-lived fs
+    supervisor holds no torch); a NO-WAIT line alone skips the wait only
+    while the --no-wait preconditions still hold. RETRACTING a --no-wait =
+    the fresh-restart procedure (move the DS run folder AND the prep folder
+    aside). UN-ABANDONING ds: stop the hand-off and its probes, drop the
+    probe rows its abandon pass logged as newer than the checkpoint, remove
+    ABANDONED, relaunch launch_distill.ps1.
+  - Known, accepted: the offline curve's snapshot path is ~289 characters
+    (Windows long paths are enabled on this machine; tools that are not
+    long-path aware may fail to copy the folder).
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 
