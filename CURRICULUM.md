@@ -1044,6 +1044,90 @@ Y:\SwitchPlayer-rgrowx-run, detached at dd5a7ce2. LAUNCHED 2026-10-20 15:24
 `supervise_rgrowx.py tkx 0`, WAITING for RG's marker and its 36 evals
 (expected ~00:30-01:00 2026-10-21).
 
+### RESULT -- P2a on Ms. Pac-Man: tokens (TK) and reward-clip growth (RG), seed 0, 2026-10-21
+
+TK: see TK DONE in the pre-registration below (15.4 h, one attempt). RG
+(mspacman-rgrow-s0-2026-10-19) trained from the run worktree (detached at
+a81bcf39) 10-20 07:35 -> 10-21 00:47 in one attempt (61,951 s, 11.5
+min/iteration; no deaths, no ALERTs, supervisor.err empty). The hand-off
+ran its evals by 01:03: all 18 rows in both variants. EXACT eval, 30 noop
+starts, prior argmax; whole games, no capped game in any row of either
+arm; every row 4/4 phases. DEPLOYED (acting states) primary, RAW
+secondary, IN-RUN = the run's 8-game eval; TWIN = mspacman-s0-2026-10-16:
+  iter      5   10   15   20   25   30   35   40   45   50   55   60   65   70   75   80   85   90
+  RG dep  423  780  475  489  374  692  435  478  853  521  609  516  563  676  816  752  606  621
+  RG raw  618  460  439  512  458  548  623  785 1350  483  969  563  498  612  803  883  685  815
+  RG in   450  654  460  560  378  565  396  571  761  530  708  489  591  494  748  668  603  605
+  RG env  2.9  5.9  8.6 11.5 14.1 17.6 20.4 23.4 26.4 30.1 33.4 36.8 40.5 43.5 46.5 49.8 53.0 56.4
+  TK dep   60   60  271  482  665  524  913  742  732  659  879  780 1033  863  920  825  885  691
+  TK raw   60   60  212  597  542  629  627  604  747  863  526  731  597 1028  767  823  721 1148
+  twin dep 462 1109  453  606  495  684  490  706  588  643  508  781  338  361  730  816  875  642
+(env in thousands of base steps; TK's row 90 at 58.5k, the twin's 53.4k.)
+READ (1) level, deployed mean 60-90 (bands +-232; raw +-138):
+  - RG 650.10 (SD 105.6, g 0.352) against the twin's 649.14: +1.0 -> NO
+    DIFFERENT. Raw 694.05 (g 0.397) against 585.62: +108 -> NO DIFFERENT.
+  - TK 856.62 (SD 108.3, g 0.564): against the twin +207.5 -> NO
+    DIFFERENT (raw +245.2 -> BETTER); against RG +206.5 -> NO DIFFERENT
+    (raw +136.8 -> NO DIFFERENT, 1.2 short of the band).
+  - Neither arm near random (both > 502.08).
+  - By thirds (rows 5-25 / 30-55 / 60-90), deployed: RG 508 / 598 / 650;
+    TK 308 / 742 / 857; the twin 625 / 603 / 649 (504 without its @10
+    outlier). TK started slowest (rows 5 and 10 scored 60, a stuck
+    policy) and climbed most (+549 from the first third to the last; RG
+    +142, the twin +24).
+READ (2) data: matched within 10% (RG 56.4k, TK 58.5k, the twin 53.4k
+  env steps at row 90). TK's deployed row beat RG's at every row from 50
+  to 90 (9 of 9); RG led at rows 5-20, 30 and 45.
+READ (3) clip growth, descriptive: the ceiling followed the schedule
+  (1.6 @5, 2.8 @10, 142.9 @45, 160 from row 50). reward_kept 0.80 @5 ->
+  0.97 @20 -> 1.000 from row 30: once the ceiling passed ~26 it clipped
+  nothing, because RG's buffer never held a record above 40 units (a
+  second ghost, 400 points) -- the 80 / 160 ghost values the end ceiling
+  was built for never occurred. TK's buffer held an 80-unit record from
+  row 50 (most likely a third ghost; a token's record sums its inner
+  steps). The row value (clipped units) ran 0.5-1.1 to
+  row 50 and 1.2-3.6 after.
+READ (4) tokens (TK), descriptive:
+  - Play shares over rows 60-90: 4-frame 0.32-0.51, 8-frame 0.02-0.03,
+    16-frame 0.34-0.51, 32-frame 0.10-0.14 -- unlike Pong (32-frame 0.64
+    @90), play moved TOWARD short tokens late; the birth search spread
+    more evenly (row 90: 0.28 / 0.27 / 0.24 / 0.21).
+  - Frames per decision, deployed (probe) 11.5-15.7 over rows 60-90 ->
+    3.8-5.2 decisions per second against the twin's 15; acting 11.5-14.3.
+    Decisions per life 57-84.
+  - Payoff by duration (count-weighted, clipped units at the ceiling 160
+    from row 50): small and without a consistent sign (row 60: +0.35 /
+    -1.70 / -0.47 / -0.11 for 4 / 8 / 16 / 32 frames; row 90: -0.21 /
+    +0.08 / -0.40 / +0.29).
+  - policy_entropy rose from 1.6 @60 to 3.1 @90 (ln 36 = 3.58): the
+    prior flattened late while its argmax kept its level.
+READ (5) stability, largest deployed drop from row 45: RG -332 (853 @45 ->
+  521 @50; raw -866, 1350 -> 483), TK -194 (885 @85 -> 691 @90), the twin
+  -443.
+PRE-REGISTERED DECISION:
+  - TOKENS: HOLD UP (TK g >= 0.2, not WORSE than the twin, not WORSE than
+    RG) -> P2b (the composition loss) on the TK arm; RG is not WORSE, so
+    the base question does not arise.
+  - GROWTH: NO DIFFERENT -> Kai's call (keep it for its intent, or retune
+    the end ceiling / schedule).
+Beyond the letter (one seed, within-run bands -- "consistent with"):
+  - RG = the twin, so TK's lead over the twin is the tokens' (plus their
+    interaction with the clip), not the clip growth's. TK leads RG by
+    +207 deployed and +137 raw, each just inside its band.
+  - The clip growth as built is non-binding after row ~30: no RG game
+    reached a third ghost. An end ceiling of ~40 units would have run the
+    same RG; a schedule that matters for Ms. Pac-Man would grow slower
+    early (it was ~1 for 5 rows only) or tie the ceiling to what the
+    buffer holds.
+  - P2b runs after the extended token run (TKX, live on the GPU; 270
+    iterations, ~01:00 10-23 at 10.8 min/iteration): its length and base
+    follow TKX's decision table and Kai's GROWTH call.
+TKX INTERIM (rows 5-80 settled; not read against its pre-registration until
+row 270): deployed 354 / 692 / 506 / 527 / 748 / 550 / 791 / 591 / 782 / 770
+/ 761 / 680 / 824 / 898 / 914 / 828 (rows 5-80), at the ceiling 19.5 @80
+and 16-frame tokens 0.64 of play (the long-token bias runs to row 69);
+row 80 at 55.5k env steps, 10.2 min/iteration so far.
+
 ### Next experiment (pre-registered) -- P2a on Ms. Pac-Man, with reward-clip growth (Kai, 2026-10-19)
 
 DECISION (Kai, 2026-10-19): after P2a's Pong NO BREAKOUT, "try the exact
