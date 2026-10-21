@@ -1056,6 +1056,50 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgro
             "rgrow arm.",
 }
 
+# Curriculum P3's distillation step (Kai, 2026-10-21; pre-registered in
+# CURRICULUM): the two students of one generation swap, over the STUDENT
+# vocabulary experiments/distill.py derives from the master's recorded play
+# (--token-vocab, required: the TOKEN_VOCAB inherited below is the master's,
+# of which the file must be an ordered subset holding every 4-frame token).
+# DS: the replay pre-filled with the master's re-tokenized games and their
+# master-search targets (--distill-set), DISTILL_OFFLINE_STEPS gradient steps
+# before iteration 1, the master's END-STATE schedules from the start
+# (ceiling 160, prior-acting temperature 0.25 x 0.5 = 0.125, no long-token
+# bias, PER beta 1). FS: the TK arm over the same vocabulary, from scratch.
+# Seed 0.
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow-student-distill"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow"],
+    "REWARD_GROWTH_START": 160.0,
+    "PRIOR_ACT_STAGED_TEMP": False,
+    "ACTING_TEMPERATURE": 0.25,
+    "TOKEN_LONG_BIAS": 0.0,
+    "PER_BETA": 1.0,
+    "_student": "distill",
+    "_distill_offline_steps": 20000,
+    "_distill_snapshot_every": 4000,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-rgrow as the DISTILLED STUDENT of a generation swap "
+            "(curriculum P3): the student vocabulary from --token-vocab; the "
+            "replay pre-filled with the master's re-tokenized games and "
+            "master-search policy targets (--distill-set), 20,000 offline "
+            "gradient steps on it before iteration 1 (snapshots every 4,000; "
+            "the last is row 0), then the TK loop; the master's end-state "
+            "schedules throughout -- reward ceiling 160 (REWARD_GROWTH_START "
+            "160), prior-acting temperature 0.125 (PRIOR_ACT_STAGED_TEMP off, "
+            "ACTING_TEMPERATURE 0.25 x PRIOR_ACT_TEMP_SCALE 0.5), no long-"
+            "token bias, PER beta 1.0. Run as TK. Twin: the -student-fresh "
+            "arm (same vocabulary, from scratch).",
+}
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow-student-fresh"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow"],
+    "_student": "fresh",
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-rgrow as the FRESH STUDENT of a generation swap "
+            "(curriculum P3): the student vocabulary from --token-vocab, "
+            "from scratch, TK's schedules. Run as TK. Twin: the "
+            "-student-distill arm.",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
@@ -1621,6 +1665,7 @@ def play_token(env, token, stack, inner=None):
     act, frames = muzero.TOKEN_VOCAB[int(token)]
     n = int(frames) // muzero.TOKEN_BASE_FRAMES
     total, done = 0.0, 0
+    pushed = None if INNER_FRAMES is None else []
     for i in range(n):
         obs, reward, term, trunc, _ = env.step(int(act))
         total += float(reward)
@@ -1630,8 +1675,22 @@ def play_token(env, token, stack, inner=None):
         if term or trunc:
             break
         if i < n - 1:
-            stack = push_frame(stack, preprocess_frame(obs, IMAGE_RESHAPE))
+            frame = preprocess_frame(obs, IMAGE_RESHAPE)
+            stack = push_frame(stack, frame)
+            if pushed is not None:
+                pushed.append(frame)
+    if pushed is not None:
+        INNER_FRAMES.append(pushed)
     return obs, total, term, trunc, stack, done
+
+
+# Curriculum P3's distillation step (2026-10-21): None, or a list that
+# receives, per play_token call, the list of inner base frames it pushed
+# into the stack (preprocessed, in order: done - 1 of them) -- the raw-step
+# resolution the replay never stores. Set only by experiments/distill.py's
+# master recorder around a play_episode; None everywhere else (the Ray
+# actors' processes never set it).
+INNER_FRAMES = None
 
 
 def token_bias_weights(b):
@@ -1738,6 +1797,191 @@ def reward_growth_gate(use_ray, cpu_actor, ray_workers):
                          f"support (half-widths {muzero.REWARD_SUPPORT:.4g} "
                          f"per step, {muzero.VALUE_PREFIX_SUPPORT:.4g} per "
                          f"{muzero.UNROLL_STEPS}-step prefix, h-space)")
+
+
+# -- curriculum P3: the distillation step's students (2026-10-21) -----------
+def file_sha256(path):
+    """Hex sha256 of a file's bytes (streamed)."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def validate_student_vocab(vocab, master_vocab):
+    """A student vocabulary (curriculum P3, the 10-17 rule): the master's
+    tokens minus the dropped ones, in the master's slot order, every
+    TOKEN_BASE_FRAMES token kept (a dropped token is replayed as raw base
+    steps), slot 0 unchanged (the placeholder action's token). Returns the
+    vocabulary as a tuple of (int, int) tuples; SystemExit otherwise."""
+    try:
+        vocab = tuple((int(a), int(f)) for a, f in vocab)
+    except (TypeError, ValueError):
+        raise SystemExit(f"student vocabulary: not a list of [action, "
+                         f"frames] pairs: {vocab!r}")
+    master = tuple(tuple(t) for t in master_vocab)
+    pos = {t: i for i, t in enumerate(master)}
+    if any(t not in pos for t in vocab):
+        raise SystemExit(f"student vocabulary: tokens outside the master's: "
+                         f"{[t for t in vocab if t not in pos]}")
+    order = [pos[t] for t in vocab]
+    if order != sorted(set(order)):
+        raise SystemExit("student vocabulary: not in the master's slot order "
+                         "(or duplicated)")
+    base = [t for t in master if t[1] == muzero.TOKEN_BASE_FRAMES]
+    if any(t not in vocab for t in base):
+        raise SystemExit(f"student vocabulary drops a {muzero.TOKEN_BASE_FRAMES}"
+                         f"-frame token: {[t for t in base if t not in vocab]}")
+    if vocab[0] != master[0]:
+        raise SystemExit(f"student vocabulary: slot 0 is {vocab[0]!r}, not "
+                         f"the master's {master[0]!r}")
+    return vocab
+
+
+def load_student_vocab(path, master_vocab):
+    """--token-vocab: the vocab.json experiments/distill.py wrote (its
+    "vocab" list), validated against the arm's master vocabulary. Returns
+    (vocab, sha256 of the file)."""
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    if not isinstance(doc, dict) or "vocab" not in doc:
+        raise SystemExit(f"{path}: no 'vocab' list (not a distill.py "
+                         f"vocab.json)")
+    return validate_student_vocab(doc["vocab"], master_vocab), \
+        file_sha256(path)
+
+
+def student_arm(arm, path):
+    """Apply --token-vocab to a student arm: ARMS[arm] becomes a copy with
+    the student TOKEN_VOCAB and the file's sha256 (`_token_vocab_sha256`),
+    so arm_config, the Ray actors' overrides and every weights file's spec
+    carry the student's vocabulary. Refuses a non-student arm."""
+    spec = ARMS[arm]
+    if spec.get("_student") not in ("distill", "fresh"):
+        raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
+                         f"arms only; '{arm}' is not one")
+    vocab, sha = load_student_vocab(path, spec["TOKEN_VOCAB"])
+    ARMS[arm] = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha}
+    return ARMS[arm]
+
+
+def student_gate(spec, distill_set):
+    """The P3 student arms' inputs, checked at startup (before any
+    --overwrite deletion): a student arm needs its --token-vocab applied
+    (student_arm); DS needs --distill-set, whose vocabulary is this run's
+    and whose master vocabulary is the arm's parent's, and the master's
+    end-state ceiling (START == CEILING); FS and every other arm refuse a
+    distillation set."""
+    kind = spec.get("_student")
+    if kind is None:
+        if distill_set:
+            raise SystemExit("--distill-set applies to the -student-distill "
+                             "arm only")
+        return
+    if "_token_vocab_sha256" not in spec:
+        raise SystemExit("a curriculum P3 student arm needs --token-vocab "
+                         "(the student vocabulary distill.py wrote)")
+    if kind == "fresh":
+        if distill_set:
+            raise SystemExit("the -student-fresh arm takes no --distill-set")
+        return
+    if not distill_set:
+        raise SystemExit("the -student-distill arm needs --distill-set")
+    import distill
+    header = distill.read_header(distill_set)
+    if tuple(tuple(t) for t in header["vocab"]) != tuple(muzero.TOKEN_VOCAB):
+        raise SystemExit(f"{distill_set}: its student vocabulary differs "
+                         f"from --token-vocab's")
+    parent = ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
+                  "mspacman-tokens-rgrow"]["TOKEN_VOCAB"]
+    if tuple(tuple(t) for t in header["master_vocab"]) != tuple(parent):
+        raise SystemExit(f"{distill_set}: recorded from a master vocabulary "
+                         f"other than the TK arm's")
+    if muzero.REWARD_GROWTH_START != muzero.REWARD_GROWTH_CEILING:
+        raise SystemExit("the distilled student runs at the master's end-state "
+                         "ceiling (REWARD_GROWTH_START == CEILING)")
+    steps = spec.get("_distill_offline_steps")
+    every = spec.get("_distill_snapshot_every")
+    if not (isinstance(steps, int) and isinstance(every, int)
+            and 0 < every <= steps and steps % every == 0):
+        raise SystemExit(f"_distill_offline_steps {steps!r} must be a positive "
+                         f"multiple of _distill_snapshot_every {every!r}")
+
+
+def student_expect(spec, distill_set):
+    """The recipe keys a P3 student adds to run_expect (a resume under
+    another vocabulary or distillation set is a different experiment):
+    None for every other arm."""
+    if spec.get("_student") is None:
+        return None
+    out = {"token_vocab": [list(t) for t in muzero.TOKEN_VOCAB]}
+    if distill_set:
+        out["distill_set_sha256"] = file_sha256(distill_set)
+    return out
+
+
+def distill_prefill(run, lives):
+    """DS's first replay: every re-tokenized master life (5-field records
+    carrying the master-search policy and root value) through paper_targets
+    -- the arm's own record builder (raw rewards clipped at the ceiling,
+    age-0 priorities in frame time under the student's vocabulary) -- born
+    at step 0, then the usual FIFO eviction to the caps. The token / target
+    diagnostics paper_targets accumulates describe the MASTER's play and
+    are cleared, so row 5 describes the student's."""
+    for life in lives:
+        run.replay.append(run.paper_targets(life["traj"], life["terminated"],
+                                            born_step=0))
+    evict_replay(run.replay)
+    run._tok_window = None
+    run._tok_totals = None
+    run._fresh_target_H = None
+
+
+def distill_acting_states(run):
+    """The representation / prediction acting states a snapshot carries
+    under BN_RECAL_ACTING -- what RayPipeline.snapshot_acting_states would
+    ship (BN statistics recalibrated on the newest replay frames); None
+    without the stabilizer."""
+    if not muzero.BN_RECAL_ACTING:
+        return None
+    frames = bn_calibration_frames(run.replay, muzero.BN_RECAL_FRAMES)
+    if frames is None:
+        return None
+    return bn_recalibrated_states(run.trainer, frames)
+
+
+def distill_offline(run, arm, seed, spec, snapshot_weights):
+    """DS's offline phase, before iteration 1 (no collection, no refresh):
+    _distill_offline_steps gradient steps through train_block on the pre-
+    filled replay, in chunks of _distill_snapshot_every; under
+    --snapshot-weights a snapshot after each chunk -- the last is ROW 0
+    (weights-iter000), the others the offline curve under
+    RESULTS/<run>-offline (iteration = the chunk's index: weights-iter001 =
+    after the first chunk), each with its acting states. The step
+    diagnostics window restarts after it."""
+    steps = spec["_distill_offline_steps"]
+    every = spec["_distill_snapshot_every"]
+    run.searcher.network_manager.training_steps = run.trainer.training_steps
+    done = 0
+    while done < steps:
+        run.set_train_mode(True)
+        train_block(run, every, it=0)
+        run.set_train_mode(False)
+        done += every
+        if snapshot_weights:
+            acting = distill_acting_states(run)
+            if done == steps:
+                save_weight_snapshot(run, arm, seed, spec, 0,
+                                     acting_states=acting)
+            else:
+                save_weight_snapshot(
+                    run, arm, seed, spec, done // every, acting_states=acting,
+                    root=RESULTS / f"{RESULTS.name}-offline")
+        print(f"  [{arm} s{seed}] offline step {done} / {steps}", flush=True)
+    run.searcher.network_manager.training_steps = run.trainer.training_steps
+    run._step_window = None
 
 
 def env_actions(env_id):
@@ -3122,15 +3366,18 @@ def weights_blob(run, arm, seed, spec):
             **{n: getattr(run.trainer, n).state_dict() for n in NET_NAMES}}
 
 
-def save_weight_snapshot(run, arm, seed, spec, it, acting_states=None):
+def save_weight_snapshot(run, arm, seed, spec, it, acting_states=None,
+                         root=None):
     """--snapshot-weights: the nets at eval row `it`, in the weights-file
     format plus the row's iteration. Completed runs otherwise keep only
     their final weights, and the collapse-timing question needs mid-run
     models (2026-09-21). Atomic: a kill mid-write leaves the previous file
     or none, never a torn one. A resumed run replays the rows after its
     checkpoint, so their snapshots are overwritten by the surviving
-    timeline, matching the jsonl."""
-    d = RESULTS / f"snapshots{TAG}-{arm}-seed{seed}"
+    timeline, matching the jsonl. `root`: the folder holding the snapshots
+    folder (default RESULTS; the distillation step's offline curve passes
+    its own, so the probe files it under another run name)."""
+    d = (RESULTS if root is None else root) / f"snapshots{TAG}-{arm}-seed{seed}"
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"weights-iter{it:03d}.pth"
     tmp = d / f"weights-iter{it:03d}.pth.tmp"
@@ -3636,18 +3883,23 @@ def env_tag_fragment(env):
 
 
 def run_expect(arm, seed, iterations, train_steps, episodes_per_iter, eval_every,
-               ray_workers=0):
+               ray_workers=0, student=None):
     """The validated recipe. EPISODE_CAP and eval_every are part of the
     experiment too: a resume that forgot --episode-cap would silently
     continue with truncated episodes stitched onto the first half's
     replay. ray_workers likewise (3b audit): pool mode IS the recipe --
     N episodes/iteration -- so a resume with a different worker count is
     a different experiment and must be refused, not continued."""
-    return {"arm": arm, "seed": seed, "env": ENV_NAME,
-            "iterations": iterations, "train_steps_per_iter": train_steps,
-            "episodes_per_iter": episodes_per_iter,
-            "episode_cap": EPISODE_CAP, "eval_every": eval_every,
-            "ray_workers": ray_workers}
+    out = {"arm": arm, "seed": seed, "env": ENV_NAME,
+           "iterations": iterations, "train_steps_per_iter": train_steps,
+           "episodes_per_iter": episodes_per_iter,
+           "episode_cap": EPISODE_CAP, "eval_every": eval_every,
+           "ray_workers": ray_workers}
+    if student:
+        # Curriculum P3 students (student_expect): the vocabulary and the
+        # distillation set are the recipe too. Absent for every other arm.
+        out.update(student)
+    return out
 
 
 def ray_scope_gate(spec):
@@ -4344,7 +4596,7 @@ class RayPipeline:
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
             checkpoint_every=10, resume=False, overwrite=False,
             init_weights=None, use_ray=False, ray_workers=0,
-            cpu_actor=False, snapshot_weights=False):
+            cpu_actor=False, snapshot_weights=False, distill_set=None):
     with arm_config(arm) as spec, _run_length_globals(iterations, train_steps), \
             token_actions():
         if use_ray:
@@ -4358,6 +4610,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         sve_gate()
         token_gate(spec, use_ray, cpu_actor, ray_workers)
         reward_growth_gate(use_ray, cpu_actor, ray_workers)
+        student_gate(spec, distill_set)
+        if spec.get("_student") and init_weights:
+            raise SystemExit("a curriculum P3 student starts from scratch or "
+                             "from its distillation set, not --init-weights")
         if muzero.REWARD_GROWTH:
             print(f"  [{arm} s{seed}] REWARD_GROWTH: raw / "
                   f"{muzero.REWARD_UNIT} clipped at a ceiling "
@@ -4466,7 +4722,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         ck = resume_path(arm, seed)
         expect = run_expect(arm, seed, iterations, train_steps,
                             episodes_per_iter, eval_every,
-                            ray_workers=ray_workers)
+                            ray_workers=ray_workers,
+                            student=student_expect(spec, distill_set))
         if muzero.USE_ATARI_WRAPPERS and FRAMESKIP is None:
             # The wrapper stack forces fixed skip 4 regardless; without the
             # flag the TAG lacks "-skip4" and rows would land in the
@@ -4548,6 +4805,27 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"{WARMSTART_PREFILL_EPISODES} episodes "
                   f"({run.env_steps} env steps) before the first gradient",
                   flush=True)
+        if spec.get("_student") == "distill" and start_it == 0:
+            # Curriculum P3's distillation step: the master's re-tokenized
+            # games become the first replay, then the offline phase -- once
+            # per timeline (a resume restores its checkpoint's replay and
+            # nets instead; a restart without a checkpoint runs it again).
+            # Before the pipeline exists: its first sync ships the trained
+            # weights and BN states calibrated on these frames.
+            import distill
+            try:
+                header, lives = distill.read_set(distill_set)
+                distill_prefill(run, lives)
+                del lives
+                print(f"  [{arm} s{seed}] distillation set: "
+                      f"{len(run.replay)} master lives in the replay "
+                      f"({sum(replay_units(t) for t in run.replay)} base "
+                      f"steps; master {header['master_snapshot']})",
+                      flush=True)
+                distill_offline(run, arm, seed, spec, snapshot_weights)
+            except BaseException:
+                run.env.close()
+                raise
         def write_row(row_it, metrics, train_steps_at, env_steps_at,
                       elapsed_at=None):
             eff_skip = (FRAMESKIP or 4) if muzero.USE_ATARI_WRAPPERS else FRAMESKIP
@@ -5087,6 +5365,17 @@ def main():
                          "weights-iterNNN.pth (weights-file format, ~50 MB "
                          "each) -- mid-run models for offline probes. "
                          "Read-only: training is unaffected.")
+    ap.add_argument("--token-vocab", default=None, metavar="PATH",
+                    help="curriculum P3 student arms only: the student "
+                         "vocabulary file experiments/distill.py wrote "
+                         "(vocab.json); required by them")
+    ap.add_argument("--distill-set", default=None, metavar="PATH",
+                    help="the -student-distill arm only: the master's "
+                         "re-tokenized games and their targets "
+                         "(distill.py's set.pkl), pre-filled into the "
+                         "replay before the offline phase; ignored on a "
+                         "resume past it (the checkpoint holds the replay), "
+                         "but its sha256 must match the checkpoint's")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
     if args.resume and args.overwrite:
@@ -5132,6 +5421,10 @@ def main():
         ACTIONS = int(probe.action_space.n)
         probe.close()
 
+    if args.token_vocab and not args.plot_only:
+        for arm in args.arms:
+            student_arm(arm, args.token_vocab)
+
     RESULTS.mkdir(parents=True, exist_ok=True)
     out = RESULTS / f"ablation{TAG}.jsonl"
 
@@ -5151,7 +5444,8 @@ def main():
                         init_weights=args.init_weights, use_ray=args.ray,
                         ray_workers=args.ray_workers,
                         cpu_actor=args.cpu_actor,
-                        snapshot_weights=args.snapshot_weights)
+                        snapshot_weights=args.snapshot_weights,
+                        distill_set=args.distill_set)
     plot(out, RESULTS)
 
 
