@@ -115,6 +115,20 @@ read at the student's operating γ_frame).
   directional push is fabricated.
 - Value distillation (pulling student heads toward V_m at deficit
   states) deferred: max-biased; start exploration-only.
+- DECISION 2026-10-21 (Kai: "I'd like the distillation to be implemented
+  and ran after the current run"): a DISTILLATION STEP at the generation
+  swap, before the student plays. The master's games, recorded at raw
+  4-frame resolution with its token boundaries, are re-tokenized into the
+  student's vocabulary (a dropped token's frames become raw 4-frame steps
+  -- the 10-17 rule) and become the student's first replay; the student
+  trains on them offline with the master's SEARCH policies as its policy
+  targets, then plays as usual. The student's VALUE is learned by its own
+  TD on that data, never pulled toward V_m, so the deficit
+  delta = max(0, V_m - V_s) stays an honest measurement. Re-tokenizing
+  raw-step recordings is the same pipeline that later carries other
+  players' games (P4 / P5) into a vocabulary. First test: "the
+  distillation step" experiment below (no deficit exploration yet -- one
+  change at a time).
 - Promotion: student evaluated argmax over N episodes; promote on mean
   return > master's matched eval. Retired masters keep value heads only —
   which is also what makes watch-only masters identical in interface.
@@ -774,6 +788,156 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
   is weak (~44% at the old 1-in-4 rate);
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
+
+### Next experiment (pre-registered) -- P3's distillation step: master -> student on Ms. Pac-Man (Kai, 2026-10-21)
+
+DECISION (Kai, 2026-10-21, after the P2a Ms. Pac-Man RESULT -- TOKENS HOLD
+UP): "I'd like the distillation to be implemented and ran after the current
+run" -- the distillation step he proposed on 10-20 ("a distillation step
+between the two networks ... before starting the student"), built and run
+once TKX (the 270-iteration token run) has completed and its evals have
+landed. P2b (the composition loss, the HOLD UP verdict's next step) waits
+behind it. GROWTH (NO DIFFERENT) stays Kai's call; meanwhile both student
+arms keep the token arm's clip machinery (below).
+QUESTION: does a distillation step at the generation swap give the student
+a head start, or a higher level, than a student that starts fresh with the
+same vocabulary?
+THE SWAP (one generation, built for this run; deficit exploration and
+promotion are P3's later steps):
+  MASTER = the best token network so far: the final snapshot of whichever
+    of TKX (weights-iter270, deployed mean of rows 240-270) and TK-90
+    (weights-iter090, rows 60-90 = 856.62) has the higher 7-row deployed
+    mean; TK-90 if TKX did not complete (ABANDONED / crash loop). The
+    snapshot carries the master's acting states (its BN-recalibrated
+    representation / prediction).
+  RECORDING: the master plays fresh games with its own training-time
+    acting policy -- the prior at its final temperature (0.125 =
+    0.5 x the staged 0.25; the long-token bias long gone) through its acting
+    states, NoopResetEnv's random starts, --episode-cap 3000 per life --
+    and every game is recorded at RAW-STEP resolution: each decision's
+    stack, token and raw per-base-step rewards (as the replay already
+    keeps) PLUS the preprocessed frame of every inner base step, which the
+    replay never stored (the completion marker also deletes a finished
+    run's replay, so the master's training data is gone: TK-90's already
+    is). Whole games until >= 31,250 base steps (the replay cap; ~40
+    games, ~120 lives). Self-check: replaying each decision's inner frames
+    onto its stack reproduces the next decision's stack exactly.
+  VOCABULARY (Kai's 10-17 rule, "drop the least used"): a master token
+    whose share of the recorded decisions is below 1% is dropped; the nine
+    4-frame tokens are never dropped (every dropped token must be
+    expressible as raw 4-frame steps). The student's vocabulary is the
+    remaining tokens in the master's slot order (slot 0 stays NOOP x4, the
+    placeholder). Fixed slots: a dropped slot is EMPTY, and with no new
+    token to put in it an empty slot is implemented as its absence -- a
+    shorter vocabulary -- since a fresh student inherits nothing per slot;
+    slot-preserving masks become necessary only once tokens are added
+    (P5e) or weights are inherited.
+  RE-TOKENIZATION: each recorded life becomes a student trajectory -- a
+    kept token stays one record; a dropped token (a, f) becomes its m
+    played base steps as m records of (a, 4), each on the stack at that
+    base step (rebuilt from the inner frames) and each carrying its own
+    raw base-step reward (m < f / 4 when a life loss cut it short).
+  TARGETS: the master's 50-sim birth search (the arm's own target recipe:
+    fresh root, Dirichlet noise, raw weights) on every student decision
+    state, over the MASTER's 36 tokens, its visit fractions renormalized
+    over the student's tokens (a masked read-out: visits to dropped tokens
+    are discarded); the tail as the arm's (terminated: uniform, masked;
+    truncated: one greedy search). The master's root values set only the
+    insertion priorities. The student's value / value-prefix targets are
+    its own (n-step TD through ITS target nets on the recorded rewards,
+    clipped at 160) -- no value distillation.
+ARMS (seed 0, Ms. Pac-Man, the TK recipe: MsPacmanNoFrameskip-v4
+--frameskip 4, 90 x 2000 train steps, 3 episodes per iteration,
+--episode-cap 3000, eval every 5, --checkpoint-every 2, --snapshot-weights,
+--ray --cpu-actor; TK's compute knobs VTREE_REFRESH_BATCH 64 /
+VTREE_COMMUNAL_TRAJS 1):
+  DS (distilled student) = the TK arm over the student vocabulary, with
+    (a) the replay pre-filled with the re-tokenized master games (born at
+    step 0: the off-policy horizon shrinks as they age; FIFO-evicted as
+    the student's own games arrive, ~48 iterations; the communal refresh
+    rotates through them oldest first, re-searching them with the
+    student's own nets -- so the master's targets fade out without an
+    explicit schedule), (b) an OFFLINE phase before iteration 1: 20,000
+    gradient steps (10 iterations' worth) on that replay, no collection,
+    no refresh, the usual losses / LR warm-up / target syncs; snapshots
+    every 4,000 steps (the 20,000-step one is ROW 0), and (c) the
+    master's END-STATE schedules from the start -- reward ceiling 160
+    constant (REWARD_GROWTH_START 160), prior-acting temperature 0.125
+    constant (PRIOR_ACT_STAGED_TEMP off, ACTING_TEMPERATURE 0.25 x the
+    arm's 0.5), long-token bias 0, PER beta 1.0. Its training-step
+    counter runs 0 -> 200k (the offline 20k included); the off-policy
+    decay keeps the 90-iteration value (54k steps).
+  FS (fresh student) = the TK arm over the SAME student vocabulary, from
+    scratch, with TK's schedules (ceiling 1 -> 160 by 50%, temperature
+    0.5 / 0.25 / 0.125 staged, bias 0.5 -> 0 by 25%) -- the swap without
+    the distillation step.
+  DS vs FS is the question. It compares two PACKAGES -- a distilled
+  student continues in the master's end-state regime, a fresh one needs
+  the beginning-of-learning regime (Kai's "clip heavily in the beginning")
+  -- not the offline phase alone. FS vs TK-90 (36 tokens, same recipe)
+  reads, descriptively, what dropping the master's least-used tokens does
+  from scratch.
+ORDER: prep (record, vocabulary, re-tokenize, master search: ~0.5 h on
+the GPU), then DS, then FS, one at a time (the sequential rule). The DS
+supervisor waits for TKX's completion marker AND both TKX probe jsonls
+holding rows 5-270, then for no trainer at all.
+READS. EXACT eval as TK's: whole games, 30 noop starts, prior argmax,
+PROBE_ENV=MsPacmanNoFrameskip-v4; DS rows 0 and 5-90 (19), FS rows 5-90
+(18); DEPLOYED (acting states) primary, raw secondary; g = (score - 307.3)
+/ 973.9; MASTER = the selected master's 7-row deployed mean.
+  NEAR RANDOM first, per arm: a 60-90 deployed mean with g < 0.2
+      (< 502.08) is diagnosed before any other read of that arm.
+  (0) transfer, row 0 (the distilled student before it plays): its
+      deployed score against MASTER, descriptively (one row against a
+      7-row mean: 2 SE = +-464, too wide to verdict), with TRANSFER FAILED
+      if row 0 is near random (< 502.08); the offline curve (4k, 8k, 12k,
+      16k, 20k steps) and the master's own scores in the recorded games
+      beside it.
+  (1) level: DS's deployed mean 60-90 against FS's, +-232 (two 7-row
+      means, the twin's row spread, as every Ms. Pac-Man read): BETTER /
+      NO DIFFERENT / WORSE. Raw likewise (+-205, as TKX's raw band).
+  (2) head start: DS's deployed mean of rows 5-25 against FS's (5-row
+      means: 2 x 216.9 x sqrt(2/5) = +-274.4): BETTER / NO DIFFERENT /
+      WORSE.
+  (3) against the master: DS's deployed mean 60-90 against MASTER, +-232
+      -- ABOVE / SAME / BELOW (does a swap with distillation keep the
+      master's level within 90 iterations, or pass it?).
+  (4) time to level, descriptive (the real-time quantity): per arm, the
+      first row whose deployed score is >= MASTER - 232, in iterations and
+      in the student's own env steps; DS's lowest deployed row in 5-25
+      against row 0 (forgetting when it starts to play).
+  (5) tokens, descriptive: the dropped tokens and their share of the
+      master's recorded play; the student's per-duration play / search
+      shares, frames per decision, the deployed decisions per second; FS
+      against TK-90 rows 60-90.
+  (6) stability: each arm's largest drop between adjacent rows from row 45.
+DECISION AFTER. Single seed, within-run bands: BETTER / WORSE read
+"consistent with"; the DEPLOYED reads decide, raw is reported beside them.
+  (1) BETTER -> the distillation step joins P3's generation swap; a seed-1
+    replicate before it is permanent.
+  (1) NO DIFFERENT + (2) BETTER -> it buys a head start, not a higher level
+    within 90 iterations: it joins P3 for the time it saves (the real-time
+    case), Kai confirms; a seed-1 replicate.
+  (1) NO DIFFERENT + (2) NO DIFFERENT -> no measurable effect: by read (0)
+    -- TRANSFER FAILED -> fix the transfer (targets, offline steps, the BN
+    states) and rerun DS; otherwise, if DS's rows 5-25 fell from row 0, the
+    student forgot as it began to play -> the annealed KICKSTARTING variant
+    next (a KL to the master's prior, decaying to 0 over the first ~25% of
+    the run); else Kai's call.
+  (1) NO DIFFERENT + (2) WORSE -> diagnose (the end-state regime: the
+    0.125 temperature's exploration, the off-policy master data).
+  (1) WORSE -> negative transfer: diagnose the same before anything else.
+  A near-random arm, or an ABANDONED one (stopped under the pace rule or a
+  crash loop), is read descriptively; no verdict that needs it.
+  Read (3) is reported with every outcome; BELOW with (1) BETTER still
+  counts for the swap (the comparison is the swap without distillation).
+COST: prep ~0.5 h; DS ~17 h (the offline 20k steps ~1 h + 90 iterations at
+TK-90's ~10.3 min, fewer tokens searching a little faster); FS ~16 h;
+evals as TKX's (one probe at a time on the CPU while training, the rest
+after). Expected: TKX done ~01:00 10-23, DS ~01:30 -> ~19:00 10-23, FS ->
+~11:00 10-24. PACE RULE: a row past 25 min/iteration is an ALERT and Kai's
+call. Kai's Switch-control sessions kill GPU pythons: pause the running
+supervisor and its trainer by command line, resume after.
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 
