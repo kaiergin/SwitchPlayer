@@ -1020,8 +1020,7 @@ a finished prep without a readable master.json stops the prep (a
 half-retraction).
 AMENDMENTS (audit r6, confirmation: ONE HIGH, in a test -- fixed): the run
 worktree checks out CRLF (autocrlf) while the dev tree is LF; the manifest
-test flipped LF -> CRLF, which on a CRLF file writes \r\r\n
- -- DS's
+test flipped LF -> CRLF, which on a CRLF file writes \r\r\n -- DS's
 preflight would have failed in the run worktree (r5's "all pass" was in
 the LF dev tree only). The test now flips whichever way differs, and the
 preflight SUITES are verified in a CRLF export of the commit (git archive)
