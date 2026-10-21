@@ -1026,6 +1026,23 @@ the LF dev tree only). The test now flips whichever way differs, and the
 preflight SUITES are verified in a CRLF export of the commit (git archive)
 under the completed and abandoned TKX states. Its LOW (the master.json read
 retried like the integrity check) fixed.
+AUDIT + LAUNCH: seven rounds. r1 -- A nothing above LOW; B two MEDIUM (an
+orphaned prep invisible to the guard; a resumed DS could redo its prep) ->
+3ad39e42. r2 -- A and B nothing above LOW (the loop closes) -> its LOWs
+36d41b56. Confirmation rounds on each fix: r3 (LOWs) -> 406ece2f; r4 (LOW)
+-> f358b2d2; r5 ONE HIGH in the tests (they read the live TKX state) ->
+27e05228; r6 ONE HIGH in a test (CRLF run worktree) -> 1e1b7ce2; r7 nothing
+above LOW (its LOW in this file only). The preflight suites pass in a CRLF
+export of the commit under the completed and abandoned TKX states. GPU
+smoke (no Ray) OK. Manifest e2de0c29 (44 AUDITED files of 835dc1a9). RUN
+WORKTREE Y:\SwitchPlayer-distill-run (detached at e2de0c29; never edit).
+LAUNCHED 2026-10-21 19:53 (WMI, scratchpad launch_distill.ps1): the hand-off
+post_distill.py, then `supervise_distill.py ds 0` (WAITING for TKX's marker
+and its 108 evals) and `supervise_distill.py fs 0` (WAITING for DS).
+Expected: TKX done ~00:45 10-23, DS preflight + prep ~01:00-02:30, DS
+~02:30 -> ~20:00 10-23, FS -> ~13:00 10-24 (+ evals). Accepted NITs: the
+r6 LOW fix has no dedicated test (r7 probed it by hand); test_rgrowx's
+line-ending flip does nothing in an LF tree.
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 
