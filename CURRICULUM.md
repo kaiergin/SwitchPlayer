@@ -938,6 +938,44 @@ after). Expected: TKX done ~01:00 10-23, DS ~01:30 -> ~19:00 10-23, FS ->
 ~11:00 10-24. PACE RULE: a row past 25 min/iteration is an ALERT and Kai's
 call. Kai's Switch-control sessions kill GPU pythons: pause the running
 supervisor and its trainer by command line, resume after.
+AMENDMENTS (audit r1, before launch: A -- the run code -- nothing above LOW;
+B -- the supervisor / hand-off -- two MEDIUM, fixed):
+  - B-M1: the prep (experiments/distill.py) counts as a trainer for the
+    any-trainer guard, and writes per-process tmp files: an orphaned prep
+    (its supervisor killed) can never run beside a second one.
+  - B-M2: once DS was launched the prep is NEVER redone (DS's checkpoint is
+    bound to the set's sha256, FS to its vocabulary); the launch gate
+    ALERTs and waits instead. Before that, a transient read error is
+    retried, and damaged prep files are moved aside, not overwritten.
+  - Read (0) adds, descriptively, the mean visit mass the masked read-out
+    discards (A's note: on TK-90's late rows its 50-sim search put ~40% of
+    its visits on the tokens the 1% rule would drop, ~5% of its play, so
+    the student's targets come out sharper than the master's own; logged
+    by the prep as discarded_visit_mass_mean).
+  - The recording overshoots 31,250 base steps by up to a game, so the
+    prefill's FIFO eviction drops the oldest 1-4 lives before iteration 1
+    (logged). A dropped long token that crossed the master's 3000-step cap
+    is split in full (up to 7 base steps past it). The offline curve's
+    probe rows are numbered by chunk (row k = k x 4,000 offline steps).
+  - Smaller fixes (A / B LOWs): DS refuses to start without
+    --snapshot-weights and with a distillation set other than the one
+    vocab.json was written with; the master snapshot must be a final one
+    (its iteration and step count); master.json is written atomically; a
+    TKX that completed with rows 240-270 incomplete stops the prep (PREP
+    FAILED) rather than falling back to TK-90, and a tie keeps TK-90; fs
+    also waits for DS's offline-curve rows and checks before each launch
+    that vocab.json is the vocabulary DS trained with; only DS, and only
+    for its row 0 and offline curve, may restart over its own
+    pre-checkpoint snapshots; the prep is watched (an ALERT when silent
+    past 30 min); ABANDONED is checked while waiting and before the prep;
+    ds --no-wait needs TKX's completion marker or ABANDONED file; the
+    hand-off makes up to 4 final passes over a run's missing rows before
+    moving on.
+  - PROCEDURES: pause = kill the supervisor, then its trainer (ablation.py)
+    or prep (distill.py), by command line. After a reboot rerun BOTH
+    launchers (launch_rgrowx.ps1 while TKX is unfinished;
+    launch_distill.ps1). Retracting a --no-wait also moves the prep folder
+    aside (its master.json holds the first choice).
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 

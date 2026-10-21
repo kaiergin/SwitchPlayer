@@ -1863,17 +1863,22 @@ def student_arm(arm, path):
         raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
                          f"arms only; '{arm}' is not one")
     vocab, sha = load_student_vocab(path, spec["TOKEN_VOCAB"])
-    ARMS[arm] = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha}
+    with open(path, encoding="utf-8") as f:
+        set_sha = json.load(f).get("set_sha256")
+    ARMS[arm] = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha,
+                 "_vocab_set_sha256": set_sha}
     return ARMS[arm]
 
 
-def student_gate(spec, distill_set):
+def student_gate(spec, distill_set, snapshot_weights=True):
     """The P3 student arms' inputs, checked at startup (before any
     --overwrite deletion): a student arm needs its --token-vocab applied
-    (student_arm); DS needs --distill-set, whose vocabulary is this run's
-    and whose master vocabulary is the arm's parent's, and the master's
-    end-state ceiling (START == CEILING); FS and every other arm refuse a
-    distillation set."""
+    (student_arm); DS needs --distill-set, whose vocabulary is this run's,
+    whose master vocabulary is the arm's parent's and whose bytes are the
+    ones vocab.json was written with (its set_sha256: the same prep; audit
+    r1 A-NIT3), the master's end-state ceiling (START == CEILING) and
+    --snapshot-weights (row 0 and the offline curve are snapshots; r1
+    A-L2); FS and every other arm refuse a distillation set."""
     kind = spec.get("_student")
     if kind is None:
         if distill_set:
@@ -1889,6 +1894,9 @@ def student_gate(spec, distill_set):
         return
     if not distill_set:
         raise SystemExit("the -student-distill arm needs --distill-set")
+    if not snapshot_weights:
+        raise SystemExit("the -student-distill arm needs --snapshot-weights "
+                         "(row 0 and the offline curve are its snapshots)")
     import distill
     header = distill.read_header(distill_set)
     if tuple(tuple(t) for t in header["vocab"]) != tuple(muzero.TOKEN_VOCAB):
@@ -1899,6 +1907,10 @@ def student_gate(spec, distill_set):
     if tuple(tuple(t) for t in header["master_vocab"]) != tuple(parent):
         raise SystemExit(f"{distill_set}: recorded from a master vocabulary "
                          f"other than the TK arm's")
+    want = spec.get("_vocab_set_sha256")
+    if not want or file_sha256(distill_set) != want:
+        raise SystemExit(f"{distill_set}: not the set --token-vocab's "
+                         f"vocab.json was written with (set_sha256)")
     if muzero.REWARD_GROWTH_START != muzero.REWARD_GROWTH_CEILING:
         raise SystemExit("the distilled student runs at the master's end-state "
                          "ceiling (REWARD_GROWTH_START == CEILING)")
@@ -1927,16 +1939,22 @@ def distill_prefill(run, lives):
     carrying the master-search policy and root value) through paper_targets
     -- the arm's own record builder (raw rewards clipped at the ceiling,
     age-0 priorities in frame time under the student's vocabulary) -- born
-    at step 0, then the usual FIFO eviction to the caps. The token / target
-    diagnostics paper_targets accumulates describe the MASTER's play and
-    are cleared, so row 5 describes the student's."""
+    at step 0, then the usual FIFO eviction to the caps (the recording
+    overshoots the transition cap by up to a game, so its oldest lives go;
+    audit r1 A-L1). The token / target diagnostics paper_targets
+    accumulates describe the MASTER's play and are cleared, so row 5
+    describes the student's. Returns (lives kept, lives evicted, base steps
+    evicted)."""
     for life in lives:
         run.replay.append(run.paper_targets(life["traj"], life["terminated"],
                                             born_step=0))
+    before = (len(run.replay), sum(replay_units(t) for t in run.replay))
     evict_replay(run.replay)
     run._tok_window = None
     run._tok_totals = None
     run._fresh_target_H = None
+    after = sum(replay_units(t) for t in run.replay)
+    return len(run.replay), before[0] - len(run.replay), before[1] - after
 
 
 def distill_acting_states(run):
@@ -4610,7 +4628,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         sve_gate()
         token_gate(spec, use_ray, cpu_actor, ray_workers)
         reward_growth_gate(use_ray, cpu_actor, ray_workers)
-        student_gate(spec, distill_set)
+        student_gate(spec, distill_set, snapshot_weights)
         if spec.get("_student") and init_weights:
             raise SystemExit("a curriculum P3 student starts from scratch or "
                              "from its distillation set, not --init-weights")
@@ -4815,13 +4833,14 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             import distill
             try:
                 header, lives = distill.read_set(distill_set)
-                distill_prefill(run, lives)
+                kept, gone, gone_units = distill_prefill(run, lives)
                 del lives
-                print(f"  [{arm} s{seed}] distillation set: "
-                      f"{len(run.replay)} master lives in the replay "
+                print(f"  [{arm} s{seed}] distillation set: {kept} master "
+                      f"lives in the replay "
                       f"({sum(replay_units(t) for t in run.replay)} base "
-                      f"steps; master {header['master_snapshot']})",
-                      flush=True)
+                      f"steps; {gone} oldest lives / {gone_units} base steps "
+                      f"evicted to the caps; master "
+                      f"{header['master_snapshot']})", flush=True)
                 distill_offline(run, arm, seed, spec, snapshot_weights)
             except BaseException:
                 run.env.close()

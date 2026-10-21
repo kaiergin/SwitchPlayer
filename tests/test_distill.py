@@ -39,10 +39,12 @@ def _student_vocab(drop=((0, 8), (0, 32), (5, 16))):
     return tuple(t for t in MASTER_VOCAB if t not in drop)
 
 
-def _vocab_file(tmp_path, vocab=None, name="vocab.json"):
+def _vocab_file(tmp_path, vocab=None, name="vocab.json", set_path=None):
     p = tmp_path / name
-    p.write_text(json.dumps({"vocab": [list(t) for t in
-                                       (vocab or _student_vocab())]}))
+    doc = {"vocab": [list(t) for t in (vocab or _student_vocab())]}
+    if set_path is not None:
+        doc["set_sha256"] = ablation.file_sha256(set_path)
+    p.write_text(json.dumps(doc))
     return p
 
 
@@ -103,11 +105,11 @@ def test_every_startup_gate_passes_for_the_students(arm, monkeypatch,
     for k in ("ENV_NAME", "FRAMESKIP", "ACTIONS"):
         monkeypatch.setattr(ablation, k, getattr(ablation, k))
     ablation.ENV_NAME, ablation.FRAMESKIP, ablation.ACTIONS = ENV_ID, 4, 9
-    ablation.student_arm(arm, _vocab_file(tmp_path))
     dset = None
     if arm == DS_ARM:
         dset = tmp_path / "set.pkl"
         distill.write_set(dset, _header(), [])
+    ablation.student_arm(arm, _vocab_file(tmp_path, set_path=dset))
     with ablation.arm_config(arm) as spec, \
             ablation._run_length_globals(90, 2000), ablation.token_actions():
         assert ablation.ACTIONS == 33
@@ -184,21 +186,27 @@ def test_student_gate_refusals(tmp_path, student):
     distill.write_set(other, _header(vocab=_student_vocab(((7, 8),))), [])
     foreign = tmp_path / "foreign.pkl"
     distill.write_set(foreign, _header(master=MASTER_VOCAB[:-1]), [])
+    twin = tmp_path / "twin.pkl"          # same header, other bytes
+    distill.write_set(twin, _header(), [{"traj": [], "terminated": True}])
 
-    def gate(arm, dset, applied=True):
+    def gate(arm, dset, applied=True, snaps=True):
         if applied:
-            ablation.student_arm(arm, _vocab_file(tmp_path))
+            ablation.student_arm(arm, _vocab_file(tmp_path, set_path=good))
         with ablation.arm_config(arm) as spec:
-            ablation.student_gate(spec, dset)
+            ablation.student_gate(spec, dset, snaps)
 
     with pytest.raises(SystemExit, match="needs --token-vocab"):
         gate(DS_ARM, good, applied=False)
     with pytest.raises(SystemExit, match="needs --distill-set"):
         gate(DS_ARM, None)
+    with pytest.raises(SystemExit, match="needs --snapshot-weights"):
+        gate(DS_ARM, good, snaps=False)                       # r1 A-L2
     with pytest.raises(SystemExit, match="differs from --token-vocab"):
         gate(DS_ARM, other)
     with pytest.raises(SystemExit, match="other than the TK arm"):
         gate(DS_ARM, foreign)
+    with pytest.raises(SystemExit, match="set_sha256"):
+        gate(DS_ARM, twin)                                    # r1 A-NIT3
     with pytest.raises(SystemExit, match="takes no --distill-set"):
         gate(FS_ARM, good)
     with pytest.raises(SystemExit, match="-student-distill arm only"):
@@ -206,22 +214,29 @@ def test_student_gate_refusals(tmp_path, student):
             ablation.student_gate(spec, good)
     gate(DS_ARM, good)
     gate(FS_ARM, None)
+    gate(FS_ARM, None, snaps=False)       # FS's snapshots are the usual ones
     with ablation.arm_config(TK_ARM) as spec:
         ablation.student_gate(spec, None)            # other arms: no-op
+    # a vocab.json without the set's hash refuses DS
+    ablation.student_arm(DS_ARM, _vocab_file(tmp_path))
+    with ablation.arm_config(DS_ARM) as spec:
+        with pytest.raises(SystemExit, match="set_sha256"):
+            ablation.student_gate(spec, good)
 
 
 def test_student_gate_refuses_a_growing_ceiling_or_bad_offline_steps(
         tmp_path, student, monkeypatch):
     dset = tmp_path / "set.pkl"
     distill.write_set(dset, _header(), [])
-    ablation.student_arm(DS_ARM, _vocab_file(tmp_path))
+    ablation.student_arm(DS_ARM, _vocab_file(tmp_path, set_path=dset))
     with ablation.arm_config(DS_ARM) as spec:
         muzero.REWARD_GROWTH_START = 1.0
         with pytest.raises(SystemExit, match="end-state ceiling"):
             ablation.student_gate(spec, dset)
+    applied = ablation.ARMS[DS_ARM]
     for steps, every in ((20000, 3000), (0, 0), (4000, 8000)):
         monkeypatch.setitem(ablation.ARMS, DS_ARM, {
-            **ablation.ARMS[DS_ARM], "_distill_offline_steps": steps,
+            **applied, "_distill_offline_steps": steps,
             "_distill_snapshot_every": every})
         with ablation.arm_config(DS_ARM) as spec:
             with pytest.raises(SystemExit, match="multiple"):
@@ -250,7 +265,7 @@ def test_the_resume_recipe_carries_the_vocabulary_and_the_set(tmp_path,
 
 def test_run_one_wires_the_students():
     src = inspect.getsource(ablation.run_one)
-    assert "student_gate(spec, distill_set)" in src
+    assert "student_gate(spec, distill_set, snapshot_weights)" in src
     assert src.index("reward_growth_gate(") < src.index("student_gate(")
     assert src.index("student_gate(") < src.index(
         "refuse_conflicting_state(")
@@ -434,9 +449,89 @@ def test_retokenize_keeps_a_life_without_dropped_tokens_as_is():
 def test_masked_targets_renormalize_over_the_student():
     pols = [np.array([0.1, 0.2, 0.3, 0.4, 0.0]),
             np.array([0.0, 0.5, 0.5, 0.0, 0.0])]
-    out, fb = distill.masked_targets(pols, MASTER5, STUDENT5)
+    out, fb, gone = distill.masked_targets(pols, MASTER5, STUDENT5)
     assert out[0] == pytest.approx([0.2, 0.8, 0.0])
     assert out[1] == pytest.approx([1 / 3] * 3) and fb == 1
+    assert gone == pytest.approx([0.5, 1.0])     # the discarded visit mass
+
+
+class _ReplayEnv:
+    """Deterministic frames and rewards per step; terminates at `end`."""
+
+    def __init__(self, end=None):
+        self.end, self.t, self.was_real_done = end, 0, True
+
+    def frame(self, t):
+        return np.random.default_rng(1000 + t).integers(
+            0, 256, (84, 84, 3), dtype=np.uint8)
+
+    def reset(self, seed=None, options=None):
+        self.t = 0
+        return self.frame(0), {}
+
+    def step(self, a):
+        self.t += 1
+        term = self.end is not None and self.t >= self.end
+        return self.frame(self.t), float((self.t * 37) % 11), term, False, {}
+
+
+def _replay_shell(env, fn):
+    from types import SimpleNamespace
+    run = object.__new__(ablation.Run)
+    run.env, run.env_steps = env, 0
+    nm = SimpleNamespace(training_steps=0,
+                         initial_inference=lambda stack: (fn(stack), 0.0))
+    run.searcher = SimpleNamespace(network_manager=nm)
+    return run
+
+
+@pytest.mark.parametrize("trial", range(24))
+def test_a_student_replaying_the_retokenized_actions_sees_the_same_records(
+        trial, monkeypatch):
+    """r1 A-L3 (the auditor's check, kept): a master plays tokens through
+    the real play_episode with the hook on; retokenize; a student replaying
+    those actions on the same env under the student vocabulary records
+    exactly the same stacks, slots and raw reward tuples -- life losses
+    inside a token, cap truncation and the first record included."""
+    master = tuple((a, f) for a in range(3) for f in (4, 8, 16, 32))
+    for k, v in (("REWARD_GROWTH", True), ("USE_SEARCH_ACTING", False),
+                 ("PAPER_TARGETS", True), ("BIRTH_SEARCH", True),
+                 ("PRIOR_ACT_STAGED_TEMP", False), ("ACTING_TEMPERATURE", 1.0),
+                 ("PRIOR_ACT_TEMP_SCALE", 1.0), ("TOKEN_LONG_BIAS", 0.0),
+                 ("TOKEN_VOCAB", master)):
+        monkeypatch.setattr(muzero, k, v)
+    for k in ("ACTIONS", "EPISODE_CAP", "INNER_FRAMES"):
+        monkeypatch.setattr(ablation, k, getattr(ablation, k))
+    rng = np.random.default_rng(trial)
+    end = int(rng.integers(5, 200)) if trial % 3 else None
+    drop = tuple(t for t in master if t[1] != 4 and rng.random() < 0.5)
+    student = tuple(t for t in master if t not in drop)
+    ablation.ACTIONS, ablation.EPISODE_CAP = len(master), int(
+        rng.integers(20, 300))
+    p = rng.dirichlet(np.ones(len(master)))
+    ablation.INNER_FRAMES = []
+    np.random.seed(trial)
+    traj, _ret, steps, term = ablation.Run.play_episode(
+        _replay_shell(_ReplayEnv(end), lambda s: p.copy()))
+    inner, ablation.INNER_FRAMES = ablation.INNER_FRAMES, None
+    distill.check_life(traj, inner)
+    out = distill.retokenize(traj, inner, master, student)
+    muzero.TOKEN_VOCAB, ablation.ACTIONS = student, len(student)
+    ablation.EPISODE_CAP = steps          # the student stops where it did
+    acts, k = [r[1] for r in out[:-1]], [0]
+
+    def fn(stack):
+        q = np.zeros(len(student))
+        q[acts[k[0]]] = 1.0
+        k[0] += 1
+        return q
+
+    straj, _r, ssteps, sterm = ablation.Run.play_episode(
+        _replay_shell(_ReplayEnv(end), fn))
+    assert (len(straj), ssteps, sterm) == (len(out), steps, term)
+    for a, b in zip(straj, out):
+        assert np.array_equal(a[0], b[0]) and a[1] == b[1]
+        assert tuple(a[2]) == tuple(b[2])
 
 
 def test_the_set_file_round_trips_and_refuses_damage(tmp_path):
@@ -616,3 +711,126 @@ def test_the_distilled_student_prefills_and_trains_offline(
     # the probe files the curve under its own run name
     assert curve.parent.parent.name == results.name + "-offline"
     assert sorted(p.name for p in snaps.iterdir()) == ["weights-iter000.pth"]
+
+
+@pytest.mark.slow
+def test_the_prefill_evicts_the_oldest_lives_and_says_so(
+        prepped, monkeypatch, tmp_path):
+    header, out, _ = prepped
+    ablation.student_arm(DS_ARM, out / "vocab.json")
+    _, lives = distill.read_set(out / "set.pkl")
+    with ablation.arm_config(DS_ARM) as spec, \
+            ablation._run_length_globals(2, 3), ablation.token_actions():
+        units = [ablation.replay_units([{"action": r[1]} for r in lf["traj"]])
+                 for lf in lives]
+        assert len(lives) >= 2
+        muzero.MAX_REPLAY_TRANSITIONS = sum(units[1:])   # the first must go
+        run = ablation.Run(DS_ARM, 0, spec)
+        try:
+            kept, gone, gone_units = ablation.distill_prefill(run, lives)
+        finally:
+            run.env.close()
+    assert (kept, gone, gone_units) == (len(lives) - 1, 1, units[0])
+    assert len(run.replay) == kept
+
+
+@pytest.mark.slow
+def test_run_one_distills_once_and_resumes_past_it(prepped, monkeypatch,
+                                                   tmp_path, capsys):
+    """r1 A-L3 (the auditor's smoke, kept): the real run_one, sequential on
+    the CPU with the Ray-only gates stubbed -- prefill + offline phase,
+    a crash at iteration 3 after the iteration-2 checkpoint, a resume that
+    skips the prefill, a resume with another set refused."""
+    header, out, _ = prepped
+    results = tmp_path / "ds-run"
+    results.mkdir()
+    ablation.RESULTS, ablation.TAG, ablation.EPISODE_CAP = results, "-t", 60
+    monkeypatch.setitem(ablation.ARMS, DS_ARM, {
+        **ablation.ARMS[DS_ARM], "ACT_SEARCH_SIMS": 4, "TRAINING_BATCHES": 8,
+        "_distill_offline_steps": 4, "_distill_snapshot_every": 2})
+    ablation.student_arm(DS_ARM, out / "vocab.json")
+    for g in ("token_gate", "reward_growth_gate", "bn_recal_gate",
+              "launch_gate", "eager_collect_gate"):
+        monkeypatch.setattr(ablation, g, lambda *a, **k: None)
+    calls = []
+    real_prefill, real_tb = ablation.distill_prefill, ablation.train_block
+    monkeypatch.setattr(ablation, "distill_prefill", lambda run, lives: (
+        calls.append(len(lives)), real_prefill(run, lives))[1])
+    crash = [True]
+
+    def tb(run, n, pipeline=None, init_name=None, consistency_base=None,
+           it=None):
+        if it == 3 and crash[0]:
+            raise RuntimeError("crash at iteration 3")
+        return real_tb(run, n, pipeline=pipeline, init_name=init_name,
+                       consistency_base=consistency_base, it=it)
+
+    monkeypatch.setattr(ablation, "train_block", tb)
+    jsonl = results / "ablation-t.jsonl"
+    kw = dict(checkpoint_every=2, use_ray=False, snapshot_weights=True,
+              distill_set=str(out / "set.pkl"))
+    with pytest.raises(RuntimeError, match="iteration 3"):
+        ablation.run_one(DS_ARM, 0, 4, 1, 3, 2, jsonl, **kw)
+    ck = ablation.resume_path(DS_ARM, 0)
+    st = ablation._read_checkpoint(ck)
+    assert st["iteration"] == 2 and st["training_steps"] == 4 + 2 * 3
+    assert st["token_vocab"] == header["vocab"]
+    assert st["distill_set_sha256"] == ablation.file_sha256(out / "set.pkl")
+    assert calls == [header["lives"]]
+    crash[0] = False
+    ablation.run_one(DS_ARM, 0, 4, 1, 3, 2, jsonl, resume=True, **kw)
+    assert calls == [header["lives"]]                  # no second prefill
+    rows = [json.loads(l) for l in open(jsonl)]
+    assert [r["iteration"] for r in rows] == [2, 4]
+    assert all(r["reward_ceiling"] == 160.0 for r in rows)
+    assert rows[0]["train_steps"] == 4 + 2 * 3
+    snaps = results / f"snapshots-t-{DS_ARM}-seed0"
+    assert sorted(x.name for x in snaps.iterdir()) == [
+        "weights-iter000.pth", "weights-iter002.pth", "weights-iter004.pth"]
+
+
+@pytest.mark.slow
+def test_a_resume_under_another_set_is_refused(prepped, monkeypatch,
+                                               tmp_path):
+    header, out, _ = prepped
+    results = tmp_path / "ds-run2"
+    results.mkdir()
+    ablation.RESULTS, ablation.TAG, ablation.EPISODE_CAP = results, "-t", 60
+    monkeypatch.setitem(ablation.ARMS, DS_ARM, {
+        **ablation.ARMS[DS_ARM], "ACT_SEARCH_SIMS": 4, "TRAINING_BATCHES": 8,
+        "_distill_offline_steps": 2, "_distill_snapshot_every": 2})
+    for g in ("token_gate", "reward_growth_gate", "bn_recal_gate",
+              "launch_gate", "eager_collect_gate"):
+        monkeypatch.setattr(ablation, g, lambda *a, **k: None)
+    ablation.student_arm(DS_ARM, out / "vocab.json")
+    jsonl = results / "ablation-t.jsonl"
+    real_tb = ablation.train_block
+
+    def tb(run, n, pipeline=None, init_name=None, consistency_base=None,
+           it=None):
+        if it == 3:
+            raise RuntimeError("crash at iteration 3")
+        return real_tb(run, n, pipeline=pipeline, init_name=init_name,
+                       consistency_base=consistency_base, it=it)
+
+    monkeypatch.setattr(ablation, "train_block", tb)
+    kw = dict(checkpoint_every=2, use_ray=False, snapshot_weights=True)
+    with pytest.raises(RuntimeError):
+        ablation.run_one(DS_ARM, 0, 4, 1, 3, 2, jsonl,
+                         distill_set=str(out / "set.pkl"), **kw)
+    # a different set (one life fewer), with a vocab.json written for it
+    _, lives = distill.read_set(out / "set.pkl")
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other = other_dir / "set.pkl"
+    distill.write_set(other, {**header, "lives": len(lives) - 1}, lives[1:]
+                      if len(lives) > 1 else lives + lives)
+    doc = json.loads((out / "vocab.json").read_text())
+    doc["set_sha256"] = ablation.file_sha256(other)
+    (other_dir / "vocab.json").write_text(json.dumps(doc))
+    monkeypatch.setitem(ablation.ARMS, DS_ARM, {
+        **ablation.ARMS[DS_ARM]})
+    ablation.student_arm(DS_ARM, other_dir / "vocab.json")
+    with pytest.raises(ValueError, match="resume mismatch.*distill_set_sha256"):
+        ablation.run_one(DS_ARM, 0, 4, 1, 3, 2, jsonl, resume=True,
+                         distill_set=str(other), **kw)

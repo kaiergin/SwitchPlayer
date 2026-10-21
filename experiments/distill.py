@@ -52,7 +52,10 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import muzero  # noqa: E402
-import ablation  # noqa: E402
+
+# ablation is imported where the prep needs it, never at module level: the
+# trainer runs ablation.py as __main__, and its read_set / read_header must
+# not execute a second copy of it (audit r1 A-NIT2).
 
 ENV = "MsPacmanNoFrameskip-v4"
 FRAMESKIP = 4
@@ -70,6 +73,7 @@ def load_master(run, blob):
     its latent renormalisation flag and training step; returns the RAW
     representation / prediction states (the acting states are overlaid for
     recording and these restored for the search)."""
+    import ablation
     for n in ablation.NET_NAMES:
         getattr(run.trainer, n).load_state_dict(blob[n])
     renorm = blob["spec"].get("LATENT_RENORMALIZE", True)
@@ -110,6 +114,7 @@ def record(run, base_steps):
     acting) until >= base_steps base steps; returns (lives, game returns,
     base steps). Each life: {"traj": 3-field decision records, "inner":
     per-decision inner frames, "terminated", "game", "steps"}."""
+    import ablation
     lives, games, total, g_ret = [], [], 0, 0.0
     while True:
         ablation.INNER_FRAMES = []
@@ -191,18 +196,22 @@ def masked_targets(pols, master_vocab, student_vocab):
     """Master visit fractions over its tokens -> the student's: the student
     tokens' entries, renormalized (visits to dropped tokens discarded).
     A row with no mass on any student token falls back to uniform; returns
-    (targets, fallbacks)."""
+    (targets, fallbacks, the mass discarded per row -- the search spreads
+    visits over every child, so the read-out sharpens the targets by
+    1 / (1 - discarded); audit r1 A's note)."""
     idx = [list(map(tuple, master_vocab)).index(t) for t in student_vocab]
-    out, fallbacks = [], 0
+    out, fallbacks, gone = [], 0, []
     for p in pols:
-        q = np.asarray(p, dtype=np.float64)[idx]
+        full = np.asarray(p, dtype=np.float64)
+        q = full[idx]
         s = q.sum()
+        gone.append(float(full.sum() - s))
         if s > 0:
             out.append(q / s)
         else:
             out.append(np.ones(len(idx)) / len(idx))
             fallbacks += 1
-    return out, fallbacks
+    return out, fallbacks, gone
 
 
 def master_search(run, recs, terminated):
@@ -219,7 +228,9 @@ def write_set(path, header, lives):
     """header pickle, then one pickle frame per life ({"traj": 5-field
     records, "terminated"}); atomic (tmp + replace)."""
     path = pathlib.Path(path)
-    tmp = path.with_name(path.name + ".tmp")
+    # per-process tmp name: two preps can never interleave one file (audit
+    # r1 B-M1; the supervisor's guard also counts a live prep)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     with open(tmp, "wb", buffering=16 * 1024 * 1024) as f:
         f.write(SET_MAGIC)
         pickle.dump({**header, "lives": len(lives)}, f, protocol=5)
@@ -265,6 +276,7 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
          drop_share=DROP_SHARE, log=print):
     """Steps 1-5 (module docstring) for one master snapshot; returns the
     header written."""
+    import ablation
     t0 = time.time()
     out = pathlib.Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -279,7 +291,8 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
     if not blob.get("acting_states"):
         raise SystemExit(f"{master}: no acting_states (a snapshot of a "
                          f"BN_RECAL_ACTING run is required)")
-    if int(blob["training_steps"]) != master_iterations * TRAIN_STEPS:
+    if (int(blob["training_steps"]) != master_iterations * TRAIN_STEPS
+            or blob.get("iteration") != master_iterations):
         raise SystemExit(f"{master}: training_steps {blob['training_steps']} "
                          f"is not the end of a {master_iterations}-iteration "
                          f"run (the master is its FINAL snapshot)")
@@ -308,6 +321,7 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                 f"tokens; dropped {list(dropped)}")
             set_rep_pred(run, raw_states)
             out_lives, records, splits, extra, fallbacks = [], 0, 0, 0, 0
+            gone_mass = []
             dropped_set = set(dropped)
             for life in lives:
                 splits += sum(1 for r in life["traj"][:-1]
@@ -315,8 +329,11 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                 recs = retokenize(life["traj"], life["inner"], master_vocab,
                                   vocab)
                 pols, vals = master_search(run, recs, life["terminated"])
-                pols, fb = masked_targets(pols, master_vocab, vocab)
+                pols, fb, gone = masked_targets(pols, master_vocab, vocab)
                 fallbacks += fb
+                # acted records only (a terminated tail's uniform is no
+                # search)
+                gone_mass += gone[:-1] if life["terminated"] else gone
                 out_lives.append({
                     "traj": [(r[0], r[1], tuple(r[2]), p, v)
                              for r, p, v in zip(recs, pols, vals)],
@@ -326,7 +343,9 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                 life["inner"] = None          # free as we go
             log(f"re-tokenized + master-searched {records} records "
                 f"({splits} dropped-token decisions split into {extra} "
-                f"extra records; {fallbacks} uniform fallbacks) "
+                f"extra records; {fallbacks} uniform fallbacks; mean visit "
+                f"mass discarded on dropped tokens "
+                f"{np.mean(gone_mass) if gone_mass else 0.0:.3f}) "
                 f"[{time.time() - t0:.0f}s]")
         finally:
             run.env.close()
@@ -347,13 +366,15 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
         "base_steps": int(total), "records": int(records),
         "split_decisions": int(splits), "split_extra_records": int(extra),
         "uniform_fallbacks": int(fallbacks),
+        "discarded_visit_mass_mean": (round(float(np.mean(gone_mass)), 4)
+                                      if gone_mass else 0.0),
         "acting_temperature": float(temp), "long_token_bias": float(bias),
         "lives": len(out_lives),
     }
     write_set(out / "set.pkl", header, out_lives)
     doc = {k: v for k, v in header.items()}
     doc["set_sha256"] = ablation.file_sha256(out / "set.pkl")
-    tmp = out / "vocab.json.tmp"
+    tmp = out / f"vocab.json.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=1)
     os.replace(tmp, out / "vocab.json")

@@ -25,19 +25,43 @@ row window), logged in PREP/master.json, and experiments/distill.py
 records it, derives the student vocabulary, re-tokenizes and searches
 (GPU, ~0.5 h; log PREP/prep.log; up to PREP_ATTEMPTS tries; vocab.json is
 its completion signal). Then DS launches. fs waits for DS's completion
-marker AND both DS probe jsonls holding rows 0 and 5-90 (and the prep's
-vocab.json), then its preflight, then FS launches. A RESUME (this run's
+marker AND both DS probe jsonls holding rows 0 and 5-90, both offline-curve
+jsonls holding rows 1-4 (and the prep's vocab.json), then its preflight,
+then FS launches. A RESUME (this run's
 checkpoint exists, or its supervisor.log logged a LAUNCHED / NO-WAIT line)
 skips the wait. --no-wait (ds only; logged, Kai's call: TKX abandoned or
 stuck) skips it too and is refused while any supervise_rgrowx.py or
-post_rgrowx.py lives; the master is then chosen from the rows TKX has
-(TK-90 unless TKX's rows 240-270 are all there). Before EVERY launch
+post_rgrowx.py lives, and unless TKX has its completion marker or its
+ABANDONED file; the master is then TK-90 when TKX has no marker, and the
+prep stops (PREP FAILED) when TKX completed without rows 240-270. Before EVERY launch
 attempt (and before the prep) it waits while ANY python runs an
 experiments/ablation.py. One supervisor per run: a second
 supervise_distill.py of the same variant refuses to start. A run already
 complete exits at once (RUN COMPLETE). ABANDONED in the run folder stops
 every launch; a run folder holding snapshots (its own or its offline
 curve's) or probe rows but no checkpoint is refused (move them aside).
+
+Audit r1 (B): the prep (experiments/distill.py) counts as a trainer for
+the any-trainer guard, so an orphaned prep (its supervisor killed) blocks a
+second one; a prep is never redone once this run was sanctioned (a
+checkpoint, or a launch logged) -- the integrity gate then ALERTs and
+waits; before that a transient read error is retried before the files are
+judged damaged, and damaged files are moved aside, not overwritten.
+master.json is written atomically; a TKX that completed with rows 240-270
+incomplete stops the prep (PREP FAILED: the rule needs them) instead of
+falling back to TK-90; a tie keeps TK-90 (TKX must be strictly higher). fs
+also waits for DS's offline-curve rows 1-4, and before every launch checks
+that vocab.json is the vocabulary DS trained with (DS's completion marker).
+Only ds, and only for weights-iter000 and the offline curve, may start over
+its own pre-checkpoint snapshots. The prep runs under Popen with an hourly
+ALERT while prep.log is silent past 30 min. ABANDONED is also checked while
+waiting and before the prep. --no-wait needs TKX's completion marker or its
+ABANDONED file. Missing master snapshots are an hourly ALERT while ds waits.
+PAUSE (a Switch session): kill the supervisor, then its trainer
+(experiments/ablation.py) or prep (experiments/distill.py), by command
+line. RETRACTING a --no-wait: also move the prep folder aside (its
+master.json holds the first choice). After a REBOOT rerun BOTH launchers
+(launch_rgrowx.ps1 while TKX is unfinished, and launch_distill.ps1).
 
 The runs execute from the RUN WORKTREE this file lives in (a checkout of
 the audited commit that nobody edits), so REPO is this file's own tree.
@@ -109,6 +133,8 @@ TKX_PROBES = tuple(os.path.join(TKX_TREE, "benchmarks", "probes",
 TKX_ROWS = tuple(range(5, 275, 5))
 TKX_SNAPSHOT = os.path.join(TKX_TREE, "benchmarks", "results", TKX_RUN,
                             SNAP_DIR, "weights-iter270.pth")
+TKX_ABANDONED = os.path.join(TKX_TREE, "benchmarks", "results", TKX_RUN,
+                             "ABANDONED")
 TK90_RUN = "mspacman-tokens-rgrow-s0-2026-10-19"
 TK90_SNAPSHOT = os.path.join(r"Y:\SwitchPlayer-rgrow-run", "benchmarks",
                              "results", TK90_RUN, SNAP_DIR,
@@ -122,6 +148,8 @@ def tk90_probe():
 
 
 DS_ROWS = (0,) + tuple(range(5, 95, 5))
+DS_CURVE_ROWS = (1, 2, 3, 4)
+PREP_SILENT_ALERT_S = 1800
 SUITES = ["tests/test_supervise_distill.py", "tests/test_distill.py",
           "tests/test_rgrowx.py", "tests/test_rgrow.py",
           "tests/test_tokens.py",
@@ -288,27 +316,32 @@ def marker_missing(marker):
 
 
 def predecessor(variant, seed):
-    """What `variant` waits for: (name, marker, probe jsonls, rows,
-    supervisor.log, supervisor script, its variant arg or None)."""
+    """What `variant` waits for: (name, marker, [(probe jsonl, rows)],
+    supervisor.log, supervisor script, its variant arg or None, its
+    ABANDONED file)."""
     if variant == "ds":
-        return ("TKX", TKX_MARKER, TKX_PROBES, TKX_ROWS, TKX_SUPLOG,
-                "supervise_rgrowx.py", None)
+        return ("TKX", TKX_MARKER, [(p, TKX_ROWS) for p in TKX_PROBES],
+                TKX_SUPLOG, "supervise_rgrowx.py", None, TKX_ABANDONED)
     _, base, _, ck, _ = paths("ds", seed)
     run = run_name("ds", seed)
-    probes = tuple(os.path.join(REPO, "benchmarks", "probes",
-                                f"probe_exhaustive_eval-{run}{s}.jsonl")
-                   for s in ("-acting", ""))
-    return ("DS", ck, probes, DS_ROWS, os.path.join(base, "supervisor.log"),
-            "supervise_distill.py", "ds")
+    # DS's rows 0 and 5-90 and its offline curve's rows 1-4 (audit r1 B-L2:
+    # FS must not start while DS's final pass still probes).
+    probes = [(os.path.join(REPO, "benchmarks", "probes",
+                            f"probe_exhaustive_eval-{name}{s}.jsonl"), rows)
+              for name, rows in ((run, DS_ROWS),
+                                 (run + "-offline", DS_CURVE_ROWS))
+              for s in ("-acting", "")]
+    return ("DS", ck, probes, os.path.join(base, "supervisor.log"),
+            "supervise_distill.py", "ds", os.path.join(base, "ABANDONED"))
 
 
 def pred_missing(variant, seed):
     """What the predecessor still lacks before `variant` may start: [] once
-    its marker is there and both probe jsonls hold every row (fs: and the
+    its marker is there and its probe jsonls hold every row (fs: and the
     prep's vocab.json)."""
-    name, marker, probes, rows, _, _, _ = predecessor(variant, seed)
+    name, marker, probes, _, _, _, _ = predecessor(variant, seed)
     out = marker_missing(marker)
-    for path in probes:
+    for path, rows in probes:
         got = probe_rows(path)
         lack = [i for i in rows if i not in got]
         if lack:
@@ -332,9 +365,13 @@ def pred_marker_age(variant, seed):
 
 def pred_unattended(variant, seed):
     """None while the predecessor is finished or driven; else why not."""
-    name, marker, _, _, suplog, script, pvar = predecessor(variant, seed)
+    name, marker, _, suplog, script, pvar, flag = predecessor(variant, seed)
     if not marker_missing(marker):
         return None
+    if os.path.exists(flag):
+        # (audit r1 B-L8: rerunning its launcher would not help)
+        return (f"{name} is ABANDONED (its run folder's flag) -- no "
+                f"verdict needing it runs; Kai's call")
     alive = live_scripts(script, pvar)
     if not alive:
         return f"no live {script}{' ' + pvar if pvar else ''} -- rerun its launcher"
@@ -352,7 +389,7 @@ def pred_unattended(variant, seed):
 def pred_gave_up(variant, seed):
     """The predecessor's supervisor logged CRASH LOOP / MAX ATTEMPTS / PREP
     FAILED after its last launch or preflight line."""
-    lines = lines_of(predecessor(variant, seed)[4])
+    lines = lines_of(predecessor(variant, seed)[3])
     fail = max((i for i, l in enumerate(lines) if l.startswith(
         ("CRASH LOOP", "MAX ATTEMPTS", "PREP FAILED"))), default=-1)
     live = max((i for i, l in enumerate(lines) if l.startswith(
@@ -361,17 +398,21 @@ def pred_gave_up(variant, seed):
 
 
 def wait_external(variant, seed):
-    """Block until the predecessor has completed AND its evals have landed;
+    """Block until the predecessor has completed AND its evals have landed
+    (returns True), or this run's ABANDONED file appears (returns False);
     hourly WAITING lines and ALERTs."""
     name = predecessor(variant, seed)[0]
+    base = paths(variant, seed)[1]
     first, polls = True, 0
     while True:
+        if abandoned(base):              # (audit r1 B-L9)
+            return False
         missing = pred_missing(variant, seed)
         if not missing:
             if not first:
                 print(f"{name} complete and evaluated; {variant} s{seed} may "
                       f"start", flush=True)
-            return
+            return True
         if first or polls % 60 == 0:
             print(f"WAITING for {name} before {variant} s{seed} "
                   f"[{polls // 60} h]: missing " + "; ".join(missing)[:400],
@@ -387,8 +428,15 @@ def wait_external(variant, seed):
             age = pred_marker_age(variant, seed)
             if age is not None and age > PRED_EVALS_ALERT_S:
                 print(f"ALERT: {name} completed {age / 3600:.1f} h ago but its "
-                      f"evals still lack rows -- is its hand-off alive?",
-                      flush=True)
+                      f"evals still lack rows -- is its hand-off alive? (a "
+                      f"hand-off log line '... rows missing' means rerun "
+                      f"them)", flush=True)
+            if variant == "ds":
+                gone = master_files_missing()
+                if gone:
+                    print(f"ALERT: master snapshot(s) missing: "
+                          f"{'; '.join(gone)} -- keep both run trees",
+                          flush=True)
         first = False
         time.sleep(60)
         polls += 1
@@ -402,17 +450,32 @@ def window_mean(rows, lo, hi):
     return sum(rows[i] for i in want) / len(want)
 
 
+def master_files_missing():
+    """The master snapshots that should exist and do not: TK-90's always,
+    TKX's once TKX has its completion marker (audit r1 B-L10)."""
+    want = [TK90_SNAPSHOT] + ([] if marker_missing(TKX_MARKER)
+                              else [TKX_SNAPSHOT])
+    return [p for p in want if not os.path.exists(p)]
+
+
 def choose_master():
     """The pre-registered master: the final snapshot of whichever of TKX
     (deployed rows 240-270) and TK-90 (rows 60-90) has the higher 7-row
-    deployed mean; TK-90 when TKX lacks a complete window or its marker.
-    Returns a dict (snapshot, iterations, which, both means)."""
+    deployed mean (TKX only when strictly higher); TK-90 when TKX has no
+    completion marker (abandoned / --no-wait). A TKX that completed with
+    its rows 240-270 incomplete raises: the rule needs them (audit r1
+    B-L7). Returns a dict (snapshot, iterations, which, both means)."""
     tk90 = window_mean(probe_rows(tk90_probe()), 60, 90)
-    tkx = (window_mean(probe_rows(TKX_PROBES[0]), 240, 270)
-           if not marker_missing(TKX_MARKER) else None)
     if tk90 is None:
         raise SystemExit(f"TK-90's deployed rows 60-90 are missing from "
                          f"{tk90_probe()}")
+    tkx = None
+    if not marker_missing(TKX_MARKER):
+        tkx = window_mean(probe_rows(TKX_PROBES[0]), 240, 270)
+        if tkx is None:
+            raise SystemExit("TKX completed but its deployed rows 240-270 "
+                             "are incomplete -- land them (its hand-off) "
+                             "first; the pre-registered rule needs them")
     if tkx is not None and tkx > tk90:
         pick = {"which": "TKX", "snapshot": TKX_SNAPSHOT, "iterations": 270}
     else:
@@ -422,6 +485,27 @@ def choose_master():
 
 def prep_done():
     return os.path.exists(os.path.join(prep_dir(), "vocab.json"))
+
+
+def read_pick(path):
+    """master.json's choice, or None when it is unreadable / incomplete."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            pick = json.load(f)
+    except (OSError, ValueError):
+        return None
+    keys = ("which", "snapshot", "iterations", "tkx_mean_240_270",
+            "tk90_mean_60_90")
+    if not isinstance(pick, dict) or any(k not in pick for k in keys):
+        return None
+    return pick
+
+
+def write_pick(path, pick):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(pick, f, indent=1)
+    os.replace(tmp, path)
 
 
 def set_intact():
@@ -441,27 +525,46 @@ def set_intact():
     return True, ""
 
 
-def run_prep(env):
+def run_prep(env, redo_ok=True):
     """The prep, once (vocab.json is its completion signal): choose and log
     the master, then experiments/distill.py up to PREP_ATTEMPTS times.
-    Returns True when the prep is done (and intact; a damaged one is
-    redone -- a DS already past its offline phase then refuses to resume on
-    the set's sha256, which is the point)."""
+    Returns True when the prep is done. A done prep that does not check out
+    intact is retried for a few minutes (a transient lock), then -- only
+    when `redo_ok` (this run was never sanctioned: nothing is bound to the
+    set yet) -- moved aside and redone; once sanctioned it is NEVER redone
+    (a launched DS's checkpoint is bound to the set's sha256 and FS to its
+    vocabulary; the attempt loop's integrity gate ALERTs and waits; audit
+    r1 B-M2)."""
     if prep_done():
-        ok, why = set_intact()
-        if ok:
+        for k in range(3):
+            ok, why = set_intact()
+            if ok:
+                return True
+            if k < 2:
+                time.sleep(60)
+        if not redo_ok:
+            print(f"ALERT: PREP not intact ({why}) after this run started -- "
+                  f"never redone now; the launch waits for it", flush=True)
             return True
-        print(f"PREP damaged ({why}) -- redoing it", flush=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        for name in ("vocab.json", "set.pkl"):
+            src = os.path.join(prep_dir(), name)
+            if os.path.exists(src):
+                os.replace(src, f"{src}.damaged-{stamp}")
+        print(f"PREP damaged ({why}) -- moved aside (.damaged-{stamp}), "
+              f"redoing it", flush=True)
     os.makedirs(prep_dir(), exist_ok=True)
     pick_path = os.path.join(prep_dir(), "master.json")
-    if os.path.exists(pick_path):
-        # A restarted supervisor keeps the first choice.
-        with open(pick_path, encoding="utf-8") as f:
-            pick = json.load(f)
-    else:
-        pick = choose_master()
-        with open(pick_path, "w", encoding="utf-8") as f:
-            json.dump(pick, f, indent=1)
+    # A restarted supervisor keeps the first choice (written atomically;
+    # an unreadable one is chosen again -- nothing ran on it yet).
+    pick = read_pick(pick_path) if os.path.exists(pick_path) else None
+    if pick is None:
+        try:
+            pick = choose_master()
+        except SystemExit as e:
+            print(f"PREP FAILED: {e}", flush=True)
+            return False
+        write_pick(pick_path, pick)
     print(f"MASTER {pick['which']}: {pick['snapshot']} (TKX 240-270 "
           f"{pick['tkx_mean_240_270']}, TK-90 60-90 "
           f"{pick['tk90_mean_60_90']})", flush=True)
@@ -471,13 +574,28 @@ def run_prep(env):
         if not ok:
             print(f"PREP FAILED: {why}", flush=True)
             return False
-        with open(os.path.join(prep_dir(), "prep.log"), "ab") as log:
-            r = subprocess.run(
+        plog = os.path.join(prep_dir(), "prep.log")
+        with open(plog, "ab") as log:
+            p = subprocess.Popen(
                 [PY, "experiments/distill.py", "--master", pick["snapshot"],
                  "--master-iterations", str(pick["iterations"]),
                  "--out", PREP_REL, "--seed", "0"],
                 cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT,
                 creationflags=0x08000000)
+            born, told = time.time(), 0.0
+            while p.poll() is None:
+                try:
+                    quiet = time.time() - max(os.path.getmtime(plog), born)
+                except OSError:
+                    quiet = 0.0
+                if (quiet > PREP_SILENT_ALERT_S
+                        and time.time() - told > 3600):
+                    print(f"ALERT: the prep (pid {p.pid}) has been silent for "
+                          f"{quiet / 60:.0f} min -- hung? (audit r1 B-L5)",
+                          flush=True)
+                    told = time.time()
+                time.sleep(30)
+        r = p
         if r.returncode == 0 and prep_done():
             ok, why = set_intact()
             if ok:
@@ -491,6 +609,25 @@ def run_prep(env):
     print(f"PREP FAILED after {PREP_ATTEMPTS} attempts -- see "
           f"{PREP_REL}/prep.log", flush=True)
     return False
+
+
+def vocab_is_ds(seed):
+    """(ok, reason): vocab.json's vocabulary is the one DS trained with (the
+    token_vocab its completion marker's recipe holds; audit r1 B-L1)."""
+    try:
+        with open(os.path.join(prep_dir(), "vocab.json"),
+                  encoding="utf-8") as f:
+            want = json.load(f)["vocab"]
+        import torch
+        marker = torch.load(paths("ds", seed)[3], map_location="cpu",
+                            weights_only=False)
+        have = marker.get("token_vocab") if isinstance(marker, dict) else None
+    except Exception as e:      # noqa: BLE001 -- any failure blocks
+        return False, f"vocab check: {type(e).__name__}: {e}"
+    if have is None or [list(t) for t in have] != [list(t) for t in want]:
+        return False, ("vocab.json is not the vocabulary DS trained with "
+                       "(DS's completion marker)")
+    return True, ""
 
 
 def preflight(variant):
@@ -540,10 +677,13 @@ def _names(cmd):
 
 def live_trainers():
     """PIDs of ANY python running experiments/ablation.py (any tree, arm or
-    seed)."""
+    seed) or experiments/distill.py (the prep: an orphan of a killed
+    supervisor keeps the GPU and writes the prep's files; audit r1
+    B-M1)."""
     return [pid for pid, cmd in _procs()
-            if any(c.replace(chr(92), "/").endswith("experiments/ablation.py")
-                   for c in cmd)]
+            if any(c.replace(chr(92), "/").endswith(
+                ("experiments/ablation.py", "experiments/distill.py"))
+                for c in cmd)]
 
 
 def live_scripts(script, variant=None):
@@ -726,9 +866,9 @@ def wait_no_trainer(rows=None):
         pids = live_trainers()
         if not pids:
             return
-        msg = (f"ALERT: an experiments/ablation.py is already running (pids "
-               f"{pids}) -- one run on the GPU at a time, and never a second "
-               f"writer")
+        msg = (f"ALERT: an experiments/ablation.py or distill.py is already "
+               f"running (pids {pids}) -- one run on the GPU at a time, and "
+               f"never a second writer")
         if msg != told or polls % 60 == 0:
             print(f"{msg} [{polls} min]", flush=True)
             told = msg
@@ -750,16 +890,24 @@ def sanctioned(base, ckpt):
                for l in lines_of(os.path.join(base, "supervisor.log")))
 
 
-def stray_snapshots(base, ckpt):
+def stray_snapshots(base, ckpt, own_ok=False):
     """Snapshots in the run folder -- its own or its offline curve's -- with
     no checkpoint beside them (a fresh start there would mix two
-    timelines)."""
+    timelines). `own_ok` (ds, sanctioned: its own death before its first
+    checkpoint) excuses exactly what that leaves -- weights-iter000 and the
+    offline curve, which the restart rewrites (audit r1 B-L4)."""
     import glob
     if os.path.exists(ckpt):
         return []
-    return sorted(glob.glob(os.path.join(base, "snapshots*", "*.pth"))
-                  + glob.glob(os.path.join(base, "*-offline", "snapshots*",
-                                           "*.pth")))
+    found = sorted(glob.glob(os.path.join(base, "snapshots*", "*.pth"))
+                   + glob.glob(os.path.join(base, "*-offline", "snapshots*",
+                                            "*.pth")))
+    if own_ok:
+        found = [f for f in found
+                 if os.path.basename(f) != "weights-iter000.pth"
+                 and not os.path.basename(os.path.dirname(os.path.dirname(
+                     f))).endswith("-offline")]
+    return found
 
 
 def stray_probe_rows(variant, seed, ckpt):
@@ -809,11 +957,12 @@ def main(argv):
         print(f"ABANDONED {variant} s{seed}: the run folder holds an "
               f"ABANDONED file -- not launching", flush=True)
         return 0
-    stray = stray_snapshots(base, ckpt)
-    if stray and not sanctioned(base, ckpt):
-        # (A death of THIS run before its first checkpoint leaves DS's
-        # offline snapshots and row 0 behind: its own log's LAUNCHED line
-        # sanctions the restart, which rewrites them.)
+    own_ok = variant == "ds" and sanctioned(base, ckpt)
+    stray = stray_snapshots(base, ckpt, own_ok)
+    if stray:
+        # (A death of DS before its first checkpoint leaves its row 0 and
+        # offline curve behind: its own log's LAUNCHED line sanctions the
+        # restart, which rewrites exactly those.)
         print(f"refusing: {len(stray)} snapshots but no checkpoint in "
               f"{rel} -- a fresh start would mix two timelines; move the run "
               f"folder and its probe jsonls aside", flush=True)
@@ -831,13 +980,22 @@ def main(argv):
                 print(f"refusing --no-wait: {script} is alive (pids {alive}) "
                       f"-- kill it first", flush=True)
                 return 2
+        if marker_missing(TKX_MARKER) and not os.path.exists(TKX_ABANDONED):
+            # (audit r1 B-L11: a reboot rerunning TKX's launcher would
+            # otherwise interleave TKX with DS)
+            print("refusing --no-wait: TKX has neither its completion marker "
+                  "nor an ABANDONED file -- abandon it first (its "
+                  "supervisor's procedure)", flush=True)
+            return 2
         print(f"NO-WAIT override: {variant} s{seed} starts without TKX's "
               f"completion marker and evals", flush=True)
     elif sanctioned(base, ckpt):
         print(f"RESUMING {variant} s{seed}: it started before (checkpoint or "
               f"launch logged) -- no wait", flush=True)
-    else:
-        wait_external(variant, seed)
+    elif not wait_external(variant, seed):
+        print(f"ABANDONED {variant} s{seed}: the run folder holds an "
+              f"ABANDONED file -- not launching", flush=True)
+        return 0
 
     os.makedirs(base, exist_ok=True)
     rows = Rows(jsonl, variant, seed)
@@ -860,9 +1018,15 @@ def main(argv):
     env = {**{k: v for k, v in os.environ.items()
               if k != "CUDA_VISIBLE_DEVICES"},
            "ABLATION_RESULTS": rel, "PYTHONFAULTHANDLER": "1"}
-    if variant == "ds" and not run_prep({k: v for k, v in env.items()
-                                         if k != "ABLATION_RESULTS"}):
-        return 1
+    if variant == "ds":
+        if abandoned(base):
+            print(f"ABANDONED {variant} s{seed}: the run folder holds an "
+                  f"ABANDONED file -- no prep, not launching", flush=True)
+            return 0
+        if not run_prep({k: v for k, v in env.items()
+                         if k != "ABLATION_RESULTS"},
+                        redo_ok=not sanctioned(base, ckpt)):
+            return 1
     stall_s = 2 * 3600
     deaths, quick_deaths = [], 0
 
@@ -887,6 +1051,8 @@ def main(argv):
             ok, why = manifest_check()
             if ok and variant == "ds":
                 ok, why = set_intact()
+            if ok and variant == "fs":
+                ok, why = vocab_is_ds(seed)
             if ok:
                 break
             if why != told or polls % 60 == 0:
@@ -904,7 +1070,9 @@ def main(argv):
             print(f"ABANDONED {variant} s{seed}: the run folder holds an "
                   f"ABANDONED file -- not relaunching", flush=True)
             return 0
-        stray = ([] if sanctioned(base, ckpt) else stray_snapshots(base, ckpt))             + stray_probe_rows(variant, seed, ckpt)
+        stray = (stray_snapshots(base, ckpt, variant == "ds"
+                                 and sanctioned(base, ckpt))
+                 + stray_probe_rows(variant, seed, ckpt))
         if stray:
             names = ", ".join(os.path.basename(x) for x in stray[:4])
             print(f"refusing: {len(stray)} stray snapshots / probe jsonls "

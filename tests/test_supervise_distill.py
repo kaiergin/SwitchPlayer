@@ -240,8 +240,8 @@ def test_ds_waits_for_tkxs_marker_and_every_row_of_both_evals(sup, fake_tkx):
     assert sup.pred_missing("ds", 0) == []
 
 
-def test_fs_waits_for_ds_its_rows_0_to_90_and_the_prep(sup, monkeypatch,
-                                                       tmp_path):
+def test_fs_waits_for_ds_its_rows_its_curve_and_the_prep(sup, monkeypatch,
+                                                         tmp_path):
     monkeypatch.setattr(sup, "REPO", str(tmp_path))
     ck = pathlib.Path(sup.paths("ds", 0)[3])
     ck.parent.mkdir(parents=True)
@@ -252,20 +252,29 @@ def test_fs_waits_for_ds_its_rows_0_to_90_and_the_prep(sup, monkeypatch,
           range(5, 95, 5))
     _rows(probes / f"probe_exhaustive_eval-{run}.jsonl", (0,) + tuple(
         range(5, 95, 5)))
+    _rows(probes / f"probe_exhaustive_eval-{run}-offline-acting.jsonl",
+          [1, 2, 3, 4])
+    _rows(probes / f"probe_exhaustive_eval-{run}-offline.jsonl", [1, 2, 4])
     miss = sup.pred_missing("fs", 0)
     assert any("-acting.jsonl rows [0]" in m for m in miss)
+    assert any("-offline.jsonl rows [3]" in m for m in miss)   # r1 B-L2
     assert any("vocab.json" in m for m in miss)
     _rows(probes / f"probe_exhaustive_eval-{run}-acting.jsonl", [0])
+    _rows(probes / f"probe_exhaustive_eval-{run}-offline.jsonl", [3])
     os.makedirs(sup.prep_dir())
     pathlib.Path(sup.prep_dir(), "vocab.json").write_text("{}")
     assert sup.pred_missing("fs", 0) == []
 
 
-def test_wait_external_blocks_and_alerts(sup, fake_tkx, monkeypatch, capsys):
+def test_wait_external_blocks_and_alerts(sup, fake_tkx, monkeypatch, capsys,
+                                         tmp_path):
     marker, probes = fake_tkx
     marker.write_bytes(b"done")
     os.utime(marker, (1, 1))                           # done long ago
     monkeypatch.setattr(sup, "live_scripts", lambda *a: [])
+    tk90 = tmp_path / "tk90.pth"
+    monkeypatch.setattr(sup, "TK90_SNAPSHOT", str(tk90))
+    monkeypatch.setattr(sup, "TKX_SNAPSHOT", str(tmp_path / "tkx.pth"))
     sleeps = []
 
     def sleep(s):
@@ -275,18 +284,42 @@ def test_wait_external_blocks_and_alerts(sup, fake_tkx, monkeypatch, capsys):
             _rows(probes[1], range(5, 275, 5))
 
     monkeypatch.setattr(sup.time, "sleep", sleep)
-    sup.wait_external("ds", 0)
+    assert sup.wait_external("ds", 0) is True
     out = capsys.readouterr().out
     assert "WAITING for TKX before ds s0" in out
     assert "ALERT: TKX completed" in out and "evals still lack rows" in out
     assert "TKX complete and evaluated; ds s0 may start" in out
+    # the masters' snapshots are checked while waiting (r1 B-L10)
+    assert "master snapshot(s) missing" in out and str(tk90) in out
+    assert str(tmp_path / "tkx.pth") in out
     marker.write_bytes(b"x" * 1_000_000)               # unfinished, undriven
     probes[0].unlink()
     monkeypatch.setattr(sup.time, "sleep", _stop)
     with pytest.raises(Stop):
         sup.wait_external("ds", 0)
-    assert "nothing drives it: no live supervise_rgrowx.py" in \
-        capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "nothing drives it: no live supervise_rgrowx.py" in out
+    assert "master snapshot(s) missing: " + str(tk90) in out
+    # an ABANDONED predecessor is named (r1 B-L8)
+    abandoned = pathlib.Path(sup.TKX_MARKER).parent / "ABANDONED"
+    monkeypatch.setattr(sup, "TKX_ABANDONED", str(abandoned))
+    abandoned.write_text("")
+    with pytest.raises(Stop):
+        sup.wait_external("ds", 0)
+    assert "TKX is ABANDONED" in capsys.readouterr().out
+
+
+def test_wait_external_stops_when_this_run_is_abandoned(sup, fake_tkx,
+                                                        monkeypatch):
+    base = pathlib.Path(sup.paths("ds", 0)[1])
+    base.mkdir(parents=True)
+
+    def sleep(s):
+        (base / "ABANDONED").write_text("")
+
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    monkeypatch.setattr(sup, "live_scripts", lambda *a: [1])
+    assert sup.wait_external("ds", 0) is False      # r1 B-L9
 
 
 def _probe_file(path, rows, value):
@@ -301,7 +334,7 @@ def test_choose_master_picks_the_better_7_row_window(sup, fake_tkx,
     with pytest.raises(SystemExit, match="TK-90"):
         sup.choose_master()
     _probe_file(tk90p, range(5, 95, 5), 856.62)
-    # TKX unfinished: TK-90 even with better rows
+    # TKX without its marker (abandoned / --no-wait): TK-90, whatever its rows
     _probe_file(probes[0], range(5, 275, 5), 1000.0)
     pick = sup.choose_master()
     assert pick["which"] == "TK-90" and pick["iterations"] == 90
@@ -317,8 +350,27 @@ def test_choose_master_picks_the_better_7_row_window(sup, fake_tkx,
     _probe_file(probes[0], range(5, 275, 5), 800.0)    # TKX worse
     assert sup.choose_master()["which"] == "TK-90"
     probes[0].unlink()
-    _probe_file(probes[0], range(5, 270, 5), 2000.0)   # row 270 missing
+    tk90_mean = sup.window_mean(sup.probe_rows(str(tk90p)), 60, 90)
+    _probe_file(probes[0], range(5, 275, 5), tk90_mean)   # a tie: TK-90
     assert sup.choose_master()["which"] == "TK-90"
+    probes[0].unlink()
+    # completed but rows 240-270 incomplete: refused, never TK-90 (r1 B-L7)
+    _probe_file(probes[0], range(5, 270, 5), 2000.0)
+    with pytest.raises(SystemExit, match="rows 240-270 are incomplete"):
+        sup.choose_master()
+
+
+def test_master_files_missing(sup, fake_tkx, monkeypatch, tmp_path):
+    marker, _ = fake_tkx
+    a, b = tmp_path / "tk90.pth", tmp_path / "tkx.pth"
+    monkeypatch.setattr(sup, "TK90_SNAPSHOT", str(a))
+    monkeypatch.setattr(sup, "TKX_SNAPSHOT", str(b))
+    assert sup.master_files_missing() == [str(a)]     # TKX unfinished
+    marker.write_bytes(b"done")
+    assert sup.master_files_missing() == [str(a), str(b)]
+    a.write_bytes(b"x")
+    b.write_bytes(b"x")
+    assert sup.master_files_missing() == []
 
 
 def test_tk90s_committed_window_is_the_preregistered_856(sup):
@@ -351,18 +403,36 @@ def _write_prep(sup, good=True):
     (d / "vocab.json").write_text(json.dumps({"set_sha256": sha}))
 
 
+class FakeProc:
+    """A finished Popen: runs `effect` (writing the prep's files) at start."""
+
+    def __init__(self, rc, effect=None):
+        self.returncode, self.pid = rc, 4321
+        if effect:
+            effect()
+
+    def poll(self):
+        return self.returncode
+
+
+def _popen(monkeypatch, sup, plan, seen=None):
+    """subprocess.Popen -> FakeProc per call, from `plan`: a list of (rc,
+    effect)."""
+    def popen(args, **k):
+        if seen is not None:
+            seen.append(args)
+        rc, effect = plan.pop(0)
+        return FakeProc(rc, effect)
+
+    monkeypatch.setattr(sup.subprocess, "Popen", popen)
+    monkeypatch.setattr(sup.subprocess, "run", _stop)
+
+
 def test_the_prep_runs_once_and_keeps_its_first_master(sup, prep_env,
                                                       monkeypatch, capsys):
     calls = prep_env
     runs = []
-
-    def run(args, **k):
-        runs.append(args)
-        if len(runs) == 2:
-            _write_prep(sup)
-        return SimpleNamespace(returncode=0 if len(runs) == 2 else 1)
-
-    monkeypatch.setattr(sup.subprocess, "run", run)
+    _popen(monkeypatch, sup, [(1, None), (0, lambda: _write_prep(sup))], runs)
     assert sup.run_prep({}) is True
     out = capsys.readouterr().out
     assert "MASTER TK-90" in out and "PREP attempt 1 failed" in out
@@ -374,6 +444,7 @@ def test_the_prep_runs_once_and_keeps_its_first_master(sup, prep_env,
     master = json.loads(pathlib.Path(sup.prep_dir(), "master.json")
                         .read_text())
     assert master["which"] == "TK-90"
+    assert not list(pathlib.Path(sup.prep_dir()).glob("*.tmp"))
     assert sup.run_prep({}) is True                  # done: nothing runs
     assert len(runs) == 2 and calls == ["choose"]
 
@@ -387,52 +458,145 @@ def test_a_restarted_prep_reuses_the_logged_master(sup, prep_env,
         "which": "TKX", "snapshot": "x.pth", "iterations": 270,
         "tkx_mean_240_270": 1.0, "tk90_mean_60_90": 0.0}))
     seen = []
-    monkeypatch.setattr(sup.subprocess, "run", lambda args, **k: (
-        seen.append(args), _write_prep(sup),
-        SimpleNamespace(returncode=0))[-1])
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup))], seen)
     assert sup.run_prep({}) is True
     assert calls == [] and seen[0][3] == "x.pth" and seen[0][5] == "270"
 
 
+def test_an_unreadable_master_json_is_chosen_again(sup, prep_env,
+                                                   monkeypatch):
+    calls = prep_env
+    d = pathlib.Path(sup.prep_dir())
+    d.mkdir(parents=True)
+    (d / "master.json").write_text('{"which": "TKX", "snap')   # torn (r1 L6)
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup))])
+    assert sup.run_prep({}) is True and calls == ["choose"]
+    assert sup.read_pick(str(d / "master.json"))["which"] == "TK-90"
+
+
+def test_a_master_rule_failure_is_prep_failed(sup, prep_env, monkeypatch,
+                                              capsys):
+    monkeypatch.setattr(sup, "choose_master", lambda: (_ for _ in ()).throw(
+        SystemExit("TKX completed but its deployed rows 240-270 are "
+                   "incomplete")))
+    _popen(monkeypatch, sup, [])
+    assert sup.run_prep({}) is False
+    assert "PREP FAILED: TKX completed" in capsys.readouterr().out
+
+
 def test_the_prep_gives_up_after_its_attempts(sup, prep_env, monkeypatch,
                                               capsys):
-    monkeypatch.setattr(sup.subprocess, "run",
-                        lambda *a, **k: SimpleNamespace(returncode=1))
+    _popen(monkeypatch, sup, [(1, None)] * 3)
     assert sup.run_prep({}) is False
     out = capsys.readouterr().out
     assert out.count("failed (rc=1") == sup.PREP_ATTEMPTS == 3
     assert "PREP FAILED after 3 attempts" in out
 
 
-def test_a_damaged_prep_is_not_done(sup, prep_env, monkeypatch, capsys):
-    monkeypatch.setattr(sup.subprocess, "run", lambda *a, **k: (
-        _write_prep(sup, good=False), SimpleNamespace(returncode=0))[-1])
-    ok = sup.run_prep({})
-    out = capsys.readouterr().out
-    # vocab.json exists after attempt 1 -> prep_done; the integrity check
-    # fails every attempt
-    assert ok is False and "does not match" in out
-    _write_prep(sup)
-    assert sup.set_intact() == (True, "")
-    # a prep damaged after it was done is redone, not trusted
-    _write_prep(sup, good=False)
-    monkeypatch.setattr(sup.subprocess, "run", lambda *a, **k: (
-        _write_prep(sup), SimpleNamespace(returncode=0))[-1])
+def test_a_silent_prep_is_an_alert(sup, prep_env, monkeypatch, capsys):
+    class Slow(FakeProc):
+        polls = 0
+
+        def poll(self):
+            Slow.polls += 1
+            return None if Slow.polls < 3 else self.returncode
+
+    import time as real_time
+    clock = [real_time.time()]      # prep.log's real mtime is "now"
+    monkeypatch.setattr(sup, "time", SimpleNamespace(
+        time=lambda: clock[0], sleep=None, strftime=real_time.strftime))
+
+    def sleep(s):
+        clock[0] += 3600
+
+    sup.time.sleep = sleep
+    monkeypatch.setattr(sup.subprocess, "Popen", lambda args, **k: Slow(
+        0, lambda: _write_prep(sup)))
     assert sup.run_prep({}) is True
-    assert "PREP damaged" in capsys.readouterr().out
+    assert "ALERT: the prep (pid 4321) has been silent" in \
+        capsys.readouterr().out
+
+
+def test_a_damaged_prep_is_moved_aside_and_redone(sup, prep_env, monkeypatch,
+                                                  capsys):
+    _write_prep(sup, good=False)
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup))])
+    assert sup.run_prep({}) is True
+    out = capsys.readouterr().out
+    assert "PREP damaged" in out and "moved aside" in out
+    d = pathlib.Path(sup.prep_dir())
+    assert len(list(d.glob("set.pkl.damaged-*"))) == 1
+    assert len(list(d.glob("vocab.json.damaged-*"))) == 1
+    assert sup.set_intact() == (True, "")
+
+
+def test_a_prep_that_never_checks_out_fails(sup, prep_env, monkeypatch,
+                                            capsys):
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup, good=False))] * 3)
+    assert sup.run_prep({}) is False
+    assert "does not match" in capsys.readouterr().out
+
+
+def test_a_sanctioned_run_never_redoes_its_prep(sup, prep_env, monkeypatch,
+                                                capsys):
+    """r1 B-M2: a launched DS is bound to the set; a transient lock or real
+    damage blocks the launch (the integrity gate), never a redo."""
+    calls = prep_env
+    _write_prep(sup, good=False)
+    _popen(monkeypatch, sup, [])                     # any launch fails
+    assert sup.run_prep({}, redo_ok=False) is True
+    out = capsys.readouterr().out
+    assert "never redone" in out and calls == []
+    assert not list(pathlib.Path(sup.prep_dir()).glob("*.damaged-*"))
+    # a transient read failure that clears is not damage
+    _write_prep(sup)
+    real = sup.set_intact
+    flaky = [(False, "prep files: [Errno 13] locked"), None]
+
+    def once():
+        r = flaky.pop(0)
+        return r if r else real()
+
+    monkeypatch.setattr(sup, "set_intact", once)
+    assert sup.run_prep({}) is True
+    assert "damaged" not in capsys.readouterr().out
 
 
 def test_the_prep_needs_the_audited_tree(sup, prep_env, monkeypatch, capsys):
     monkeypatch.setattr(sup, "manifest_check",
                         lambda: (False, "not the audited revision: x"))
-    monkeypatch.setattr(sup.subprocess, "run", _stop)
+    _popen(monkeypatch, sup, [])
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
     assert sup.run_prep({}) is False
     assert "PREP FAILED: not the audited revision" in capsys.readouterr().out
 
 
-# --------------------------------------------------------------------------
-# main: overrides, resume, order
-# --------------------------------------------------------------------------
+def test_fs_launches_only_on_dss_vocabulary(sup, monkeypatch, tmp_path):
+    import torch
+    monkeypatch.setattr(sup, "REPO", str(tmp_path))
+    os.makedirs(sup.prep_dir())
+    vocab = [[0, 4], [1, 4], [1, 16]]
+    pathlib.Path(sup.prep_dir(), "vocab.json").write_text(
+        json.dumps({"vocab": vocab}))
+    ck = pathlib.Path(sup.paths("ds", 0)[3])
+    ck.parent.mkdir(parents=True)
+    ok, why = sup.vocab_is_ds(0)
+    assert not ok and "vocab check" in why            # no marker yet
+    torch.save({"completed": True, "token_vocab": vocab}, ck)
+    assert sup.vocab_is_ds(0) == (True, "")
+    torch.save({"completed": True, "token_vocab": vocab[:2]}, ck)
+    ok, why = sup.vocab_is_ds(0)
+    assert not ok and "not the vocabulary DS trained with" in why
+
+
+def test_the_trainer_guard_counts_the_prep(sup, monkeypatch):
+    _procs(monkeypatch, sup, [
+        (1, ["py", r"Y:\x\experiments\distill.py", "--master", "m"]),
+        (2, ["py", "-m", "pytest", "tests/test_distill.py"]),
+        (3, ["py", "experiments/ablation.py", "--arms", "a"])])
+    assert sup.live_trainers() == [1, 3]               # r1 B-M1
+
+
 def _procs(monkeypatch, sup, procs):
     monkeypatch.setattr(sup, "_procs", lambda: iter(procs))
 
@@ -481,6 +645,10 @@ def test_no_wait_is_logged_and_refused_while_tkx_is_driven(sup, monkeypatch,
     monkeypatch.setattr(sup, "REPO", str(tmp_path))
     monkeypatch.setattr(sup, "other_supervisors", lambda v: [])
     monkeypatch.setattr(sup, "wait_external", _stop)
+    marker = tmp_path / "tkx" / "resume.ckpt"
+    marker.parent.mkdir()
+    monkeypatch.setattr(sup, "TKX_MARKER", str(marker))
+    monkeypatch.setattr(sup, "TKX_ABANDONED", str(tmp_path / "tkx" / "AB"))
     alive = {"supervise_rgrowx.py": [5], "post_rgrowx.py": []}
     monkeypatch.setattr(sup, "live_scripts", lambda s, v=None: alive[s])
     assert sup.main(["ds", "0", "--no-wait"]) == 2
@@ -489,6 +657,11 @@ def test_no_wait_is_logged_and_refused_while_tkx_is_driven(sup, monkeypatch,
     assert sup.main(["ds", "0", "--no-wait"]) == 2
     assert "post_rgrowx.py is alive" in capsys.readouterr().out
     alive["post_rgrowx.py"] = []
+    # neither TKX's marker nor its ABANDONED file (r1 B-L11)
+    assert sup.main(["ds", "0", "--no-wait"]) == 2
+    assert "neither its completion marker nor an ABANDONED" in \
+        capsys.readouterr().out
+    (tmp_path / "tkx" / "AB").write_text("")
     monkeypatch.setattr(sup, "preflight", _stop)
     with pytest.raises(Stop):
         sup.main(["ds", "0", "--no-wait"])
@@ -518,11 +691,14 @@ def _loop(sup, monkeypatch, tmp_path, events):
     monkeypatch.setattr(sup, "REPO", str(tmp_path))
     monkeypatch.setattr(sup, "other_supervisors", lambda v: [])
     monkeypatch.setattr(sup, "wait_external",
-                        lambda v, s: events.append("wait"))
+                        lambda v, s: events.append("wait") or True)
     monkeypatch.setattr(sup, "preflight",
                         lambda v: events.append("preflight") or (True, ""))
     monkeypatch.setattr(sup, "run_prep",
-                        lambda env: events.append("prep") or True)
+                        lambda env, redo_ok: events.append(("prep", redo_ok))
+                        and False or True)
+    monkeypatch.setattr(sup, "vocab_is_ds",
+                        lambda seed: events.append("vocab") or (True, ""))
     monkeypatch.setattr(sup, "wait_no_trainer",
                         lambda *a: events.append("guard"))
     monkeypatch.setattr(sup, "manifest_check",
@@ -555,7 +731,7 @@ def test_ds_runs_wait_preflight_prep_then_each_launch_guarded(
     monkeypatch.setattr(sup.subprocess, "Popen", popen)
     assert sup.main(["ds", "0"]) == 1                 # 5 quick deaths
     assert "CRASH LOOP" in capsys.readouterr().out
-    assert events == (["wait", "preflight", "prep"]
+    assert events == (["wait", "preflight", ("prep", True)]
                       + ["guard", "manifest", "intact", "popen"] * 5)
     args, env = launched[0]
     assert args == sup.command("ds", 0)
@@ -574,13 +750,14 @@ def test_fs_has_no_prep_and_no_set_check(sup, monkeypatch, tmp_path):
     monkeypatch.setattr(sup.subprocess, "Popen", popen)
     with pytest.raises(Stop):
         sup.main(["fs", "0"])
-    assert events == ["wait", "preflight", "guard", "manifest", "popen"]
+    assert events == ["wait", "preflight", "guard", "manifest", "vocab",
+                      "popen"]
 
 
 def test_a_failed_prep_launches_nothing(sup, monkeypatch, tmp_path):
     events = []
     _loop(sup, monkeypatch, tmp_path, events)
-    monkeypatch.setattr(sup, "run_prep", lambda env: False)
+    monkeypatch.setattr(sup, "run_prep", lambda env, redo_ok: False)
     monkeypatch.setattr(sup.subprocess, "Popen", _stop)
     assert sup.main(["ds", "0"]) == 1
 
@@ -609,14 +786,30 @@ def test_stray_state(sup, monkeypatch, tmp_path, capsys):
     off = base / f"{base.name}-offline" / "snapshots-x"
     off.mkdir(parents=True)
     (off / "weights-iter001.pth").write_bytes(b"x")
-    assert sup.stray_snapshots(str(base), ckpt)
+    own = base / "snapshots-x"
+    own.mkdir()
+    (own / "weights-iter000.pth").write_bytes(b"x")
+    assert len(sup.stray_snapshots(str(base), ckpt)) == 2
     assert sup.main(["ds", "0"]) == 2
     assert "snapshots but no checkpoint" in capsys.readouterr().out
-    # this run's own death before its first checkpoint: sanctioned
+    # DS's own death before its first checkpoint: sanctioned, and exactly
+    # row 0 + the offline curve excused (r1 B-L4)
     (base / "supervisor.log").write_text("LAUNCHED ds s0 attempt 1 (fresh)\n")
-    with pytest.raises(Stop):          # past the checks: RESUMING, preflight
-        monkeypatch.setattr(sup, "preflight", _stop)
+    assert sup.stray_snapshots(str(base), ckpt, own_ok=True) == []
+    monkeypatch.setattr(sup, "preflight", _stop)
+    with pytest.raises(Stop):
         sup.main(["ds", "0"])
+    (own / "weights-iter005.pth").write_bytes(b"x")  # a later row: stray
+    assert sup.main(["ds", "0"]) == 2
+    (own / "weights-iter005.pth").unlink()
+    # fs never gets the excuse
+    _r, fbase, _fj, fck, _fd = sup.paths("fs", 0)
+    fsnap = pathlib.Path(fbase) / "snapshots-x"
+    fsnap.mkdir(parents=True)
+    (fsnap / "weights-iter000.pth").write_bytes(b"x")
+    (pathlib.Path(fbase) / "supervisor.log").write_text("LAUNCHED fs\n")
+    assert sup.main(["fs", "0"]) == 2
+    capsys.readouterr()
     # probe rows without a checkpoint: refused even when sanctioned
     probes = tmp_path / "benchmarks" / "probes"
     _rows(probes / f"probe_exhaustive_eval-{base.name}-offline-acting.jsonl",
@@ -626,6 +819,44 @@ def test_stray_state(sup, monkeypatch, tmp_path, capsys):
     pathlib.Path(ckpt).write_bytes(b"x" * 1_000_001)
     assert sup.stray_snapshots(str(base), ckpt) == []
     assert sup.stray_probe_rows("ds", 0, ckpt) == []
+
+
+def test_a_resumed_ds_never_redoes_its_prep(sup, monkeypatch, tmp_path):
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    ck = pathlib.Path(sup.paths("ds", 0)[3])
+    ck.parent.mkdir(parents=True)
+    ck.write_bytes(b"x" * 1_000_001)                  # a resume
+    with pytest.raises(Stop):
+        sup.main(["ds", "0"])
+    assert ("prep", False) in events
+
+
+def test_an_abandoned_ds_runs_no_prep(sup, monkeypatch, tmp_path, capsys):
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    base = pathlib.Path(sup.paths("ds", 0)[1])
+
+    def preflight(v):
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "ABANDONED").write_text("")
+        return True, ""
+
+    monkeypatch.setattr(sup, "preflight", preflight)
+    assert sup.main(["ds", "0"]) == 0
+    assert not any(isinstance(e, tuple) for e in events)
+    assert "no prep" in capsys.readouterr().out
+
+
+def test_main_returns_when_abandoned_while_waiting(sup, monkeypatch,
+                                                   tmp_path, capsys):
+    events = []
+    _loop(sup, monkeypatch, tmp_path, events)
+    monkeypatch.setattr(sup, "wait_external", lambda v, s: False)
+    monkeypatch.setattr(sup, "preflight", _stop)
+    assert sup.main(["ds", "0"]) == 0
+    assert "ABANDONED ds s0" in capsys.readouterr().out
 
 
 def test_the_attempt_loop_refuses_stray_probe_rows(sup, monkeypatch,
@@ -652,7 +883,8 @@ def test_main_source_order(sup):
     loop = src[src.index("for attempt in range("):]
     assert loop.index("wait_no_trainer(rows)") < loop.index(
         "manifest_check()") < loop.index("set_intact()") < loop.index(
-        "subprocess.Popen(")
+        "vocab_is_ds(seed)") < loop.index("subprocess.Popen(")
+    assert "redo_ok=not sanctioned(base, ckpt)" in src
 
 
 @pytest.mark.parametrize("variant, row, per, want", [
