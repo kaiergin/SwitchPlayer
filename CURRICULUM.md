@@ -1044,6 +1044,96 @@ Expected: TKX done ~00:45 10-23, DS preflight + prep ~01:00-02:30, DS
 r6 LOW fix has no dedicated test (r7 probed it by hand); test_rgrowx's
 line-ending flip does nothing in an LF tree.
 
+### RESULT -- the token arm on Ms. Pac-Man, 3x longer (TKX, seed 0), 2026-10-23
+
+TKX (mspacman-tokens-rgrow-x270-s0-2026-10-20) trained from its run
+worktree 10-21 01:08 -> 10-23 00:07 in one attempt (169,171 s, 10.44
+min/iteration; no ALERTs, supervisor.err empty). The hand-off ran its last
+evals by 00:11: all 54 rows in both variants, no capped game. EXACT eval,
+30 noop starts, prior argmax; DEPLOYED (acting states) primary, RAW
+secondary, IN = the run's 8-game eval; maxp = the prior's mean max
+probability, ceil = the reward-clip ceiling (units), T = the acting
+temperature:
+  iter       5   10   15   20   25   30   35   40   45   50   55   60   65   70   75   80   85   90
+  dep      354  692  506  527  748  550  791  591  782  770  761  680  824  898  914  828  798  877
+  raw      446  655  587  499  611  655  730  818  657  753  788  659  783  844  924  835  765  959
+  in       408  642  360  444  745  499  612  604  921  669  719  582  849 1118  816  888  852  878
+  env k      3    6    9   12   16   20   23   26   30   34   37   41   45   48   52   55   59   63
+  maxp    0.62 0.62 0.63 0.66 0.73 0.73 0.75 0.69 0.66 0.66 0.71 0.67 0.61 0.61 0.53 0.61 0.62 0.53
+  ceil       1    1    2    2    2    3    4    4    5    6    8    9   11   13   16   19   24   28
+  iter      95  100  105  110  115  120  125  130  135  140  145  150  155  160  165  170  175  180
+  dep     1034 1213  761  774  939  580  621  569  575  296  292  484  447  524  619  382  305  295
+  raw     1195 1088  634  932  939  722  688  457  276  362  694  300  525  590  436  330  413  522
+  in      1222 1244  731  804  721  479  675  674  590  266  270  398  706  496  596  421  300  298
+  env k     66   70   74   77   79   82   85   88   90   92   95   98  101  103  106  108  111  114
+  maxp    0.40 0.25 0.21 0.16 0.12 0.13 0.06 0.06 0.05 0.05 0.05 0.07 0.08 0.08 0.09 0.11 0.13 0.13
+  ceil      34   41   50   60   73   88  106  128  154  160  160  160  160  160  160  160  160  160
+  iter     185  190  195  200  205  210  215  220  225  230  235  240  245  250  255  260  265  270
+  dep      558  356  546  608  382  506  491  475  783  740  685  463  423  510  857  460  419  530
+  raw      430  544 1186  479  884  761  402  372  555  404  386  891  472  765  695  689  666  464
+  in       624  371  332  631  426  765  485  459  700  909  599  404  344  431 1295  486  414  505
+  env k    116  119  122  124  127  130  133  137  140  143  146  149  152  155  158  161  164  167
+  maxp    0.10 0.13 0.17 0.18 0.23 0.16 0.24 0.15 0.12 0.10 0.09 0.10 0.11 0.12 0.16 0.14 0.13 0.12
+(T 0.5 to row 135, 0.25 from row 140, 0.19 @205, 0.125 from row 210;
+the ceiling 160 from row 140; TK-90's row 90 at 58.5k env steps.)
+NEAR RANDOM: no -- the last-7 deployed mean 523.24 (g 0.222) is above
+  502.08, by 21.
+READ (1) level, rows 240-270: deployed 523.24 (SD 152.9) against TK-90's
+  856.62: -333.4 -> WORSE (<= 624.6). Raw 663.10 (SD 153.0) against
+  830.81: -167.7 -> NO DIFFERENT (band 205). A deployed / raw
+  disagreement: reported, not acted on. Against EfficientZero's 1281.2:
+  g 0.222 deployed, 0.365 raw.
+READ (2) trend: rows 240-270 against rows 150-180 (436.62): +86.6 ->
+  PLATEAU (raw 445.43 -> 663.10, +217.7).
+READ (3) data: the first row past 100k env steps is row 155 (100,639);
+  the 7-row window 140-170 scored 434.8 deployed (462.7 raw) -- g 0.13,
+  against EfficientZero's 1281.2 at 100k. TKX gathered 167k env steps,
+  2.9x TK-90's 58.5k.
+READ (4) same iterations: TKX's rows 60-90 scored 831.24 deployed (824.14
+  raw) against TK-90's 856.62 (830.81): -25.4 -- the stretched schedule
+  cost nothing over the first 90 iterations.
+READ (5) tokens, descriptive: play shares (4 / 8 / 16 / 32 frames) 0.11 /
+  0.04 / 0.58 / 0.27 @90 -> 0.45 / 0.27 / 0.20 / 0.08 @140 -> 0.51 /
+  0.40 / 0.07 / 0.03 @270: play moved to short tokens, as TK-90's did
+  late. Frames per decision, deployed (probe): 17.9 @90, 5.7 @140, 11.0
+  @180, 8.0 @270; acting 18.7 @90 -> 7.2 @270. Decisions per life 94-134
+  from row 220.
+READ (6) stability: the largest drop from row 140, -397 (857 @255 -> 460
+  @260). The first row >= 881 was row 70; 15 rows fell below 502.08 after
+  it (140, 145, 150, 155, 170, 175, 180, 190, 205, 215, 220, 240, 245,
+  260, 265). The best 7-row deployed window is rows 70-100, 937.4; the
+  peak row 100, 1213.
+READ (7) clip growth: the ceiling followed its stretched schedule (28 @90,
+  88 @120, 160 from 140). reward_kept 0.98-0.998 to row 115, 1.000 from
+  row 120; reward_max sat AT the ceiling through row 115 (an 80-unit
+  record clipped), 80 for rows 120-145, 40-42 from row 150: non-binding
+  from row 120, as RG's was from row ~30.
+PRE-REGISTERED DECISION: WORSE + PLATEAU -> WORSE (any trend): diagnose
+  before anything else. 90 iterations stay the Ms. Pac-Man length for
+  P2b / P3 comparisons; the 3x stretch does not pay at this recipe.
+DIAGNOSIS, descriptive (one seed -- "consistent with", not a cause):
+  - The fall is rows 100 -> 140 (1213 -> 296 deployed) at a CONSTANT
+    temperature (0.5 to row 135): not the temperature stages (140, 205).
+  - Over the same rows the prior went flat: maxp 0.53 @90 -> 0.25 @100 ->
+    0.05 @135-145, policy_entropy 1.85 -> 3.49 (ln 36 = 3.58) -- the
+    deployed player's argmax over a near-uniform prior. It never
+    re-sharpened (maxp <= 0.24 to row 270).
+  - It began ~10 rows after the ceiling passed ~30-40 units (28 @90, 41
+    @100), and so did TK-90's: maxp held 0.66 to row 45 (ceiling 143 @45)
+    and fell 0.61 @55 -> 0.27 @85 -> 0.20 @90 (its prior-flattening note,
+    READ (4) of the 90-iteration result). RG -- the same clip growth over
+    9 actions -- never flattened (maxp 0.47-0.56, entropy 1.30-1.55 of
+    ln 9 = 2.20, every 10th row 5-85). Consistent with: once large rewards pass the
+    clip, a 50-simulation birth search over 36 tokens spreads its visits
+    and the prior trained on them flattens; TK-90 stopped at row 90 before
+    its argmax lost its level, TKX ran 180 rows past it.
+  - Already in flight: the distillation step's 14-token student
+    vocabulary. DS (the end-state ceiling 160 from row 0) sharpens (maxp
+    0.19 @5 -> 0.54 @40); FS (the same 14 tokens from scratch, TK's clip
+    growth) is the cleaner check of the vocabulary-size reading.
+  - Not checked yet: the visit distributions themselves (the birth
+    targets' entropy by row), the value scale against the ceiling.
+
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 
 DECISION (Kai, 2026-10-20): after TK's 90 iterations (deployed mean 60-90
