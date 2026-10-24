@@ -789,6 +789,114 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- P3's distillation step: DS against FS on Ms. Pac-Man (seed 0), 2026-10-24
+
+RUNS (from the run worktree Y:\SwitchPlayer-distill-run, detached at
+e2de0c29; one attempt each, no ALERTs, supervisor.err empty): the prep
+10-23 00:17 -> 00:23; DS 00:23 -> 17:56 10-23 (63,210 s, the offline
+phase included); FS 18:08 10-23 -> 08:58 10-24 (53,430 s, 9.9
+min/iteration); the hand-off's last evals 09:02 10-24 -- all rows in both
+variants (DS 0 and 5-90, FS 5-90, DS's offline curve 1-4), no capped game.
+PREP: MASTER = TK-90 (weights-iter090; TKX's rows 240-270 523.24 < 856.62).
+The master's recorded play: 44 games, 132 lives, 31,620 base steps, game
+returns mean 810.2. VOCABULARY: 14 of 36 tokens -- the nine 4-frame tokens,
+LEFT and UPLEFT x16, NOOP, DOWN and DOWNRIGHT x32; ALL nine 8-frame tokens
+dropped. The 22 dropped tokens held 10.1% of the master's decisions (1,113
+decisions, split into 3,293 extra 4-frame records; 14,451 records in all;
+no uniform fallback). The master's search put 0.569 of its visits on them
+(the masked read-out's discarded mass; A's ~40% estimate was low).
+EXACT eval as TK's (30 noop starts, prior argmax); DEPLOYED (acting
+states) primary, RAW secondary, IN = the run's 8-game eval, maxp = the
+prior's mean max probability:
+  iter      0    5   10   15   20   25   30   35   40   45   50   55   60   65   70   75   80   85   90
+  DS dep  660  635  841 1415  833  951 1184  972 1327  973 1310 1391 1192 1018 1239 1338 1336 1061 1436
+  DS raw  579  700  740 1315  971 1421  923  967 1048 1334 1461 1022 1073  966 1084 1478 1158 1190 1756
+  DS in     -  484 1002 1065  825  912 1299  921 1229 1061 1182 1188 1359 1095 1415 1176 1202 1208 1401
+  DS env    -  3.3  6.1  9.7 13.3 17.6 21.8 25.8 29.4 32.8 36.7 40.3 44.7 48.7 52.3 56.2 60.4 64.3 68.2
+  DS maxp   - 0.19 0.22 0.31 0.36 0.45 0.49 0.55 0.54 0.56 0.58 0.54 0.58 0.57 0.50 0.55 0.52 0.52 0.50
+  FS dep    -  567  808  868  797  820  705  748 1079  851 1068  937 1035 1097 1090  830 1141  961 1087
+  FS raw    -  594  963  780  775  813  788  751  780  959 1015  939  992  937  894 1173  847  998 1247
+  FS in     -  399  820  751  788  785  750  740 1124  978  986 1151 1099  985 1346  845 1152  996 1068
+  FS env    -  3.4  6.0  9.0 12.4 15.8 19.1 22.6 25.6 29.2 32.9 37.0 40.2 44.3 47.7 51.1 54.5 58.3 61.6
+  FS maxp   - 0.60 0.55 0.62 0.61 0.55 0.58 0.58 0.57 0.63 0.60 0.58 0.55 0.45 0.38 0.29 0.23 0.19 0.16
+  TK-90 dep -   60   60  271  482  665  524  913  742  732  659  879  780 1033  863  920  825  885  691
+(env in thousands of the student's own base steps; FS's ceiling 2 @5 ->
+26 @30 -> 143 @45 -> 160 from 50, T 0.5 / 0.25 from 50 / 0.125 from 75;
+DS's ceiling 160 and T 0.125 throughout.)
+NEAR RANDOM: neither (DS 60-90 g 0.949, FS 0.747).
+READ (0) transfer: row 0 (20,000 offline steps, before DS played) 660.0
+  deployed (579.3 raw, g 0.362) against MASTER 856.62: -196.6,
+  descriptive (+-464); NOT TRANSFER FAILED. The offline curve, deployed /
+  raw: 492 / 274 @4k, 747 / 395 @8k, 520 / 362 @12k, 803 / 795 @16k, 660 /
+  579 @20k -- within ~110 of MASTER at 8k and 16k steps, noisy; the
+  master scored 810.2 in the recorded games.
+READ (1) level 60-90: DS 1231.38 (SD 153.1) against FS 1034.38 (SD 106.6):
+  +197.0 -> NO DIFFERENT (band 232). Raw 1243.43 against 1012.48: +231.0
+  -> BETTER (band 205). A deployed / raw disagreement: reported, not
+  acted on.
+READ (2) head start 5-25: DS 935.00 against FS 772.07: +162.9 -> NO
+  DIFFERENT (band 274.4). Raw 1029.47 against 784.87 (+244.6).
+READ (3) against the master: DS 1231.38 against 856.62: +374.8 -> ABOVE
+  (g 0.949; EfficientZero's 1281.2 is g 1). FS +177.8 -> SAME.
+READ (4) time to level (the first row >= 624.62): DS row 0 (before it
+  played); FS row 10 (5,950 env steps); TK-90 row 25 (15,589). DS's
+  lowest row in 5-25 is 635.0 against row 0's 660.0 (-25, inside one
+  row's noise; the 5-25 mean is 935): no forgetting when it began to play.
+READ (5) tokens: per-duration play shares (4 / 16 / 32 frames) DS 0.51 /
+  0.40 / 0.08 @5 -> 0.45 / 0.31 / 0.24 @90; FS 0.64 / 0.05 / 0.31 @5 ->
+  0.58 / 0.18 / 0.24 @90. Frames per decision, deployed (probe), rows
+  60-90: DS 14.3, FS 12.9 (4.2 and 4.7 decisions per second; TK-90
+  11.5-15.7). FS against TK-90 (the same recipe over 36 tokens) at 60-90:
+  +177.8 deployed, inside the band: dropping the master's least-used
+  tokens did not hurt a fresh start, and may have helped (one seed).
+READ (6) stability, the largest adjacent drop from row 45: DS -275 (1336 @80
+  -> 1061 @85), FS -260 (1090 @70 -> 830 @75).
+PRE-REGISTERED DECISION: (1) NO DIFFERENT + (2) NO DIFFERENT -> no
+  measurable effect at these bands; by read (0) the transfer did not fail,
+  and DS did not forget as it began to play -> Kai's call.
+Beyond the letter (one seed, within-run bands -- "consistent with"):
+  - Both deployed reads favour DS and fall just inside their bands (+197
+    of 232, +163 of 274); raw is BETTER. DS led FS at 17 of the 18 shared
+    rows (all but row 65), and in every third: 935 / 1193 / 1231 against
+    772 / 898 / 1034. Seven DS rows reached EfficientZero's 1281.2 (15,
+    40, 50, 55, 75, 80, 90); no FS row did. Adjacent rows are correlated,
+    so the row count is not an independent test; a seed-1 pair is the
+    test the bands ask for.
+  - The swap with distillation started AT the master's level (row 0) and
+    ended 375 above it; the swap without started at 567 and ended at the
+    master's level (+178, SAME). The data bill differs: DS also used the
+    master's 58.5k training steps and the 31.6k recorded ones.
+  - PRIOR FLATTENING (TKX's diagnosis, updated): FS flattened too -- maxp
+    0.63 @45 -> 0.16 @90, entropy 1.24 -> 2.55 of ln 14 = 2.64 -- so the
+    vocabulary-size reading TKX's RESULT proposed is NOT supported (14
+    tokens flatten as 36 do). DS did not (maxp 0.50-0.58 from row 30).
+    Across the six Ms. Pac-Man runs the prior flattened in TK-90, TKX and
+    FS -- tokens with the clip ceiling growing during training -- and in
+    neither RG (growth, 9 actions) nor DS (tokens, ceiling 160 from the
+    start, a sharp distilled start). Its onset does NOT keep a fixed lag
+    behind the ceiling: TKX's coincides with the ceiling passing ~30-40
+    units (maxp 0.53 @90 -> 0.25 @100, ceiling 28 -> 41), TK-90's and
+    FS's comes ~25-30 rows after it (ceiling ~40 @34; maxp falling from
+    ~60-65, after their temperature's 0.25 stage). CORRECTION to TKX's
+    RESULT: "it began ~10 rows after the ceiling passed ~30-40 units, and
+    so did TK-90's" is wrong on both counts -- the clip-growth link is
+    weaker than written there. FS's and TK-90's
+    deployed scores held through 90 while their priors flattened; TKX's
+    collapsed once maxp reached ~0.05. Not tested: the clip growth's
+    timing against the temperature stages and PER beta's anneal, which
+    differ between these arms too.
+  - DESIGN NOTE for P3's swap trigger (Kai's question 10-24, "a plateau"),
+    backtested on the six deployed curves: a 7-row moving mean of the
+    deployed rows; PLATEAU when it has not risen 75 (~1 SE of a 7-row mean)
+    above its last reference for 30 iterations; DECLINE when it falls 232
+    below its best. It fires on TKX at row 125 (the best window then rows
+    70-100, 937; TKX's rows after 125 averaged 503), on the twin and RG at
+    row 65 (both flat; their later rows averaged 685 / 694 against best
+    windows of 649 / 586 -- within noise), and never on TK-90, DS or FS
+    within 90 (still rising). A slope test (OLS over the 7 rows, upper
+    1-SE bound x 30 iterations < 75) fires earlier and noisier (row 40 on
+    the twin and RG). Not adopted; Kai's call with the loop's design.
+
 ### Next experiment (pre-registered) -- P3's distillation step: master -> student on Ms. Pac-Man (Kai, 2026-10-21)
 
 DECISION (Kai, 2026-10-21, after the P2a Ms. Pac-Man RESULT -- TOKENS HOLD
@@ -1133,6 +1241,11 @@ DIAGNOSIS, descriptive (one seed -- "consistent with", not a cause):
     growth) is the cleaner check of the vocabulary-size reading.
   - Not checked yet: the visit distributions themselves (the birth
     targets' entropy by row), the value scale against the ceiling.
+  - UPDATED 2026-10-24 (the distillation RESULT): FS -- 14 tokens, TK's
+    clip growth -- flattened too, so the vocabulary-size reading is not
+    supported; and the "~10 rows after the ceiling passed ~30-40 units,
+    and so did TK-90's" lag above is wrong (TKX's onset coincides with
+    that passage, TK-90's comes ~25-30 rows after it). See that RESULT.
 
 ### Next experiment (pre-registered) -- the token arm on Ms. Pac-Man, 3x longer (Kai, 2026-10-20)
 
