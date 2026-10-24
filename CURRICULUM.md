@@ -922,6 +922,11 @@ threshold is as pre-registered); there is no timeout on the quick probe
 to 1.9 GB while three audit processes ran beside G0, so avoid parallel
 suite runs while a run trains. THE AUDIT LOOP IS CLOSED (r1: one MEDIUM,
 fixed; r2: nothing above LOW).
+LAUNCHED 2026-10-24 16:29 from Y:\SwitchPlayer-gen1-run (detached, CRLF; manifest
+commit a852bb1b, 46 AUDITED files): launch_gen1.ps1 started post_gen1.py and
+the ds2 and fs2 supervisors, which WAIT (ds2 for G0's completion marker and
+its evals' rows 5-90; fs2 for DS2). Nothing trains or preflights until G0
+is done (~06:30 10-25) and evaluated.
 
 ### Next experiment (pre-registered) -- Test 1: a generation-0 token master at a constant sign clip (Kai, 2026-10-24)
 
