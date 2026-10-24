@@ -789,6 +789,108 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test 1: a generation-0 token master at a constant sign clip (Kai, 2026-10-24)
+
+DECISION (Kai, 2026-10-24): "I think reward clipping is implemented
+incorrectly. I was thinking that we would only change the clipping between
+swaps of student to master." His 10-17 rule ("clip heavily in the
+beginning and over time decrease the amount clipped") is ACROSS
+GENERATIONS: one clip level per generation, constant while that network
+trains, loosened only at a student / master swap -- as the vocabulary
+(which never changes while a network trains). The REWARD_GROWTH built for
+P2a (the ceiling 1 -> 160 log-linear WITHIN each run, the replay re-clipped
+every iteration) misread it. Every Ms. Pac-Man run so far but DS trained
+under a moving ceiling; DS alone held one (160). Also (Kai, same message):
+the swap trigger ("a plateau") must be a GENERAL rule, not thresholds
+tuned to one game's reward scale. Kai then: "Let's start with running the
+tests you proposed" -- the proposal's defaults for the questions it left
+open: (a) the clip loosens at each swap so that the share of the points it
+removes HALVES (measured on the master's recorded games), generation 0 at
+the sign clip; (b) the other within-run schedules (prior-acting
+temperature stages, long-token bias, PER beta) stay as built -- the clip
+is the one change; (c) the order Step 0 -> Test 1 -> Test 2 (-> a seed-1
+repeat of Test 2 if it lands near its bands), Test 1 a fixed 90
+iterations.
+STEP 0 (no GPU, beside Test 1): (i) the prior-flattening diagnosis from the
+logged rows (the search targets' entropy against the prior's, by row,
+against the ceiling); (ii) GENERAL plateau rules -- thresholds in units of
+the run's own measured noise, or a rank-based trend test -- backtested on
+the Ms. Pac-Man AND Pong curves (two reward scales), on the raw game score
+(a clip change at a swap must not move the yardstick); (iii) Test 2's
+build (pre-registered before it is built).
+QUESTIONS (Test 1): (A) does a token network trained at ONE constant clip
+avoid the prior flattening that TK-90, TKX and FS (all under the moving
+ceiling) showed? (B) how good is a sign-clipped generation-0 token master
+-- the master Test 2's swap starts from?
+ARM (seed 0): G0 = effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen0
+  = TK (effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow)
+  with REWARD_GROWTH_START = REWARD_GROWTH_CEILING = 1.0: every base
+  step's reward / REWARD_UNIT 10 (Ms. Pac-Man's smallest reward, a pellet)
+  clipped at 1 for the WHOLE run -- the sign clip (Ms. Pac-Man has no
+  negative reward), a token's reward the sum of its inner base steps'
+  clipped rewards (as TK). The constant-ceiling path is DS's (START ==
+  CEILING), already run. Everything else TK's: 36 tokens, the long-token
+  bias 0.5 -> 0 by 25%, the staged temperature, PER beta 0.4 -> 1, the TK
+  recipe (MsPacmanNoFrameskip-v4 --frameskip 4, 90 x 2000 train steps, 3
+  episodes per iteration, --episode-cap 3000, eval every 5,
+  --checkpoint-every 2, --snapshot-weights, --ray --cpu-actor; TK's compute
+  knobs).
+COMPARED WITH: TK-90 (mspacman-tokens-rgrow-s0-2026-10-19: the same arm
+under the moving ceiling; deployed 60-90 856.62, raw 830.81) and the twin
+(mspacman-s0-2026-10-16: sign clip, no tokens; deployed 649.14, raw 585.62).
+READS. EXACT eval as TK's (whole games, 30 noop starts, prior argmax,
+PROBE_ENV=MsPacmanNoFrameskip-v4), rows 5-90; DEPLOYED (acting states)
+primary, raw secondary; g = (score - 307.3) / 973.9.
+  NEAR RANDOM first: a 60-90 deployed mean with g < 0.2 (< 502.08) is
+      diagnosed before any other read.
+  (1) the prior, read (A): R = the mean policy_maxp (the prior's mean max
+      probability, logged per row) over rows 75-90 divided by its mean over
+      rows 30-55 -- a ratio to the run's own earlier sharpness (scale-free;
+      the token count cancels): HELD >= 0.8, FLATTENED <= 0.6, else
+      PARTIAL. On the finished runs: TK-90 0.48, FS 0.37 (FLATTENED); TKX
+      0.81 (it flattened after row 90), RG 0.92, DS 0.96 (HELD). Beside it,
+      descriptively: policy_entropy against ln 36, and the search targets'
+      entropy (fresh_target_entropy) by row.
+  (2) level against TK-90: G0's deployed mean 60-90 against 856.62, +-232
+      (the twin's row spread, as every Ms. Pac-Man read): BETTER / NO
+      DIFFERENT / WORSE; raw against 830.81, +-205.
+  (3) tokens against no tokens at the sign clip: against the twin's
+      649.14, +-232 (raw against 585.62, +-138).
+  (4) the clip, descriptive: reward_kept by row (the share of the replay's
+      raw reward units the clip keeps, per base step; 1 - kept = the share
+      it removes -- the quantity Test 2's rule halves), reward_max.
+  (5) tokens, descriptive (as TK's read 4), and (6) stability: the largest
+      adjacent deployed drop from row 45; the thirds 5-25 / 30-55 / 60-90.
+  (7) the plateau rule Step 0 settles on, applied after the fact to G0's
+      curve -- descriptive (Test 1 runs a fixed 90 iterations).
+DECISION AFTER. Single seed, within-run bands: BETTER / WORSE read
+"consistent with"; the DEPLOYED reads decide, raw beside them.
+  - Read (1) HELD -> consistent with: the moving ceiling drove the
+    flattening (the same arm flattened under it, R 0.48); the
+    per-generation clip removes it. PARTIAL / FLATTENED -> not the moving
+    ceiling alone: Step 0's diagnosis continues (the temperature stages,
+    PER beta's anneal, the token count) -- it does not hold up Test 2.
+  - Read (2) / (3) are reported; neither gates Test 2 (Kai's design starts
+    generation 0 at the sign clip whatever it scores against a moving
+    ceiling). A WORSE against TK-90 is the price of generation 0's heavy
+    clip that the swaps are meant to recover.
+  - G0 becomes Test 2's MASTER unless NEAR RANDOM (then diagnose; Kai's
+    call).
+TEST 2 (outline; its full pre-registration lands before its build, while
+G0 trains): MASTER = G0's final snapshot; the student vocabulary by the 1%
+rule; the student's constant ceiling chosen on the master's recorded games
+so the share of points it removes is HALF the sign clip's; two students at
+that ceiling, identical but for the distillation step -- DS2 (the prefill
++ the offline phase, as DS) and FS2 (fresh) -- both on TK's within-run
+temperature / bias / PER schedules, 90 iterations each, seed 0. The clean
+version of the DS / FS question, whose two arms differed in the clip
+schedule and the temperature schedule too.
+ORDER / COST: G0 ~16 h (TK-90's 15.4 h) from a detached run worktree, its
+evals one probe at a time on the CPU while it trains (the hand-off), the
+rest after. The pace rule as before (past 25 min/iteration: Kai's call).
+Kai's Switch-control sessions kill GPU pythons: pause the supervisor and its
+trainer by command line, resume after.
+
 ### RESULT -- P3's distillation step: DS against FS on Ms. Pac-Man (seed 0), 2026-10-24
 
 RUNS (from the run worktree Y:\SwitchPlayer-distill-run, detached at
