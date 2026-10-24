@@ -896,6 +896,32 @@ fs2 waiting with hourly ALERTs (Kai's call); the master gate is not
 re-checked between a finished prep and the first launch; a manifest read
 error inside the prep is fatal (inherited); set_intact pins G0's arm and
 iterations, not its snapshot path (the supervisor passes the one path).
+AUDIT r2 A (the core, after the r1 fixes): nothing above LOW. The fixes
+were checked against exact rational arithmetic (996 cases, 0 failures) and
+every born_step reader (horizon, refresh rotation, priorities, eviction,
+resume, Ray). The old DS arm is bit for bit unchanged. Noted for
+generation 2 (no effect on Test 2): the prep reads the master's ceiling c0
+and vocabulary from ARMS[its arm], not from the snapshot's spec. A
+generation-1 master's ARMS entry still holds G0's ceiling 1, since
+--token-vocab is never applied in the prep. So before the next swap the
+prep must take c0 (START == CEILING) and the vocabulary from blob["spec"];
+until then it must refuse a _ceiling_from_prep master.
+AUDIT r2 B (the orchestration, after the r1 fixes): nothing above LOW. In a
+CRLF export of 59932305, the 19 preflight suites gave 845 passed and 4
+skipped (CUDA-only, plus a git-history test that needs .git and was checked
+by hand), and both quick probes passed. The AUDITED list matched every repo
+file the suites open. Accepted as they stand: after an un-abandoned G0 and
+a relaunch, the waiting ds2 supervisor prints only WAITING lines, so its
+old "PREP FAILED: MASTER" line still reads as the newest give-up. fs2 then
+ALERTs "gave up" hourly until DS2 launches, which misleads but never
+starts a wrong run. Other accepted points: an attempt killed before it
+writes can show the previous attempt's last prep.log line; 973.9 is
+EfficientZero's score minus random, not a human score (the 502.08
+threshold is as pre-registered); there is no timeout on the quick probe
+(inherited; post_gen1's 4-h silence ALERT covers a hang). Host commit fell
+to 1.9 GB while three audit processes ran beside G0, so avoid parallel
+suite runs while a run trains. THE AUDIT LOOP IS CLOSED (r1: one MEDIUM,
+fixed; r2: nothing above LOW).
 
 ### Next experiment (pre-registered) -- Test 1: a generation-0 token master at a constant sign clip (Kai, 2026-10-24)
 
