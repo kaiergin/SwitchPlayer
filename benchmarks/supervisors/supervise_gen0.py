@@ -10,10 +10,10 @@ token master at a constant sign clip".
     python benchmarks/supervisors/supervise_gen0.py --write-manifest
 
 No predecessor: it starts once its preflight passes. Before EVERY launch
-attempt it waits while ANY python runs experiments/ablation.py or
-experiments/distill.py (any tree, arm or seed: one trainer on the GPU at a
-time, never a second writer; other GPU users -- a GPU probe, Kai's Switch
-code -- are not seen), THEN checks the manifest, then launches; rows keep
+attempt it waits while ANY python runs ablation.py or distill.py (any tree,
+arm or seed, by path or as a module: one trainer on the GPU at a time,
+never a second writer; other GPU users -- a GPU probe, Kai's Switch code --
+are not seen), THEN checks the manifest, then launches; rows keep
 streaming while it waits (an orphaned trainer of this run stays
 monitored). One supervisor per run: a second supervise_gen0.py refuses to
 start. A run already complete exits at once (RUN COMPLETE), before any
@@ -25,7 +25,9 @@ the run folder and its two probe jsonls aside). Completion, ABANDONED and
 the stray state are re-checked right before every launch. Each row ALERTs
 on a ceiling other than 1, a stored record reward past 8 units (a 32-frame
 token's 8 base steps at 1 each: the clip did not apply), a pace past 25
-min/iteration (Kai's call) and host commit below 4 GB.
+min/iteration (Kai's call) and host commit below 4 GB. CRASH LOOP (5
+deaths within 60 min) and NO PROGRESS (3 long-lived attempts in a row that
+die without a new checkpoint) stop it for diagnosis.
 
 Create the run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
@@ -66,6 +68,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(
 # The shared interpreter lives in the main tree (worktrees have no .venv).
 PY = os.environ.get("GEN0_PY", r"Y:\SwitchPlayer\.venv\Scripts\python.exe")
 MAX_ATTEMPTS = 40
+# Long-lived attempts (>= 10 min) that die without writing a new checkpoint
+# this many times in a row stop the supervisor (a deterministic crash
+# minutes into each resume never reaches CRASH LOOP's 5 deaths in 60 min;
+# audit r1 B-L3).
+NO_PROGRESS_DEATHS = 3
 MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "gen0_manifest.json")
 # Every repo module the run executes, the probe the readout runs, the
@@ -244,12 +251,33 @@ def preflight(variant):
     return True, ""
 
 
+TRAINER_SCRIPTS = ("ablation.py", "distill.py")
+TRAINER_MODULES = ("ablation", "distill", "experiments.ablation",
+                   "experiments.distill")
+
+
+def is_trainer(cmd):
+    """A python command line that runs ablation.py or distill.py: as a
+    script path from any directory (`experiments/ablation.py`, or
+    `ablation.py` run from experiments/) or as a module (`-m ablation`,
+    `-m experiments.distill`; audit r1 B-L4). A test file (test_distill.py)
+    is not one."""
+    for i, c in enumerate(cmd):
+        if os.path.basename(c.replace(chr(92), "/")) in TRAINER_SCRIPTS:
+            return True
+        if c == "-m" and cmd[i + 1:i + 2] and cmd[i + 1] in TRAINER_MODULES:
+            return True
+    return False
+
+
 def live_trainers():
-    """PIDs of ANY python running experiments/ablation.py or
-    experiments/distill.py (any tree, arm or seed): an orphan of an earlier
-    supervisor (the child is detached and survives a supervisor kill),
-    another experiment's run or prep, a duplicate launch. Python processes
-    only: an editor or a git command naming the file is not a trainer."""
+    """PIDs of ANY python running ablation.py or distill.py (any tree,
+    arm or seed; is_trainer): an orphan of an earlier supervisor (the child
+    is detached and survives a supervisor kill), another experiment's run
+    or prep, a duplicate launch. Python processes only: an editor or a git
+    command naming the file is not a trainer. A python whose command line
+    cannot be read is not counted (counting it could block every launch
+    for good on a foreign process)."""
     import psutil
     out = []
     for p in psutil.process_iter(["pid", "name", "cmdline"]):
@@ -258,10 +286,7 @@ def live_trainers():
             cmd = p.info["cmdline"] or []
         except (psutil.Error, KeyError):
             continue
-        if name.startswith("python") and any(
-                c.replace(chr(92), "/").endswith(
-                    ("experiments/ablation.py", "experiments/distill.py"))
-                for c in cmd):
+        if name.startswith("python") and is_trainer(cmd):
             out.append(p.info["pid"])
     return out
 
@@ -562,7 +587,13 @@ def main(argv):
               if k != "CUDA_VISIBLE_DEVICES"},
            "ABLATION_RESULTS": rel, "PYTHONFAULTHANDLER": "1"}
     stall_s = 2 * 3600    # the child logs at least every checkpoint (2 iters)
-    deaths, quick_deaths = [], 0
+    deaths, quick_deaths, stalls = [], 0, 0
+
+    def ckpt_stamp():
+        try:
+            return os.path.getmtime(ckpt)
+        except OSError:
+            return None
 
     def completed():
         try:
@@ -616,7 +647,7 @@ def main(argv):
         args = command(variant, seed) + (["--resume"] if os.path.exists(ckpt)
                                          else [])
         log = open(os.path.join(base, f"supv2_{attempt}.log"), "ab")
-        born = time.time()
+        born, stamp0 = time.time(), ckpt_stamp()
         p = subprocess.Popen(args, cwd=REPO, env=env, stdout=log,
                              stderr=subprocess.STDOUT, creationflags=0x08000000)
         print(f"LAUNCHED {variant} s{seed} attempt {attempt} "
@@ -646,6 +677,17 @@ def main(argv):
         if len([t for t in deaths if time.time() - t < 3600]) >= 5:
             print("CRASH LOOP: 5 deaths within 60 min -- stopping for "
                   "diagnosis", flush=True)
+            return 1
+        # Long-lived deaths without a new checkpoint (quick ones are CRASH
+        # LOOP's; audit r1 B-L3).
+        if ckpt_stamp() != stamp0:
+            stalls = 0
+        elif lifetime >= 600:
+            stalls += 1
+        if stalls >= NO_PROGRESS_DEATHS:
+            print(f"NO PROGRESS: {stalls} consecutive attempts died without "
+                  f"writing a new checkpoint -- stopping for diagnosis",
+                  flush=True)
             return 1
         if lifetime < 600:
             quick_deaths += 1

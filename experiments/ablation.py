@@ -4654,7 +4654,12 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         if spec.get("_student") and init_weights:
             raise SystemExit("a curriculum P3 student starts from scratch or "
                              "from its distillation set, not --init-weights")
-        if muzero.REWARD_GROWTH:
+        if muzero.REWARD_GROWTH and (muzero.REWARD_GROWTH_START
+                                     == muzero.REWARD_GROWTH_CEILING):
+            print(f"  [{arm} s{seed}] REWARD_GROWTH: raw / "
+                  f"{muzero.REWARD_UNIT} clipped at a CONSTANT ceiling "
+                  f"{muzero.REWARD_GROWTH_CEILING}", flush=True)
+        elif muzero.REWARD_GROWTH:
             print(f"  [{arm} s{seed}] REWARD_GROWTH: raw / "
                   f"{muzero.REWARD_UNIT} clipped at a ceiling "
                   f"{muzero.REWARD_GROWTH_START} -> "

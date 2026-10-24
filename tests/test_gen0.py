@@ -95,7 +95,7 @@ def test_the_ceiling_is_1_for_the_whole_run_and_the_rest_is_tks():
     assert tk_ceilings[44] < 160.0
 
 
-def test_ceiling_1_is_the_sign_clip_per_base_step(monkeypatch):
+def test_ceiling_1_is_the_sign_clip_per_base_step():
     with ablation.arm_config(G0_ARM):
         unit = muzero.REWARD_UNIT
         # every Ms. Pac-Man reward (pellet 10 ... ghost 1600, fruit 5000)
@@ -131,7 +131,11 @@ def test_every_startup_gate_passes_for_g0(monkeypatch):
         ablation.token_gate(spec, True, True, 0)
         ablation.reward_growth_gate(True, True, 0)
         # not a student: the distillation gate passes it through untouched
+        # and adds nothing to the resume recipe (audit r1 A-LOW)
         assert spec.get("_student") is None
+        ablation.student_gate(spec, None, True)
+        ablation.student_gate(spec, None, False)
+        assert ablation.student_expect(spec, None) is None
 
 
 # --------------------------------------------------------------------------
@@ -294,8 +298,19 @@ def test_live_trainers_finds_any_ablation_run_or_prep(sup, monkeypatch):
          "cmdline": ["git", "diff", "--", "experiments/distill.py"]},
         {"pid": 10, "name": None, "cmdline": ["experiments/ablation.py"]},
         {"pid": 11, "name": "python.exe",
-         "cmdline": ["py", "tests/test_distill.py"]}])
-    assert sup.live_trainers() == [1, 2, 3, 4]
+         "cmdline": ["py", "tests/test_distill.py"]},
+        # audit r1 B-L4: from experiments/, or as a module
+        {"pid": 12, "name": "python.exe",
+         "cmdline": ["py", "ablation.py", "--arms", G0_ARM]},
+        {"pid": 13, "name": "python.exe",
+         "cmdline": ["py", "-m", "experiments.distill", "--master", "m"]},
+        {"pid": 14, "name": "python.exe",
+         "cmdline": ["py", "-m", "ablation"]},
+        {"pid": 15, "name": "python.exe",
+         "cmdline": ["py", "-m", "pytest", "ablation"]},
+        {"pid": 16, "name": "python.exe",
+         "cmdline": ["py", "experiments/ablation.pyc"]}])
+    assert sup.live_trainers() == [1, 2, 3, 4, 12, 13, 14]
 
 
 def test_one_supervisor_per_run(sup, monkeypatch, capsys):
@@ -387,14 +402,29 @@ def test_every_launch_attempt_waits_for_no_trainer(sup, monkeypatch,
         def poll(self):
             return 1
 
+    seen = []
+
     def popen(args, **k):
         events.append("popen")
+        seen.append((list(args), k))
+        if len(seen) == 1:          # the first attempt leaves a checkpoint
+            ckpt = pathlib.Path(sup.paths("g0", 0)[3])
+            ckpt.write_bytes(b"x" * 1_000_001)
         return Dead()
 
     monkeypatch.setattr(sup.subprocess, "Popen", popen)
+    # the preflight's CPU-only env must never reach the trainer (B-L2)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "-1")
     assert sup.main(["g0", "0"]) == 1              # 5 quick deaths
     assert "CRASH LOOP" in capsys.readouterr().out
     assert events == ["guard", "popen"] * 5
+    rel = sup.paths("g0", 0)[0]
+    for i, (args, k) in enumerate(seen):
+        assert args == sup.command("g0", 0) + (["--resume"] if i else [])
+        assert k["cwd"] == sup.REPO
+        assert k["env"]["ABLATION_RESULTS"] == rel
+        assert k["env"]["PYTHONFAULTHANDLER"] == "1"
+        assert "CUDA_VISIBLE_DEVICES" not in k["env"]
 
 
 def test_wait_no_trainer_waits_out_any_trainer(sup, monkeypatch, capsys):
@@ -610,3 +640,37 @@ def test_supervisor_rows_alert_on_low_host_commit(sup, tmp_path, monkeypatch,
     rows.emit()
     out = capsys.readouterr().out
     assert "ALERT: g0 s0 row 40: host commit free 3.2 GB < 4 GB" in out
+
+
+def test_no_progress_stops_slow_deaths_without_a_checkpoint(
+        sup, monkeypatch, tmp_path, capsys):
+    """Audit r1 B-L3: three long-lived attempts in a row that write no new
+    checkpoint stop the supervisor; one that does resets the count."""
+    base, ckpt = _attempt_loop(sup, monkeypatch, tmp_path)
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup, "wait_no_trainer", lambda *a: None)
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(sup.time, "time", lambda: clock[0])
+    launches = []
+
+    class Slow:
+        pid, returncode = 99, 1
+
+        def poll(self):
+            clock[0] += 1200                # each attempt lives 20 min
+            return 1
+
+    def popen(args, **k):
+        launches.append(args)
+        if len(launches) == 2:              # attempt 2 writes a checkpoint
+            ckpt.write_bytes(b"x" * 1_000_001)
+            os.utime(ckpt, (clock[0] + 600, clock[0] + 600))
+        return Slow()
+
+    monkeypatch.setattr(sup.subprocess, "Popen", popen)
+    assert sup.main(["g0", "0"]) == 1
+    out = capsys.readouterr().out
+    assert "NO PROGRESS: 3 consecutive attempts died" in out
+    assert "CRASH LOOP" not in out
+    assert len(launches) == 5                # 1 stall, reset, then 3 stalls

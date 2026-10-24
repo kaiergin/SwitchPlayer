@@ -891,6 +891,33 @@ rest after. The pace rule as before (past 25 min/iteration: Kai's call).
 Kai's Switch-control sessions kill GPU pythons: pause the supervisor and its
 trainer by command line, resume after.
 
+AMENDMENTS (audit r1, before launch: A -- the run code -- and B -- the
+supervisor / hand-off -- NOTHING ABOVE LOW; the LOWs fixed):
+  - CORRECTION (A): the twin (mspacman-s0-2026-10-16) trained at a CONSTANT
+    sign clip too (no REWARD_GROWTH): it is every Ms. Pac-Man TOKEN run but
+    DS that trained under a moving ceiling. Read (1)'s references gain the
+    twin: R 0.88 (HELD; no tokens, constant clip). So read (1) HELD reads
+    "consistent with: the moving ceiling TOGETHER WITH the tokens drove the
+    flattening" (RG -- moving ceiling, 9 actions -- and the twin -- constant
+    clip, 9 actions -- both HELD); PARTIAL / FLATTENED reads "tokens flatten
+    without the moving ceiling".
+  - supervise_gen0.py: NO PROGRESS -- 3 long-lived attempts (>= 10 min) in a
+    row that die without writing a new checkpoint stop it (a slow
+    deterministic crash never reached CRASH LOOP; B-L3); the trainer guard
+    also sees ablation.py / distill.py run from experiments/ or as a module
+    (B-L4; a python whose command line cannot be read is not counted, so a
+    foreign process cannot block every launch). Tests pin the child's
+    environment (ABLATION_RESULTS, no CUDA_VISIBLE_DEVICES), cwd and
+    --resume (B-L2), and that the P3 student gate passes the arm through
+    and adds nothing to its resume recipe (A-LOW). The startup banner says
+    "CONSTANT ceiling" when START == CEILING (A-NIT). The hand-off's
+    docstring restores the un-abandon procedure (B-L1).
+  - Accepted NITs: a normal completion logs "DEATH ... rc=0" before RUN
+    COMPLETE (inherited); the fake-tree checker leaves its temp trees; the
+    PREFLIGHT counter ignores the suites' own ~12 min; the AUDITED self-test
+    scans only top-level imports (B verified coverage dynamically: every
+    module the 17 suites open is hashed).
+
 STEP 0 FINDINGS (2026-10-24, from the logged rows and probe curves; no
 GPU):
   (i) the prior flattening starts in the SEARCH. The birth-search targets'
