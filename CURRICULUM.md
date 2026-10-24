@@ -1003,6 +1003,19 @@ counts as a stall -- three stop the supervisor, which loses nothing (the
 idempotent launcher resumes from the checkpoint). The 17 suites pass in a
 CRLF worktree of d8f35a9c (663 passed, 3 CUDA-only skips).
 
+AUDIT + LAUNCH: r1 (A run code, B supervisor / hand-off) nothing above
+LOW -> fixed (d8f35a9c); r2 ONE MEDIUM (the hand-off blind to the new NO
+PROGRESS stop) + one LOW -> fixed (703857b3); r3 NOTHING ABOVE LOW (it
+simulated every no-checkpoint death lifetime 60-1500 s: each stops by CRASH
+LOOP or NO PROGRESS, never MAX ATTEMPTS; mutation-checked the hand-off's
+NO PROGRESS handling; 17 suites in a CRLF worktree: 666 passed, 3 CUDA-only
+skips) -- the loop closes. r3's LOW (three host kills of 5-25 min in a row
+stop the supervisor; the launcher resumes it -- pause training before a
+Switch session) and NITs accepted. Manifest 8e370b78 (_commit 523ef49b);
+RUN WORKTREE Y:\SwitchPlayer-gen0-run (detached, CRLF; never edited).
+LAUNCHED 2026-10-24 13:58 (scratchpad launch_gen0.ps1: the hand-off
+post_gen0.py, then supervise_gen0.py g0 0). Expected done ~06:30 10-25.
+
 STEP 0 FINDINGS (2026-10-24, from the logged rows and probe curves; no
 GPU):
   (i) the prior flattening starts in the SEARCH. The birth-search targets'
