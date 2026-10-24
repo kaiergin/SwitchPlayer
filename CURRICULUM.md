@@ -918,6 +918,18 @@ supervisor / hand-off -- NOTHING ABOVE LOW; the LOWs fixed):
     scans only top-level imports (B verified coverage dynamically: every
     module the 17 suites open is hashed).
 
+AMENDMENTS (audit r2, the confirmation round: ONE MEDIUM, in the hand-off,
+fixed): the eval hand-off now treats the supervisor's NO PROGRESS stop as a
+failed run -- echoed as an ALERT, a give-up ALERT at once -- instead of a
+misleading 4-h "silent log" ALERT (MEDIUM-1: the r1 stop was new to it).
+NO PROGRESS counts deaths after >= 5 min (was 10) without a new checkpoint,
+so no lifetime falls between it and CRASH LOOP (which reaches ~465 s under
+the quick-death backoffs; 466-599 s ran to MAX ATTEMPTS; LOW-1). Accepted:
+a healthy attempt killed by the host before its first new checkpoint
+counts as a stall -- three stop the supervisor, which loses nothing (the
+idempotent launcher resumes from the checkpoint). The 17 suites pass in a
+CRLF worktree of d8f35a9c (663 passed, 3 CUDA-only skips).
+
 STEP 0 FINDINGS (2026-10-24, from the logged rows and probe curves; no
 GPU):
   (i) the prior flattening starts in the SEARCH. The birth-search targets'

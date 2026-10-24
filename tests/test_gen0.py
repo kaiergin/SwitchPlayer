@@ -435,7 +435,7 @@ def test_wait_no_trainer_waits_out_any_trainer(sup, monkeypatch, capsys):
     monkeypatch.setattr(sup.time, "sleep", sleeps.append)
     sup.wait_no_trainer()
     out = capsys.readouterr().out
-    assert out.count("ALERT: an experiments/ablation.py or distill.py is "
+    assert out.count("ALERT: an ablation.py or distill.py trainer is "
                      "already running (pids [7])") == 1   # told once
     assert sleeps == [60, 60]
     src = inspect.getsource(sup.main)
@@ -671,6 +671,43 @@ def test_no_progress_stops_slow_deaths_without_a_checkpoint(
     monkeypatch.setattr(sup.subprocess, "Popen", popen)
     assert sup.main(["g0", "0"]) == 1
     out = capsys.readouterr().out
-    assert "NO PROGRESS: 3 consecutive attempts died" in out
+    assert "NO PROGRESS: 3 attempts in a row" in out
     assert "CRASH LOOP" not in out
     assert len(launches) == 5                # 1 stall, reset, then 3 stalls
+
+
+@pytest.mark.parametrize("life,stop,n", [
+    (240, "CRASH LOOP", 5),          # quick deaths: CRASH LOOP's
+    (480, "NO PROGRESS", 3),         # audit r2 LOW-1: the old 465-600 s gap
+    (1200, "NO PROGRESS", 3)])
+def test_every_repeating_death_without_a_checkpoint_stops(
+        sup, monkeypatch, tmp_path, capsys, life, stop, n):
+    base, ckpt = _attempt_loop(sup, monkeypatch, tmp_path)
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup, "wait_no_trainer", lambda *a: None)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(sup.time, "time", lambda: clock[0])
+
+    def sleep(s):
+        clock[0] += s                       # backoffs take clock time
+
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    launches = []
+
+    class Dies:
+        pid, returncode = 99, 1
+
+        def poll(self):
+            clock[0] += life
+            return 1
+
+    def popen(args, **k):
+        launches.append(args)
+        return Dies()
+
+    monkeypatch.setattr(sup.subprocess, "Popen", popen)
+    assert sup.main(["g0", "0"]) == 1
+    out = capsys.readouterr().out
+    assert stop in out and "MAX ATTEMPTS" not in out
+    assert len(launches) == n
+    assert sup.STALL_MIN_S == 300 < 465

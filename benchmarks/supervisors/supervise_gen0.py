@@ -26,8 +26,8 @@ the stray state are re-checked right before every launch. Each row ALERTs
 on a ceiling other than 1, a stored record reward past 8 units (a 32-frame
 token's 8 base steps at 1 each: the clip did not apply), a pace past 25
 min/iteration (Kai's call) and host commit below 4 GB. CRASH LOOP (5
-deaths within 60 min) and NO PROGRESS (3 long-lived attempts in a row that
-die without a new checkpoint) stop it for diagnosis.
+deaths within 60 min) and NO PROGRESS (3 attempts of >= 5 min in a row
+that die without a new checkpoint) stop it for diagnosis.
 
 Create the run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
@@ -68,11 +68,14 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(
 # The shared interpreter lives in the main tree (worktrees have no .venv).
 PY = os.environ.get("GEN0_PY", r"Y:\SwitchPlayer\.venv\Scripts\python.exe")
 MAX_ATTEMPTS = 40
-# Long-lived attempts (>= 10 min) that die without writing a new checkpoint
-# this many times in a row stop the supervisor (a deterministic crash
-# minutes into each resume never reaches CRASH LOOP's 5 deaths in 60 min;
-# audit r1 B-L3).
+# Attempts that live at least STALL_MIN_S and die without writing a new
+# checkpoint this many times (quick deaths aside) stop the supervisor: a
+# deterministic crash minutes into each resume never reaches CRASH LOOP's 5
+# deaths in 60 min (audit r1 B-L3). STALL_MIN_S overlaps CRASH LOOP's reach
+# (it catches deaths up to ~465 s under the quick-death backoffs), so no
+# lifetime falls between the two (audit r2 LOW-1).
 NO_PROGRESS_DEATHS = 3
+STALL_MIN_S = 300
 MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "gen0_manifest.json")
 # Every repo module the run executes, the probe the readout runs, the
@@ -462,10 +465,9 @@ def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
 
 
 def wait_no_trainer(rows=None):
-    """Block while ANY python runs experiments/ablation.py or
-    experiments/distill.py (an orphan of an earlier supervisor, another
-    run, a duplicate): one trainer on the GPU at a time, and never a second
-    writer. `rows` keep streaming meanwhile (an orphan of THIS run keeps its
+    """Block while ANY python runs ablation.py or distill.py (is_trainer:
+    an orphan of an earlier supervisor, another run, a duplicate): one
+    trainer on the GPU at a time, and never a second writer. `rows` keep streaming meanwhile (an orphan of THIS run keeps its
     EVAL lines and ALERTs)."""
     polls, told = 0, None
     while True:
@@ -474,7 +476,7 @@ def wait_no_trainer(rows=None):
         pids = live_trainers()
         if not pids:
             return
-        msg = (f"ALERT: an experiments/ablation.py or distill.py is already "
+        msg = (f"ALERT: an ablation.py or distill.py trainer is already "
                f"running (pids {pids}) -- one trainer on the GPU at a time, "
                f"and never a second writer")
         if msg != told or polls % 60 == 0:
@@ -678,16 +680,16 @@ def main(argv):
             print("CRASH LOOP: 5 deaths within 60 min -- stopping for "
                   "diagnosis", flush=True)
             return 1
-        # Long-lived deaths without a new checkpoint (quick ones are CRASH
-        # LOOP's; audit r1 B-L3).
+        # Deaths after >= STALL_MIN_S without a new checkpoint (the
+        # shortest are CRASH LOOP's; audit r1 B-L3, r2 LOW-1).
         if ckpt_stamp() != stamp0:
             stalls = 0
-        elif lifetime >= 600:
+        elif lifetime >= STALL_MIN_S:
             stalls += 1
         if stalls >= NO_PROGRESS_DEATHS:
-            print(f"NO PROGRESS: {stalls} consecutive attempts died without "
-                  f"writing a new checkpoint -- stopping for diagnosis",
-                  flush=True)
+            print(f"NO PROGRESS: {stalls} attempts in a row (quick deaths "
+                  f"aside) died without writing a new checkpoint -- stopping "
+                  f"for diagnosis", flush=True)
             return 1
         if lifetime < 600:
             quick_deaths += 1
