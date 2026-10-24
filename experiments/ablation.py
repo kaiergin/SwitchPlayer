@@ -1119,6 +1119,46 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen0
             "TK.",
 }
 
+# Test 2 (Kai, 2026-10-24; pre-registered in CURRICULUM): the first swap
+# under the per-generation clip -- G0 the master, two generation-1 students
+# over the prep's student vocabulary AT THE PREP'S CONSTANT CEILING (the
+# halved-clip rule: --token-vocab's vocab.json "student_ceiling"), on TK's
+# within-run schedules; the distilled one's offline phase does not advance
+# them (SCHEDULE_OFFSET_STEPS), so both see the same settings at every
+# online iteration. Seed 0.
+GEN0_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-gen0")
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1-distill"] = {
+    **ARMS[GEN0_ARM],
+    "SCHEDULE_OFFSET_STEPS": 20000,
+    "_student": "distill",
+    "_distill_offline_steps": 20000,
+    "_distill_snapshot_every": 4000,
+    "_ceiling_from_prep": True,
+    "_master_arm": GEN0_ARM,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-gen0 as the DISTILLED generation-1 STUDENT (Test 2): "
+            "the student vocabulary and its constant ceiling from "
+            "--token-vocab (the prep's vocab.json: the halved-clip rule), "
+            "the replay pre-filled with G0's re-tokenized games and "
+            "master-search targets (--distill-set), 20,000 offline gradient "
+            "steps (snapshots every 4,000; the last is row 0), then TK's "
+            "within-run schedules keyed to the ONLINE steps "
+            "(SCHEDULE_OFFSET_STEPS 20,000). Run as TK. Twin: the "
+            "-gen1-fresh arm.",
+}
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1-fresh"] = {
+    **ARMS[GEN0_ARM],
+    "_student": "fresh",
+    "_ceiling_from_prep": True,
+    "_master_arm": GEN0_ARM,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-gen0 as the FRESH generation-1 STUDENT (Test 2): the "
+            "student vocabulary and its constant ceiling from --token-vocab "
+            "(the prep's vocab.json), from scratch, TK's schedules. Run as "
+            "TK. Twin: the -gen1-distill arm.",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
@@ -1805,17 +1845,22 @@ def reward_growth_gate(use_ray, cpu_actor, ray_workers):
         raise SystemExit(f"REWARD_GROWTH: REWARD_UNIT {muzero.REWARD_UNIT!r} "
                          f"is not {ENV_NAME}'s reward unit ({unit!r}; "
                          f"REWARD_UNITS)")
-    # One base step's clipped reward must fit the per-step reward support,
-    # and UNROLL_STEPS of them the value-prefix support (the head the paper
-    # arms train; a token's record sums several base steps -- a prefix past
-    # the support saturates, logged by reward_max per record).
-    sup = muzero.scalar_categorical.support_for
-    if (sup(hi) > muzero.REWARD_SUPPORT
-            or sup(hi * muzero.UNROLL_STEPS) > muzero.VALUE_PREFIX_SUPPORT):
+    if not ceiling_fits_supports(hi):
         raise SystemExit(f"REWARD_GROWTH_CEILING {hi!r} lies past the reward "
                          f"support (half-widths {muzero.REWARD_SUPPORT:.4g} "
                          f"per step, {muzero.VALUE_PREFIX_SUPPORT:.4g} per "
                          f"{muzero.UNROLL_STEPS}-step prefix, h-space)")
+
+
+def ceiling_fits_supports(c):
+    """One base step's reward clipped at `c` fits the per-step reward
+    support, and UNROLL_STEPS of them the value-prefix support (the head the
+    paper arms train; a token's record sums several base steps -- a prefix
+    past the support saturates, logged by reward_max per record). Also the
+    distillation prep's check on a student's ceiling (Test 2)."""
+    sup = muzero.scalar_categorical.support_for
+    return not (sup(c) > muzero.REWARD_SUPPORT
+                or sup(c * muzero.UNROLL_STEPS) > muzero.VALUE_PREFIX_SUPPORT)
 
 
 # -- curriculum P3: the distillation step's students (2026-10-21) -----------
@@ -1859,10 +1904,10 @@ def validate_student_vocab(vocab, master_vocab):
     return vocab
 
 
-def load_student_vocab(path, master_vocab):
+def load_student_doc(path, master_vocab):
     """--token-vocab: the vocab.json experiments/distill.py wrote (its
     "vocab" list), validated against the arm's master vocabulary. Returns
-    (vocab, sha256 of the file, its "set_sha256" or None) -- one read."""
+    (vocab, sha256 of the file, the parsed document) -- one read."""
     import hashlib
     with open(path, "rb") as f:
         data = f.read()
@@ -1874,21 +1919,51 @@ def load_student_vocab(path, master_vocab):
         raise SystemExit(f"{path}: no 'vocab' list (not a distill.py "
                          f"vocab.json)")
     return (validate_student_vocab(doc["vocab"], master_vocab),
-            hashlib.sha256(data).hexdigest(), doc.get("set_sha256"))
+            hashlib.sha256(data).hexdigest(), doc)
+
+
+def load_student_vocab(path, master_vocab):
+    """(vocab, sha256 of the file, its "set_sha256" or None) -- one read
+    (load_student_doc)."""
+    vocab, sha, doc = load_student_doc(path, master_vocab)
+    return vocab, sha, doc.get("set_sha256")
+
+
+def student_ceiling(doc, path):
+    """Test 2: the student's constant reward ceiling the prep chose
+    (vocab.json's "student_ceiling": the halved-clip rule) -- a finite
+    positive number that fits the reward supports."""
+    c = doc.get("student_ceiling")
+    if (isinstance(c, bool) or not isinstance(c, (int, float))
+            or not math.isfinite(c) or c <= 0):
+        raise SystemExit(f"{path}: no valid 'student_ceiling' ({c!r}) -- "
+                         f"not a Test 2 prep's vocab.json")
+    if not ceiling_fits_supports(float(c)):
+        raise SystemExit(f"{path}: student_ceiling {c!r} lies past the "
+                         f"reward supports")
+    return float(c)
 
 
 def student_arm(arm, path):
     """Apply --token-vocab to a student arm: ARMS[arm] becomes a copy with
     the student TOKEN_VOCAB and the file's sha256 (`_token_vocab_sha256`),
     so arm_config, the Ray actors' overrides and every weights file's spec
-    carry the student's vocabulary. Refuses a non-student arm."""
+    carry the student's vocabulary -- and, for an arm with
+    `_ceiling_from_prep` (Test 2's generation-1 students), the prep's
+    student_ceiling as its constant ceiling (REWARD_GROWTH_START =
+    REWARD_GROWTH_CEILING; `_student_ceiling`). Refuses a non-student arm."""
     spec = ARMS[arm]
     if spec.get("_student") not in ("distill", "fresh"):
         raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
                          f"arms only; '{arm}' is not one")
-    vocab, sha, set_sha = load_student_vocab(path, spec["TOKEN_VOCAB"])
-    ARMS[arm] = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha,
-                 "_vocab_set_sha256": set_sha}
+    vocab, sha, doc = load_student_doc(path, spec["TOKEN_VOCAB"])
+    new = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha,
+           "_vocab_set_sha256": doc.get("set_sha256")}
+    if spec.get("_ceiling_from_prep"):
+        c = student_ceiling(doc, path)
+        new.update({"REWARD_GROWTH_START": c, "REWARD_GROWTH_CEILING": c,
+                    "_student_ceiling": c})
+    ARMS[arm] = new
     return ARMS[arm]
 
 
@@ -1902,6 +1977,14 @@ def student_gate(spec, distill_set, snapshot_weights):
     --snapshot-weights (row 0 and the offline curve are snapshots; r1
     A-L2); FS and every other arm refuse a distillation set."""
     kind = spec.get("_student")
+    # Test 2: the schedule offset is the distilled student's offline phase,
+    # nothing else's
+    offset = muzero.SCHEDULE_OFFSET_STEPS
+    if offset and (kind != "distill"
+                   or offset != spec.get("_distill_offline_steps")):
+        raise SystemExit(f"SCHEDULE_OFFSET_STEPS {offset!r} belongs to a "
+                         f"distilled student, equal to its "
+                         f"_distill_offline_steps")
     if kind is None:
         if distill_set:
             raise SystemExit("--distill-set applies to the -student-distill "
@@ -1910,6 +1993,15 @@ def student_gate(spec, distill_set, snapshot_weights):
     if "_token_vocab_sha256" not in spec:
         raise SystemExit("a curriculum P3 student arm needs --token-vocab "
                          "(the student vocabulary distill.py wrote)")
+    if spec.get("_ceiling_from_prep"):
+        # Test 2: the prep's student_ceiling, held for the whole run
+        c = spec.get("_student_ceiling")
+        if (c is None or muzero.REWARD_GROWTH_START != c
+                or muzero.REWARD_GROWTH_CEILING != c):
+            raise SystemExit(f"a generation-1 student runs at the prep's "
+                             f"constant student_ceiling ({c!r}); got "
+                             f"{muzero.REWARD_GROWTH_START!r} -> "
+                             f"{muzero.REWARD_GROWTH_CEILING!r}")
     if kind == "fresh":
         if distill_set:
             raise SystemExit("the -student-fresh arm takes no --distill-set")
@@ -1933,6 +2025,15 @@ def student_gate(spec, distill_set, snapshot_weights):
     if not want or file_sha256(distill_set) != want:
         raise SystemExit(f"{distill_set}: not the set --token-vocab's "
                          f"vocab.json was written with (set_sha256)")
+    master_arm = spec.get("_master_arm")
+    if master_arm is not None and header.get("master_arm") != master_arm:
+        raise SystemExit(f"{distill_set}: recorded from {header.get('master_arm')!r}"
+                         f", not this student's master arm {master_arm!r}")
+    if (spec.get("_ceiling_from_prep")
+            and header.get("student_ceiling") != spec["_student_ceiling"]):
+        raise SystemExit(f"{distill_set}: its student_ceiling "
+                         f"{header.get('student_ceiling')!r} is not "
+                         f"--token-vocab's {spec['_student_ceiling']!r}")
     if muzero.REWARD_GROWTH_START != muzero.REWARD_GROWTH_CEILING:
         raise SystemExit("the distilled student runs at the master's end-state "
                          "ceiling (REWARD_GROWTH_START == CEILING)")
@@ -1951,6 +2052,8 @@ def student_expect(spec, distill_set):
     if spec.get("_student") is None:
         return None
     out = {"token_vocab": [list(t) for t in muzero.TOKEN_VOCAB]}
+    if spec.get("_ceiling_from_prep"):
+        out["reward_ceiling"] = spec.get("_student_ceiling")
     if distill_set:
         out["distill_set_sha256"] = file_sha256(distill_set)
     return out

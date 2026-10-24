@@ -18,6 +18,12 @@ its 36 tokens):
      recorded decisions is below DROP_SHARE, never a 4-frame one (Kai's
      10-17 rule, "drop the least used"; a dropped token must be expressible
      as raw 4-frame steps). The master's slot order is kept.
+  2b. THE STUDENT'S CLIP (Test 2, Kai 2026-10-24: the clip loosens only at a
+     swap): under REWARD_GROWTH, the student's constant ceiling is the
+     smallest that removes HALF the share of reward units the master's
+     ceiling (its arm's, at its final step) removes on the recorded games
+     (halved_ceiling); written to vocab.json as "student_ceiling", which
+     the generation-1 student arms apply (ablation.student_arm).
   3. RE-TOKENIZE (retokenize): a kept token stays one record; a dropped
      token (a, f) becomes its m played base steps as m records of (a, 4),
      each on the stack at that base step and carrying its own raw reward.
@@ -158,6 +164,47 @@ def student_vocabulary(master_vocab, shares, drop_share=DROP_SHARE):
         tok = (int(tok[0]), int(tok[1]))
         (keep if tok[1] == base or share >= drop_share else dropped).append(tok)
     return tuple(keep), tuple(dropped)
+
+
+# -- 2b. the student's clip (Test 2, Kai 2026-10-24) ----------------------------
+def reward_magnitudes(lives, unit):
+    """Every recorded base step's raw reward magnitude in REWARD_UNITs (each
+    base step once: the records' incoming raw-reward tuples)."""
+    return np.asarray([abs(float(r)) / float(unit) for life in lives
+                       for rec in life["traj"] for r in rec[2]],
+                      dtype=np.float64)
+
+
+def clip_share(mags, c):
+    """S(c): the share of the reward units a per-base-step ceiling c removes
+    (1 - sum(min(m, c)) / sum(m)); 0 when nothing was earned."""
+    total = float(np.sum(mags))
+    if total <= 0:
+        return 0.0
+    return float(1.0 - np.minimum(mags, c).sum() / total)
+
+
+def halved_ceiling(mags, c0):
+    """The smallest ceiling c >= c0 with S(c) <= S(c0) / 2 (Kai's "decrease
+    the amount clipped", halved at each swap). sum(min(m, c)) is continuous,
+    piecewise linear and non-decreasing in c, so the threshold is solved
+    exactly on the sorted magnitudes; c0 itself when it clips nothing."""
+    m = np.sort(np.asarray(mags, dtype=np.float64))
+    m = m[m > 0]
+    total = float(m.sum())
+    s0 = clip_share(m, c0)
+    if total <= 0 or s0 <= 0:
+        return float(c0)
+    want = total * (1.0 - s0 / 2.0)          # the kept units to reach
+    prefix = np.concatenate([[0.0], np.cumsum(m)])
+    n = len(m)
+    # kept(c) = prefix[j] + c * (n - j) for m[j-1] <= c <= m[j]
+    for j in range(n):
+        lo = m[j - 1] if j else 0.0
+        c = (want - prefix[j]) / (n - j)
+        if c <= m[j] and c >= lo:
+            return float(max(c, c0))
+    return float(m[-1])
 
 
 # -- 3. re-tokenization -----------------------------------------------------------
@@ -323,6 +370,34 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
             log(f"recorded {len(games)} games, {len(lives)} lives, {total} "
                 f"base steps; game returns mean {np.mean(games):.1f} "
                 f"[{time.time() - t0:.0f}s]")
+            clip = {}
+            if muzero.REWARD_GROWTH:
+                # Test 2: the student's ceiling halves the share of reward
+                # units the master's ceiling removed, on its own recorded
+                # games
+                unit = float(muzero.REWARD_UNIT)
+                c0 = float(muzero.reward_ceiling(run.trainer.training_steps))
+                mags = reward_magnitudes(lives, unit)
+                c1 = halved_ceiling(mags, c0)
+                if not ablation.ceiling_fits_supports(c1):
+                    raise SystemExit(f"the halved-clip ceiling {c1!r} lies "
+                                     f"past the reward supports")
+                earned = mags[mags > 0]
+                clip = {
+                    "reward_unit": unit, "master_ceiling": c0,
+                    "student_ceiling": c1,
+                    "clip_share_master": round(clip_share(mags, c0), 6),
+                    "clip_share_student": round(clip_share(mags, c1), 6),
+                    "clipped_step_share_master": round(float(
+                        np.mean(earned > c0)) if len(earned) else 0.0, 6),
+                    "clipped_step_share_student": round(float(
+                        np.mean(earned > c1)) if len(earned) else 0.0, 6),
+                    "reward_steps": int(len(earned)),
+                    "reward_units": round(float(mags.sum()), 3)}
+                log(f"student clip: the master's ceiling {c0:g} removes "
+                    f"{clip['clip_share_master']:.3f} of {mags.sum():.0f} "
+                    f"reward units; the student's ceiling {c1:.4g} removes "
+                    f"{clip['clip_share_student']:.3f}")
             shares, counts = token_shares(lives, len(master_vocab))
             vocab, dropped = student_vocabulary(master_vocab, shares,
                                                 drop_share)
@@ -379,6 +454,7 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                                       if gone_mass else 0.0),
         "acting_temperature": float(temp), "long_token_bias": float(bias),
         "lives": len(out_lives),
+        **clip,
     }
     write_set(out / "set.pkl", header, out_lives)
     doc = {k: v for k, v in header.items()}

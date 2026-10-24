@@ -479,6 +479,22 @@ EVAL_PRIOR_ONLY = False
 # 50% / 75% of the run). Requires a planned run length; None (the unbounded
 # pipeline) stays at 1.0. The harness sets it per run.
 TEMPERATURE_TOTAL_STEPS = None
+# Curriculum P3, Test 2 (Kai, 2026-10-24): training steps that do NOT advance
+# the within-run schedules (staged temperature, long-token bias, PER beta,
+# the reward ceiling) -- a distilled student's offline phase, so it sees the
+# same settings at every online iteration as a fresh student. 0 = off (every
+# schedule reads the raw step count, bit for bit).
+SCHEDULE_OFFSET_STEPS = 0
+
+
+def schedule_steps(training_steps):
+    """The step count the within-run schedules read: training_steps less
+    SCHEDULE_OFFSET_STEPS, floored at 0; training_steps itself when off."""
+    if not SCHEDULE_OFFSET_STEPS:
+        return training_steps
+    return max(0, training_steps - SCHEDULE_OFFSET_STEPS)
+
+
 PER_ENABLED = False
 # EfficientZero's PER settings, from their released config: alpha 0.6, beta
 # annealed linearly 0.4 -> 1.0 over the run, epsilon 1e-6. (MuZero's Atari
@@ -495,7 +511,7 @@ def per_beta(training_steps):
     total = TEMPERATURE_TOTAL_STEPS
     if not total:
         return PER_BETA
-    frac = min(1.0, training_steps / total)
+    frac = min(1.0, schedule_steps(training_steps) / total)
     return PER_BETA + (PER_BETA_FINAL - PER_BETA) * frac
 # EfficientZero A.1 value-prefix head: 16 conv planes and a 32-unit FC
 # bottleneck before the categorical output. The historical head here used 32
@@ -677,7 +693,7 @@ def visit_softmax_temperature(training_steps):
     total = TEMPERATURE_TOTAL_STEPS
     if not total:
         return 1.0
-    frac = training_steps / total
+    frac = schedule_steps(training_steps) / total
     if frac < 0.5:
         return 1.0
     if frac < 0.75:
@@ -727,6 +743,7 @@ def token_long_bias(training_steps):
     if not total:
         return float(TOKEN_LONG_BIAS)
     end = float(TOKEN_LONG_BIAS_END) * total
+    training_steps = schedule_steps(training_steps)
     if end <= 0 or training_steps >= end:
         return 0.0
     return float(TOKEN_LONG_BIAS) * (1.0 - training_steps / end)
@@ -742,6 +759,7 @@ def reward_ceiling(training_steps):
     if not total:
         return lo
     end = float(REWARD_GROWTH_END) * total
+    training_steps = schedule_steps(training_steps)
     if end <= 0 or training_steps >= end:
         return hi
     return lo * (hi / lo) ** (training_steps / end)
