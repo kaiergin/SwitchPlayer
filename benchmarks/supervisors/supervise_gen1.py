@@ -73,7 +73,8 @@ distillation step's wait-skipping override and everything behind it (Test
 PROCEDURES. PAUSE (a Switch session): kill the supervisor, then its trainer
 (experiments/ablation.py) or prep (experiments/distill.py), by command
 line; resume by rerunning launch_gen1.ps1 (idempotent). After a REBOOT
-rerun launch_gen1.ps1 (and launch_gen0.ps1 while G0 is unfinished).
+rerun launch_gen1.ps1 (and launch_gen0.ps1 until G0's evals have landed:
+its hand-off, post_gen0.py, writes the rows ds2 waits for).
 ABANDON (Kai's call): FIRST stop the supervisor and its trainer, THEN
 create ABANDONED in the run folder (ds2 abandoned: fs2 keeps waiting for
 it -- Kai's call). UN-ABANDONING: stop the hand-off (post_gen1.py) and its
@@ -118,6 +119,10 @@ TRAIN_STEPS = 2000
 # host commit.
 MAX_TOKEN_STEPS = 8
 REWARD_MAX_SLACK = 1e-4
+# A stored record reward past the reward support's edge (muzero.REWARD_CLIP
+# units) saturates the reward / value-prefix heads (the distillation step's
+# alert; audit r1 B-NIT7: 8 x c1 passes it once c1 > 50)
+REWARD_SUPPORT_EDGE = 400.0
 PACE_ALERT_MIN = 25.0
 COMMIT_ALERT_GB = 4.0
 PRED_EVALS_ALERT_S = 2 * 3600    # predecessor done this long, evals missing
@@ -428,6 +433,11 @@ def pred_unattended(variant, seed):
                 f"verdict needing it runs; Kai's call")
     alive = live_scripts(script, pvar)
     if not alive:
+        stop = pred_master_stop(variant, seed)
+        if stop:
+            # (audit r1 B-NIT2: a rerun repeats the preflight and the stop)
+            return (f"{name}'s supervisor stopped on '{stop}' -- Kai's call "
+                    f"(rerunning its launcher repeats the stop)")
         return f"no live {script} {pvar} -- rerun its launcher"
     try:
         quiet = time.time() - os.path.getmtime(suplog)
@@ -437,6 +447,21 @@ def pred_unattended(variant, seed):
         return (f"{name}'s supervisor (pids {alive}) is alive but its log is "
                 f"silent for {quiet / 3600:.1f} h -- check it; do NOT rerun "
                 f"its launcher beside it")
+    return None
+
+
+def pred_master_stop(variant, seed):
+    """The predecessor's supervisor's last give-up line when it is a
+    master-gate stop ("PREP FAILED: MASTER ..."; after its last launch or
+    preflight line), else None."""
+    lines = lines_of(predecessor(variant, seed)[3])
+    fail = max((i for i, l in enumerate(lines) if l.startswith(
+        ("CRASH LOOP", "MAX ATTEMPTS", "PREP FAILED", "NO PROGRESS"))),
+               default=-1)
+    live = max((i for i, l in enumerate(lines) if l.startswith(
+        ("LAUNCHED", "preflight ok", "PREFLIGHT"))), default=-1)
+    if fail > live and lines[fail].startswith("PREP FAILED: MASTER"):
+        return lines[fail].strip()[:200]
     return None
 
 
@@ -621,6 +646,14 @@ def set_intact():
     return True, ""
 
 
+def prep_log_tail(plog):
+    """The prep log's last non-empty line (an exit's reason: distill.py's
+    SystemExit text or a traceback's last line; audit r1 B-L1), at most
+    200 characters, or ''."""
+    lines = [l.strip() for l in lines_of(plog) if l.strip()]
+    return lines[-1][:200] if lines else ""
+
+
 def run_prep(env, redo_ok=True):
     """The prep, once (vocab.json is its completion signal): the master gate
     and its pick in master.json, then experiments/distill.py up to
@@ -724,8 +757,10 @@ def run_prep(env, redo_ok=True):
                 return True
             print(f"PREP attempt {attempt}: {why}", flush=True)
         else:
+            tail = prep_log_tail(plog)
             print(f"PREP attempt {attempt} failed (rc={p.returncode}; see "
-                  f"{PREP_REL}/prep.log)", flush=True)
+                  f"{PREP_REL}/prep.log)"
+                  + (f"; its last line: {tail}" if tail else ""), flush=True)
         if attempt < PREP_ATTEMPTS:
             time.sleep(PREP_RETRY_S)
     print(f"PREP FAILED after {PREP_ATTEMPTS} attempts -- see "
@@ -988,7 +1023,8 @@ def row_alerts(r, per, ceiling):
     the arm is not this one; None: the prep's vocab.json holds none to
     check against), a pace past PACE_ALERT_MIN min/iteration
     (pre-registered: Kai's call), a stored record reward past
-    MAX_TOKEN_STEPS x the ceiling (the clip did not apply)."""
+    MAX_TOKEN_STEPS x the ceiling (the clip did not apply) or past the
+    reward support's edge (REWARD_SUPPORT_EDGE: saturated)."""
     out = []
     it, c = r.get("iteration"), r.get("reward_ceiling")
     if isinstance(it, int) and it >= 1:
@@ -1012,6 +1048,9 @@ def row_alerts(r, per, ceiling):
                    f"{ceiling:.4f} (a 32-frame token sums at most "
                    f"{MAX_TOKEN_STEPS} base steps at the ceiling: the clip "
                    f"did not apply)")
+    if isinstance(m, (int, float)) and m > REWARD_SUPPORT_EDGE:
+        out.append(f"reward_max {m} > {REWARD_SUPPORT_EDGE:g}, the reward "
+                   f"support's edge (the reward heads saturate)")
     return out
 
 

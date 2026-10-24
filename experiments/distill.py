@@ -191,20 +191,26 @@ def halved_ceiling(mags, c0):
     exactly on the sorted magnitudes; c0 itself when it clips nothing."""
     m = np.sort(np.asarray(mags, dtype=np.float64))
     m = m[m > 0]
-    total = float(m.sum())
+    if not len(m):
+        return float(c0)
+    prefix = np.concatenate([[0.0], np.cumsum(m)])
+    total = float(prefix[-1])
     s0 = clip_share(m, c0)
     if total <= 0 or s0 <= 0:
         return float(c0)
     want = total * (1.0 - s0 / 2.0)          # the kept units to reach
-    prefix = np.concatenate([[0.0], np.cumsum(m)])
     n = len(m)
-    # kept(c) = prefix[j] + c * (n - j) for m[j-1] <= c <= m[j]
-    for j in range(n):
-        lo = m[j - 1] if j else 0.0
-        c = (want - prefix[j]) / (n - j)
-        if c <= m[j] and c >= lo:
-            return float(max(c, c0))
-    return float(m[-1])
+    # kept(c) = prefix[j] + c * (n - j) for m[j-1] <= c <= m[j]; at the
+    # breakpoint m[j] it is prefix[j + 1] + m[j] * (n - j - 1), which is
+    # total (>= want) at j = n - 1, so the first segment reaching `want`
+    # always exists, and c is clamped into it against rounding (audit r1
+    # A-L1: a window test on c itself could miss both neighbours of a
+    # duplicated magnitude and fall through to "clip nothing").
+    at = prefix[1:] + m * (n - 1 - np.arange(n))
+    j = int(np.argmax(at >= want))
+    lo = m[j - 1] if j else 0.0
+    c = min(max((want - prefix[j]) / (n - j), lo), m[j])
+    return float(max(c, c0))
 
 
 # -- 3. re-tokenization -----------------------------------------------------------
@@ -392,6 +398,13 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                         np.mean(earned > c0)) if len(earned) else 0.0, 6),
                     "clipped_step_share_student": round(float(
                         np.mean(earned > c1)) if len(earned) else 0.0, 6),
+                    # over every recorded base step (the pre-registered
+                    # "share of base steps clipped"; the two above are
+                    # over the reward-earning ones)
+                    "clipped_base_share_master": round(float(
+                        np.mean(mags > c0)) if len(mags) else 0.0, 6),
+                    "clipped_base_share_student": round(float(
+                        np.mean(mags > c1)) if len(mags) else 0.0, 6),
                     "reward_steps": int(len(earned)),
                     "reward_units": round(float(mags.sum()), 3)}
                 log(f"student clip: the master's ceiling {c0:g} removes "

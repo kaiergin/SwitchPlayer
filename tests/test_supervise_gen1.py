@@ -260,6 +260,7 @@ def test_the_alert_bounds(real_sup):
     assert (sup.G_RANDOM, sup.G_HUMAN, sup.NEAR_RANDOM) == (307.3, 973.9,
                                                             502.08)
     assert sup.REWARD_MAX_SLACK < 1e-3
+    assert sup.REWARD_SUPPORT_EDGE == muzero.REWARD_CLIP == 400
     # far below the 3-decimal probe means' 1/7000 step in a 7-row mean
     assert sup.NEAR_RANDOM_TOL <= 1e-6 < 0.001 / 7
 
@@ -558,6 +559,30 @@ def test_fs2_keeps_waiting_for_an_abandoned_ds2(sup, monkeypatch, capsys):
     with pytest.raises(Stop):
         sup.wait_external("fs2", 0)
     assert "no live supervise_gen1.py ds2" in capsys.readouterr().out
+    # audit r1 B-NIT2: DS2's supervisor stopped at the master gate -> Kai's
+    # call, not "rerun its launcher"
+    for stop in ("PREP FAILED: MASTER NEAR RANDOM: G0's deployed mean ...",
+                 "PREP FAILED: MASTER ABANDONED: G0's run folder ..."):
+        (base / "supervisor.log").write_text(
+            "preflight ok (manifest + quick probe + 19 suites)\n"
+            + stop + "\n")
+        with pytest.raises(Stop):
+            sup.wait_external("fs2", 0)
+        out = capsys.readouterr().out
+        assert "Kai's call" in out and stop[:30] in out
+        assert "-- rerun its launcher" not in out
+    # a later preflight (a relaunch after the fix) clears it
+    (base / "supervisor.log").write_text(
+        "PREP FAILED: MASTER NEAR RANDOM: ...\npreflight ok (...)\n")
+    with pytest.raises(Stop):
+        sup.wait_external("fs2", 0)
+    assert "no live supervise_gen1.py ds2" in capsys.readouterr().out
+    # another give-up keeps the rerun advice
+    (base / "supervisor.log").write_text(
+        "preflight ok (...)\nPREP FAILED after 3 attempts -- see ...\n")
+    with pytest.raises(Stop):
+        sup.wait_external("fs2", 0)
+    assert "no live supervise_gen1.py ds2" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
@@ -772,6 +797,24 @@ def test_the_prep_gives_up_after_its_attempts(sup, prep_env, monkeypatch,
     out = capsys.readouterr().out
     assert out.count("failed (rc=1") == sup.PREP_ATTEMPTS == 3
     assert "PREP FAILED after 3 attempts" in out
+
+
+def test_a_failed_attempt_names_its_reason(sup, prep_env, monkeypatch,
+                                         capsys):
+    # audit r1 B-L1: the reason in the supervisor's log, not only prep.log
+    def exits():
+        d = pathlib.Path(sup.prep_dir())
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "prep.log", "a", encoding="utf-8") as f:
+            f.write("recorded 3 games\nSystemExit: the halved-clip ceiling "
+                    "999.0 lies past the reward supports\n\n")
+    _popen(monkeypatch, sup, [(1, exits)] * 3)
+    assert sup.run_prep({}) is False
+    out = capsys.readouterr().out
+    assert out.count("its last line: SystemExit: the halved-clip ceiling "
+                     "999.0 lies past the reward supports") == 3
+    assert "PREP FAILED after 3 attempts" in out
+    assert sup.prep_log_tail(os.path.join(sup.prep_dir(), "nope")) == ""
 
 
 def test_the_prep_retries_15_min_apart(sup, prep_env, monkeypatch):
@@ -1493,6 +1536,9 @@ C = 7.5
      "n/a", ["reward_max"]),
     ({"iteration": 40, "reward_ceiling": 160.0, "reward_max": 400.0}, "30",
      ["reward_ceiling", "min/iteration", "reward_max"]),
+    # past the support's edge (both reward_max alerts)
+    ({"iteration": 40, "reward_ceiling": C, "reward_max": 400.5}, "n/a",
+     ["8 x the ceiling", "support's edge"]),
 ])
 def test_row_alerts(sup, row, per, want):
     got = sup.row_alerts(row, per, C)
@@ -1512,7 +1558,8 @@ def test_row_alerts_at_the_rounded_bound(sup):
 def test_row_alerts_without_a_ceiling(sup):
     got = sup.row_alerts({"iteration": 5, "reward_ceiling": 7.5,
                           "reward_max": 1e6}, "n/a", None)
-    assert len(got) == 1 and "no valid student_ceiling" in got[0]
+    assert len(got) == 2 and "no valid student_ceiling" in got[0]
+    assert "support's edge" in got[1]          # checked without a ceiling
 
 
 def test_rows_check_against_the_preps_ceiling(sup, tmp_path, capsys):

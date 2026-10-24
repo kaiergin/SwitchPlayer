@@ -1136,6 +1136,7 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1
     "_distill_snapshot_every": 4000,
     "_ceiling_from_prep": True,
     "_master_arm": GEN0_ARM,
+    "_master_iterations": 90,
     "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
             "-tokens-gen0 as the DISTILLED generation-1 STUDENT (Test 2): "
             "the student vocabulary and its constant ceiling from "
@@ -1152,6 +1153,7 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1
     "_student": "fresh",
     "_ceiling_from_prep": True,
     "_master_arm": GEN0_ARM,
+    "_master_iterations": 90,
     "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
             "-tokens-gen0 as the FRESH generation-1 STUDENT (Test 2): the "
             "student vocabulary and its constant ceiling from --token-vocab "
@@ -1951,7 +1953,10 @@ def student_arm(arm, path):
     carry the student's vocabulary -- and, for an arm with
     `_ceiling_from_prep` (Test 2's generation-1 students), the prep's
     student_ceiling as its constant ceiling (REWARD_GROWTH_START =
-    REWARD_GROWTH_CEILING; `_student_ceiling`). Refuses a non-student arm."""
+    REWARD_GROWTH_CEILING; `_student_ceiling`), from a prep of the arm's
+    `_master_arm` at its `_master_iterations` (audit r1 A-L3: FS2 checks
+    its master here, as DS2's set header does). Refuses a non-student
+    arm."""
     spec = ARMS[arm]
     if spec.get("_student") not in ("distill", "fresh"):
         raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
@@ -1960,6 +1965,11 @@ def student_arm(arm, path):
     new = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha,
            "_vocab_set_sha256": doc.get("set_sha256")}
     if spec.get("_ceiling_from_prep"):
+        for key in ("master_arm", "master_iterations"):
+            if doc.get(key) != spec.get(f"_{key}"):
+                raise SystemExit(f"{path}: a prep of {key} "
+                                 f"{doc.get(key)!r}, not this student's "
+                                 f"{spec.get(f'_{key}')!r}")
         c = student_ceiling(doc, path)
         new.update({"REWARD_GROWTH_START": c, "REWARD_GROWTH_CEILING": c,
                     "_student_ceiling": c})
@@ -2064,15 +2074,21 @@ def distill_prefill(run, lives):
     carrying the master-search policy and root value) through paper_targets
     -- the arm's own record builder (raw rewards clipped at the ceiling,
     age-0 priorities in frame time under the student's vocabulary) -- born
-    at step 0, then the usual FIFO eviction to the caps (the recording
+    at step SCHEDULE_OFFSET_STEPS (0; Test 2's DS2: its first online step),
+    then the usual FIFO eviction to the caps (the recording
     overshoots the transition cap by up to a game, so its oldest lives go;
     audit r1 A-L1). The token / target diagnostics paper_targets
     accumulates describe the MASTER's play and are cleared, so row 5
     describes the student's. Returns (lives kept, lives evicted, base steps
     evicted)."""
+    # Born at SCHEDULE_OFFSET_STEPS (0 but for Test 2's DS2): the 4.3
+    # age-shrunk horizon is a within-run schedule keyed to the online steps
+    # too, so the prefill ages from the first online step (audit r1 A-M1);
+    # its age is max(0, ...), 0 through the offline phase.
     for life in lives:
-        run.replay.append(run.paper_targets(life["traj"], life["terminated"],
-                                            born_step=0))
+        run.replay.append(run.paper_targets(
+            life["traj"], life["terminated"],
+            born_step=muzero.SCHEDULE_OFFSET_STEPS))
     before = (len(run.replay), sum(replay_units(t) for t in run.replay))
     evict_replay(run.replay)
     run._tok_window = None
@@ -4768,6 +4784,11 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"{muzero.REWARD_GROWTH_START} -> "
                   f"{muzero.REWARD_GROWTH_CEILING} (log-linear to "
                   f"{muzero.REWARD_GROWTH_END:.0%} of the run)", flush=True)
+        if muzero.SCHEDULE_OFFSET_STEPS:
+            print(f"  [{arm} s{seed}] SCHEDULE_OFFSET_STEPS "
+                  f"{muzero.SCHEDULE_OFFSET_STEPS}: the within-run schedules "
+                  f"(and the prefill's 4.3 age) read the online steps",
+                  flush=True)
         if muzero.TOKEN_VOCAB is not None:
             # main()'s banner printed the env's action count; this arm's
             # action space is its vocabulary (audit r1 B-NIT).

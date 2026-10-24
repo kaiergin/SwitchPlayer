@@ -861,6 +861,41 @@ supervisor that waits for G0's completion marker and both G0 probe jsonls'
 rows 5-90, then the prep, DS2, FS2 (the distillation step's, the master
 fixed to G0); the eval hand-off.
 COST: prep ~0.5 h; DS2 ~17.5 h; FS2 ~15 h; after G0 (~16 h).
+AMENDMENTS (audit r1 A, the core, before launch): (M1) the off-policy
+horizon decay is age-based, so the offset cancels for each student's own
+data, but the prefill was born at step 0 and so aged through the offline
+phase (horizon 4 instead of 5 over online steps ~34k-54k). It is now born at
+SCHEDULE_OFFSET_STEPS, so its age is 0 offline and k at online step k, as
+written above. (L1) the c1 solver now takes the first segment whose
+breakpoint reaches the target and clamps into it. The old window test could
+miss both neighbours of a duplicated non-integer magnitude and return "clip
+nothing"; Ms. Pac-Man's integer units could never trigger it, but other
+games could. (L2) the slow prep tests now record rewards past one unit, so
+c1 > 1 is exercised end to end. (L3) both students check vocab.json's
+master_arm and master_iterations against new arm keys (_master_arm G0,
+_master_iterations 90); FS2 has no set header. Logged too:
+clipped_base_share_master/student, the share of ALL base steps clipped (the
+"share of base steps clipped" above), beside the reward-earning-step
+shares. NOT offset, by design: LR warmup (1,000 steps; offsetting it would
+hold the offline phase at LR 0) and every iteration-keyed cadence (refresh,
+eval, checkpoint). Noted for later generations: distill.prep needs the
+master's training_steps to be iterations x 2,000, so a DS2 master (200,000
+steps after 90 iterations) needs the prep to count its offline steps first.
+AMENDMENTS (audit r1 B, the orchestration: nothing above LOW): a failed
+prep attempt's line now carries prep.log's last line, its reason (a
+deterministic failure costs ~33 min: 3 tries, 15 min apart). fs2's hourly
+ALERT for a stopped DS2 supervisor says "Kai's call" when that stop was the
+master gate ("PREP FAILED: MASTER ..."), since rerunning the launcher only
+repeats it. The reboot note now reads: rerun launch_gen0.ps1 until G0's
+evals have landed. A record reward past the reward support's edge (400
+units) ALERTs again, beside the 8 x c1 bound. Accepted as they stand: three
+host kills before DS2's first checkpoint (~1 h 20 min: the prefill and the
+offline phase) stop it with NO PROGRESS, and rerunning the launcher recovers
+with nothing lost, so pause before Switch sessions; an ABANDONED DS2 leaves
+fs2 waiting with hourly ALERTs (Kai's call); the master gate is not
+re-checked between a finished prep and the first launch; a manifest read
+error inside the prep is fatal (inherited); set_intact pins G0's arm and
+iterations, not its snapshot path (the supervisor passes the one path).
 
 ### Next experiment (pre-registered) -- Test 1: a generation-0 token master at a constant sign clip (Kai, 2026-10-24)
 

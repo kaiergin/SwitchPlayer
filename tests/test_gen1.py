@@ -47,9 +47,13 @@ def _vocab(drop=((0, 8), (0, 32), (5, 16))):
 
 
 def _vocab_file(tmp_path, ceiling=7.5, set_path=None, name="vocab.json",
-                **extra):
+                master_arm=G0_ARM, master_iterations=90, **extra):
     p = tmp_path / name
     doc = {"vocab": [list(t) for t in _vocab()], **extra}
+    for k, v in (("master_arm", master_arm),
+                 ("master_iterations", master_iterations)):
+        if v is not None:
+            doc[k] = v
     if ceiling is not None:
         doc["student_ceiling"] = ceiling
     if set_path is not None:
@@ -164,6 +168,41 @@ def test_halved_ceiling_keeps_a_ceiling_that_clips_nothing():
     assert c1 == pytest.approx(51.0)
 
 
+def test_halved_ceiling_lands_on_a_duplicated_magnitude():
+    # audit r1 A-L1: non-integer magnitudes whose exact solution is a
+    # duplicated magnitude -- the old window test missed both neighbouring
+    # segments and returned the largest magnitude (clip nothing)
+    # (c0 puts the exact solution on b: kept(b) = (total + kept(c0)) / 2;
+    # the old solver returned d here)
+    a, b, d = 1.2534543953681516, 3.2871821987649565, 6.434119732102841
+    c0 = 1.242119592045484
+    m = np.array([a] * 28 + [b] * 2 + [d] * 4)
+    c1 = distill.halved_ceiling(m, c0)
+    assert c1 == pytest.approx(b, abs=1e-9)
+    assert distill.clip_share(m, c1) <= distill.clip_share(m, c0) / 2 \
+        + 1e-12
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_halved_ceiling_never_falls_through(seed):
+    # random duplicated non-integer magnitudes (a game-agnostic reuse):
+    # always the smallest ceiling within float noise, never "clip nothing"
+    rng = np.random.default_rng(100 + seed)
+    for _ in range(300):
+        vals = rng.uniform(0.1, 30.0, size=rng.integers(1, 6))
+        m = np.repeat(vals, rng.integers(1, 40, size=len(vals)))
+        c0 = float(rng.uniform(0.05, m.max()))
+        s0 = distill.clip_share(m, c0)
+        c1 = distill.halved_ceiling(m, c0)
+        if s0 <= 0:
+            assert c1 == c0
+            continue
+        assert c0 <= c1 <= m.max()
+        assert distill.clip_share(m, c1) <= s0 / 2 + 1e-9
+        if c1 > c0 * (1 + 1e-6):
+            assert distill.clip_share(m, c1 * (1 - 1e-6)) > s0 / 2 - 1e-9
+
+
 def test_reward_magnitudes_count_every_base_step_once():
     lives = [{"traj": [(None, 0, ()), (None, 1, (10.0, 0.0, 200.0)),
                        (None, 2, (-50.0,))]},
@@ -181,13 +220,15 @@ def test_gen1_arm_deltas_from_g0():
     d = {k for k in set(g0) | set(ds) if g0.get(k) != ds.get(k)}
     assert d == {"SCHEDULE_OFFSET_STEPS", "_student", "_distill_offline_steps",
                  "_distill_snapshot_every", "_ceiling_from_prep",
-                 "_master_arm", "_doc"}
+                 "_master_arm", "_master_iterations", "_doc"}
     assert (ds["SCHEDULE_OFFSET_STEPS"], ds["_distill_offline_steps"],
             ds["_distill_snapshot_every"]) == (20000, 20000, 4000)
     assert ds["_student"] == "distill" and ds["_master_arm"] == G0_ARM
     d = {k for k in set(g0) | set(fs) if g0.get(k) != fs.get(k)}
-    assert d == {"_student", "_ceiling_from_prep", "_master_arm", "_doc"}
+    assert d == {"_student", "_ceiling_from_prep", "_master_arm",
+                 "_master_iterations", "_doc"}
     assert fs["_student"] == "fresh" and fs["_master_arm"] == G0_ARM
+    assert ds["_master_iterations"] == fs["_master_iterations"] == 90
     # TK's within-run schedules (not the old DS's end state), TK's tokens
     for spec in (ds, fs):
         assert spec["PRIOR_ACT_STAGED_TEMP"] == ablation.ARMS[TK_ARM][
@@ -218,6 +259,19 @@ def test_student_arm_refuses_a_missing_or_bad_ceiling(bad, tmp_path,
                                                       student):
     with pytest.raises(SystemExit, match="student_ceiling"):
         ablation.student_arm(DS2_ARM, _vocab_file(tmp_path, ceiling=bad))
+
+
+@pytest.mark.parametrize("arm", [DS2_ARM, FS2_ARM])
+@pytest.mark.parametrize("key,bad", [
+    ("master_arm", TK_ARM), ("master_arm", None),
+    ("master_iterations", 40), ("master_iterations", None)])
+def test_student_arm_refuses_another_masters_prep(arm, key, bad, tmp_path,
+                                                 student):
+    # audit r1 A-L3: FS2 has no set header, so vocab.json's own master
+    # fields are checked (both students)
+    with pytest.raises(SystemExit, match=key):
+        ablation.student_arm(arm, _vocab_file(tmp_path, **{key: bad}))
+    assert "_student_ceiling" not in ablation.ARMS[arm]
 
 
 def test_the_old_students_ignore_a_ceiling(tmp_path, student, monkeypatch):
@@ -336,11 +390,37 @@ def _pin(monkeypatch):
     torch.set_num_threads(2)
 
 
+def _boosted(record):
+    """distill.record with rewards past one unit, as Ms. Pac-Man's power
+    pellets, ghosts and fruit pay (random nets eat only pellets, so S(1)
+    would be 0 and c1 = c0; audit r1 A-L2): every 4th rewarded base step
+    pays 200, every 7th 50."""
+    def wrapped(run, base_steps):
+        lives, games, total = record(run, base_steps)
+        k = 0
+        for life in lives:
+            recs = []
+            for r in life["traj"]:
+                rs = []
+                for x in r[2]:
+                    if x > 0:
+                        k += 1
+                        x = 200.0 if k % 4 == 0 else (
+                            50.0 if k % 7 == 0 else x)
+                    rs.append(x)
+                recs.append((r[0], r[1], tuple(rs), *r[3:]))
+            life["traj"] = recs
+        return lives, games, total
+    return wrapped
+
+
 @pytest.fixture
 def prepped(monkeypatch, tmp_path, restore_rngs, student):  # noqa: F811
     """A G0-like master (random nets, the constant sign clip, a 4-sim
-    search for speed) and its prep over a few recorded games."""
+    search for speed) and its prep over a few recorded games, with rewards
+    past one unit (_boosted)."""
     _pin(monkeypatch)
+    monkeypatch.setattr(distill, "record", _boosted(distill.record))
     monkeypatch.setitem(ablation.ARMS, MASTER_ARM,
                         {**ablation.ARMS[G0_ARM], "ACT_SEARCH_SIMS": 4})
     ablation.ENV_NAME, ablation.FRAMESKIP, ablation.ACTIONS = ENV_ID, 4, 9
@@ -372,12 +452,17 @@ def test_prep_writes_the_halved_ceiling(prepped):
     assert h["clip_share_master"] == pytest.approx(
         distill.clip_share(m, 1.0), abs=1e-6)
     assert h["student_ceiling"] == distill.halved_ceiling(m, 1.0)
-    if h["clip_share_master"] > 0:
-        assert h["student_ceiling"] > 1.0
-        assert h["clip_share_student"] == pytest.approx(
-            h["clip_share_master"] / 2, abs=1e-6)
-    else:
-        assert h["student_ceiling"] == 1.0
+    # the boosted rewards make the sign clip remove units: c1 moves
+    assert h["clip_share_master"] > 0
+    assert h["student_ceiling"] > 1.0
+    assert h["clip_share_student"] == pytest.approx(
+        h["clip_share_master"] / 2, abs=1e-6)
+    assert h["clipped_base_share_master"] == pytest.approx(
+        float(np.mean(m > 1.0)), abs=1e-6)
+    assert h["clipped_base_share_student"] == pytest.approx(
+        float(np.mean(m > h["student_ceiling"])), abs=1e-6)
+    assert 0 < h["clipped_base_share_master"] <= h[
+        "clipped_step_share_master"]
     assert any("student clip" in line for line in logs)
 
 
@@ -388,9 +473,10 @@ def test_ds2_trains_offline_at_the_preps_ceiling_under_the_offset(
     monkeypatch.setitem(ablation.ARMS, DS2_ARM, {
         **ablation.ARMS[DS2_ARM], "_distill_offline_steps": 4,
         "_distill_snapshot_every": 2, "SCHEDULE_OFFSET_STEPS": 4,
-        "_master_arm": MASTER_ARM})
+        "_master_arm": MASTER_ARM, "_master_iterations": 2})
     ablation.student_arm(DS2_ARM, out / "vocab.json")
     c1 = header["student_ceiling"]
+    assert c1 > 1.0                       # the clip is observable (_boosted)
     results = tmp_path / "mspacman-gen1-distill-s0-test"
     results.mkdir()
     ablation.RESULTS, ablation.TAG = results, "-test"
@@ -403,9 +489,15 @@ def test_ds2_trains_offline_at_the_preps_ceiling_under_the_offset(
         try:
             ablation.distill_prefill(run, lives)
             assert run._reward_ceiling == c1
+            moved = 0
             for traj, life in zip(run.replay, lives):
                 for t, rec in zip(traj, life["traj"]):
                     assert t["reward"] == muzero.grown_reward(rec[2], c1)
+                    moved += t["reward"] != muzero.grown_reward(rec[2], 1.0)
+                    # audit r1 A-M1: the prefill ages from the first online
+                    # step (age 0 through the offline phase)
+                    assert t["born_step"] == 4
+            assert moved > 0                      # not G0's sign clip
             ablation.distill_offline(run, DS2_ARM, 0, spec, True)
             assert run.trainer.training_steps == 4
             # the schedules restart at the first online step
