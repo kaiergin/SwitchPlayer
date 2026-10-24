@@ -1121,6 +1121,54 @@ GPU):
       eval's own game spread where the probe records it; the swap trigger's
       other conditions (a minimum budget, the student against its master)
       are P3's loop design, not this rule.
+  (iii) WHY THE SEARCH FLATTENS (2026-10-24, CPU probes on the existing
+      snapshots; scripts and records in benchmarks/probes/step0_prefix_bn/):
+      the VALUE-PREFIX HEAD'S BatchNorm, not the Q spread against the
+      exploration term. Training calls the prefix head once per unroll step
+      in train mode, so each step is normalized with ITS OWN batch
+      statistics. The search runs it in eval mode, on running statistics
+      pooled over all 5 steps, and the first step after a fresh or reset
+      LSTM state has a very different input distribution. In eval mode that
+      step-1 prefix comes out far too high, while the same weights with
+      train-mode BN predict it correctly. On FS, for a true token reward of
+      ~0.4, it reads 0.32 @45, 16.4 @60 and 30 @75. In the tree, a root edge
+      gets +p1 and the next edge about -p1. A child's second visit backs up
+      through that negative edge and its Q drops (~-11 raw @60), so visited
+      children look worse than unvisited ones. PUCT then spreads the visits
+      over nearly every token (6.9 of 14 visited @45, 13.1 @60), and the
+      inflated min-max range compresses the normalized Q. Root noise is not
+      it (the noise-free search flattens as much). Instrumented copy of the
+      engine (identical visit counts), 480 states:
+        FS target H/lnA, eval BN -> step-1 BN re-estimated: @45 0.47 ->
+        0.48; @60 0.84 -> 0.42; @75 0.95 -> 0.50 (prefix off: 0.58 @60).
+      ACROSS RUNS (26 snapshots in 7 runs, each on its own code and spec):
+      the step-1 artifact (eval |p1| 8-80x the train-BN value) is present at
+      every snapshot whose targets went flat, and re-estimating the step-1
+      BN statistics restores sharp targets in every one of them:
+        TK-90 @55 0.71 -> 0.33, @75 0.90 -> 0.31, @90 0.92 -> 0.16;
+        TKX @100 0.92 -> 0.45, @140 0.93 -> 0.48, @200 0.72 -> 0.15;
+        FS as above.
+      Clean before the flattening (TK @30, TKX @55, FS @45) and in every
+      held run: RG (no tokens, small per-decision rewards), the twin (sign
+      clip) and G0 @5-15 (tokens, sign clip; too early to call, since TK's
+      artifact came between rows 30 and 55). DS shows the BN offset too, but
+      its eval-mode step-1 prefix errs LOW (0.10-0.28 against 0.28-0.63),
+      which does not penalize a second visit. So DS held because the error
+      points the harmless way; the probe does not show why. The artifact
+      precedes the prior's fall (TK @55: artifact 3.8, prior maxp still
+      0.61; then 0.40 @75, 0.20 @90). The pattern across runs fits reward
+      scale: it appears in the token runs once the ceiling reaches the full
+      reward scale (TKX ~41 by row 100, TK and FS 160). The logged `prefix`
+      error is measured only at unroll step 5 (FS 0.25 -> 1.81), so it hid
+      the step-1 error (0.27 -> 16.1). EfficientZero has the same layout (its
+      bn_value_prefix), but under the sign clip the error stays small.
+      Caveats: one seed per arm, so the link across runs is correlational.
+      The causal result covers the search targets at each snapshot, not
+      whether a fix in training keeps the prior sharp. All arms were
+      searched on FS@45's states, and the per-run searches used 48 states
+      (SE ~0.02). Under Kai's plan every later generation loosens the clip,
+      i.e. raises the reward scale, which is where this appears. Test 2's
+      students at c1 are exposed to it; G0 at the sign clip should not be.
 
 ### RESULT -- P3's distillation step: DS against FS on Ms. Pac-Man (seed 0), 2026-10-24
 
