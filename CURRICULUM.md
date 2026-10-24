@@ -891,6 +891,46 @@ rest after. The pace rule as before (past 25 min/iteration: Kai's call).
 Kai's Switch-control sessions kill GPU pythons: pause the supervisor and its
 trainer by command line, resume after.
 
+STEP 0 FINDINGS (2026-10-24, from the logged rows and probe curves; no
+GPU):
+  (i) the prior flattening starts in the SEARCH. The birth-search targets'
+      entropy (fresh_target_entropy / ln A) went near-uniform 10-15 rows
+      BEFORE the prior's: TK-90 0.39 @50 -> 0.69 @55 -> 0.79 @60 -> 0.93
+      @75 (prior 0.45 @60 -> 0.87 @90); FS 0.59 @45 -> 0.76 @50 -> 0.95 @60
+      -> 0.99 @70 (prior 0.57 @60 -> 0.97 @90); TKX 0.42 @85 -> 0.83 @90 ->
+      0.93 @100 (prior 0.52 @90 -> 0.98 @125). The KL from the targets to the
+      prior then fell as the prior caught up (FS 0.65 @50 -> 0.08 @90). DS's
+      targets held 0.54-0.65 throughout (its prior sharpened to them, 0.92 ->
+      0.55); RG's 0.56-0.79. So the prior follows its targets; the question
+      is why the 50-simulation birth search stops telling the tokens apart.
+      The onset matches no single schedule landmark: TK-90 and FS at rows
+      50-55 (just after their ceiling reached 160 and their temperature's
+      0.25 stage, both at 46), TKX at row 90 (ceiling 28, temperature 0.5,
+      ~45 rows before either). Test 1 reads whether the moving ceiling is
+      involved. Next diagnostic (CPU, on existing snapshots; not yet run):
+      the birth search's per-child Q spread against its exploration term at
+      FS iter 45 and 60.
+  (ii) a GENERAL plateau rule, backtested with ONE parameter set on Ms.
+      Pac-Man (6 runs, deployed probes) and Pong (24 runs, the in-run eval):
+      M = the mean of the last 7 evals; the noise sigma estimated from the
+      run itself (1.4826 x the median absolute difference between adjacent
+      evals / sqrt 2); PLATEAU when M has not risen 1 x sigma / sqrt 7 above
+      its last reference for 30 iterations; DECLINE when M stays 2 x sigma x
+      sqrt(2/7) below its best for two checks in a row. No game constant. It
+      fires on TKX at row 125 (best window then rows 70-100, 937; TKX's later
+      rows averaged 503), on the flat runs (the twin and RG at 65, Pong's
+      edge-s0 at 75: their later rows within noise of the best window), on
+      DS at 90 (its last row); never on TK-90, FS or 23 of the 24 Pong runs
+      -- every Pong breakout included (their pre-breakout phase rises slowly,
+      not flat). A one-check decline misfired on a single outlier eval (Pong
+      sve2-s0); the two-check version above does not. A rank-based
+      Mann-Kendall variant (8 evals) was less consistent: silent on the
+      flat RG, firing on TKX at 110, the twin at 70 and four Pong runs (two
+      at their last row). Remaining refinements: a noise floor from each
+      eval's own game spread where the probe records it; the swap trigger's
+      other conditions (a minimum budget, the student against its master)
+      are P3's loop design, not this rule.
+
 ### RESULT -- P3's distillation step: DS against FS on Ms. Pac-Man (seed 0), 2026-10-24
 
 RUNS (from the run worktree Y:\SwitchPlayer-distill-run, detached at
