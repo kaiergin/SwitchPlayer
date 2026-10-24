@@ -789,6 +789,79 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test 2: the first swap under the per-generation clip (Kai, 2026-10-24)
+
+DECISION: Kai's "Let's start with running the tests you proposed" (Test 1's
+DECISION has the proposal and its defaults). Test 2 runs after Test 1 (G0)
+completes and its evals land.
+QUESTION: under Kai's swap design -- one clip per generation, loosened only
+at the swap -- does the distillation step give the student a head start,
+or a higher level, than a fresh student with the same vocabulary AND the
+same clip? (The distillation step's DS and FS also differed in their clip
+and temperature schedules; here the distillation step is the only
+difference.)
+THE SWAP (generation 0 -> 1):
+  MASTER = G0's final snapshot (weights-iter090, its acting states). G0
+    NEAR RANDOM (Test 1's first read) -> no Test 2 until diagnosed (Kai's
+    call); G0 ABANDONED -> Kai's call.
+  RECORDING, VOCABULARY, RE-TOKENIZATION, TARGETS: the distillation step's
+    (the master's fresh games at its final temperature 0.125 through its
+    acting states, at raw-step resolution, whole games until >= 31,250 base
+    steps; the 1% rule; dropped tokens as raw 4-frame records; the masked
+    read-out of the master's 50-sim birth search). The student's value is
+    its own TD on the recorded rewards clipped at ITS ceiling (no value
+    distillation, so the master's sign-clip value scale needs no
+    rescaling).
+  THE STUDENT'S CLIP (Kai's "decrease the amount clipped", across
+    generations; rule (a)): on the recorded games' raw per-base-step reward
+    magnitudes m (in REWARD_UNITs), the share a ceiling c removes is
+    S(c) = 1 - sum(min(m, c)) / sum(m). The master's ceiling c0 = 1 removes
+    S(1); the student's ceiling c1 is the smallest c with S(c) <= S(1) / 2
+    (S is continuous and non-increasing: c1 is solved exactly on the sorted
+    magnitudes). No game constant beyond REWARD_UNIT (the smallest positive
+    reward, which makes c0 = 1 the sign clip); each later swap halves again.
+    c1 past the reward supports (the growth gate's check) -> PREP FAILED,
+    Kai's call. Logged: S(1), c1, S(c1), the share of base steps clipped.
+ARMS (seed 0, the TK recipe, 90 iterations each, one after the other):
+  DS2 = the TK arm over the student vocabulary at the CONSTANT ceiling c1,
+    with the distillation step's prefill and 20,000-step offline phase,
+    then TK's within-run schedules (prior-acting temperature 0.5 / 0.25 /
+    0.125 staged, long-token bias 0.5 -> 0 by 25%, PER beta 0.4 -> 1, the
+    off-policy horizon decay) KEYED TO ITS ONLINE STEPS: the offline 20,000
+    steps do not advance them, so DS2 and FS2 see the same settings at
+    every iteration.
+  FS2 = the same vocabulary at the same constant c1, from scratch, TK's
+    schedules.
+READS. EXACT eval as before (whole games, 30 noop starts, prior argmax,
+PROBE_ENV=MsPacmanNoFrameskip-v4); DS2 rows 0 and 5-90 plus its offline
+curve, FS2 rows 5-90; DEPLOYED primary, raw secondary; MASTER = G0's 60-90
+deployed mean. The distillation step's reads (0)-(6) with DS2 / FS2 for DS
+/ FS (NEAR RANDOM first; (0) transfer at row 0 and the offline curve; (1)
+level 60-90 +-232, raw +-205; (2) head start 5-25 +-274.4; (3) DS2 against
+MASTER +-232; (4) time to level; (5) tokens; (6) stability), plus:
+  (7) the clip: S(1), c1, S(c1) on the master's games; reward_kept by row.
+  (8) the prior: R = mean policy_maxp over rows 75-90 / over rows 30-55 per
+      student (Test 1's read (1)), and the search targets' entropy by row.
+  (9) the general plateau rule (Step 0 (ii)) applied after the fact to each
+      curve, descriptively.
+DECISION AFTER: the distillation step's table, unchanged ((1) BETTER ->
+the distillation step joins P3's swap; (1) NO DIFFERENT + (2) BETTER ->
+it joins for the time it saves, Kai confirms; (1) NO DIFFERENT + (2) NO
+DIFFERENT -> by read (0): TRANSFER FAILED -> fix and rerun DS2; forgetting
+(DS2's rows 5-25 below row 0) -> the annealed kickstarting variant; else
+Kai's call; (1) NO DIFFERENT + (2) WORSE or (1) WORSE -> diagnose). TEST 3
+(a seed-1 repeat of the pair) runs when read (1) or (2) is BETTER, or NO
+DIFFERENT with its deployed difference beyond half its band in either
+direction; Kai's call otherwise.
+BUILD (before launch; audited like every build): the clip rule in the
+prep (experiments/distill.py: S, c1 into vocab.json); the generation-1
+student arms taking --token-vocab and the prep's ceiling; DS2's schedule
+offset (the offline steps excluded from every within-run schedule); a
+supervisor that waits for G0's completion marker and both G0 probe jsonls'
+rows 5-90, then the prep, DS2, FS2 (the distillation step's, the master
+fixed to G0); the eval hand-off.
+COST: prep ~0.5 h; DS2 ~17.5 h; FS2 ~15 h; after G0 (~16 h).
+
 ### Next experiment (pre-registered) -- Test 1: a generation-0 token master at a constant sign clip (Kai, 2026-10-24)
 
 DECISION (Kai, 2026-10-24): "I think reward clipping is implemented
