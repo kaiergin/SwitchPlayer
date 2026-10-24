@@ -1100,6 +1100,25 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgro
             "-student-distill arm.",
 }
 
+# Test 1 of the per-generation clip (Kai, 2026-10-24: the clip changes ONLY
+# between student / master swaps; pre-registered in CURRICULUM): the
+# generation-0 token master -- TK with its reward ceiling held at 1 (the
+# sign clip: every Ms. Pac-Man reward is at least one REWARD_UNIT) for the
+# whole run instead of growing within it. Seed 0.
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen0"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow"],
+    "REWARD_GROWTH_START": 1.0,
+    "REWARD_GROWTH_CEILING": 1.0,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-rgrow with the reward ceiling CONSTANT at 1 "
+            "(REWARD_GROWTH_START = REWARD_GROWTH_CEILING = 1: each base "
+            "step's reward / 10 clipped at 1 -- the sign clip -- for the "
+            "whole run; a token's reward the sum of its inner steps'): "
+            "generation 0 of the per-generation clip, whose ceiling moves "
+            "only at a student / master swap. Everything else TK's. Run as "
+            "TK.",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
