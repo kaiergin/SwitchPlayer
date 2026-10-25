@@ -789,6 +789,71 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- PB: per-step prefix BatchNorm statistics on the token arm (Kai, 2026-10-24)
+
+DECISION: Kai, 2026-10-24, after Step 0 (iii) found that the value-prefix
+head's BatchNorm flattens the search. Kai chose "test the fix on TK first",
+then Test 2 with the fix, and the fix "per-step running stats". Test 2 is
+STOPPED until PB reads: its waiting supervisors and hand-off were killed
+2026-10-24 ~17:20 before anything launched, and Test 2 is rebuilt with the
+fix after PB. G0 (Test 1) runs on unchanged.
+QUESTION: does the fix keep the token arm's search targets and prior sharp
+through 90 iterations (TK-90 flattened from row 55), and what does it do
+to the score?
+THE FIX (PREFIX_BN_PER_STEP, default off = bit for bit): every BatchNorm
+layer in the value-prefix head (norm_in, norm_out and, when present,
+fc_hidden_norm) keeps a separate set of running statistics for each LSTM
+step since the last reset (1..PREFIX_LSTM_HORIZON). Training is unchanged:
+the same train-mode calls on batch statistics, the same affine parameters,
+and the pooled running statistics still updated. In addition, step k's
+batch statistics update step k's set. Every eval-mode call (each search
+engine's expansion, birth search, refresh / reanalyze, the prep's master
+search, the logged diagnostics) normalizes each row with the set for its
+own step: 1 after a fresh or reset state, otherwise steps since the reset
++ 1. A call without a step index is refused when the flag is on. Logged in
+addition, for every arm: the eval-mode step-1 prefix error beside the step-5
+one ("prefix"), since Step 0 (iii) showed the step-5 error hides step 1.
+ARM (seed 0, 90 iterations, the TK recipe, --ray --cpu-actor): PB = TK
+(effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow:
+36 tokens, the clip growing 1 -> 160 by half the run, TK's schedules) with
+PREFIX_BN_PER_STEP on. That is the one change. It runs after G0 completes,
+from its own frozen run worktree. Reference: TK-90 itself (seed 0,
+2026-10-19).
+READS (EXACT eval as before: whole games, 30 noop starts, prior argmax;
+rows 5-90; DEPLOYED primary, raw secondary). NEAR RANDOM first (deployed
+60-90 < 502.08).
+  (1) MECHANISM: the Step 0 (iii) probe at PB's snapshots 30, 55, 75 and 90,
+      with the arm's own step-1 statistics. FIXED where the eval-mode step-1
+      |prefix| <= 2 x its train-mode-BN value (TK-90: 8-27x from row 55).
+      Not FIXED at any of 55-90 -> BUILD FAILED: diagnose, fix, rerun.
+  (2) TARGETS: the mean of fresh_target_entropy / ln 36 over rows 60-90.
+      HELD <= 0.55, FLAT >= 0.70, PARTLY between (TK-90: 0.81; its rows
+      30-55: 0.44).
+  (3) PRIOR: R = mean policy_maxp over rows 75-90 / over rows 30-55. HELD >=
+      0.8, FLATTENED <= 0.6 (TK-90: 0.48).
+  (4) LEVEL: deployed mean 60-90 against TK-90's 856.62: BETTER / NO
+      DIFFERENT / WORSE at +-232; raw against 830.81 at +-205.
+  (5) the logged step-1 prefix error by row, against the step-5 one;
+      tokens' play share; the general plateau rule (Step 0 (ii)) after the
+      fact, descriptively.
+DECISION AFTER: (1) FIXED and (3) HELD -> the fix joins the base for every
+later arm: Test 2 is rebuilt with it in both students (an amendment to
+Test 2, re-audited) and launched; (4) is reported. (1) FIXED but (3)
+FLATTENED or between -> the search artifact was not the only cause:
+diagnose (the probes again on PB's snapshots); Test 2 with or without the
+fix is Kai's call. (1) not FIXED -> BUILD FAILED as above. (4) WORSE
+while (3) HELD -> Kai's call.
+BUILD (audited like every build): the per-step statistics in
+networks.ValuePrefixNetwork behind the flag, with a per-row step index (a
+batched expansion mixes rows at different depths); the step index through
+every caller (training unroll, both muzero_vtree engines, the sequential
+engine, refresh, the diagnostics); the new logged field; the PB arm; a
+supervisor (supervise_gen0.py's, waiting for G0's completion marker before
+its preflight); the eval hand-off; tests (off: bit for bit; on: train-mode
+outputs identical, eval-mode per-row statistics, every caller passes the
+index).
+COST: ~16 h (TK-90: 15.4 h) after G0 (~06:30 10-25); Test 2 then ~33 h.
+
 ### Next experiment (pre-registered) -- Test 2: the first swap under the per-generation clip (Kai, 2026-10-24)
 
 DECISION: Kai's "Let's start with running the tests you proposed" (Test 1's
