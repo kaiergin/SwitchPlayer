@@ -1212,6 +1212,17 @@ Beyond the letter (one seed, within-run bands -- "consistent with"):
     more through the search artifact than it gained. One seed; PB reads
     whether the fixed search changes that, and Test 2 whether a looser
     clip helps once the master is already good.
+EXPLORATORY (post hoc, not a pre-registered read; probe_prefix_bn.py on Step
+0's 480 states, CPU, 05:24 10-25): G0's eval-mode step-1 prefix is NOT
+inflated at rows 30 / 55 / 75 / 90 -- p1_ratio (eval |p1| / train-BN |p1|)
+0.65 / 0.69 / 0.68 / 0.72 (|p1| 0.28-0.49 eval against 0.43-0.69 train-BN),
+against TK-90's 8.20 / 20.95 / 23.63 at rows 55 / 75 / 90. That is under
+PB's FIXED line (<= 2) on the pooled statistics alone, the error erring LOW
+(DS's harmless direction). Step 0 (iii)'s prediction for the sign clip
+holds to the end of the run. For Test 2's rebuild (A-NIT-3): the master's
+own searches (G0's weights, pooled statistics) are clean at G0's scale; the
+students at c1 are the exposed ones. Records:
+benchmarks/probes/step0_prefix_bn/g0_prefix_bn.jsonl.
 
 ### Next experiment (pre-registered) -- Test 1: a generation-0 token master at a constant sign clip (Kai, 2026-10-24)
 
