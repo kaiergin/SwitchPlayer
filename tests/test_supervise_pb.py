@@ -7,9 +7,10 @@ the paths and the constants naming the live G0 run, TK's ceiling schedule
 in the row alerts, the G0 wait (its completion marker or its ABANDONED file
 lets PB start; an unfinished G0 nothing drives, or whose supervisor gave
 up, is an hourly ALERT and the wait goes on; a resume skips it), the
-manifest, the quick probe, the guard before each launch, the child's
-environment, the refusals, NO PROGRESS and the AUDITED coverage. CPU only,
-no launches.
+manifest, the quick probe (bounded), the guard before the preflight and
+before each launch, the EVAL line, the child's environment, the refusals
+(the hand-off's three probe jsonls), NO PROGRESS and the AUDITED coverage.
+CPU only, no launches.
 
 No test reads LIVE state (the distillation step's audit r5 HIGH): the `sup`
 fixture points every path into the live G0 run, this tree's results /
@@ -306,11 +307,17 @@ def test_rows_print_the_clip_prior_and_token_fields(sup, tmp_path, capsys):
 
     row(iteration=5, return_mean=500.0, reward_ceiling=_tk(5),
         reward_kept=0.97, reward_max=3.0, policy_maxp=0.61,
+        proj_erank=23.5, fresh_target_entropy=1.12, prefix=0.42,
+        prefix_step1=0.9, prefix_step1_control=0.3,
         tok_frames_per_decision=9.5, tok_decisions_per_game=40.0)
     rows.emit()
     out = capsys.readouterr().out
     assert out.startswith("EVAL pb s0 iter 5")
     assert "maxp 0.61" in out
+    # PB's live reads (audit r1 B-N4): freshH, the step-5 and step-1
+    # value-prefix errors (the field every arm logs), the step-1 control
+    assert ("erank 23.5  freshH 1.12 | prefix 0.42  prefix_step1 0.9 "
+            "(control 0.3) | ceiling") in out
     assert f"ceiling {_tk(5)}  kept 0.97  max 3.0" in out
     assert "frames/decision 9.5  decisions/life 40.0" in out
     assert "ALERT" not in out
@@ -320,6 +327,14 @@ def test_rows_print_the_clip_prior_and_token_fields(sup, tmp_path, capsys):
     rows.emit()
     out = capsys.readouterr().out
     assert "ALERT: pb s0 row 6: reward_ceiling 1.0, the schedule says" in out
+    # a row without them (an older arm's): None, never a crash
+    assert ("freshH None | prefix None  prefix_step1 None (control None)"
+            in out)
+    # the row keys the trainer logs under these names
+    src = inspect.getsource(ablation)
+    for key in ("prefix", "prefix_step1", "prefix_step1_control",
+                "fresh_target_entropy"):
+        assert f'errs["{key}"]' in src, key
 
 
 def test_rows_alert_on_low_host_commit(sup, tmp_path, monkeypatch, capsys):
@@ -358,9 +373,13 @@ def test_supervisor_pins_what_the_run_and_preflight_use(real_sup, g0sup):
         "tests/test_supervise_pb.py", "tests/test_pbn.py",
         "tests/test_supervise_gen1.py", "tests/test_gen1.py",
         "benchmarks/probes/probe_prefix_bn.py",
+        "benchmarks/probes/step0_prefix_bn/states.npz",   # read (1)'s input
         "benchmarks/supervisors/supervise_distill.py",
         "benchmarks/supervisors/supervise_gen1.py",
         "benchmarks/supervisors/supervise_pb.py"}
+    # the one non-.py: audit r1 B-L4
+    assert [r for r in sup.AUDITED if not r.endswith(".py")] == [
+        "pytest.ini", "benchmarks/probes/step0_prefix_bn/states.npz"]
     for rel in ("networks.py", "muzero.py", "muzero_vtree.py",
                 "experiments/ablation.py", "experiments/ray_actors.py",
                 "benchmarks/probes/probe_exhaustive_eval.py"):
@@ -435,6 +454,14 @@ def test_supervisor_manifest_catches_an_edit(sup, monkeypatch, tmp_path):
         assert flipped != orig
         p.write_bytes(flipped)
         assert sup.manifest_check() == (True, "")
+    # read (1)'s state set (audit r1 B-L4): another state set is caught
+    p = tree / "benchmarks" / "probes" / "step0_prefix_bn" / "states.npz"
+    orig = p.read_bytes()
+    p.write_bytes(orig[:-1] + bytes([orig[-1] ^ 1]))
+    ok, why = sup.manifest_check()
+    assert not ok and "step0_prefix_bn/states.npz" in why
+    p.write_bytes(orig)
+    assert sup.manifest_check() == (True, "")
     (tmp_path / "m.json").write_text("[1, 2]")
     assert sup.manifest_check() == (False, "manifest check: not a JSON "
                                            "object")
@@ -508,6 +535,41 @@ def test_the_quick_probe_tells_the_arms_apart(real_sup):
                            env={**os.environ, "CUDA_VISIBLE_DEVICES": "-1"})
         assert r.returncode != 0 and ("AssertionError" in r.stderr
                                       or "KeyError" in r.stderr), arm
+
+
+def test_the_quick_probe_is_bounded(monkeypatch):
+    """Audit r1 B-N5: a hung quick probe is a PREFLIGHT not-ready reason
+    (the loop retries), never a preflight stalled for good; the suites
+    are not run after it. The real preflight, every subprocess stubbed."""
+    import subprocess
+    pre = _load(SUPERVISORS / "supervise_pb.py", "supervise_pb_preflight")
+    monkeypatch.setattr(pre, "manifest_check", lambda: (True, ""))
+    calls, outcome = [], ["hang"]
+
+    def run(args, **k):
+        calls.append((list(args), k))
+        if args[1] == "-c" and outcome[0] == "hang":
+            raise subprocess.TimeoutExpired(args, k["timeout"])
+        if args[1] == "-c" and outcome[0] == "fail":
+            return SimpleNamespace(returncode=1, stdout="",
+                                   stderr="x" + NL + "AssertionError")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pre.subprocess, "run", run)
+    assert pre.preflight("pb") == (False, "quick probe timed out")
+    assert len(calls) == 1                         # no suites after it
+    args, k = calls[0]
+    assert args == [pre.PY, "-c", pre.quick("pb")]
+    assert k["timeout"] == pre.QUICK_TIMEOUT_S == 900
+    assert k["env"]["CUDA_VISIBLE_DEVICES"] == "-1"
+    outcome[0], calls[:] = "fail", []
+    assert pre.preflight("pb") == (False, "quick probe: AssertionError")
+    assert len(calls) == 1
+    outcome[0], calls[:] = "ok", []
+    assert pre.preflight("pb") == (True, "")
+    assert [a[1:3] for a, _k in calls] == [["-c", pre.quick("pb")],
+                                           ["-m", "pytest"]]
+    assert calls[1][1]["timeout"] == 3 * 3600
 
 
 # --------------------------------------------------------------------------
@@ -690,13 +752,18 @@ def test_a_resume_skips_the_wait(sup, fake_g0, monkeypatch, capsys):
     with pytest.raises(Stop):
         sup.main(["pb", "0"])
     assert "RESUMING pb s0" in capsys.readouterr().out
-    # anything else is a fresh start: it waits
+    # anything else is a fresh start: it waits (audit r1 B-N1: asserted,
+    # not just a Stop either path would raise)
     (ck.parent / "supervisor.log").write_text(
         "WAITING for G0 before pb s0 [3 h]: missing x" + NL
         + "x LAUNCHED pb" + NL)
-    monkeypatch.setattr(sup, "wait_external", _stop)
+    waited = []
+    monkeypatch.setattr(sup, "wait_external",
+                        lambda *a: waited.append(a) or _stop())
     with pytest.raises(Stop):
         sup.main(["pb", "0"])
+    assert waited == [("pb", 0)]
+    assert "RESUMING" not in capsys.readouterr().out
 
 
 def test_launched(sup, tmp_path):
@@ -721,11 +788,14 @@ def test_main_source_order(sup):
         src.index("abandoned(base)") < src.index("stray_snapshots(") < \
         src.index("stray_probe_rows(") < src.index("launched(base, ckpt)") \
         < src.index("wait_external(") < src.index("rows.prime()") < \
+        src.index("wait_no_trainer(rows)") < \
         src.index("preflight(variant)") < src.index("for attempt in range(")
     loop = src[src.index("for attempt in range("):]
     assert loop.index("wait_no_trainer(rows)") < loop.index(
         "manifest_check()") < loop.index("subprocess.Popen(")
-    assert src.count("wait_no_trainer(") == 1
+    # once before the preflight (audit r1 B-L2), once per attempt
+    assert src.count("wait_no_trainer(") == 2
+    assert loop.count("wait_no_trainer(") == 1
     assert src.count("wait_external(") == 1
 
 
@@ -750,8 +820,8 @@ def _loop(sup, monkeypatch, events):
 
 def test_every_launch_attempt_waits_for_no_trainer(sup, monkeypatch,
                                                    capsys):
-    """Behavioural: the wait, the preflight, then the guard and the
-    manifest before EVERY Popen; the child's recipe, cwd and env."""
+    """Behavioural: the wait, the guard, the preflight, then the guard and
+    the manifest before EVERY Popen; the child's recipe, cwd and env."""
     events, seen = [], []
     _loop(sup, monkeypatch, events)
     # the preflight's CPU-only env must never reach the trainer
@@ -768,7 +838,7 @@ def test_every_launch_attempt_waits_for_no_trainer(sup, monkeypatch,
     monkeypatch.setattr(sup.subprocess, "Popen", popen)
     assert sup.main(["pb", "0"]) == 1              # 5 quick deaths
     assert "CRASH LOOP" in capsys.readouterr().out
-    assert events == (["wait", "preflight"]
+    assert events == (["wait", "guard", "preflight"]
                       + ["guard", "manifest", "popen"] * 5)
     rel = sup.paths("pb", 0)[0]
     for i, (args, k) in enumerate(seen):
@@ -791,7 +861,8 @@ def test_a_failing_manifest_blocks_the_launch(sup, monkeypatch, capsys):
                         lambda *a, **k: events.append("popen") or _stop())
     with pytest.raises(Stop):
         sup.main(["pb", "0"])
-    assert events[2:] == ["guard", "manifest"] * 3 + ["popen"]
+    assert events[:3] == ["wait", "guard", "preflight"]
+    assert events[3:] == ["guard", "manifest"] * 3 + ["popen"]
     assert capsys.readouterr().out.count("not relaunching until") == 1
 
 
@@ -802,21 +873,66 @@ def test_wait_no_trainer_waits_out_any_trainer_and_streams_rows(
     seen = [[7], [7], []]
     monkeypatch.setattr(sup, "live_trainers",
                         lambda: seen.pop(0) if seen else [])
-    sleeps = []
-
-    def sleep(s):
-        sleeps.append(s)
-        jsonl.write_text(json.dumps({"iteration": 40, "reward_ceiling": 99.0,
-                                     "elapsed_s": 1.0}) + NL)
-
+    # bounded (audit r1 B-N2): a guard that never returns fails the test
+    # instead of hanging the preflight's pytest
+    sleep = _bounded(lambda k: jsonl.write_text(json.dumps(
+        {"iteration": 40, "reward_ceiling": 99.0, "elapsed_s": 1.0}) + NL))
     monkeypatch.setattr(sup.time, "sleep", sleep)
     sup.wait_no_trainer(rows)
     out = capsys.readouterr().out
     assert out.count("ALERT: an ablation.py or distill.py trainer is "
                      "already running (pids [7])") == 1     # told once
-    assert sleeps == [60, 60]
+    assert sleep.calls == [60, 60]
     assert "EVAL pb s0 iter 40" in out            # an orphan stays watched
     assert "ALERT: pb s0 row 40: reward_ceiling 99.0" in out
+
+
+@pytest.mark.parametrize("start", ["resume", "fresh"])
+def test_the_preflight_waits_for_no_trainer(sup, fake_g0, monkeypatch,
+                                            capsys, start):
+    """Audit r1 B-L2: a RESUMING relaunch beside an orphaned PB trainer, or
+    a fresh start right after G0's marker appears while G0's trainer still
+    shuts down -- the preflight (21 suites, Ray-spinning slow tests among
+    them) is not called until no trainer is alive; the orphan's rows stream
+    meanwhile (primed first: an old row is not re-printed). Sleeps bounded:
+    a guard that never returns fails instead of hanging."""
+    _rel, base, jsonl, ck, _d = sup.paths("pb", 0)
+    pathlib.Path(base).mkdir(parents=True)
+    if start == "resume":
+        pathlib.Path(ck).write_bytes(b"x" * 1_000_001)
+        fake_g0.write_bytes(b"x" * 1_000_000)        # G0 still training
+    else:
+        fake_g0.write_bytes(b"done")                 # G0's marker: ready
+
+    def row(it):
+        with open(jsonl, "a") as f:
+            f.write(json.dumps({"iteration": it, "elapsed_s": float(it),
+                                "reward_ceiling": _tk(it)}) + NL)
+
+    row(3)                                           # before the prime
+    alive = [7]
+    monkeypatch.setattr(sup, "live_trainers", lambda: list(alive))
+
+    def effect(k):
+        if k == 1:
+            row(4)                                   # the orphan writes
+        if k == 3:
+            alive.clear()                            # the trainer exits
+
+    sleep = _bounded(effect, n=5)
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    seen = []
+    monkeypatch.setattr(sup, "preflight", lambda v: seen.append(
+        (v, sup.live_trainers(), list(sleep.calls))) or _stop())
+    monkeypatch.setattr(sup.subprocess, "Popen", _stop)
+    with pytest.raises(Stop):
+        sup.main(["pb", "0"])
+    assert seen == [("pb", [], [60, 60, 60])]
+    out = capsys.readouterr().out
+    assert ("RESUMING pb s0" in out) == (start == "resume")
+    assert out.count("ALERT: an ablation.py or distill.py trainer is "
+                     "already running (pids [7])") == 1
+    assert "EVAL pb s0 iter 4" in out and "iter 3 " not in out
 
 
 def _psutil(monkeypatch, procs):
@@ -965,10 +1081,42 @@ def test_probe_rows_without_a_checkpoint_are_refused(sup, monkeypatch,
     f.write_text("")                                  # empty: not a record
     pathlib.Path(ckpt).unlink()
     assert sup.stray_probe_rows("pb", 0, ckpt) == []
+    # read (1)'s jsonl, which the eval hand-off also appends to: a leftover
+    # one is refused the same way (the hand-off would skip re-probing those
+    # snapshots on the new timeline)
+    r1 = probes / ("probe_prefix_bn-mspacman-tokens-rgrow-pbn-s0-"
+                   "2026-10-25.jsonl")
+    r1.write_text(json.dumps({"snapshot": "weights-iter005.pth"}) + NL)
+    assert sup.stray_probe_rows("pb", 0, ckpt) == [r1.name]
+    assert sup.main(["pb", "0"]) == 2
+    assert f"probe rows ({r1.name})" in capsys.readouterr().out
+    pathlib.Path(ckpt).write_bytes(b"x" * 1_000_001)  # a legit resume
+    assert sup.stray_probe_rows("pb", 0, ckpt) == []
+    pathlib.Path(ckpt).unlink()
+    # TK-90's read (1) jsonl (another run name) is no obstacle
+    r1.rename(probes / ("probe_prefix_bn-mspacman-tokens-rgrow-s0-"
+                        "2026-10-19.jsonl"))
+    assert sup.stray_probe_rows("pb", 0, ckpt) == []
 
 
+def test_the_probe_jsonls_are_the_hand_offs_three(sup):
+    run = "mspacman-tokens-rgrow-pbn-s0-2026-10-25"
+    probes = os.path.join(sup.REPO, "benchmarks", "probes")
+    assert sup.probe_jsonls("pb", 0) == [
+        os.path.join(probes, f"probe_exhaustive_eval-{run}-acting.jsonl"),
+        os.path.join(probes, f"probe_exhaustive_eval-{run}.jsonl"),
+        os.path.join(probes, f"probe_prefix_bn-{run}.jsonl")]
+    # every refusal says "its probe jsonls", never "two"
+    assert "two probe jsonls" not in inspect.getsource(sup)
+
+
+@pytest.mark.parametrize("name", [
+    "probe_exhaustive_eval-mspacman-tokens-rgrow-pbn-s0-2026-10-25.jsonl",
+    "probe_exhaustive_eval-mspacman-tokens-rgrow-pbn-s0-2026-10-25-acting"
+    ".jsonl",
+    "probe_prefix_bn-mspacman-tokens-rgrow-pbn-s0-2026-10-25.jsonl"])
 def test_stray_state_rechecked_before_a_launch_without_checkpoint(
-        sup, monkeypatch, capsys):
+        sup, monkeypatch, capsys, name):
     events = []
     _loop(sup, monkeypatch, events)
     monkeypatch.setattr(sup.subprocess, "Popen", _stop)
@@ -976,8 +1124,7 @@ def test_stray_state_rechecked_before_a_launch_without_checkpoint(
 
     def old_rows_appear(*a):
         probes.mkdir(parents=True, exist_ok=True)
-        (probes / ("probe_exhaustive_eval-mspacman-tokens-rgrow-pbn-s0-"
-                   "2026-10-25.jsonl")).write_text("{}" + NL)
+        (probes / name).write_text("{}" + NL)
 
     monkeypatch.setattr(sup, "wait_no_trainer", old_rows_appear)
     assert sup.main(["pb", "0"]) == 2
@@ -992,13 +1139,21 @@ def test_completion_and_abandon_rechecked_before_each_launch(
     monkeypatch.setattr(sup.subprocess, "Popen", _stop)
     base = pathlib.Path(sup.paths("pb", 0)[1])
     ckpt = pathlib.Path(sup.paths("pb", 0)[3])
-    monkeypatch.setattr(sup, "wait_no_trainer",
-                        lambda *a: (base / "ABANDONED").write_text(""))
+
+    def during_the_attempt_guard(effect):
+        """Runs `effect` in the per-attempt guard (the 2nd call; the 1st is
+        the one before the preflight): the re-check AFTER it must see it."""
+        calls = []
+        return lambda *a: calls.append(a) or (len(calls) == 2 and effect())
+
+    monkeypatch.setattr(sup, "wait_no_trainer", during_the_attempt_guard(
+        lambda: (base / "ABANDONED").write_text("")))
     assert sup.main(["pb", "0"]) == 0
-    assert "ABANDONED pb s0" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "ABANDONED pb s0" in out and "not relaunching" in out
     (base / "ABANDONED").unlink()
-    monkeypatch.setattr(sup, "wait_no_trainer",
-                        lambda *a: ckpt.write_bytes(b"done"))
+    monkeypatch.setattr(sup, "wait_no_trainer", during_the_attempt_guard(
+        lambda: ckpt.write_bytes(b"done")))
     assert sup.main(["pb", "0"]) == 0
     assert "RUN COMPLETE pb s0" in capsys.readouterr().out
 

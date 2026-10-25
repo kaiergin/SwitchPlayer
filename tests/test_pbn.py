@@ -650,13 +650,50 @@ def test_communal_engines_pass_each_rows_step(monkeypatch, horizon):
     assert_parity(seq, raw, vec)
 
 
+def _clone(net):
+    """A deep copy running the class forward (a record_steps wrapper on
+    the original would be copied too, and call back into the original)."""
+    out = copy.deepcopy(net)
+    out.__dict__.pop("forward", None)
+    return out
+
+
+def _step1_panel(rep, dyn, vp, batches):
+    """The diagnostics' step-1 fields recomputed from the batches they
+    drew: the head in eval mode from a fresh state, step 1, against
+    truth[:, 1] (= rewards[:, 1] at discount 1; truth[:, 0] is 0); and
+    the two wrong readings -- the step-K prefix, truth[:, 0:1]."""
+    K = muzero.UNROLL_STEPS
+    vp.eval()
+    got = {"want": 0.0, "control": 0.0, "step_k": 0.0, "truth0": 0.0}
+    with torch.no_grad():
+        for b in batches:
+            obs = torch.tensor(b["obs"], dtype=torch.float32) / 255.0
+            acts = torch.tensor(b["actions"], dtype=torch.long)
+            t1 = torch.tensor(b["rewards"], dtype=torch.float32)[:, 1:2]
+            latent = dyn(rep(obs[:, 0]), acts[:, 0])[0]
+            p1, _, state = vp(latent, vp.initial_state(len(obs), CPU),
+                              step=1)
+            pk = p1
+            for i in range(2, K + 1):
+                latent = dyn(latent, acts[:, i - 1])[0]
+                pk, _, state = vp(latent, state, step=i)
+            got["want"] += (p1 - t1).abs().mean().item()
+            got["control"] += t1.abs().mean().item()
+            got["step_k"] += (pk - t1).abs().mean().item()
+            got["truth0"] += p1.abs().mean().item()
+    return {k: v / len(batches) for k, v in got.items()}
+
+
 def test_the_diagnostics_pass_steps_in_eval_mode_and_log_step_1(
         monkeypatch):
     """evaluate_diagnostics: per batch, steps 1..UNROLL_STEPS from a fresh
     state, the head in EVAL mode (the search's function) even when called
     in train mode -- restored after -- and the new fields beside the
     step-K ones (tests/test_snapshot_weights.py pins the panel's RNG and
-    net-state use)."""
+    net-state use). prefix_step1 / _control equal an independent
+    recomputation on the panel's own batches (captured at prepare_batch)
+    and differ from the step-K prefix's and truth[:, 0]'s readings."""
     from tests.test_checkpoint_resume import make_run
     from tests.test_reanalyze_refresh import obs_traj
     monkeypatch.setattr(ablation, "DEVICE", CPU)
@@ -668,11 +705,27 @@ def test_the_diagnostics_pass_steps_in_eval_mode_and_log_step_1(
                 latent_channels=C, hidden_size=64,
                 support_size=muzero.VALUE_PREFIX_SUPPORT,
                 num_bins=muzero.VALUE_PREFIX_BINS, per_step=K)
+            randomize_step_sets(run.trainer.value_prefix)
         dezero(run.trainer.value_prefix)
         np.random.seed(4)
         run.replay = [obs_traj([0.0, 1.0] * 6, [0.5] * 12)]
+        drawn = []
+        real_prepare = run.trainer.prepare_batch
+
+        async def prepare_batch(*args, **kwargs):
+            b = await real_prepare(*args, **kwargs)
+            drawn.append(copy.deepcopy(b))
+            return b
+
+        monkeypatch.setattr(run.trainer, "prepare_batch", prepare_batch)
         for training in (False, True):
             run.set_train_mode(training)
+            # Pre-call copies in the call's modes: train-mode BN outputs
+            # are batch statistics, so the panel's running-stat updates
+            # do not change what the copies compute.
+            nets = [_clone(getattr(run.trainer, n)) for n in
+                    ("representation", "dynamics", "value_prefix")]
+            drawn.clear()
             log = []
             record_steps(monkeypatch, run.trainer.value_prefix, log)
             errs = run.evaluate_diagnostics(batches=2)
@@ -682,6 +735,16 @@ def test_the_diagnostics_pass_steps_in_eval_mode_and_log_step_1(
                       "control"):
                 assert np.isfinite(errs[k]), k
             assert errs["prefix_step1_control"] > 0
+            assert len(drawn) == 2
+            want = _step1_panel(*nets, drawn)
+            assert errs["prefix_step1"] == pytest.approx(
+                want["want"], rel=1e-6, abs=1e-9), (per_step, training)
+            assert errs["prefix_step1_control"] == pytest.approx(
+                want["control"], rel=1e-6, abs=1e-9)
+            # a step-K prefix or truth[:, 0:1] would read differently
+            for wrong in ("step_k", "truth0"):
+                assert want[wrong] != pytest.approx(want["want"],
+                                                    rel=1e-3), wrong
 
 
 def test_redo_passes_steps_and_resets_recycled_step_channels(monkeypatch):
@@ -974,11 +1037,21 @@ def prefix_probe(monkeypatch):
     torch.set_num_threads(threads)
 
 
+def _offset_sd(x, mean, var):
+    """The channel mean of |x's batch mean - mean| / sqrt(var), written
+    out here rather than taken from the probe."""
+    sd = var.sqrt().clamp(min=1e-5)
+    return float(((x.mean(dim=0) - mean).abs() / sd).mean())
+
+
 def test_the_prefix_probe_reads_a_snapshots_own_step_1_statistics(
         prefix_probe, pb_runs, tmp_path, capsys, restore_rngs):  # noqa: F811
-    """PB read (1)'s probe on a PB snapshot: the arm's own step-1 set in
-    eval mode (here equal to the pooled statistics' copy, so eval matches
-    an off head on the same weights) against the train-mode-BN value."""
+    """PB read (1)'s probe on a PB snapshot whose step sets and pooled
+    statistics all differ: p1_abs_eval is the head's eval output on step
+    1's set (not step 2's, not the pooled statistics), p1_abs_trainBN
+    its batch-statistics value, and normout_offset_sd_step{1,2} read sets
+    [0] / [1] (not the pooled, not another index) -- each against an
+    independent computation on copies of the saved nets, same states."""
     import json
     pb = pb_runs(PB_ARM)
     vp = pb.trainer.value_prefix
@@ -988,14 +1061,14 @@ def test_the_prefix_probe_reads_a_snapshots_own_step_1_statistics(
             bn = getattr(vp, name)
             bn.running_mean.normal_(0, 0.2)
             bn.running_var.uniform_(0.5, 2.0)
-            getattr(vp, f"{name}_step_mean")[:] = bn.running_mean
-            getattr(vp, f"{name}_step_var")[:] = bn.running_var
+    randomize_step_sets(vp)
     spec = ablation.ARMS[PB_ARM]
     path = ablation.save_weight_snapshot(pb, PB_ARM, 0, spec, 30)
     states = tmp_path / "states.npz"
     rng = np.random.default_rng(0)
-    np.savez_compressed(states, obs=rng.integers(
-        0, 255, (8, 12, *muzero.IMAGE_RESHAPE), dtype=np.uint8))
+    obs = rng.integers(0, 255, (8, 12, *muzero.IMAGE_RESHAPE),
+                       dtype=np.uint8)
+    np.savez_compressed(states, obs=obs)
     out = tmp_path / "pp.jsonl"
     prefix_probe.main(["--states", str(states), "--out", str(out),
                        str(path)])
@@ -1007,7 +1080,85 @@ def test_the_prefix_probe_reads_a_snapshots_own_step_1_statistics(
               "p1_allactions_abs_eval"):
         assert np.isfinite(rec[k]), k
     assert rec["fixed"] == (rec["p1_ratio"] <= 2.0)
-    # the step sets equal the pooled statistics here: both offsets agree
-    assert rec["normout_offset_sd_step1"] == pytest.approx(
-        rec["normout_offset_sd_step1_pooled"], rel=1e-5)
     assert json.loads(capsys.readouterr().out.splitlines()[-1]) == rec
+
+    # The same reads, here, on eval-mode copies of the snapshot's nets.
+    rep, dyn, pred, head = (
+        copy.deepcopy(getattr(pb.trainer, n)).eval() for n in
+        ("representation", "dynamics", "prediction", "value_prefix"))
+    pooled = copy.deepcopy(head)       # every step set := pooled stats
+    with torch.no_grad():
+        for name in pooled.norm_names():
+            bn = getattr(pooled, name)
+            getattr(pooled, f"{name}_step_mean")[:] = bn.running_mean
+            getattr(pooled, f"{name}_step_var")[:] = bn.running_var
+    seen = []
+    hook = head.lstm.register_forward_hook(
+        lambda m, i, o: seen.append(o[0].squeeze(0)))
+    with torch.no_grad():
+        l0 = rep(torch.tensor(obs, dtype=torch.float32) / 255.0)
+        l1 = dyn(l0, pred(l0)[0].argmax(1))[0]
+        l2 = dyn(l1, pred(l1)[0].argmax(1))[0]
+        s0 = head.initial_state(len(obs), CPU)
+        p1, _, s1 = head(l1, s0, step=1)
+        head(l2, s1, step=2)
+        hook.remove()
+        x1, x2 = seen             # the post-LSTM BN's inputs, steps 1, 2
+        p1_set2 = head(l1, s0, step=2)[0]
+        p1_pooled = pooled(l1, s0, step=1)[0]
+        p1_train = copy.deepcopy(head).train()(l1, s0, step=1)[0]
+    p1_abs = float(p1.abs().mean())
+    assert rec["p1_abs_eval"] == pytest.approx(p1_abs, rel=1e-5)
+    for wrong in (p1_set2, p1_pooled):
+        assert float(wrong.abs().mean()) != pytest.approx(p1_abs, rel=1e-3)
+    assert rec["p1_abs_trainBN"] == pytest.approx(
+        float(p1_train.abs().mean()), rel=1e-5)
+    m, v = head.norm_out_step_mean, head.norm_out_step_var
+    rm, rv = head.norm_out.running_mean, head.norm_out.running_var
+    for s, xs in ((1, x1), (2, x2)):
+        own = _offset_sd(xs, m[s - 1], v[s - 1])
+        assert rec[f"normout_offset_sd_step{s}"] == pytest.approx(
+            own, rel=1e-5), s
+        assert rec[f"normout_offset_sd_step{s}_pooled"] == pytest.approx(
+            _offset_sd(xs, rm, rv), rel=1e-5), s
+        others = [_offset_sd(xs, m[j], v[j]) for j in range(len(m))
+                  if j != s - 1] + [_offset_sd(xs, rm, rv)]
+        for j, wrong in enumerate(others):
+            assert wrong != pytest.approx(own, rel=1e-3), (s, j)
+
+
+# --------------------------------------------------------------------------
+# flag on, production wrappers, real size
+# --------------------------------------------------------------------------
+def test_a_pb_runs_birth_search_steps_every_prefix_call(
+        pb_runs, monkeypatch, restore_rngs):  # noqa: F811
+    """Smoke: a real PB Run's _birth_search -- the arm's target search,
+    VectorizedPUCT over the live nets in eval mode, at the arm's sims and
+    36 tokens -- on a short policy-only trajectory completes, and every
+    value-prefix call it makes is eval mode with a per-row step in
+    1..PREFIX_LSTM_HORIZON (a missing step would raise in the head)."""
+    pb = pb_runs(PB_ARM)
+    vp = pb.trainer.value_prefix
+    dezero(vp)
+    randomize_step_sets(vp)
+    rng = np.random.default_rng(6)
+    traj = [(rng.integers(0, 255, (12, *muzero.IMAGE_RESHAPE),
+                          dtype=np.uint8), 0, 0.0) for _ in range(4)]
+    log = []
+    record_steps(monkeypatch, vp, log)
+    mode = vp.training
+    with ablation.arm_config(PB_ARM), ablation._run_length_globals(90, 2000), \
+            ablation.token_actions():
+        K, A = muzero.PREFIX_LSTM_HORIZON, ablation.ACTIONS
+        assert muzero.PREFIX_BN_PER_STEP and vp.per_step == K and A == 36
+        out = pb._birth_search(traj, False)
+    assert [len(r) for r in out] == [5] * len(traj)
+    for _, _, _, pol, val in out:
+        assert pol.shape == (A,) and pol.sum() == pytest.approx(1.0)
+        assert np.isfinite(val)
+    assert pb._birth_stats["birth_positions_last"] == len(traj)
+    assert log and all(not tr and rows for tr, rows in log)
+    steps = flat(log)
+    assert set(steps) <= set(range(1, K + 1))
+    assert 1 in steps and 2 in steps          # root expansions and below
+    assert vp.training is mode                # the head's mode restored

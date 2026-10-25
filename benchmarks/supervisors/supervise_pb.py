@@ -31,13 +31,17 @@ distill.py (any tree, arm or seed, by path or as a module: one trainer on
 the GPU at a time, never a second writer; other GPU users -- a GPU probe,
 Kai's Switch code -- are not seen), THEN checks the manifest, then
 launches; rows keep streaming while it waits (an orphaned trainer of this
-run stays monitored). One supervisor per run: a second supervise_pb.py pb
-refuses to start. A run already complete exits at once (RUN COMPLETE),
-before any wait or preflight. An ABANDONED file in the run folder (Kai's
-call: stop the supervisor and its trainer first, then create it) stops
-every later launch, and the wait. A run folder holding snapshots, or probe
-jsonls holding records, but no checkpoint is refused (a fresh start would
-mix two timelines: move the run folder and its two probe jsonls aside).
+run stays monitored). The same guard runs once before the preflight (audit
+r1 B-L2): the suites -- Ray-spinning slow tests among them -- never run
+beside a live trainer (an orphan of this run on a resume, G0's trainer
+still shutting down after its marker). One supervisor per run: a second
+supervise_pb.py pb refuses to start. A run already complete exits at once
+(RUN COMPLETE), before any wait or preflight. An ABANDONED file in the run
+folder (Kai's call: stop the supervisor and its trainer first, then create
+it) stops every later launch, and the wait. A run folder holding
+snapshots, or probe jsonls (the exact evals' two, read (1)'s) holding
+records, but no checkpoint is refused (a fresh start would mix two
+timelines: move the run folder and its probe jsonls aside).
 Completion, ABANDONED and the stray state are re-checked right before
 every launch. Each row ALERTs on a reward_ceiling other than TK's
 within-run schedule at that row (expected_ceiling), a stored record reward
@@ -54,7 +58,11 @@ launch_gen0.ps1 while G0 or its evals are unfinished). ABANDON (Kai's
 call): FIRST stop the supervisor and its trainer, THEN create ABANDONED in
 the run folder. A FRESH restart: stop the supervisor, its trainer and the
 hand-off, move the run folder AND its probe jsonls aside, then rerun
-launch_pb.ps1.
+launch_pb.ps1. ABANDONING G0 releases PB's wait as G0's completion does
+(intended: PB needs only the GPU; audit r1 B-L1): abandon G0 only after
+G0's trainer is stopped (the guard before the preflight also covers a
+slip), and if G0 is to be un-abandoned later, stop PB's supervisor (and
+its trainer) first.
 
 Create the run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
@@ -99,6 +107,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(
 # The shared interpreter lives in the main tree (worktrees have no .venv).
 PY = os.environ.get("PB_PY", r"Y:\SwitchPlayer\.venv\Scripts\python.exe")
 MAX_ATTEMPTS = 40
+QUICK_TIMEOUT_S = 900    # the preflight's quick import probe
 # Attempts that live at least STALL_MIN_S and die without writing a new
 # checkpoint this many times in a row (quick deaths aside) stop the
 # supervisor: supervise_gen0.py's rule (CURRICULUM Test 1 AMENDMENTS r1
@@ -157,8 +166,11 @@ AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
            "benchmarks/supervisors/supervise_distill.py",
            "benchmarks/supervisors/supervise_gen1.py",
            # the readout's probes: the exact evals, the mechanism read (1)
+           # and read (1)'s fixed state set (audit r1 B-L4; binary in git,
+           # never converted, so it hashes the same in an autocrlf tree)
            "benchmarks/probes/probe_exhaustive_eval.py",
            "benchmarks/probes/probe_prefix_bn.py",
+           "benchmarks/probes/step0_prefix_bn/states.npz",
            "benchmarks/supervisors/supervise_pb.py"] + SUITES
 
 
@@ -198,7 +210,8 @@ def command(variant, seed):
 
 def file_hashes(root):
     """sha256 of every AUDITED file's text, CRLF normalized to LF (git's
-    autocrlf round trip must not matter)."""
+    autocrlf round trip must not matter; the one binary, states.npz, is
+    never converted, so the same bytes normalize the same)."""
     import hashlib
     out = {}
     for rel in AUDITED:
@@ -389,8 +402,14 @@ def preflight(variant):
     if not ok:
         return False, why
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "-1"}
-    r = subprocess.run([PY, "-c", quick(variant)], cwd=REPO,
-                       capture_output=True, text=True, env=env)
+    try:
+        # bounded (audit r1 B-N5): a hung import must not stall the
+        # preflight for good
+        r = subprocess.run([PY, "-c", quick(variant)], cwd=REPO,
+                           capture_output=True, text=True, env=env,
+                           timeout=QUICK_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return False, "quick probe timed out"
     if r.returncode:
         return False, "quick probe: " + (r.stderr.strip().splitlines()
                                          or ["?"])[-1]
@@ -522,7 +541,8 @@ def commit_free_gb():
 
 class Rows:
     """Stream new jsonl rows as EVAL lines (the run's in-run eval, the
-    clip fields, the prior's sharpness and the token diagnostics)."""
+    prior's sharpness, the search targets' entropy, the value-prefix
+    errors, the clip fields and the token diagnostics)."""
 
     def __init__(self, jsonl, variant, seed):
         self.jsonl, self.variant, self.seed = jsonl, variant, seed
@@ -564,13 +584,19 @@ class Rows:
                        r.get("tok_decisions_per_game"),
                        r.get("tok_duration_play_share"),
                        r.get("tok_duration_search_share")))
+            # PB's live reads (audit r1 B-N4): the search targets' entropy,
+            # the step-K (5) and step-1 value-prefix errors (eval-mode BN)
+            pre = (" | prefix %s  prefix_step1 %s (control %s)" % (
+                r.get("prefix"), r.get("prefix_step1"),
+                r.get("prefix_step1_control")))
             print("EVAL %s s%d iter %s  train %s  env %s  return %s  H(pi) %s "
-                  " maxp %s  erank %s | ceiling %s  kept %s  max %s%s | "
-                  "elapsed %s s, %s min/iter" % (
+                  " maxp %s  erank %s  freshH %s%s | ceiling %s  kept %s  "
+                  "max %s%s | elapsed %s s, %s min/iter" % (
                       self.variant, self.seed, r.get("iteration"),
                       r.get("train_steps"), r.get("env_steps"),
                       r.get("return_mean"), r.get("policy_entropy"),
                       r.get("policy_maxp"), r.get("proj_erank"),
+                      r.get("fresh_target_entropy"), pre,
                       r.get("reward_ceiling"), r.get("reward_kept"),
                       r.get("reward_max"), tok, el, per),
                   flush=True)
@@ -681,17 +707,25 @@ def stray_snapshots(base, ckpt):
     return sorted(glob.glob(os.path.join(base, "snapshots*", "*.pth")))
 
 
+def probe_jsonls(variant, seed):
+    """The jsonls the eval hand-off appends this run's records to: the
+    exact evals' two (acting, search) and read (1)'s (probe_prefix_bn)."""
+    run = run_name(variant, seed)
+    return [os.path.join(REPO, "benchmarks", "probes", name) for name in (
+        f"probe_exhaustive_eval-{run}-acting.jsonl",
+        f"probe_exhaustive_eval-{run}.jsonl",
+        f"probe_prefix_bn-{run}.jsonl")]
+
+
 def stray_probe_rows(variant, seed, ckpt):
     """This run's probe jsonls holding records while no checkpoint exists
-    (probe rows only exist for settled snapshots, i.e. after a
-    checkpoint)."""
+    (probe rows only exist for settled snapshots, i.e. after a checkpoint;
+    the hand-off would skip re-probing those snapshots on a new
+    timeline)."""
     if os.path.exists(ckpt):
         return []
-    run = run_name(variant, seed)
     out = []
-    for suffix in ("-acting", ""):
-        path = os.path.join(REPO, "benchmarks", "probes",
-                            f"probe_exhaustive_eval-{run}{suffix}.jsonl")
+    for path in probe_jsonls(variant, seed):
         if any(l.strip() for l in lines_of(path)):
             out.append(os.path.basename(path))
     return out
@@ -733,7 +767,7 @@ def main(argv):
     if stray:
         print(f"refusing: {len(stray)} snapshots but no checkpoint in "
               f"{rel} -- a fresh start would mix two timelines; move the run "
-              f"folder and its two probe jsonls aside", flush=True)
+              f"folder and its probe jsonls aside", flush=True)
         return 2
     stray = stray_probe_rows(variant, seed, ckpt)
     if stray:
@@ -754,6 +788,11 @@ def main(argv):
     # still printed and checked.
     rows = Rows(jsonl, variant, seed)
     rows.prime()
+    # The guard once before the preflight too (audit r1 B-L2): the suites
+    # (Ray-spinning slow tests among them) never run beside a live trainer
+    # -- an orphan of this run on a resume (its rows stream: primed above),
+    # G0's trainer still shutting down after its marker appeared.
+    wait_no_trainer(rows)
     polls, told = 0, None
     while True:
         ok, why = preflight(variant)

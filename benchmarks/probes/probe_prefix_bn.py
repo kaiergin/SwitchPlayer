@@ -19,7 +19,7 @@ fixed state set (Step 0 (iii)'s 480 states: an .npz with `obs`):
   * p1_abs_trainBN: the same with train-mode BN (batch statistics of the
     same batch, on a deep copy -- what each training call sees);
     p1_ratio = p1_abs_eval / p1_abs_trainBN; fixed = p1_ratio <= 2 (PB's
-    FIXED line; TK-90: 8-27x from row 55);
+    FIXED line; TK-90: 8-24x from row 55);
   * p1_allactions_abs_eval: the root expansion's step-1 prefix over every
     action, eval mode, on every 4th state;
   * normout_offset_sd_step{1,2}: the post-LSTM BatchNorm's input batch mean

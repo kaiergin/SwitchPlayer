@@ -194,7 +194,7 @@ PREFIX_LSTM_HORIZON = UNROLL_STEPS
 # unroll step with its own batch statistics; the search ran eval mode on
 # running statistics pooled over every step, and step 1 after a fresh or
 # reset state -- every root expansion and horizon reset -- has a different
-# distribution, so its eval-mode prefix came out inflated (8-27x on TK-90
+# distribution, so its eval-mode prefix came out inflated (8-24x on TK-90
 # from row 55), flattening the search targets. On: the head keeps one set of
 # running statistics per LSTM step 1..PREFIX_LSTM_HORIZON and every
 # eval-mode call normalizes each row with its own step's set; every caller

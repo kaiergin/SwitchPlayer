@@ -853,6 +853,72 @@ its preflight); the eval hand-off; tests (off: bit for bit; on: train-mode
 outputs identical, eval-mode per-row statistics, every caller passes the
 index).
 COST: ~16 h (TK-90: 15.4 h) after G0 (~06:30 10-25); Test 2 then ~33 h.
+BUILT 2026-10-25 02:45 (eb94fd6e, pre-audit).
+AUDIT r1 (2026-10-25, two fresh-eyes auditors on eb94fd6e). A (the fix):
+nothing above LOW. Verified: the per-step fold (BN's own update: unbiased
+variance, its momentum, the cumulative average when None) and the eval
+normalization (BN's eval formula with set k); no AMP anywhere; buffers
+persistent (state_dict, .to(), deepcopy), strict loads, the target model
+built and synced with them; EVERY value-prefix caller passes the right step
+-- the training unroll i (a fresh state, never reset inside), the
+sequential expand_prefixes and both vtree engines 1 after a reset else
+prefix_len + 1 (root, chain restarts, horizon resets; chain nodes carry no
+state), ReDo k + 1, the diagnostics i, the inference server per payload;
+birth search, the prep's master search, SVE and refresh ride on those
+engines. OFF bit for bit on real weights (TK@75: VectorizedPUCT 12 roots x
+36 tokens x 50 sims and the sequential engine -- visits, policies, values
+and the RNG draws identical to the parent commit). The diagnostics block
+is already in eval mode in production (the forced eval is a no-op: the
+step-5 "prefix" keeps its meaning for every off arm). probe_prefix_bn.py
+reproduces xrun_results.jsonl at TK@55/75/90 in every field; a simulation of
+the step-1 set PB's training would estimate (train-mode upstream latents)
+gives 1.06 / 1.02 / 0.83 at TK@55/75/90 (pooled: 8.2 / 20.9 / 23.6). B (the
+orchestration): one MEDIUM -- read (1) had no producer (the hand-off left
+it "by hand", i.e. from a tree that will have moved on).
+FIXES r1:
+  - B-M1: read (1) runs IN the eval hand-off, from the frozen run tree:
+    benchmarks/probes/probe_prefix_bn.py --states
+    benchmarks/probes/step0_prefix_bn/states.npz --out
+    benchmarks/probes/probe_prefix_bn-mspacman-tokens-rgrow-pbn-s0-2026-10-25.jsonl
+    <snapshot> at 30, 55, 75, 90 -- each as it settles (after its exact
+    evals), any missing in the final pass (counted with the missing rows).
+    The supervisor refuses a fresh start beside a leftover read (1) jsonl
+    as it does the exact-eval jsonls.
+  - B-L2: the any-trainer guard also runs once BEFORE the preflight (a
+    resume beside an orphaned trainer, or G0's trainer still shutting down,
+    would otherwise run the 21 suites beside a live trainer).
+  - B-L3: Test 2's stopped launcher renamed launch_gen1.ps1.stopped (and
+    Test 2's LAUNCH note marked STOPPED).
+  - B-L4: states.npz (read (1)'s input) joins AUDITED.
+  - B-N1 / N2: two supervisor tests made able to fail / bounded; B-N4: the
+    EVAL line shows fresh_target_entropy, prefix and prefix_step1 (reads (2)
+    and (5) live); B-N5: the quick probe has a 900 s timeout.
+  - A-L2 / L3 / L4: the probe test distinguishes step sets (set 1, not set
+    2, not pooled, not an off-by-one), the diagnostics test checks
+    prefix_step1's value independently, and one flag-on test runs a real
+    Run's birth search checking every head call's step.
+  - A-N1: "8-27x" was wrong: TK-90 read 8.20 / 20.95 / 23.63 at rows 55 /
+    75 / 90, so 8-24x. The FIXED line (<= 2x) is unchanged.
+ACCEPTED r1 (LOW / NIT):
+  - B-L1: G0's ABANDONED file also releases PB's wait (PB needs only the
+    GPU). Procedure: abandon G0 only after its trainer is stopped (the
+    guard before the preflight covers a slip); to un-abandon G0, stop PB's
+    supervisor and trainer first.
+  - A-L1: the Step 0 search-side probes (step0_prefix_bn/xrun_prefix.py,
+    probe_qspread.py) do not run on this tree (their _expand_forward
+    overrides take no step), and on a PB snapshot their recalibration would
+    reset only the pooled statistics -- the per-step sets eval mode reads
+    would stay (silently). They matter only on the "(1) FIXED but (3)
+    FLATTENED -> diagnose" branch; they are ported (a step parameter and a
+    per-step-set reset) and audited before any such use.
+  - A-L5: read (1) is one-sided (<= 2x); clean snapshots read 0.12-2.00 and
+    an eval prefix that errs LOW passes. Reported descriptively at every
+    snapshot, both directions.
+  - A-N7: PB's logged step-5 "prefix" is normalized with set 5, TK-90's
+    with the pooled statistics: a cross-arm comparison of that field
+    includes the fix (read (5) says so).
+  - A-N2 / N3 (a small per-expansion overhead on and off; no number
+    changes), A-N4 / N5 / N6, B-N3 / N5-inherited: noted.
 
 ### Next experiment (pre-registered) -- Test 2: the first swap under the per-generation clip (Kai, 2026-10-24)
 
@@ -992,6 +1058,11 @@ commit a852bb1b, 46 AUDITED files): launch_gen1.ps1 started post_gen1.py and
 the ds2 and fs2 supervisors, which WAIT (ds2 for G0's completion marker and
 its evals' rows 5-90; fs2 for DS2). Nothing trains or preflights until G0
 is done (~06:30 10-25) and evaluated.
+STOPPED 2026-10-24 ~17:20 (Kai's PB decision, the PB section above): those
+processes were killed before anything launched. The scratchpad launcher is
+renamed launch_gen1.ps1.stopped (PB audit r1 B-L3), so a reboot procedure
+cannot re-arm the pre-fix Test 2 beside PB; Test 2 is rebuilt with the fix
+(a new manifest, worktree and launcher) after PB reads.
 
 ### Next experiment (pre-registered) -- Test 1: a generation-0 token master at a constant sign clip (Kai, 2026-10-24)
 
