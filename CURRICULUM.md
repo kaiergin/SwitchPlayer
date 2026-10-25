@@ -964,6 +964,18 @@ post_pb.log) and supervise_pb.py pb 0, which WAITS for G0's completion
 marker (first line: "WAITING for G0 before pb s0 [0 h]", no ALERT), then
 the any-trainer guard, the preflight and the run. Rerun launch_pb.ps1 after
 a reboot or a pause (idempotent).
+TRAINING since 05:23 10-25 (G0's marker 05:15; preflight ok: quick probe +
+21 suites; attempt 1). INTERIM (rows 5-55; not read against the
+pre-registration until row 90): the ceiling on TK's schedule (1.57 @5,
+26.3 @30, 160 from 50); 10.0 min/iteration at row 35; no ALERT.
+  read (1) so far: p1_ratio 0.68 @30, 0.40 @55 (TK-90 8.20 @55) -> FIXED at
+      both; the step-1 batch sits 1.84 / 4.95 pooled SDs off the pooled
+      statistics at 30 / 55 and 0.18 / 0.40 off its own step set.
+  targets H/ln 36 0.31-0.45 through 55 (TK-90 0.69 @55); prior maxp
+      0.69-0.75 from row 25 (0.69 @55).
+  deployed  530  837  597  570  779  873  778  617  825  932 1131 (rows
+      5-55; TK-90 60 60 271 482 665 524 913 742 732 659 879); raw 616 670
+      568 543 763 868 856 725 815 955 1153.
 
 ### Next experiment (pre-registered) -- Test 2: the first swap under the per-generation clip (Kai, 2026-10-24)
 
