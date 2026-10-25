@@ -795,8 +795,9 @@ DECISION: Kai, 2026-10-24, after Step 0 (iii) found that the value-prefix
 head's BatchNorm flattens the search. Kai chose "test the fix on TK first",
 then Test 2 with the fix, and the fix "per-step running stats". Test 2 is
 STOPPED until PB reads: its waiting supervisors and hand-off were killed
-2026-10-24 ~17:20 before anything launched, and Test 2 is rebuilt with the
-fix after PB. G0 (Test 1) runs on unchanged.
+2026-10-24 23:43 (first recorded as ~17:20; corrected by PB audit r2 B-L2)
+before anything launched, and Test 2 is rebuilt with the fix after PB. G0
+(Test 1) runs on unchanged.
 QUESTION: does the fix keep the token arm's search targets and prior sharp
 through 90 iterations (TK-90 flattened from row 55), and what does it do
 to the score?
@@ -919,6 +920,41 @@ ACCEPTED r1 (LOW / NIT):
     includes the fix (read (5) says so).
   - A-N2 / N3 (a small per-expansion overhead on and off; no number
     changes), A-N4 / N5 / N6, B-N3 / N5-inherited: noted.
+AUDIT r2 (2026-10-25, two fresh-eyes auditors on 7c97b48b): A (the r1 tests
+and a second look at the fix) nothing above LOW; B (the orchestration)
+nothing above LOW. THE AUDIT LOOP IS CLOSED. Verified in r2: every r1 test
+fails under the bug it targets (mutants: truth[:, 0:1], the step-1 field
+taken at step K or 2, the probe at step 2, the offsets read from set s,
+the train-mode copy in eval, step.repeat for repeat_interleave in either
+engine, a biased-variance fold -- all caught); TK's behaviour is unchanged
+from a81bcf39 (TK-90's tree) to eb94fd6e apart from the flag
+(SCHEDULE_OFFSET_STEPS 0 is the identity, the new arms copy TK, the
+gates and banners take TK's branches); every net rebuild / load / copy
+carries the step sets and nothing resets or copies BN statistics by name
+past them (ReDo's recycle handles them); probe_prefix_bn peaks at 2.4 GB
+commit (7 s) on a 36-token snapshot and fits the interim 6 GB gate; the
+hand-off regenerates byte-identically and its read (1) runs from the
+frozen tree on CPU, never two on one jsonl.
+ACCEPTED r2 (LOW / NIT):
+  - A-L1: tests/test_pbn.py's pb_runs fixture lowers torch's thread count
+    to 2 and never restores it, so the preflight's later suites run on 2
+    threads -- slower, not wrong (four later suites set 2 themselves).
+  - B-L1 (fixed in the scratchpad hand-off, text only; confirmed by a
+    fresh-eyes r3 check): the UN-ABANDON / FRESH-restart procedures and the
+    abandon pass's log line name all three probe jsonls (read (1)'s too).
+  - B-L2: Test 2's stop time corrected (23:43, not ~17:20) here and in
+    Test 2's section.
+  - B-L3: a FAILED G0 final eval pass retries at +10 / +20 / +30 min and
+    could start a probe beside PB's young trainer at G0's 4 GB gate. Watch:
+    if post_gen0.log shows a final-pass ALERT after G0 completes, watch
+    PB's first attempt's memory.
+  - A-NIT-3, for the Test 2 rebuild (not a PB defect): the distillation
+    prep's master search runs under the MASTER's arm (distill.py
+    arm_config(blob["arm"])), and G0 is an off arm with no step sets, so
+    DS2's prefill targets from G0's search keep the pooled statistics even
+    with the fix in both students. The Test 2 amendment must say so, or
+    re-estimate the master's per-step statistics.
+  - A-NIT-1 / 2, B-N1-N9: noted (B-N9: memory note corrected).
 
 ### Next experiment (pre-registered) -- Test 2: the first swap under the per-generation clip (Kai, 2026-10-24)
 
@@ -1058,8 +1094,12 @@ commit a852bb1b, 46 AUDITED files): launch_gen1.ps1 started post_gen1.py and
 the ds2 and fs2 supervisors, which WAIT (ds2 for G0's completion marker and
 its evals' rows 5-90; fs2 for DS2). Nothing trains or preflights until G0
 is done (~06:30 10-25) and evaluated.
-STOPPED 2026-10-24 ~17:20 (Kai's PB decision, the PB section above): those
-processes were killed before anything launched. The scratchpad launcher is
+STOPPED 2026-10-24 23:43 (Kai's PB decision, the PB section above): all six
+processes -- post_gen1.py and the ds2 / fs2 supervisors, each a venv
+launcher plus its child -- were killed by exact PID before anything
+launched (their logs end with the 23:30 WAITING lines; a process-table
+query found none since; PB audit r2 B-L2 corrected the time, first
+recorded as ~17:20). The scratchpad launcher is
 renamed launch_gen1.ps1.stopped (PB audit r1 B-L3), so a reboot procedure
 cannot re-arm the pre-fix Test 2 beside PB; Test 2 is rebuilt with the fix
 (a new manifest, worktree and launcher) after PB reads.
