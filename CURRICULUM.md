@@ -1113,6 +1113,106 @@ renamed launch_gen1.ps1.stopped (PB audit r1 B-L3), so a reboot procedure
 cannot re-arm the pre-fix Test 2 beside PB; Test 2 is rebuilt with the fix
 (a new manifest, worktree and launcher) after PB reads.
 
+### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
+
+RUN (mspacman-tokens-gen0-s0-2026-10-24, from the run worktree
+Y:\SwitchPlayer-gen0-run, detached at the manifest commit): 13:58 10-24 ->
+05:15 10-25 in ONE attempt (54,540 s, 10.1 min/iteration; no deaths, no
+ALERTs, supervisor.err empty; RUN COMPLETE). The hand-off ran the evals one
+at a time while it trained and the last two by 05:19: all 18 rows in both
+variants, every row 4/4 phases, no capped game. Row 90 at 59.2k env steps
+(TK-90 58.5k, the twin 53.4k). The ceiling held at 1.0 throughout.
+EXACT eval as TK's (30 noop starts, prior argmax); DEPLOYED (acting states)
+primary, RAW secondary, IN = the run's 8-game eval, maxp = the prior's mean
+max probability, tgtH = fresh_target_entropy / ln 36:
+  iter      5   10   15   20   25   30   35   40   45   50   55   60   65   70   75   80   85   90
+  G0 dep  162  583  530  583  640  740  851  799  895  875  806 1154 1097  992 1116  937 1311 1190
+  G0 raw  217  499  496  630  710  594  796  856  734  789 1182  386 1041  994 1226 1199  894 1527
+  G0 in   173  691  578  418  713  714  845  553  859  824  845 1360  956 1171 1173  963 1346 1274
+  maxp   0.68 0.69 0.85 0.60 0.82 0.78 0.79 0.77 0.80 0.71 0.76 0.42 0.79 0.72 0.79 0.72 0.77 0.75
+  tgtH   0.36 0.21 0.21 0.38 0.30 0.26 0.20 0.21 0.28 0.37 0.44 0.33 0.26 0.40 0.34 0.27 0.32 0.31
+  TK-90 dep 60  60  271  482  665  524  913  742  732  659  879  780 1033  863  920  825  885  691
+NEAR RANDOM: no (deployed 60-90 g 0.828).
+READ (1) the prior: R = mean maxp 75-90 (0.7569) / mean maxp 30-55 (0.7676)
+  = 0.99 -> HELD (TK-90 0.48 and FS 0.37 FLATTENED; the twin 0.88, RG
+  0.92, DS 0.96 HELD). policy_entropy / ln 36 stayed 0.14-0.39 at every row
+  but 60 (0.58), against TK-90's 0.45 @60 -> 0.87 @90. The search targets
+  never went flat: tgtH 0.20-0.44 over the whole run, against TK-90's 0.39
+  @50 -> 0.79 @60 -> 0.93 @75.
+READ (2) level against TK-90: deployed mean 60-90 1113.86 (SD 124.4) against
+  856.62: +257.2 -> BETTER (band 232). Raw 1038.19 (SD 353.2, g 0.750)
+  against 830.81: +207.4 -> BETTER (band 205, by 2.4).
+READ (3) tokens against no tokens at the sign clip: against the twin's
+  649.14: +464.7 -> BETTER (band 232); raw against 585.62: +452.6 -> BETTER
+  (band 138).
+READ (4) the clip, descriptive: reward_kept 0.94 @5 -> 0.64 @10 -> 0.73-0.76
+  @20-45 -> 0.70 @50 -> 0.61 @75 -> 0.585 @90, so by row 90 the sign clip
+  removes 41% of the replay's raw reward units (it removes more as the
+  agent reaches ghosts and fruit). reward_max (a token's record, the sum of
+  its inner steps' clipped rewards) 3.0 from row 5. Test 2's c1 halves the
+  removed share, measured on the master's recorded games.
+READ (5) tokens, descriptive: play shares (4 / 8 / 16 / 32 frames) 0.07 /
+  0.13 / 0.27 / 0.53 @5 -> 0.10 / 0.06 / 0.33 / 0.51 @90; over rows 60-90
+  the 32-frame tokens took 0.40-0.64 of play, the 4-frame ones 0.07-0.16
+  (TK-90, under the moving ceiling: 32-frame 0.10-0.14, 4-frame 0.32-0.51 --
+  the opposite end). Search shares @90 0.12 / 0.08 / 0.27 / 0.53. Frames
+  per decision, deployed (probe), rows 60-90: 20.9-23.0, so 2.6-2.9
+  decisions per second (TK-90 11.5-15.7, 3.8-5.2 per second). Decisions per
+  life 37-44 (TK-90 57-84).
+READ (6) stability: the largest adjacent deployed drop from row 45 is -179
+  (1116 @75 -> 937 @80; TK-90 -194, DS -275, FS -260). Thirds 5-25 / 30-55
+  / 60-90: deployed 500 / 828 / 1114 (TK-90 308 / 742 / 857); raw 510 / 825
+  / 1038. THE ROW-60 JOLT: at the row-60 snapshot every eval-mode reading
+  moved at once -- maxp 0.76 -> 0.42, the logged prefix error 0.29 -> 2.52,
+  value error 1.43 -> 3.49, proj_erank 42.7 -> 18.1 -- and the RAW probe
+  scored 386 (1182 @55, 1041 @65), while the behaviour that row did not
+  move: the actor's prior maxp 0.59 (0.59 @55, 0.63 @65), the in-run eval
+  1360, DEPLOYED 1154. The acting states are the trainer's weights with
+  BN statistics recalibrated on the newest replay frames, so raw and
+  deployed differ only in the BN statistics: the jolt sat in the trainer's
+  running BatchNorm statistics at that snapshot (what the eval-mode
+  diagnostics and the raw probe use), not in the weights or the play. Gone
+  by row 65; one row, not repeated.
+READ (7) the plateau rule (Step 0 (ii), one parameter set), applied after the
+  fact: it never fires on G0, on deployed (sigma 104.8; the best 7-row
+  window is the last one, rows 60-90, 1113.9) or on raw (sigma 140.5); the
+  rank-based variant never fires either. G0 was still rising at row 90.
+PRE-REGISTERED DECISION:
+  - Read (1) HELD -> consistent with: the moving ceiling TOGETHER WITH the
+    tokens drove the flattening (the r1 amendment's reading); the
+    per-generation clip removes it.
+  - Reads (2) / (3) reported (neither gates Test 2): BETTER against both.
+    The heavy generation-0 clip cost nothing measurable here.
+  - Not NEAR RANDOM -> G0 becomes Test 2's MASTER (its weights-iter090).
+Beyond the letter (one seed, within-run bands -- "consistent with"):
+  - G0 is the best FRESH Ms. Pac-Man run so far: deployed 60-90 1114
+    against FS 1034, TK-90 857, RG 650 and the twin 649; only DS (1231,
+    which started from a master) is higher. One row reached
+    EfficientZero's 1281.2 (row 85, 1311); raw row 90 scored 1527.
+  - This fits Step 0 (iii): the search's step-1 prefix artifact appears
+    once the reward scale is large (the moving ceiling at 40-160 units), and
+    a token run at the sign clip never reaches that scale. G0's targets
+    stayed sharp and its prior followed them. Consistent with: the tokens
+    do not flatten by themselves; a large reward scale under pooled prefix
+    BN statistics does (one seed per arm). PB (TK + per-step statistics,
+    training since 05:23 10-25) tests the fix under the moving ceiling;
+    Test 2's students at c1 are exposed to the larger scale, which is why
+    Test 2 waits for PB.
+  - Under the sign clip the token play moved to LONG tokens (32-frame about
+    half of play), the opposite of TK-90's late shift to short ones; at
+    2.6-2.9 decisions per second G0 plays fewer, longer decisions than
+    TK-90, DS or FS (3.8-5.2; Pong's P2a run 2.5). Which clip-dependent
+    effect drives that is not
+    separated here (the prior's sharpness, the clipped token reward
+    summing at most one unit per inner step).
+  - The sign clip scores a ghost (20+ units) like a pellet, yet G0 beat
+    TK-90, which trained toward a 160-unit ceiling; without tokens the clip
+    growth made no difference either (RG = the twin). So far a finer reward
+    scale has not paid for itself on Ms. Pac-Man, and with tokens it cost
+    more through the search artifact than it gained. One seed; PB reads
+    whether the fixed search changes that, and Test 2 whether a looser
+    clip helps once the master is already good.
+
 ### Next experiment (pre-registered) -- Test 1: a generation-0 token master at a constant sign clip (Kai, 2026-10-24)
 
 DECISION (Kai, 2026-10-24): "I think reward clipping is implemented
