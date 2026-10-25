@@ -62,6 +62,11 @@ def load(run, path):
         # One vocabulary per probe call (main sets it from the first file).
         raise SystemExit(f"{path.name}: TOKEN_VOCAB {v!r} differs from the "
                          f"probe's {muzero.TOKEN_VOCAB!r}")
+    pbn = bool((d.get("spec") or {}).get("PREFIX_BN_PER_STEP", False))
+    if pbn != bool(muzero.PREFIX_BN_PER_STEP):
+        # Likewise one prefix-head layout (the per-step BN buffers).
+        raise SystemExit(f"{path.name}: PREFIX_BN_PER_STEP {pbn} differs "
+                         f"from the probe's {muzero.PREFIX_BN_PER_STEP}")
     for n in ablation.NET_NAMES:
         getattr(run.trainer, n).load_state_dict(d[n])
     renorm = d.get("spec", {}).get("LATENT_RENORMALIZE", True)
@@ -165,6 +170,26 @@ def snapshot_tokens(vocab):
         muzero.TOKEN_VOCAB, ablation.ACTIONS = saved
 
 
+def snapshot_prefix_bn(path):
+    """Whether a snapshot's run kept per-step prefix BN statistics
+    (PREFIX_BN_PER_STEP, CURRICULUM "PB"): its prefix head carries the
+    extra buffers, so the probe's nets must be built with them for the
+    strict load. The prior-argmax play never runs the head."""
+    d = torch.load(str(path), map_location="cpu", weights_only=False)
+    return bool((d.get("spec") or {}).get("PREFIX_BN_PER_STEP", False))
+
+
+@contextlib.contextmanager
+def snapshot_prefix_layout(pbn):
+    """PREFIX_BN_PER_STEP for the probe's Run, restored after."""
+    saved = muzero.PREFIX_BN_PER_STEP
+    muzero.PREFIX_BN_PER_STEP = bool(pbn)
+    try:
+        yield
+    finally:
+        muzero.PREFIX_BN_PER_STEP = saved
+
+
 def play(run, noops):
     """One noop-start game: (return, base steps, terminated), plus the
     decisions played under TOKEN_VOCAB (where base steps count frames / 4
@@ -209,8 +234,9 @@ def play(run, noops):
 def main(argv):
     check_mode()
     vocab = snapshot_vocab(argv[0]) if argv else None
+    pbn = snapshot_prefix_bn(argv[0]) if argv else False
     with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000), \
-            snapshot_tokens(vocab):
+            snapshot_tokens(vocab), snapshot_prefix_layout(pbn):
         run = ablation.Run(ARM, 0, ablation.ARMS[ARM])
         assert muzero.USE_SEARCH_ACTING is False       # greedy = prior argmax
         if SEARCH_SIMS:

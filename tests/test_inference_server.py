@@ -183,8 +183,8 @@ class _SyncHandle:
             lambda lat, which="live":
             srv._run("prediction", [lat], which)[0])
         self.prefix_step = _Method(
-            lambda lat, h, c, which="live":
-            srv._run("value_prefix", [(lat, h, c)], which)[0])
+            lambda lat, h, c, step=None, which="live":
+            srv._run("value_prefix", [(lat, h, c, step)], which)[0])
         self.prefix_hidden_size = _Method(srv.prefix_hidden_size)
 
 

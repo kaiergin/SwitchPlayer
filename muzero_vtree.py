@@ -90,12 +90,14 @@ class VectorizedPUCT:
             policy = torch.softmax(logits, dim=1).double()
         return latent, policy, value.squeeze(-1).double()
 
-    def _expand_forward(self, parent_latent, h, c, reset):
+    def _expand_forward(self, parent_latent, h, c, reset, step=None):
         """One expansion wave: parent latents [B,C,H,W] -> per-action
         children. Returns (child_latents [B,A,...], edge_rewards [B,A],
         child_policy [B,A,A], child_value [B,A], prefixes [B,A],
         new_h, new_c) with is_reset edge semantics applied by the CALLER
-        (needs parent prefix)."""
+        (needs parent prefix). step [B]: the LSTM step each parent's
+        children take (the caller's child_len: 1 after a reset, else the
+        parent's pref_len + 1), PREFIX_BN_PER_STEP's per-row index."""
         B = parent_latent.shape[0]
         A = self.A
         with torch.no_grad():
@@ -108,7 +110,8 @@ class VectorizedPUCT:
                 hh = h.repeat_interleave(A, dim=1).contiguous()
                 cc = c.repeat_interleave(A, dim=1).contiguous()
                 prefixes, _, (nh, nc) = self.nets["value_prefix"](
-                    nxt, (hh, cc))
+                    nxt, (hh, cc),
+                    step=None if step is None else step.repeat_interleave(A))
                 prefixes = prefixes.squeeze(-1).double().view(B, A)
                 nh = nh.view(nh.shape[0], B, A, -1)
                 nc = nc.view(nc.shape[0], B, A, -1)
@@ -232,24 +235,26 @@ class VectorizedPUCT:
                     int(tsel.numel()), dev)
                 h = torch.where(reset.view(1, -1, 1), init[0], h)
                 c = torch.where(reset.view(1, -1, 1), init[1], c)
-            else:
-                h = c = None
-                reset = torch.zeros(tsel.numel(), dtype=torch.bool,
-                                    device=dev)
-            nxt, rew, pol, val, prefixes, nh, nc = self._expand_forward(
-                pl, h, c, reset)
-            if self.use_prefix:
-                parent_pref = pref[tsel, nsel]
-                edge = torch.where(reset.unsqueeze(1), prefixes,
-                                   prefixes - parent_pref.unsqueeze(1))
+                # The children's accumulation length, which is also the
+                # LSTM step their prefix takes (PREFIX_BN_PER_STEP).
                 child_len = torch.where(
                     reset, torch.ones_like(pref_len[tsel, nsel]),
                     pref_len[tsel, nsel] + 1)
             else:
-                edge = rew
-                prefixes = torch.zeros_like(edge)
+                h = c = None
+                reset = torch.zeros(tsel.numel(), dtype=torch.bool,
+                                    device=dev)
                 child_len = torch.zeros(tsel.numel(), dtype=torch.long,
                                         device=dev)
+            nxt, rew, pol, val, prefixes, nh, nc = self._expand_forward(
+                pl, h, c, reset, child_len)
+            if self.use_prefix:
+                parent_pref = pref[tsel, nsel]
+                edge = torch.where(reset.unsqueeze(1), prefixes,
+                                   prefixes - parent_pref.unsqueeze(1))
+            else:
+                edge = rew
+                prefixes = torch.zeros_like(edge)
             base = count[tsel]                       # [B]
             ids = base.unsqueeze(1) + torch.arange(A, device=dev)  # [B,A]
             children[tsel, nsel] = ids
@@ -914,19 +919,22 @@ class VectorizedCommunalPUCT(VectorizedPUCT):
             init = self.nets["value_prefix"].initial_state(B, dev)
             h = torch.where(reset.view(1, -1, 1), init[0], h)
             c = torch.where(reset.view(1, -1, 1), init[1], c)
+            # The children's accumulation length = their prefix's LSTM step
+            # (PREFIX_BN_PER_STEP); chain nodes never carry state, so a
+            # chain parent's children take step 1.
+            child_len = torch.where(reset, torch.ones_like(f["pref_len"][pids]),
+                                    f["pref_len"][pids] + 1)
             net = self.nets["value_prefix"]
             was_training = net.training
             net.eval()   # expand_prefixes toggles eval for the prefix net
             try:
                 nxt, rew, pol, val, prefixes, nh, nc = self._expand_forward(
-                    pl, h, c, reset)
+                    pl, h, c, reset, child_len)
             finally:
                 net.train(was_training)
             parent_pref = f["pref"][pids]
             edge = torch.where(reset.unsqueeze(1), prefixes,
                                prefixes - parent_pref.unsqueeze(1))
-            child_len = torch.where(reset, torch.ones_like(f["pref_len"][pids]),
-                                    f["pref_len"][pids] + 1)
         else:
             reset = torch.zeros(B, dtype=torch.bool, device=dev)
             nxt, rew, pol, val, prefixes, nh, nc = self._expand_forward(

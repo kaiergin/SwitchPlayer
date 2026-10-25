@@ -368,11 +368,24 @@ class ValuePrefixNetwork(nn.Module):
     activation -> fc. Both norms matter: the accumulated prefix drifts in scale
     as the unroll deepens, and without the post-LSTM activation the path from
     hidden state to logits is linear.
+
+    per_step=K > 0 (muzero.PREFIX_BN_PER_STEP; CURRICULUM.md "PB"): every
+    BatchNorm here also keeps K sets of running statistics, one per LSTM step
+    since the last reset (1..K). Training calls the head once per unroll step
+    in train mode, so each step is normalized with its OWN batch statistics;
+    eval mode (the search) used the running statistics pooled over all K
+    steps, and step 1 -- a fresh state -- has a very different distribution,
+    so its eval-mode prefix came out inflated at large reward scales (Step 0
+    (iii)). Train mode is unchanged (the same modules on batch statistics,
+    the pooled running statistics still updated) and additionally folds step
+    k's batch statistics into set k; eval mode normalizes each row with its
+    own step's set. The buffers exist only when K > 0: an off net's
+    state_dict, outputs and RNG use are the original class's.
     """
 
     def __init__(self, latent_channels=64, hidden_size=512, support_size=2000,
                  num_bins=51, head_channels=32, pool=(6, 6), transform=True,
-                 fc_hidden=None):
+                 fc_hidden=None, per_step=0):
         super(ValuePrefixNetwork, self).__init__()
         # See PredictionNetwork: must match the encode side's transform flag.
         self.transform = transform
@@ -407,6 +420,27 @@ class ValuePrefixNetwork(nn.Module):
         # EfficientZero A.1 zero-init: the prefix decodes exactly 0 at init.
         nn.init.zeros_(final.weight)
         nn.init.zeros_(final.bias)
+        # Per-step running statistics (see the class docstring). Registered
+        # after every parameter, and only when on: no RNG is drawn, so an on
+        # net's weights init exactly as an off net's.
+        self.per_step = int(per_step or 0)
+        if self.per_step:
+            for name in self.norm_names():
+                c = getattr(self, name).num_features
+                self.register_buffer(f"{name}_step_mean",
+                                     torch.zeros(self.per_step, c))
+                self.register_buffer(f"{name}_step_var",
+                                     torch.ones(self.per_step, c))
+                self.register_buffer(f"{name}_step_count",
+                                     torch.zeros(self.per_step,
+                                                 dtype=torch.long))
+
+    def norm_names(self):
+        """The head's BatchNorm attributes, in forward order."""
+        names = ["norm_in", "norm_out"]
+        if self.fc_hidden_norm is not None:
+            names.append("fc_hidden_norm")
+        return names
 
     def initial_state(self, batch_size, device):
         """Zeroed hidden state: no reward accumulated yet."""
@@ -414,14 +448,21 @@ class ValuePrefixNetwork(nn.Module):
         return (torch.zeros(*shape, device=device),
                 torch.zeros(*shape, device=device))
 
-    def forward(self, latent, state):
-        """One unroll step. Returns (prefix_scalar, prefix_logits, next_state)."""
+    def forward(self, latent, state, step=None):
+        """One unroll step. Returns (prefix_scalar, prefix_logits, next_state).
+
+        step: the LSTM step this call takes since the last reset -- 1 from a
+        fresh or reset state -- as an int or a LongTensor of shape (batch,).
+        Ignored unless per_step, where every call must pass it (a missed
+        caller fails loudly): one uniform step in train mode, per row in
+        eval mode (a batched expansion mixes rows at different depths)."""
         x = self.conv(latent)
         # BatchNorm needs more than one sample in train mode; a single-row batch
         # happens during search, where eval-mode running stats apply anyway.
         batched = latent.size(0) > 1 or not self.training
+        k = self._step_index(step, latent) if self.per_step else None
         if batched:
-            x = self.norm_in(x)
+            x = self._norm("norm_in", x, k)
         x = self.relu(x)
         x = F.adaptive_avg_pool2d(x, self.pool)
         x = x.contiguous().view(x.size(0), -1).unsqueeze(0)   # (seq=1, batch, feat)
@@ -429,15 +470,88 @@ class ValuePrefixNetwork(nn.Module):
         out, state = self.lstm(x, state)
         out = out.squeeze(0)
         if batched:
-            out = self.norm_out(out)
+            out = self._norm("norm_out", out, k)
         h = self.relu(out)
         if self.fc_hidden_layer is not None:
             h = self.fc_hidden_layer(h)
             if batched:
-                h = self.fc_hidden_norm(h)
+                h = self._norm("fc_hidden_norm", h, k)
             h = self.relu(h)
         prefix_logits = self.fc(h)
 
         support = create_support(self.support_size, self.num_bins, latent.device)
         prefix = scalar_from_logits(prefix_logits, support, invert=self.transform)
         return prefix, prefix_logits, state
+
+    def _step_index(self, step, latent):
+        """per_step's validated step: an int in train mode (one step per
+        call), a LongTensor (batch,) in eval mode; values in 1..per_step."""
+        K = self.per_step
+        if step is None:
+            raise ValueError("PREFIX_BN_PER_STEP: a value-prefix call passed "
+                             "no LSTM step index")
+        if self.training:
+            if torch.is_tensor(step):
+                flat = step.reshape(-1)
+                k = int(flat[0])
+                if bool((flat != k).any()):
+                    raise ValueError("PREFIX_BN_PER_STEP: a train-mode call "
+                                     "must take one step, got several")
+            else:
+                k = int(step)
+            if not 1 <= k <= K:
+                raise ValueError(f"PREFIX_BN_PER_STEP: step {k} outside "
+                                 f"1..{K}")
+            return k
+        B = latent.size(0)
+        if torch.is_tensor(step):
+            rows = step.to(device=latent.device, dtype=torch.long).reshape(-1)
+            if rows.numel() == 1:
+                rows = rows.expand(B)
+        else:
+            rows = torch.full((B,), int(step), dtype=torch.long,
+                              device=latent.device)
+        if rows.numel() != B:
+            raise ValueError(f"PREFIX_BN_PER_STEP: {rows.numel()} step "
+                             f"indices for a batch of {B}")
+        if bool(((rows < 1) | (rows > K)).any()):
+            raise ValueError(f"PREFIX_BN_PER_STEP: a step outside 1..{K}")
+        return rows
+
+    def _norm(self, name, x, k):
+        """BatchNorm `name` on x. Off (k None): the module itself. Train
+        mode: the module itself, plus step k's batch statistics folded into
+        set k. Eval mode: each row with its own step's running statistics
+        and the module's affine weight and bias."""
+        bn = getattr(self, name)
+        if k is None:
+            return bn(x)
+        if self.training:
+            self._fold_step_stats(name, bn, x, k)
+            return bn(x)
+        shape = (x.size(0), x.size(1)) + (1,) * (x.dim() - 2)
+        mean = getattr(self, f"{name}_step_mean")[k - 1].view(shape)
+        inv = torch.rsqrt(getattr(self, f"{name}_step_var")[k - 1]
+                          + bn.eps).view(shape)
+        y = (x - mean) * inv
+        if bn.weight is not None:
+            aff = (1, -1) + (1,) * (x.dim() - 2)
+            y = y * bn.weight.view(aff) + bn.bias.view(aff)
+        return y
+
+    @torch.no_grad()
+    def _fold_step_stats(self, name, bn, x, k):
+        """BatchNorm's own running update, into step k's set: this call's
+        batch mean and UNBIASED variance (what running_var tracks), its
+        momentum (a cumulative average when momentum is None)."""
+        dims = [0] + list(range(2, x.dim()))
+        mean = x.mean(dim=dims)
+        var = x.var(dim=dims, correction=1)
+        count = getattr(self, f"{name}_step_count")
+        count[k - 1] += 1
+        f = (bn.momentum if bn.momentum is not None
+             else 1.0 / float(count[k - 1]))
+        rm = getattr(self, f"{name}_step_mean")
+        rv = getattr(self, f"{name}_step_var")
+        rm[k - 1] = (1 - f) * rm[k - 1] + f * mean
+        rv[k - 1] = (1 - f) * rv[k - 1] + f * var

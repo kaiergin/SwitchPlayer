@@ -223,7 +223,8 @@ def dormancy_stats(nets, obs, actions, units):
         for k in range(actions.shape[1]):
             latent, _, _ = copies["dynamics"](latent, actions[:, k])
             copies["prediction"](latent)
-            _, _, state = copies["value_prefix"](latent, state)
+            # LSTM step k + 1 from the fresh state (PREFIX_BN_PER_STEP).
+            _, _, state = copies["value_prefix"](latent, state, step=k + 1)
             if with_proj:
                 copies["projector"](latent, with_prediction=True)
     finally:
@@ -331,6 +332,11 @@ def recycle(nets, optimizers, scores, tau, generator, raw=None, inputs=None):
                 bn.bias[c] = b
                 bn.running_mean[c] = 0.0
                 bn.running_var[c] = 1.0
+                # PREFIX_BN_PER_STEP: the prefix head's per-step sets too.
+                step_mean = getattr(nets[u.net], f"{u.norm}_step_mean", None)
+                if step_mean is not None:
+                    step_mean[:, c] = 0.0
+                    getattr(nets[u.net], f"{u.norm}_step_var")[:, c] = 1.0
                 _zero_state(optimizers, bn.weight, c)
                 _zero_state(optimizers, bn.bias, c)
     # Pass 2: outgoing side -- the consumer's column block of each unit.

@@ -1161,6 +1161,26 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1
             "TK. Twin: the -gen1-distill arm.",
 }
 
+# PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
+# BatchNorm statistics on the token arm", after Step 0 (iii)): TK with the
+# value-prefix head's BatchNorms keeping one set of running statistics per
+# LSTM step (PREFIX_BN_PER_STEP) -- the one change. Seed 0, 90 iterations,
+# the TK recipe; reference TK-90 itself (2026-10-19).
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow-pbn"] = {
+    **ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow"],
+    "PREFIX_BN_PER_STEP": True,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-rgrow with PREFIX_BN_PER_STEP: every BatchNorm in the "
+            "value-prefix head keeps a separate set of running statistics "
+            "for each LSTM step since the last reset (1..PREFIX_LSTM_HORIZON"
+            "), each training step's batch statistics updating its own set "
+            "(training otherwise unchanged), and every eval-mode call -- the "
+            "search engines, birth search, refresh, the diagnostics -- "
+            "normalizing each row with its own step's set (1 after a fresh "
+            "or reset state). Everything else TK's. Run as TK. Reference: "
+            "TK-90 (mspacman-tokens-rgrow-s0-2026-10-19).",
+}
+
 # The sharper prior-acting temperature (Kai, 2026-10-04; pre-registered in
 # CURRICULUM before any seed-1 exact eval -- seed 1 was at in-run row 10):
 # prioract-noredo with the staged prior-acting schedule halved. Runs only if
@@ -3295,7 +3315,8 @@ class Run:
             self.trainer.invalidate_bootstrap_cache()
         K = muzero.UNROLL_STEPS
         errs = {"per_step": 0.0, "prefix": 0.0, "control": 0.0, "value": 0.0,
-                "value_control": 0.0, "policy_entropy": 0.0, "policy_maxp": 0.0}
+                "value_control": 0.0, "policy_entropy": 0.0, "policy_maxp": 0.0,
+                "prefix_step1": 0.0, "prefix_step1_control": 0.0}
         projs = []
         if self.replay:
             with torch.no_grad():
@@ -3324,12 +3345,30 @@ class Run:
                     errs["policy_entropy"] += (-p * torch.log(p + 1e-12)).sum(dim=1).mean().item()
                     errs["policy_maxp"] += p.max(dim=1).values.mean().item()
 
-                    state = self.trainer.value_prefix.initial_state(obs.size(0), DEVICE)
+                    vp = self.trainer.value_prefix
+                    state = vp.initial_state(obs.size(0), DEVICE)
                     running = torch.zeros(obs.size(0), 1, device=DEVICE)
-                    for i in range(1, K + 1):
-                        latent, reward, _ = self.trainer.dynamics(latent, acts[:, i - 1])
-                        running = running + reward
-                        prefix, _, state = self.trainer.value_prefix(latent, state)
+                    # The prefix head in EVAL mode -- the search's function
+                    # (the resting state already; expand_prefixes' toggle,
+                    # so the step-1 number is the search-side one in any
+                    # mode). The state is fresh here and never resets, so
+                    # call i is LSTM step i.
+                    was_training = vp.training
+                    vp.eval()
+                    try:
+                        for i in range(1, K + 1):
+                            latent, reward, _ = self.trainer.dynamics(latent, acts[:, i - 1])
+                            running = running + reward
+                            prefix, _, state = vp(latent, state, step=i)
+                            if i == 1:
+                                # The step-1 prefix -- every root expansion
+                                # and horizon reset in the search -- which
+                                # the step-K error below hid (Step 0 (iii)).
+                                t1 = truth[:, 1:2]
+                                errs["prefix_step1"] += (prefix - t1).abs().mean().item()
+                                errs["prefix_step1_control"] += t1.abs().mean().item()
+                    finally:
+                        vp.train(was_training)
                     tgt = truth[:, K:K + 1]
                     errs["per_step"] += (running - tgt).abs().mean().item()
                     errs["prefix"] += (prefix - tgt).abs().mean().item()

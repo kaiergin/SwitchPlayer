@@ -189,6 +189,19 @@ USE_VALUE_PREFIX_IN_TREE = False
 # was extrapolation. At a reset boundary the edge reward is the fresh
 # prefix itself, not a difference (EffZero's is_reset semantics).
 PREFIX_LSTM_HORIZON = UNROLL_STEPS
+# Per-step BatchNorm statistics in the value-prefix head (CURRICULUM.md "PB",
+# pre-registered 2026-10-24 after Step 0 (iii)). Training normalizes each
+# unroll step with its own batch statistics; the search ran eval mode on
+# running statistics pooled over every step, and step 1 after a fresh or
+# reset state -- every root expansion and horizon reset -- has a different
+# distribution, so its eval-mode prefix came out inflated (8-27x on TK-90
+# from row 55), flattening the search targets. On: the head keeps one set of
+# running statistics per LSTM step 1..PREFIX_LSTM_HORIZON and every
+# eval-mode call normalizes each row with its own step's set; every caller
+# passes the step (1 after a reset, else steps since the reset + 1). Read at
+# network construction (build_value_prefix). Off = the original head, bit
+# for bit.
+PREFIX_BN_PER_STEP = False
 
 # ---------------------------------------------------------------------------
 # Loss weighting and gradient scaling (MuZero appendix G)
@@ -1450,6 +1463,21 @@ def build_prediction(action_space, support_size=None, num_bins=None, transform=T
                              fc_hidden=PRED_FC_HIDDEN)
 
 
+def prefix_bn_steps():
+    """PREFIX_BN_PER_STEP's per-step set count: PREFIX_LSTM_HORIZON when on,
+    0 when off. The horizon must equal the training unroll (every arm's
+    5 = 5, EfficientZero's too): a longer horizon would search steps that
+    training never estimates, a shorter one would train steps that have no
+    set."""
+    if not PREFIX_BN_PER_STEP:
+        return 0
+    if PREFIX_LSTM_HORIZON != UNROLL_STEPS or PREFIX_LSTM_HORIZON < 1:
+        raise ValueError(
+            f"PREFIX_BN_PER_STEP needs PREFIX_LSTM_HORIZON "
+            f"({PREFIX_LSTM_HORIZON}) == UNROLL_STEPS ({UNROLL_STEPS})")
+    return int(PREFIX_LSTM_HORIZON)
+
+
 def build_value_prefix(support_size=None, num_bins=None, transform=True):
     return ValuePrefixNetwork(latent_channels=LATENT_CHANNELS,
                               hidden_size=VALUE_PREFIX_HIDDEN,
@@ -1457,7 +1485,8 @@ def build_value_prefix(support_size=None, num_bins=None, transform=True):
                               num_bins=VALUE_PREFIX_BINS if num_bins is None else num_bins,
                               transform=transform,
                               head_channels=PREFIX_HEAD_CHANNELS,
-                              fc_hidden=PREFIX_FC_HIDDEN)
+                              fc_hidden=PREFIX_FC_HIDDEN,
+                              per_step=prefix_bn_steps())
 
 
 def build_projector():
@@ -1915,6 +1944,7 @@ class MCTSHelper:
         prefix_net = self.network_manager.value_prefix
         parent_states = []
         resets = []
+        steps = []
         for node in chunk:
             state = node.prefix_state
             reset = state is None or node.prefix_len >= PREFIX_LSTM_HORIZON
@@ -1922,15 +1952,23 @@ class MCTSHelper:
                 state = prefix_net.initial_state(1, self.device)
             parent_states.append(state)
             resets.append(reset)
+            # The LSTM step the children's prefix takes (PREFIX_BN_PER_STEP's
+            # per-row index): 1 from a fresh state, else one past the
+            # parent's accumulation -- the child_len batch_expand_nodes stores.
+            steps.append(1 if reset else node.prefix_len + 1)
 
         # (1, num_chunk, H) -> one copy per action -> (1, num_chunk*A, H)
         h = torch.cat([s[0] for s in parent_states], dim=1).repeat_interleave(action_space, dim=1)
         c = torch.cat([s[1] for s in parent_states], dim=1).repeat_interleave(action_space, dim=1)
+        # Host-side: the head moves it to the latents' device only when the
+        # flag is on (an off head never reads it).
+        step = torch.tensor(steps, dtype=torch.long).repeat_interleave(action_space)
 
         was_training = prefix_net.training
         prefix_net.eval()
         try:
-            prefixes, _, state = prefix_net(next_latents, (h.contiguous(), c.contiguous()))
+            prefixes, _, state = prefix_net(next_latents, (h.contiguous(), c.contiguous()),
+                                            step=step)
         finally:
             prefix_net.train(was_training)
         return prefixes.squeeze(-1).cpu().numpy(), state, resets
@@ -2862,7 +2900,11 @@ class TrainingHelper:
             # same trunk for now so they can be compared directly on identical
             # representations; the per-step head goes away once the tree search
             # is migrated to consume prefixes.
-            _, prefix_logits, prefix_state = self.value_prefix(latent, prefix_state)
+            # step=i: the state is fresh at the unroll's start and never
+            # resets inside it, so call i is LSTM step i (PREFIX_BN_PER_STEP's
+            # per-step sets; prefix_bn_steps pins the horizon to the unroll).
+            _, prefix_logits, prefix_state = self.value_prefix(
+                latent, prefix_state, step=i)
             prefix_loss = wmean(-torch.sum(converted_target_prefix[:, i, :] * F.log_softmax(prefix_logits, dim=1), dim=1))
 
             policy_logits, _, value_logits = self.prediction(latent)
@@ -3017,7 +3059,9 @@ class TrainingHelper:
                 num_bins=self.value_prefix.num_bins,
                 transform=self.value_prefix.transform,
                 head_channels=self.value_prefix.head_channels,
-                fc_hidden=self.value_prefix.fc_hidden).to(self.device)
+                fc_hidden=self.value_prefix.fc_hidden,
+                per_step=getattr(self.value_prefix, "per_step", 0)
+                ).to(self.device)
             # Structural, not conventional: target nets never see an
             # optimizer, and every forward is no-grad anyway.
             for net in (self.target_representation, self.target_prediction,

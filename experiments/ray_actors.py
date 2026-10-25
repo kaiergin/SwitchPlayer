@@ -341,8 +341,11 @@ class InferenceServer:
                     out.append((logits[at:at + s], values[at:at + s]))
                     at += s
                 return out
-            # value_prefix: payload = (latents, h, c); batch along the
-            # LSTM's batch dim (dim 1 for states, dim 0 for latents).
+            # value_prefix: payload = (latents, h, c[, step]); batch along
+            # the LSTM's batch dim (dim 1 for states, dim 0 for latents).
+            # step: each payload's per-row LSTM steps (PREFIX_BN_PER_STEP),
+            # concatenated like the latents; any payload without one sends
+            # None (the head refuses that when the flag is on).
             sizes = [p[0].shape[0] for p in payloads]
             lat = torch.tensor(np.concatenate([p[0] for p in payloads], 0),
                                dtype=torch.float32, device=self.device)
@@ -350,8 +353,15 @@ class InferenceServer:
                              dtype=torch.float32, device=self.device)
             c = torch.tensor(np.concatenate([p[2] for p in payloads], 1),
                              dtype=torch.float32, device=self.device)
+            steps = [p[3] if len(p) > 3 else None for p in payloads]
+            step = None
+            if all(s is not None for s in steps):
+                step = torch.tensor(np.concatenate(
+                    [np.broadcast_to(np.asarray(s, dtype=np.int64)
+                                     .reshape(-1), (n,))
+                     for s, n in zip(steps, sizes)]), device=self.device)
             prefixes, _, (nh, nc) = nets["value_prefix"](
-                lat, (h.contiguous(), c.contiguous()))
+                lat, (h.contiguous(), c.contiguous()), step=step)
             prefixes = prefixes.cpu().numpy()
             nh, nc = nh.cpu().numpy(), nc.cpu().numpy()
             out, at = [], 0
@@ -372,8 +382,9 @@ class InferenceServer:
     async def predict(self, latents, which="live"):
         return await self._enqueue("prediction", which, latents)
 
-    async def prefix_step(self, latents, h, c, which="live"):
-        return await self._enqueue("value_prefix", which, (latents, h, c))
+    async def prefix_step(self, latents, h, c, step=None, which="live"):
+        return await self._enqueue("value_prefix", which,
+                                   (latents, h, c, step))
 
 
 class _RemoteModule:
@@ -400,7 +411,7 @@ class _RemoteModule:
         z = torch.zeros(layers, batch, hidden)
         return (z, z.clone())
 
-    def __call__(self, *args):
+    def __call__(self, *args, step=None):
         owner = self._owner
         if self._kind == "dynamics":
             lat, act = args
@@ -414,11 +425,14 @@ class _RemoteModule:
                 "predict", args[0].detach().cpu().numpy())
             return (torch.from_numpy(np.array(logits)),
                     torch.from_numpy(np.array(values)), None)
-        # value_prefix
+        # value_prefix; step (PREFIX_BN_PER_STEP's per-row LSTM steps)
+        # crosses the wire as an int or an int64 array.
         lat, (h, c) = args
+        if torch.is_tensor(step):
+            step = step.detach().cpu().numpy()
         prefixes, nh, nc = owner._call(
             "prefix_step", lat.detach().cpu().numpy(),
-            h.detach().cpu().numpy(), c.detach().cpu().numpy())
+            h.detach().cpu().numpy(), c.detach().cpu().numpy(), step)
         return (torch.from_numpy(np.array(prefixes)), None,
                 (torch.from_numpy(np.array(nh)),
                  torch.from_numpy(np.array(nc))))
