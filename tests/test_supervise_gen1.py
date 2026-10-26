@@ -433,6 +433,34 @@ def test_the_quick_probes_tell_the_arms_apart(real_sup):
                                           or "KeyError" in r.stderr), other
 
 
+@pytest.mark.parametrize("variant", ["ds2", "fs2"])
+@pytest.mark.parametrize("break_", ["arm off", "default on", "G0 on"])
+def test_each_flag_assert_of_the_quick_probe_bites_alone(real_sup, variant,
+                                                         break_):
+    """Audit r2 A-NIT-1: with everything else the real student arm, each
+    of the three flag asserts alone fails the probe -- the student's flag
+    off, the module default on, G0's arm carrying the flag (so a vacuous
+    rewrite of any of them is caught)."""
+    import subprocess
+    probe = real_sup.quick(variant)
+    arm = real_sup.VARIANTS[variant]
+    prelude = {"arm off": f"ablation.ARMS[{arm!r}]['PREFIX_BN_PER_STEP'] = "
+                          f"False; ",
+               "default on": "muzero.PREFIX_BN_PER_STEP = True; ",
+               "G0 on": f"ablation.ARMS[{G0_ARM!r}]['PREFIX_BN_PER_STEP'] = "
+                        f"True; "}[break_]
+    anchor = f"spec = ablation.ARMS[{arm!r}]; "
+    assert probe.count(anchor) == 1
+    broken = probe.replace(anchor, prelude + anchor)
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": "-1"}
+    r = subprocess.run([sys.executable, "-c", broken], cwd=ROOT,
+                       capture_output=True, text=True, env=env)
+    assert r.returncode != 0 and "AssertionError" in r.stderr, r.stderr
+    ok = subprocess.run([sys.executable, "-c", probe], cwd=ROOT,
+                        capture_output=True, text=True, env=env)
+    assert ok.returncode == 0, ok.stderr[-2000:]   # the control
+
+
 def test_the_quick_probe_is_bounded(monkeypatch):
     """Audit r1 B-N3 (PB's r1 B-N5): a hung quick probe is a PREFLIGHT
     not-ready reason (the loop retries), never a preflight stalled for
@@ -624,7 +652,7 @@ def test_fs2_keeps_waiting_for_an_abandoned_ds2(sup, monkeypatch, capsys):
     for stop in ("PREP FAILED: MASTER NEAR RANDOM: G0's deployed mean ...",
                  "PREP FAILED: MASTER ABANDONED: G0's run folder ..."):
         (base / "supervisor.log").write_text(
-            "preflight ok (manifest + quick probe + 19 suites)\n"
+            "preflight ok (manifest + quick probe + 20 suites)\n"
             + stop + "\n")
         with pytest.raises(Stop):
             sup.wait_external("fs2", 0)

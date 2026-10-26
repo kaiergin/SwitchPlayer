@@ -41,8 +41,9 @@ vocab.json), then its preflight, then FS2 launches -- only on the
 vocabulary AND ceiling DS2 trained with (vocab_is_ds, before every launch).
 A RESUME (this run's checkpoint exists, or its supervisor.log logged a
 LAUNCHED line) skips the wait. Before EVERY launch attempt (and before the
-prep) it waits while ANY python runs ablation.py or distill.py (is_trainer:
-any tree, by path or as a module; the prep counts). One supervisor per
+preflight and the prep) it waits while ANY python runs ablation.py or
+distill.py (is_trainer: any tree, by path or as a module; the prep
+counts). One supervisor per
 run: a second supervise_gen1.py of the same variant refuses to start. A
 run already complete exits at once (RUN COMPLETE). ABANDONED in the run
 folder stops every launch; a run folder holding snapshots (its own or its
@@ -77,9 +78,11 @@ PROCEDURES (the rebuild's launcher and hand-off: launch_gen1b.ps1,
 post_gen1b.py; the pre-fix launch_gen1.ps1 and Y:/SwitchPlayer-gen1-run are
 never used again -- that tree's run folders hold ABANDONED files). PAUSE (a
 Switch session): kill the supervisor, then its trainer
-(experiments/ablation.py) or prep (experiments/distill.py), by command
-line; resume by rerunning launch_gen1b.ps1 (idempotent). After a REBOOT
-rerun launch_gen1b.ps1.
+(experiments/ablation.py), prep (experiments/distill.py) or preflight
+(a python running -m pytest in the run tree: the guard does not count it,
+so a quick resume would run the 20 suites twice), by command line; resume
+by rerunning launch_gen1b.ps1 (idempotent). After a REBOOT rerun
+launch_gen1b.ps1.
 ABANDON (Kai's call): FIRST stop the supervisor and its trainer, THEN
 create ABANDONED in the run folder (ds2 abandoned: fs2 keeps waiting for
 it -- Kai's call). UN-ABANDONING: stop the hand-off (post_gen1b.py) and

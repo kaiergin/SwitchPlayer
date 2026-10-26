@@ -1255,9 +1255,10 @@ every later arm). Everything above stands except:
     (1)) at rows 30, 55, 75 and 90 (DS2 also at row 0), run by the eval
     hand-off from the frozen tree on Step 0 (iii)'s 480 states. FIXED as
     in PB (p1_ratio <= 2), reported in both directions (PB A-L5). A
-    student not FIXED at any of rows 55-90 -> its search is not clean:
-    reads (1)-(9) are reported with that caveat, and the fix is diagnosed
-    before any Test 3 (Kai's call).
+    student not FIXED at one or more of rows 55, 75 and 90 -> its search
+    is not clean: reads (1)-(9) are reported with that caveat, and the fix
+    is diagnosed before any Test 3 (Kai's call). (Worded so by audit r2
+    A-L1: "not FIXED at any of" read both ways.)
   - The preflight adds tests/test_pbn.py (the fix's suite); the probe and
     its states join AUDITED.
   COST unchanged: prep ~0.5 h, DS2 ~17.5 h, FS2 ~15 h (PB ran at TK's
@@ -1320,6 +1321,44 @@ FIXES r1:
 ACCEPTED r1: B-N4 (the suite count: 20, not 22 as first said). B's
 auditor ran two no-op commands with the system python3, outside the lock
 (nothing imported).
+AUDIT r2 (two fresh-eyes auditors on 06d8d126): A (the core) nothing above
+LOW; B (the orchestration) nothing above LOW. THE AUDIT LOOP IS CLOSED.
+Verified in r2: every r1 fix in code and tests (core mutants: either
+student's flag off or not True, G0's on, student_arm dropping it, the
+offline phase in eval mode, no fc_hidden_norm fold -- each caught;
+supervisor mutants: the guard missing or before the prime, the quick
+probe unbounded or its timeout taken as success, read (10)'s jsonl
+dropped from the refusal, freshH missing, SUITES / AUDITED / dates wrong
+-- each caught; 17 hand-off mutants, all caught by the checker); an
+end-to-end student run with every head call and fold instrumented (the
+prep under G0's off arm folds nothing; every fold inside train_step on the
+live head, each set exactly once per step; refresh, birth search and the
+diagnostics in eval mode with their steps; resume restores the step sets
+exactly; a fresh-interpreter --cpu-actor SelfPlayActor builds per_step 5
+and strict-loads; both probes on row 0 and the offline curve); the
+disarmed tree's supervisor (a852bb1b) returns "not launching" before any
+wait in a trapped copy, and reaches the preflight with ABANDONED moved
+away (the r1 MEDIUM was real); a CRLF export: all 49 AUDITED files hash
+as here (states.npz is -text), a manifest from this tree passes there,
+217 targeted tests pass; the G0 wait and the master gate (1113.857) pass
+on the real G0; the derivations regenerate byte for byte.
+FIXES r2 (text and tests, LOW / NIT; confirmed by a fresh-eyes r3 check,
+as PB's r2 B-L1 was):
+  - A-L1: read (10)'s caveat rule worded "not FIXED at one or more of rows
+    55, 75 and 90" (above; "not FIXED at any of" read both ways).
+  - B-L1 (inherited): PAUSE also kills a running preflight (python -m
+    pytest in the run tree): the guard does not count it, and a quick
+    resume would run the 20 suites twice. B-N1: the docstring names the
+    guard before the preflight.
+  - B-N2: the hand-off's docstring and final-pass comment say fs2 waits on
+    DS2's exact evals only.
+  - A-NIT-1: each of the quick probe's three flag asserts alone fails it
+    on an otherwise real student arm (6 cases, with the unbroken probe as
+    the control); A-NIT-2: the DS2 offline test requires each step set
+    folded exactly once per offline step; A-NIT-3: a log line's count.
+ACCEPTED r2: both auditors ran one no-op command with the system python
+outside the lock (json only, nothing written); r1's "seven mutants" are
+the r1 auditor's own set (r2's are listed above).
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 

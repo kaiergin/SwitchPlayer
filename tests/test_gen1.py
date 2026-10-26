@@ -547,6 +547,8 @@ def test_ds2_trains_offline_at_the_preps_ceiling_under_the_offset(
     vp = row0["value_prefix"]
     for name in ("norm_in", "norm_out", "fc_hidden_norm"):
         count = vp[f"{name}_step_count"]
-        assert count.shape[0] == 5 and bool((count > 0).all()), name
+        # once per offline step, every set (audit r2 A-NIT-2: a double
+        # fold or a skipped step would show)
+        assert count.tolist() == [4] * 5, (name, count)
         assert not torch.equal(vp[f"{name}_step_mean"],
                                torch.zeros_like(vp[f"{name}_step_mean"]))
