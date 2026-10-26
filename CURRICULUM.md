@@ -1407,6 +1407,20 @@ half):
       mass on dropped tokens 0.177.
 DS2 LAUNCHED 22:30 10-25 (attempt 1, fresh): the prefill, then the 20,000
 offline steps (~1 h 20 min to the first checkpoint), then 90 iterations.
+DS2 ROW 0 (interim, 00:25 10-26; the offline phase took ~1 h 33 min):
+  READ (0) transfer: row 0 (20,000 offline steps, before DS2 played)
+      1065.0 deployed (SD 413.7, min 570; g 0.778), raw 1119.3, against
+      MASTER 1113.86: -48.9, descriptive (+-464); NOT TRANSFER FAILED. The
+      offline curve, deployed / raw: 948 / 1115 @4k, 942 / 1149 @8k,
+      1146 / 1035 @12k, 1326 / 1226 @16k, 1065 / 1119 @20k (row 0) --
+      every row within ~170 of MASTER from 4k steps on; G0 scored 1176.0
+      in the recorded games. (The distillation step's DS: 660 at row 0
+      against its master's 857, 492 at 4k.)
+  READ (10) row 0: p1_ratio 0.84 -> FIXED (|step-1 prefix| 0.611 in eval
+      mode against 0.725 with batch statistics); the post-LSTM BN's step-1
+      input offset is 0.25 running SDs against its step set (1.78 against
+      the pooled statistics).
+  Frames per decision, deployed: 22.5 at row 0 (21.3-22.4 offline).
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
