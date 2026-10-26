@@ -36,6 +36,10 @@ from tests.test_prioract2 import restore_rngs  # noqa: E402,F401
 TK_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
           "tokens-rgrow")
 PB_ARM = TK_ARM + "-pbn"
+# Test 2's generation-1 students, rebuilt with the fix (CURRICULUM Test 2
+# "REBUILD WITH THE FIX", 2026-10-25)
+GEN1_ARMS = tuple("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
+                  f"mspacman-tokens-gen1-{k}" for k in ("distill", "fresh"))
 ENV_ID = "MsPacmanNoFrameskip-v4"
 CPU = torch.device("cpu")
 C, HW = muzero.LATENT_CHANNELS, muzero.LATENT_HW
@@ -191,12 +195,15 @@ def test_off_head_ignores_its_step_argument():
 
 
 def test_off_arms_build_the_pre_pb_head():
-    """Every existing arm leaves the flag off: the factory's head, the
-    harness's nets and the target model carry no step buffers."""
+    """Every arm but PB and the arms built on it after its result (Test 2's
+    students) leaves the flag off: the factory's head, the harness's nets
+    and the target model carry no step buffers."""
     assert muzero.PREFIX_BN_PER_STEP is False
-    for name, spec in ablation.ARMS.items():
-        if name != PB_ARM:
-            assert not spec.get("PREFIX_BN_PER_STEP"), name
+    on = {name for name, spec in ablation.ARMS.items()
+          if spec.get("PREFIX_BN_PER_STEP")}
+    assert on == {PB_ARM, *GEN1_ARMS}, on
+    for name in on:
+        assert ablation.ARMS[name]["PREFIX_BN_PER_STEP"] is True, name
     with ablation.arm_config(TK_ARM) as spec:
         nets = ablation.build_networks(spec)
         assert nets["value_prefix"].per_step == 0
