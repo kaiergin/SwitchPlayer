@@ -1244,8 +1244,11 @@ every later arm). Everything above stands except:
     therefore keeps G0's pooled statistics (PB audit r2 A-NIT-3). Test 1's
     exploratory read shows them clean at G0's own scale (p1_ratio
     0.65-0.72 at rows 30-90, under PB's 2x line), so the master's policy
-    targets need no re-estimation. Each student's value is its own TD (no
-    value distillation), so nothing of G0's value-prefix head reaches it.
+    targets need no re-estimation. No G0 value target reaches a student
+    (each student's value is its own TD, recomputed at batch time); G0's
+    search, through its pooled prefix head, shapes only DS2's prefill:
+    its policy targets and, through the stored root values, its initial
+    replay priorities (corrected by audit r1 A-NIT-1).
   - The master gate is settled: G0's deployed mean 60-90 is 1113.86, not
     NEAR RANDOM; MASTER for read (3) = 1113.86.
   - NEW READ (10) MECHANISM, per student: probe_prefix_bn.py (PB's read
@@ -1259,6 +1262,64 @@ every later arm). Everything above stands except:
     its states join AUDITED.
   COST unchanged: prep ~0.5 h, DS2 ~17.5 h, FS2 ~15 h (PB ran at TK's
   pace, 10.1 min/iteration).
+REBUILT 2026-10-25 (35982db6, pre-audit): the flag in both student arms;
+the supervisor's runs and prep dated 2026-10-25, tests/test_pbn.py in its
+SUITES (20 suites), probe_prefix_bn.py and states.npz in AUDITED, read
+(10)'s jsonl refused like the exact evals' on a fresh start. The eval
+hand-off post_gen1b.py (scratchpad; make_post_gen1b.py derives it from
+post_gen1.py's audited derivation plus PB's read (1) machinery) runs read
+(10); launch_gen1b.ps1 starts it and both supervisors from the new tree.
+AUDIT r1 (two fresh-eyes auditors on 35982db6). A (the core): one HIGH,
+already found by the lead's full preflight run and fixed in f4907d9d --
+test_pbn's off-arms test still required PB to be the only flag-on arm, so
+the preflight could never pass (loud, no wrong data); now it requires
+exactly PB and the two students. Otherwise nothing above LOW. Verified:
+every value-prefix call on the student paths passes its step (the offline
+phase through train_step, birth search on the deep-copied nets, refresh on
+the target nets, the diagnostics, resume; the prefill makes no head
+calls); no master net or BN statistic enters a student (--init-weights is
+refused; G0 loads strictly under its own off arm, and a flag-on build
+refuses G0's state strictly); the flag reaches every weights file's spec,
+the Ray overrides and both probes (synthetic flag-on DS2 / FS2 snapshots:
+probe_prefix_bn A = 31, per_step 5, the globals restored; the exact-eval
+probe's strict loads); BN recalibration and ReDo leave the step sets
+alone; seven mutants each caught by the new tests; G0's p1_ratio
+0.65-0.72 and deployed mean 1113.86 confirmed from the records. B (the
+orchestration): one MEDIUM -- with G0 complete, the stopped pre-fix tree's
+supervisors would no longer wait: started by hand or after a reboot (its
+docstring still named launch_gen1.ps1), they would run an UNFIXED DS2,
+and launch_gen1b.ps1 would skip its own as "already running".
+FIXES r1:
+  - B-M1: the stopped tree is disarmed -- an ABANDONED file in both of its
+    run folders (Y:\SwitchPlayer-gen1-run\benchmarks\results\mspacman-
+    gen1-{distill,fresh}-s0-2026-10-24; its supervisors exit before any
+    wait); the supervisor's PROCEDURES name launch_gen1b.ps1 and
+    post_gen1b.py, drop the launch_gen0.ps1 clause and name read (10)'s
+    jsonl in UN-ABANDON and FRESH.
+  - B-L1 (PB's r1 B-L2): the any-trainer guard runs once before the
+    preflight too (a relaunch beside an orphaned trainer or prep would
+    otherwise run the 20 suites beside it); tested.
+  - B-L2: the hand-off checker pins read (10)'s "exited 0 but no row"
+    branch (judged on read (10)'s own jsonl) and the final pass's missing
+    count (n == 10 in the abandon case, read (10)'s row 0 among them), and
+    that the offline curve's abandon line names no read (10) jsonl.
+  - B-L3: fs2 waits on DS2's exact-eval rows, not read (10): the
+    predecessor comment says so, and the hand-off's final-pass-FAILED line
+    reads "fs2 waits on the exact-eval rows among them".
+  - A-L1 / B-N2: the quick probe asserts the flag on, the module default
+    off and G0 off; G0's arm fails both students' probes (tested).
+  - B-N3 (PB's r1 B-N4 / N5): the EVAL line shows freshH, prefix and
+    prefix_step1 (read (8) live); the quick probe has a 900 s timeout
+    (tested).
+  - B-N1: the hand-off's vanish guard is documented as watching the exact
+    evals' rows (a moved read (10) jsonl is just re-probed).
+  - B-N5: launch_gen1b.ps1 refuses a manifest that does not pin
+    probe_prefix_bn.py (the pre-fix one), before anything starts.
+  - A-NIT-1: the MASTER bullet above corrected; A-NIT-2: the DS2 offline
+    test checks all three step-set BatchNorms (fc_hidden_norm too).
+ACCEPTED r1: B-N4 (the suite count: 20, not 22 as first said). B's
+auditor ran two no-op commands with the system python3, outside the lock
+(nothing imported).
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 

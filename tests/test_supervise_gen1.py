@@ -411,12 +411,61 @@ def test_supervisor_quick_probe_passes(real_sup, variant):
 
 
 def test_the_quick_probes_tell_the_arms_apart(real_sup):
+    """FS2's arm fails DS2's probe; G0 (the flag off: the rebuild's one
+    change, audit r1 A-L1 / B-N2) fails both."""
     import subprocess
-    swapped = real_sup.quick("ds2").replace(DS2_ARM, FS2_ARM)
-    r = subprocess.run([sys.executable, "-c", swapped], cwd=ROOT,
-                       capture_output=True, text=True,
-                       env={**os.environ, "CUDA_VISIBLE_DEVICES": "-1"})
-    assert r.returncode != 0 and "AssertionError" in r.stderr
+    for variant in ("ds2", "fs2"):
+        probe = real_sup.quick(variant)
+        assert "spec['PREFIX_BN_PER_STEP'] is True" in probe
+        assert "muzero.PREFIX_BN_PER_STEP is False" in probe
+        assert f"'PREFIX_BN_PER_STEP' not in ablation.ARMS[{G0_ARM!r}]" \
+            in probe
+        others = (FS2_ARM, G0_ARM) if variant == "ds2" else (G0_ARM,)
+        for other in others:
+            swapped = probe.replace(f"ARMS[{real_sup.VARIANTS[variant]!r}]",
+                                    f"ARMS[{other!r}]")
+            assert swapped != probe
+            r = subprocess.run([sys.executable, "-c", swapped], cwd=ROOT,
+                               capture_output=True, text=True,
+                               env={**os.environ,
+                                    "CUDA_VISIBLE_DEVICES": "-1"})
+            assert r.returncode != 0 and ("AssertionError" in r.stderr
+                                          or "KeyError" in r.stderr), other
+
+
+def test_the_quick_probe_is_bounded(monkeypatch):
+    """Audit r1 B-N3 (PB's r1 B-N5): a hung quick probe is a PREFLIGHT
+    not-ready reason (the loop retries), never a preflight stalled for
+    good; the suites are not run after it. The real preflight, every
+    subprocess stubbed."""
+    import subprocess
+    pre = _load(SUPERVISORS / "supervise_gen1.py", "supervise_gen1_preflight")
+    monkeypatch.setattr(pre, "manifest_check", lambda: (True, ""))
+    calls, outcome = [], ["hang"]
+
+    def run(args, **k):
+        calls.append((list(args), k))
+        if args[1] == "-c" and outcome[0] == "hang":
+            raise subprocess.TimeoutExpired(args, k["timeout"])
+        if args[1] == "-c" and outcome[0] == "fail":
+            return SimpleNamespace(returncode=1, stdout="",
+                                   stderr="x" + NL + "AssertionError")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pre.subprocess, "run", run)
+    assert pre.preflight("ds2") == (False, "quick probe timed out")
+    assert len(calls) == 1                         # no suites after it
+    args, k = calls[0]
+    assert args == [pre.PY, "-c", pre.quick("ds2")]
+    assert k["timeout"] == pre.QUICK_TIMEOUT_S == 900
+    assert k["env"]["CUDA_VISIBLE_DEVICES"] == "-1"
+    outcome[0], calls[:] = "fail", []
+    assert pre.preflight("ds2") == (False, "quick probe: AssertionError")
+    assert len(calls) == 1
+    outcome[0], calls[:] = "ok", []
+    assert pre.preflight("fs2") == (True, "")
+    assert [a[1:3] for a, _k in calls] == [["-c", pre.quick("fs2")],
+                                           ["-m", "pytest"]]
 
 
 # --------------------------------------------------------------------------
@@ -1128,6 +1177,55 @@ def test_wait_no_trainer_waits_out_any_trainer_and_streams_rows(
     assert "EVAL ds2 s0 iter 40" in out           # an orphan stays watched
 
 
+@pytest.mark.parametrize("variant", ["ds2", "fs2"])
+def test_the_preflight_waits_for_no_trainer(sup, monkeypatch, capsys,
+                                            variant):
+    """Audit r1 B-L1 (PB's r1 B-L2): a RESUMING relaunch beside an
+    orphaned trainer or prep -- the preflight (20 suites, Ray-spinning
+    slow tests among them) is not called until none is alive; the
+    orphan's rows stream meanwhile (primed first: an old row is not
+    re-printed). Sleeps bounded: a guard that never returns fails instead
+    of hanging."""
+    _rel, base, jsonl, ck, _d = sup.paths(variant, 0)
+    pathlib.Path(base).mkdir(parents=True)
+    pathlib.Path(ck).write_bytes(b"x" * 1_000_001)   # a resume: no wait
+    _write_prep(sup)
+
+    def row(it):
+        with open(jsonl, "a") as f:
+            f.write(json.dumps({"iteration": it, "elapsed_s": float(it),
+                                "reward_ceiling": 7.5}) + NL)
+
+    row(3)                                           # before the prime
+    alive = [7]
+    monkeypatch.setattr(sup, "live_trainers", lambda: list(alive))
+
+    def effect(k):
+        if k == 1:
+            row(4)                                   # the orphan writes
+        if k == 3:
+            alive.clear()                            # the trainer exits
+
+    sleep = _bounded(effect, n=5)
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    seen = []
+
+    def preflight(v):
+        seen.append((v, list(alive)))
+        raise Stop
+
+    monkeypatch.setattr(sup, "preflight", preflight)
+    with pytest.raises(Stop):
+        sup.main([variant, "0"])
+    assert seen == [(variant, [])]
+    assert sleep.calls == [60, 60, 60]
+    out = capsys.readouterr().out
+    assert f"RESUMING {variant} s0" in out
+    assert "trainer is already running (pids [7])" in out
+    assert f"EVAL {variant} s0 iter 4" in out
+    assert f"EVAL {variant} s0 iter 3" not in out
+
+
 # --------------------------------------------------------------------------
 # main: the order, the launch gate, the child
 # --------------------------------------------------------------------------
@@ -1232,7 +1330,7 @@ def test_ds2_runs_wait_preflight_prep_then_each_launch_guarded(
     monkeypatch.setattr(sup.subprocess, "Popen", popen)
     assert sup.main(["ds2", "0"]) == 1                 # 5 quick deaths
     assert "CRASH LOOP" in capsys.readouterr().out
-    assert events == (["wait", "preflight", ("prep", True)]
+    assert events == (["wait", "guard", "preflight", ("prep", True)]
                       + ["guard", "manifest", "intact", "popen"] * 5)
     rel = sup.paths("ds2", 0)[0]
     for i, (args, k) in enumerate(launched):
@@ -1267,8 +1365,8 @@ def test_fs2_has_no_prep_and_checks_ds2s_vocabulary(sup, monkeypatch):
     monkeypatch.setattr(sup.subprocess, "Popen", popen)
     with pytest.raises(Stop):
         sup.main(["fs2", "0"])
-    assert events == ["wait", "preflight", "guard", "manifest", "vocab",
-                      "popen"]
+    assert events == ["wait", "guard", "preflight", "guard", "manifest",
+                      "vocab", "popen"]
     args, k = launched[0]
     assert args == sup.command("fs2", 0) and "--distill-set" not in args
     assert os.path.normpath(os.path.join(
@@ -1301,7 +1399,9 @@ def test_a_broken_prep_blocks_the_launch_until_intact(sup, monkeypatch,
     monkeypatch.setattr(sup.subprocess, "Popen", _stop)
     with pytest.raises(Stop):
         sup.main([variant, "0"])
-    gate = events[events.index("guard"):]
+    pre = events.index("preflight")
+    assert events[pre - 1] == "guard"            # the guard before it
+    gate = events[events.index("guard", pre):]
     assert gate == ["guard", "manifest", "check"] * 3
     out = capsys.readouterr().out
     assert out.count("not relaunching until") == 1          # told once
@@ -1317,7 +1417,8 @@ def test_a_failing_manifest_blocks_the_launch(sup, monkeypatch):
                         lambda *a, **k: events.append("popen") or _stop())
     with pytest.raises(Stop):
         sup.main(["ds2", "0"])
-    assert events[3:] == ["guard", "manifest", "guard", "manifest",
+    assert events[:4] == ["wait", "guard", "preflight", ("prep", True)]
+    assert events[4:] == ["guard", "manifest", "guard", "manifest",
                           "intact", "popen"]
 
 
@@ -1433,7 +1534,7 @@ def test_a_resumed_ds2_never_redoes_its_prep(sup, monkeypatch):
     ck.write_bytes(b"x" * 1_000_001)                  # a resume
     with pytest.raises(Stop):
         sup.main(["ds2", "0"])
-    assert events[0] == "preflight" and ("prep", False) in events
+    assert events[:2] == ["guard", "preflight"] and ("prep", False) in events
 
 
 def test_an_abandoned_ds2_runs_no_prep(sup, monkeypatch, capsys):
@@ -1468,14 +1569,16 @@ def test_main_source_order(sup):
     assert src.index("other_supervisors(") < src.index("run_done(") < \
         src.index("abandoned(base)") < src.index("stray_snapshots(") < \
         src.index("wait_external(")
-    assert src.index("rows.prime()") < src.index("preflight(variant)")
+    # the guard once before the preflight (audit r1 B-L1), after the prime
+    assert src.index("rows.prime()") < src.index("wait_no_trainer(rows)") \
+        < src.index("preflight(variant)")
     assert src.index("preflight(variant)") < src.index("run_prep(")
     assert src.index("run_prep(") < src.index("for attempt in range(")
     loop = src[src.index("for attempt in range("):]
     assert loop.index("wait_no_trainer(rows)") < loop.index(
         "manifest_check()") < loop.index("set_intact()") < loop.index(
         "vocab_is_ds(seed)") < loop.index("subprocess.Popen(")
-    assert src.count("wait_no_trainer(") == 1
+    assert src.count("wait_no_trainer(") == 2       # before the preflight
     assert "redo_ok=not launched(base, ckpt)" in src
 
 
@@ -1621,6 +1724,15 @@ def test_rows_check_against_the_preps_ceiling(sup, tmp_path, capsys):
     assert out.startswith("EVAL fs2 s0 iter 2") and "ALERT" not in out
     assert "maxp 0.4" in out and "ceiling 7.5  kept 0.9  max 60.0" in out
     assert "frames/decision 12.0" in out
+    # the rebuild's live reads (audit r1 B-N3, PB's r1 B-N4)
+    assert "freshH None | prefix None  prefix_step1 None (control None)" \
+        in out
+    row(iteration=4, reward_ceiling=7.5, fresh_target_entropy=1.25,
+        prefix=0.5, prefix_step1=0.125, prefix_step1_control=0.75)
+    rows.emit()
+    out = capsys.readouterr().out
+    assert ("freshH 1.25 | prefix 0.5  prefix_step1 0.125 (control 0.75) "
+            "| ceiling 7.5") in out
     row(iteration=3, reward_ceiling=1.0, reward_max=60.1)
     rows.emit()
     out = capsys.readouterr().out

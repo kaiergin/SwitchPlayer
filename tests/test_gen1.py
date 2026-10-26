@@ -231,7 +231,8 @@ def test_gen1_arm_deltas_from_g0():
     # the rebuild (CURRICULUM Test 2 "REBUILD WITH THE FIX"): PB's fix in
     # both students, so the pair still differs only in the distillation
     # step; the master stays an off arm (its snapshot has no step sets)
-    assert ds["PREFIX_BN_PER_STEP"] is True and fs["PREFIX_BN_PER_STEP"] is True
+    assert ds["PREFIX_BN_PER_STEP"] is True
+    assert fs["PREFIX_BN_PER_STEP"] is True
     assert "PREFIX_BN_PER_STEP" not in g0 and not muzero.PREFIX_BN_PER_STEP
     d = {k for k in set(ds) | set(fs) if ds.get(k) != fs.get(k)}
     assert d == {"SCHEDULE_OFFSET_STEPS", "_student", "_distill_offline_steps",
@@ -544,7 +545,7 @@ def test_ds2_trains_offline_at_the_preps_ceiling_under_the_offset(
     # them
     assert row0["spec"]["PREFIX_BN_PER_STEP"] is True
     vp = row0["value_prefix"]
-    for name in ("norm_in", "norm_out"):
+    for name in ("norm_in", "norm_out", "fc_hidden_norm"):
         count = vp[f"{name}_step_count"]
         assert count.shape[0] == 5 and bool((count > 0).all()), name
         assert not torch.equal(vp[f"{name}_step_mean"],

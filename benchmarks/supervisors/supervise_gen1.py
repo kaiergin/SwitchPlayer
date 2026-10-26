@@ -73,20 +73,24 @@ the long-lived supervisor). Removed with the fallback master: the
 distillation step's wait-skipping override and everything behind it (Test
 2 has no second master to fall back to).
 
-PROCEDURES. PAUSE (a Switch session): kill the supervisor, then its trainer
+PROCEDURES (the rebuild's launcher and hand-off: launch_gen1b.ps1,
+post_gen1b.py; the pre-fix launch_gen1.ps1 and Y:/SwitchPlayer-gen1-run are
+never used again -- that tree's run folders hold ABANDONED files). PAUSE (a
+Switch session): kill the supervisor, then its trainer
 (experiments/ablation.py) or prep (experiments/distill.py), by command
-line; resume by rerunning launch_gen1.ps1 (idempotent). After a REBOOT
-rerun launch_gen1.ps1 (and launch_gen0.ps1 until G0's evals have landed:
-its hand-off, post_gen0.py, writes the rows ds2 waits for).
+line; resume by rerunning launch_gen1b.ps1 (idempotent). After a REBOOT
+rerun launch_gen1b.ps1.
 ABANDON (Kai's call): FIRST stop the supervisor and its trainer, THEN
 create ABANDONED in the run folder (ds2 abandoned: fs2 keeps waiting for
-it -- Kai's call). UN-ABANDONING: stop the hand-off (post_gen1.py) and its
-probes, drop the probe rows its abandon pass logged as newer than the
-checkpoint, remove ABANDONED, rerun launch_gen1.ps1. A FRESH restart: stop
-the supervisor, its trainer or prep and the hand-off, move the run folder
-AND its probe jsonls (ds2: and its "-offline" ones) aside -- and, to redo
-the prep too, the prep folder (only before DS2 trained on it: FS2 must
-train on DS2's vocabulary) -- then rerun launch_gen1.ps1.
+it -- Kai's call). UN-ABANDONING: stop the hand-off (post_gen1b.py) and
+its probes, drop the probe rows its abandon pass logged as newer than the
+checkpoint from every probe jsonl of the run (read (10)'s
+probe_prefix_bn-<run>.jsonl included), remove ABANDONED, rerun
+launch_gen1b.ps1. A FRESH restart: stop the supervisor, its trainer or
+prep and the hand-off, move the run folder AND its probe jsonls (read
+(10)'s too; ds2: and its "-offline" ones) aside -- and, to redo the prep
+too, the prep folder (only before DS2 trained on it: FS2 must train on
+DS2's vocabulary) -- then rerun launch_gen1b.ps1.
 
 Create a run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
@@ -130,6 +134,7 @@ PACE_ALERT_MIN = 25.0
 COMMIT_ALERT_GB = 4.0
 PRED_EVALS_ALERT_S = 2 * 3600    # predecessor done this long, evals missing
 PRED_SILENT_ALERT_S = 4 * 3600   # predecessor unfinished, its log silent
+QUICK_TIMEOUT_S = 900    # the preflight's quick import probe (PB r1 B-N5)
 PREP_ATTEMPTS = 3
 PREP_RETRY_S = 900
 # Attempts that live at least STALL_MIN_S and die without writing a new
@@ -321,13 +326,17 @@ def write_manifest():
 
 def quick(variant):
     """The import probe for `variant`'s arm (a generation-1 student of G0
-    whose ceiling comes from the prep) and the prep module."""
+    whose ceiling comes from the prep; the rebuild's PREFIX_BN_PER_STEP on,
+    default off, G0 off) and the prep module."""
     arm = VARIANTS[variant]
     kind = "distill" if variant == "ds2" else "fresh"
     offset = 20000 if variant == "ds2" else 0
     return ("import sys; sys.path[:0] = ['.', 'experiments']; "
             "import muzero, ablation, muzero_vtree, distill; "
             f"spec = ablation.ARMS[{arm!r}]; "
+            "assert spec['PREFIX_BN_PER_STEP'] is True; "
+            "assert muzero.PREFIX_BN_PER_STEP is False; "
+            f"assert 'PREFIX_BN_PER_STEP' not in ablation.ARMS[{G0_ARM!r}]; "
             f"assert spec['_student'] == {kind!r}; "
             "assert spec['_ceiling_from_prep'] is True; "
             f"assert spec['_master_arm'] == {G0_ARM!r}; "
@@ -397,8 +406,10 @@ def predecessor(variant, seed):
                 G0_SUPLOG, "supervise_gen0.py", "g0", G0_ABANDONED)
     _, base, _, ck, _ = paths("ds2", seed)
     run = run_name("ds2", seed)
-    # DS2's rows 0 and 5-90 and its offline curve's rows 1-4 (FS2 must not
-    # start while DS2's final pass still probes).
+    # DS2's rows 0 and 5-90 and its offline curve's rows 1-4: FS2 never
+    # starts before DS2's exact evals have landed (read (10), the
+    # rebuild's, is not waited for: DS2's last probe_prefix_bn, ~7 s and
+    # ~2.4 GB on the CPU, may still run beside FS2's preflight).
     probes = [(os.path.join(REPO, "benchmarks", "probes",
                             f"probe_exhaustive_eval-{name}{s}.jsonl"), rows)
               for name, rows in ((run, DS_ROWS),
@@ -828,8 +839,14 @@ def preflight(variant):
     if not ok:
         return False, why
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "-1"}
-    r = subprocess.run([PY, "-c", quick(variant)], cwd=REPO,
-                       capture_output=True, text=True, env=env)
+    try:
+        # bounded (as PB's audit r1 B-N5): a hung import must not stall the
+        # preflight for good
+        r = subprocess.run([PY, "-c", quick(variant)], cwd=REPO,
+                           capture_output=True, text=True, env=env,
+                           timeout=QUICK_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return False, "quick probe timed out"
     if r.returncode:
         return False, "quick probe: " + (r.stderr.strip().splitlines()
                                          or ["?"])[-1]
@@ -1010,13 +1027,20 @@ class Rows:
                        r.get("tok_decisions_per_game"),
                        r.get("tok_duration_play_share"),
                        r.get("tok_duration_search_share")))
+            # the rebuild's live reads (as PB's audit r1 B-N4): the search
+            # targets' entropy (read (8)), the step-K (5) and step-1
+            # value-prefix errors (eval-mode BN, the per-step sets)
+            pre = (" | prefix %s  prefix_step1 %s (control %s)" % (
+                r.get("prefix"), r.get("prefix_step1"),
+                r.get("prefix_step1_control")))
             print("EVAL %s s%d iter %s  train %s  env %s  return %s  H(pi) %s "
-                  " maxp %s  erank %s | ceiling %s  kept %s  max %s%s | "
-                  "elapsed %s s, %s min/iter" % (
+                  " maxp %s  erank %s  freshH %s%s | ceiling %s  kept %s  "
+                  "max %s%s | elapsed %s s, %s min/iter" % (
                       self.variant, self.seed, r.get("iteration"),
                       r.get("train_steps"), r.get("env_steps"),
                       r.get("return_mean"), r.get("policy_entropy"),
                       r.get("policy_maxp"), r.get("proj_erank"),
+                      r.get("fresh_target_entropy"), pre,
                       r.get("reward_ceiling"), r.get("reward_kept"),
                       r.get("reward_max"), tok, el, per),
                   flush=True)
@@ -1238,6 +1262,11 @@ def main(argv):
     # still printed and checked.
     rows = Rows(jsonl, variant, seed)
     rows.prime()
+    # The guard once before the preflight too (as PB's audit r1 B-L2): the
+    # suites (Ray-spinning slow tests among them) never run beside a live
+    # trainer or prep -- an orphan of this run on a resume (its rows
+    # stream: primed above).
+    wait_no_trainer(rows)
     polls, told = 0, None
     while True:
         ok, why = preflight(variant)
