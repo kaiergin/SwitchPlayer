@@ -1448,6 +1448,30 @@ DS2 ROWS 35-55 (interim, 09:37 10-26): deployed 1722 @35, 1385 @40, 1161
       Its exact evals (1161 / 909) are DS2's lowest since rows 10 / 5.
       Earlier runs show the same one-row kind: G0 at row 60 (prefix 2.52,
       H 2.09), the distillation step's FS at rows 60 and 80-90.
+DS2 COMPLETE 15:32 10-26 (RUN COMPLETE, rc 0 after 61,050 s, attempt 1;
+  every exact eval and read (10) row in; fs2's supervisor released 15:31).
+  rows 60-90, deployed: 1525, 1798, 1448, 1514, 1636, 1825, 1851; raw
+      1928, 1534, 1769, 1365, 1234, 1742, 1629. No game capped.
+  NEAR RANDOM: no. DS2 60-90: deployed 1656.52 (SD 167.2; g 1.385), raw
+      1600.05 (SD 241.8; g 1.327).
+  READ (3) against the master: 1656.52 against MASTER 1113.86: +542.7 ->
+      ABOVE (band 232); EfficientZero's 1281.2 is g 1. (The distillation
+      step's DS: 1231.38, +374.8 over its master.)
+  READ (4): at level from row 0 (no forgetting, as above).
+  READ (6) stability, the largest adjacent drop from row 45: -539 (2064
+      @55 -> 1525 @60); raw -403 (1769 @70 -> 1365 @75).
+  READ (8) prior, DS2: R = mean policy_maxp 75-90 / 30-55 = 0.670 / 0.633
+      = 1.06 (0.995 without row 45's one-row dip) -> the prior HELD; the
+      fresh targets' entropy 0.49-1.65 by row, no trend.
+  READ (10): FIXED at all five rows -- p1_ratio 0.84 / 0.73 / 0.72 /
+      0.46 / 0.52 at rows 0 / 30 / 55 / 75 / 90; the step-1 offset
+      against the pooled statistics 1.78 / 6.88 / 5.30 / 4.88 / 4.79 SDs.
+  Tokens and clip: the 32-frame tokens' play share 0.64 @5 -> 0.64 @90
+      (16-frame 0.27 -> 0.22, 4-frame 0.05 -> 0.10); 21.6-25.2 frames per
+      decision at 60-90 (deployed probe); reward_kept 0.83 @5 -> 0.78 @90
+      (the constant ceiling 11.26 cuts a growing share: more of DS2's
+      reward comes from the capped ghosts and later fruit).
+  Reads (1), (2), (5)'s FS2 half and (9) wait for FS2 (~15 h).
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
