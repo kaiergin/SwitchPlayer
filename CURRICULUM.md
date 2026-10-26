@@ -789,6 +789,112 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- PB: per-step prefix BatchNorm statistics on the token arm (seed 0), 2026-10-25
+
+RUN (mspacman-tokens-rgrow-pbn-s0-2026-10-25, from the run worktree
+Y:\SwitchPlayer-pb-run, detached at 8ad72517): 05:23 -> 20:35 10-25 in ONE
+attempt (54,781 s, 10.1 min/iteration; no deaths, no ALERTs,
+supervisor.err empty; RUN COMPLETE). The hand-off ran the evals one at a
+time while it trained and the last three by 20:41: all 18 rows in both
+variants and read (1) at all four snapshots; every row 4/4 phases, no
+capped game. Row 90 at 65.7k env steps (TK-90 58.5k, G0 59.2k). The
+ceiling followed TK's schedule (1.57 @5, 26.3 @30, 160 from row 50;
+reward_kept 1.0 from row 35).
+EXACT eval as TK's (30 noop starts, prior argmax); DEPLOYED (acting states)
+primary, RAW secondary, IN = the run's 8-game eval, maxp = the prior's mean
+max probability, tgtH = fresh_target_entropy / ln 36, pfx1 / pfx5 = the
+logged eval-mode prefix error at LSTM step 1 / step 5 (PB's with the
+per-step sets, TK-90's pfx5 with the pooled statistics):
+  iter          5   10   15   20   25   30   35   40   45   50   55   60   65   70   75   80   85   90
+  PB dep      530  837  597  570  779  873  778  617  825  932 1131 1001  967  869 1150 1096 1016 1129
+  PB raw      616  670  568  543  763  868  856  725  815  955 1153  959  957  986 1025  892 1059 1246
+  PB in       709  702  562  482  979  750  759  692  876  681 1034  876  938 1112 1062 1321 1216 1120
+  maxp       0.67 0.59 0.66 0.68 0.75 0.75 0.75 0.69 0.69 0.69 0.69 0.66 0.67 0.63 0.68 0.67 0.66 0.64
+  tgtH       0.33 0.37 0.31 0.34 0.37 0.32 0.45 0.38 0.41 0.36 0.33 0.41 0.31 0.33 0.44 0.28 0.26 0.23
+  pfx1       0.07 0.04 0.11 0.08 0.08 0.08 0.08 0.09 0.19 0.12 0.11 0.09 0.11 0.09 0.19 0.10 0.33 0.45
+  pfx5       0.08 0.07 0.17 0.05 0.17 0.16 0.14 0.25 0.73 0.27 0.45 0.61 0.86 0.70 1.03 0.78 1.19 1.25
+  TK-90 dep    60   60  271  482  665  524  913  742  732  659  879  780 1033  863  920  825  885  691
+  TK maxp    0.27 0.19 0.61 0.60 0.65 0.65 0.66 0.62 0.66 0.64 0.61 0.57 0.46 0.47 0.40 0.35 0.27 0.20
+  TK tgtH    0.34 0.41 0.43 0.39 0.35 0.32 0.47 0.36 0.40 0.39 0.69 0.79 0.78 0.85 0.93 0.93 0.46 0.92
+  TK pfx5    0.50 0.03 0.07 0.07 0.14 0.17 0.27 0.23 0.47 0.92 1.18 0.73 1.95 1.32 2.61 3.91 2.65 3.45
+NEAR RANDOM: no (deployed 60-90 g 0.745).
+READ (1) MECHANISM: FIXED at all four snapshots. p1_ratio (eval |p1| /
+  train-BN |p1|, with the arm's own step-1 set) 0.68 / 0.40 / 0.41 / 0.47 at
+  rows 30 / 55 / 75 / 90 (FIXED <= 2; TK-90 8.20 / 20.95 / 23.63 at rows 55
+  / 75 / 90 -- 8-24x, not the "8-27x" the pre-registration quoted, A-N1).
+  Both directions (A-L5): the eval error errs LOW, |p1| 0.21-0.43 eval
+  against 0.53-0.81 train-BN, as G0's did on its pooled statistics
+  (p1_ratio 0.65-0.72). The step-1 batch sits 1.84 / 4.95 / 4.84 / 4.72
+  pooled SDs off the pooled statistics and 0.18 / 0.40 / 0.31 / 0.36 off
+  its own set. From row 55 the pooled statistics sat nearly as far off as
+  TK-90's (7.09 / 6.49 / 6.79 at rows 55 / 75 / 90); the per-step set did
+  not. Records: benchmarks/probes/step0_prefix_bn/pb_prefix_bn.jsonl (the
+  hand-off's probe_prefix_bn-mspacman-tokens-rgrow-pbn-s0-2026-10-25.jsonl).
+READ (2) TARGETS: mean tgtH over rows 60-90 0.324 -> HELD (<= 0.55; TK-90
+  0.81). Rows 30-55 0.375 (TK-90 0.44). PB's targets sharpened late (0.44
+  @75 -> 0.23 @90), where TK-90's went 0.39 @50 -> 0.79 @60 -> 0.93 @75.
+READ (3) PRIOR: R = mean maxp 75-90 (0.6628) / mean maxp 30-55 (0.7082) =
+  0.94 -> HELD (>= 0.8; TK-90 0.48, G0 0.99). policy_entropy / ln 36
+  0.31-0.36 over rows 60-90 against TK-90's 0.45 @60 -> 0.87 @90.
+READ (4) LEVEL: deployed mean 60-90 1032.43 (SD 99.6, g 0.745) against
+  TK-90's 856.62: +175.8 -> NO DIFFERENT (band 232). Raw 1017.71 (SD 113.8,
+  g 0.729) against 830.81: +186.9 -> NO DIFFERENT (band 205). Thirds 5-25 /
+  30-55 / 60-90: deployed 663 / 859 / 1032 (TK-90 308 / 742 / 857); raw 632
+  / 895 / 1018.
+READ (5) descriptive:
+  - The prefix errors. Step 1 (set 1): 0.04-0.19 through row 80, 0.33 @85,
+    0.45 @90, while the step-1 targets grew (mean |target| 0.28-0.53 to row
+    30, 0.68-0.88 at rows 35-60 and 70, 1.58-2.25 at 65 and from 75).
+    Relative to the target that is 0.05-0.24 at every row, with no trend:
+    the per-step set follows the scale. Step 5 (set 5): 0.05-0.27 to row 40,
+    0.27-1.25 after, against TK-90's (pooled) 0.73-3.91 over rows 60-90 --
+    a comparison that includes the fix (A-N7).
+  - Tokens. Play shares over rows 60-90: 4-frame 0.010-0.035, 8-frame
+    0.03-0.18, 16-frame 0.42-0.62, 32-frame 0.32-0.40. That is long tokens,
+    as in G0 (32-frame 0.40-0.64), not TK-90's late shift to short ones
+    (4-frame 0.32-0.51, 32-frame 0.10-0.14). Search shares @90 0.10 / 0.09 /
+    0.37 / 0.45 (TK-90's near-even 0.28 / 0.27 / 0.24 / 0.21). Frames per
+    decision, deployed (probe), rows 60-90: 19.6-22.1, so 2.7-3.1 decisions
+    per second (TK-90 3.8-5.2, G0 2.6-2.9). Decisions per life 44-58
+    (TK-90 57-84, G0 37-44).
+  - The plateau rule (Step 0 (ii), one parameter set), after the fact: it
+    never fires, on deployed (sigma 118.1; the best 7-row window is rows
+    55-85 at 1032.8, the last 1032.4) or on raw (sigma 109.7; the best
+    window is the last); the rank-based variant never fires either.
+  - Stability: the largest adjacent deployed drop from row 45 is -131 (1131
+    @55 -> 1001 @60; TK-90 -194, G0 -179).
+PRE-REGISTERED DECISION:
+  - (1) FIXED and (3) HELD -> the fix joins the base for every later arm:
+    Test 2 is rebuilt with PREFIX_BN_PER_STEP in both students (an amendment
+    to Test 2, re-audited) and launched.
+  - (4) reported: NO DIFFERENT on both variants (+176 deployed, +187 raw).
+Beyond the letter (one seed, within-run bands -- "consistent with"):
+  - The one change removed the flattening. Under the same moving ceiling
+    that flattened TK-90's targets from row 55 and its prior after them,
+    PB's targets and prior held to row 90. With G0 (no artifact at the
+    sign clip, nothing flattened) this is consistent with Step 0 (iii)'s
+    reading: once the reward scale was large, the pooled prefix statistics
+    flattened the search, and the flat targets flattened the prior. The
+    tokens did not.
+  - It did not buy a level by itself. PB's 1032 sits with FS (1034), above
+    TK-90 inside the band and below G0 (1114; -82, inside the band). The
+    finer reward scale (the ceiling at 160 from row 50) has still not paid
+    for itself on Ms. Pac-Man. Test 2 asks whether a looser clip helps a
+    student that starts from a good master.
+  - The token play followed the search. With the targets sharp, 16- and
+    32-frame tokens took 0.80-0.95 of play over rows 60-90, as in G0, while
+    TK-90's late shift to 4-frame tokens came with near-even (flat) search
+    shares. Consistent with: that shift was a symptom of the artifact, not
+    a preference the tokens learned.
+  - Longer decisions took more env steps per iteration: 65.7k at row 90
+    against TK-90's 58.5k (+12%), so per env step PB's lead over TK-90 is
+    a little smaller than per iteration.
+  - For Test 2's rebuild (A-NIT-3): the master G0 is an off arm, so the
+    prep's master search keeps the pooled statistics. G0's exploratory read
+    shows them clean at G0's own scale (p1_ratio 0.65-0.72 at rows
+    30-90), so the master's search needs no re-estimation. The students
+    at c1 carry the fix.
+
 ### Next experiment (pre-registered) -- PB: per-step prefix BatchNorm statistics on the token arm (Kai, 2026-10-24)
 
 DECISION: Kai, 2026-10-24, after Step 0 (iii) found that the value-prefix
