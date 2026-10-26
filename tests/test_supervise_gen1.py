@@ -168,7 +168,8 @@ def test_recipe_is_the_distillation_steps_with_the_gen1_arms(real_sup,
     assert sup.VARIANTS == {"ds2": DS2_ARM, "fs2": FS2_ARM}
     assert sup.RUNS == {"ds2": "mspacman-gen1-distill",
                         "fs2": "mspacman-gen1-fresh"}
-    assert sup.SEEDS == {0: "2026-10-24"} and sup.ITERATIONS == 90
+    # the rebuild's date (CURRICULUM Test 2 "REBUILD WITH THE FIX")
+    assert sup.SEEDS == {0: "2026-10-25"} and sup.ITERATIONS == 90
     for v, old in (("ds2", "ds"), ("fs2", "fs")):
         cmd = sup.command(v, 0)
         want = [sup.PY] + [
@@ -199,7 +200,7 @@ def test_paths_the_run_folders_and_the_prep(real_sup):
     for v, name in (("ds2", "mspacman-gen1-distill"),
                     ("fs2", "mspacman-gen1-fresh")):
         rel, base, jsonl, ckpt, deaths = sup.paths(v, 0)
-        assert rel == f"benchmarks/results/{name}-s0-2026-10-24"
+        assert rel == f"benchmarks/results/{name}-s0-2026-10-25"
         assert jsonl.endswith(os.path.join(
             rel.split("/")[-1], "ablation-mspacmannoframeskip-skip4.jsonl"))
         assert ckpt.endswith(f"resume-mspacmannoframeskip-skip4-"
@@ -208,9 +209,9 @@ def test_paths_the_run_folders_and_the_prep(real_sup):
         assert pathlib.Path(base).parent == ROOT / "benchmarks" / "results"
     assert pathlib.Path(sup.REPO) == ROOT           # runs from its own tree
     assert pathlib.Path(sup.MANIFEST) == SUPERVISORS / "gen1_manifest.json"
-    assert sup.PREP_REL == "benchmarks/results/gen1-prep-s0-2026-10-24"
+    assert sup.PREP_REL == "benchmarks/results/gen1-prep-s0-2026-10-25"
     assert pathlib.Path(sup.prep_dir()) == (ROOT / "benchmarks" / "results"
-                                            / "gen1-prep-s0-2026-10-24")
+                                            / "gen1-prep-s0-2026-10-25")
     assert sup.DS_ROWS == (0,) + tuple(range(5, 95, 5))
     assert sup.DS_CURVE_ROWS == (1, 2, 3, 4)
     assert (sup.MAX_ATTEMPTS, sup.PREP_ATTEMPTS, sup.PREP_RETRY_S) == (40, 3,
@@ -280,15 +281,24 @@ def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g0sup):
     assert set(sup.SUITES) <= set(sup.AUDITED)
     assert set(g0sup.SUITES) <= set(sup.SUITES)
     assert set(g0sup.AUDITED) <= set(sup.AUDITED)
+    assert len(set(sup.SUITES)) == len(sup.SUITES)
+    # the rebuild adds the fix's suite, read (10)'s probe and its states
     assert set(sup.SUITES) - set(g0sup.SUITES) == {
-        "tests/test_supervise_gen1.py", "tests/test_gen1.py"}
+        "tests/test_supervise_gen1.py", "tests/test_gen1.py",
+        "tests/test_pbn.py"}
     assert set(sup.AUDITED) - set(g0sup.AUDITED) == {
         "tests/test_supervise_gen1.py", "tests/test_gen1.py",
+        "tests/test_pbn.py",
+        "benchmarks/probes/probe_prefix_bn.py",
+        "benchmarks/probes/step0_prefix_bn/states.npz",
         "benchmarks/supervisors/supervise_distill.py",
         "benchmarks/supervisors/supervise_gen1.py"}
+    assert [r for r in sup.AUDITED if not r.endswith(".py")] == [
+        "pytest.ini", "benchmarks/probes/step0_prefix_bn/states.npz"]
     for rel in ("experiments/ablation.py", "experiments/distill.py",
                 "experiments/ray_actors.py",
-                "benchmarks/probes/probe_exhaustive_eval.py"):
+                "benchmarks/probes/probe_exhaustive_eval.py",
+                "benchmarks/probes/probe_prefix_bn.py"):
         assert rel in sup.AUDITED
     homes = ("", "experiments/", "benchmarks/probes/", "tests/")
     # the suites: what they import (at any depth) or read
@@ -307,10 +317,11 @@ def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g0sup):
             for home in homes:
                 if (ROOT / f"{home}{name}.py").exists():
                     assert f"{home}{name}.py" in sup.AUDITED, (rel, name)
-    # the code the runs, the prep and the probe execute: every repo module
+    # the code the runs, the prep and the probes execute: every repo module
     # it imports, transitively
     todo = ["experiments/ablation.py", "experiments/distill.py",
-            "benchmarks/probes/probe_exhaustive_eval.py"]
+            "benchmarks/probes/probe_exhaustive_eval.py",
+            "benchmarks/probes/probe_prefix_bn.py"]
     seen = set()
     while todo:
         rel = todo.pop()
@@ -1366,6 +1377,33 @@ def test_the_attempt_loop_refuses_stray_probe_rows(sup, monkeypatch, capsys):
     monkeypatch.setattr(sup, "wait_no_trainer", rows_appear)
     assert sup.main(["fs2", "0"]) == 2
     assert "stray snapshots / probe jsonls" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("variant", ["ds2", "fs2"])
+def test_a_leftover_read10_jsonl_is_refused_like_the_exact_evals(
+        sup, variant, capsys):
+    """The rebuild (as PB's audit r1 B-M1): read (10)'s probe_prefix_bn
+    jsonl is one of the run's probe jsonls -- rows there without a
+    checkpoint refuse a fresh start (the hand-off would never re-probe
+    those snapshots on the new timeline)."""
+    run = sup.run_name(variant, 0)
+    probes = pathlib.Path(sup.REPO) / "benchmarks" / "probes"
+    assert [os.path.basename(p) for p in sup.probe_jsonls(variant, 0)] == [
+        f"probe_exhaustive_eval-{run}-acting.jsonl",
+        f"probe_exhaustive_eval-{run}.jsonl",
+        f"probe_exhaustive_eval-{run}-offline-acting.jsonl",
+        f"probe_exhaustive_eval-{run}-offline.jsonl",
+        f"probe_prefix_bn-{run}.jsonl"]
+    ckpt = sup.paths(variant, 0)[3]
+    mech = probes / f"probe_prefix_bn-{run}.jsonl"
+    mech.parent.mkdir(parents=True, exist_ok=True)
+    mech.write_text(json.dumps({"iteration": 30, "p1_ratio": 0.5}) + NL)
+    assert sup.stray_probe_rows(variant, 0, ckpt) == [mech.name]
+    assert sup.main([variant, "0"]) == 2
+    assert f"probe rows ({mech.name})" in capsys.readouterr().out
+    pathlib.Path(ckpt).parent.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(ckpt).write_bytes(b"x" * 1_000_001)
+    assert sup.stray_probe_rows(variant, 0, ckpt) == []
 
 
 def test_completion_and_abandon_rechecked_before_each_launch(

@@ -220,13 +220,22 @@ def test_gen1_arm_deltas_from_g0():
     d = {k for k in set(g0) | set(ds) if g0.get(k) != ds.get(k)}
     assert d == {"SCHEDULE_OFFSET_STEPS", "_student", "_distill_offline_steps",
                  "_distill_snapshot_every", "_ceiling_from_prep",
-                 "_master_arm", "_master_iterations", "_doc"}
+                 "_master_arm", "_master_iterations", "_doc",
+                 "PREFIX_BN_PER_STEP"}
     assert (ds["SCHEDULE_OFFSET_STEPS"], ds["_distill_offline_steps"],
             ds["_distill_snapshot_every"]) == (20000, 20000, 4000)
     assert ds["_student"] == "distill" and ds["_master_arm"] == G0_ARM
     d = {k for k in set(g0) | set(fs) if g0.get(k) != fs.get(k)}
     assert d == {"_student", "_ceiling_from_prep", "_master_arm",
-                 "_master_iterations", "_doc"}
+                 "_master_iterations", "_doc", "PREFIX_BN_PER_STEP"}
+    # the rebuild (CURRICULUM Test 2 "REBUILD WITH THE FIX"): PB's fix in
+    # both students, so the pair still differs only in the distillation
+    # step; the master stays an off arm (its snapshot has no step sets)
+    assert ds["PREFIX_BN_PER_STEP"] is True and fs["PREFIX_BN_PER_STEP"] is True
+    assert "PREFIX_BN_PER_STEP" not in g0 and not muzero.PREFIX_BN_PER_STEP
+    d = {k for k in set(ds) | set(fs) if ds.get(k) != fs.get(k)}
+    assert d == {"SCHEDULE_OFFSET_STEPS", "_student", "_distill_offline_steps",
+                 "_distill_snapshot_every", "_doc"}
     assert fs["_student"] == "fresh" and fs["_master_arm"] == G0_ARM
     assert ds["_master_iterations"] == fs["_master_iterations"] == 90
     # TK's within-run schedules (not the old DS's end state), TK's tokens
@@ -361,6 +370,26 @@ def test_the_resume_recipe_carries_the_ceiling(tmp_path, student):
         assert ablation.student_expect(spec, None) == {
             "token_vocab": [list(t) for t in _vocab()],
             "reward_ceiling": 7.5}
+
+
+@pytest.mark.parametrize("arm", [DS2_ARM, FS2_ARM])
+def test_each_student_builds_the_per_step_prefix_sets(arm):
+    """The rebuild: a student's value-prefix head carries one set of
+    running statistics per LSTM step (PB's K = 5); G0's, the master's, none
+    -- so G0's snapshot still loads strictly under its own arm in the prep."""
+    with ablation.arm_config(arm) as spec, ablation.token_actions():
+        assert muzero.PREFIX_BN_PER_STEP is True
+        assert muzero.prefix_bn_steps() == muzero.PREFIX_LSTM_HORIZON == 5
+        vp = ablation.build_networks(spec)["value_prefix"]
+    assert vp.per_step == 5
+    assert vp.norm_out_step_mean.shape[0] == 5
+    assert any(k.endswith("_step_mean") for k in vp.state_dict())
+    with ablation.arm_config(G0_ARM) as spec, ablation.token_actions():
+        assert muzero.PREFIX_BN_PER_STEP is False
+        g0 = ablation.build_networks(spec)["value_prefix"]
+    assert g0.per_step == 0
+    assert not any("_step_" in k for k in g0.state_dict())
+    assert muzero.PREFIX_BN_PER_STEP is False      # arm_config restored it
 
 
 def test_ceiling_fits_supports_is_the_growth_gates_check():
@@ -510,3 +539,13 @@ def test_ds2_trains_offline_at_the_preps_ceiling_under_the_offset(
                       "weights-iter000.pth", weights_only=False)
     assert row0["spec"]["REWARD_GROWTH_CEILING"] == c1
     assert row0["spec"]["SCHEDULE_OFFSET_STEPS"] == 4
+    # the rebuild: the offline phase trains the per-step sets (each LSTM
+    # step's batch statistics folded into its own set) and row 0 carries
+    # them
+    assert row0["spec"]["PREFIX_BN_PER_STEP"] is True
+    vp = row0["value_prefix"]
+    for name in ("norm_in", "norm_out"):
+        count = vp[f"{name}_step_count"]
+        assert count.shape[0] == 5 and bool((count > 0).all()), name
+        assert not torch.equal(vp[f"{name}_step_mean"],
+                               torch.zeros_like(vp[f"{name}_step_mean"]))

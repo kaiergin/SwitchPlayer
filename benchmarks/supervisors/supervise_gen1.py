@@ -7,7 +7,10 @@ the per-generation clip -- TWO runs at SEED 0, one after the other --
   fs2: ...-tokens-gen1-fresh (the same student vocabulary at the same
        constant ceiling, from scratch, TK's schedules)
 both at the prep's constant student_ceiling (the halved-clip rule), 90
-iterations each, the TK recipe, --ray --cpu-actor (pinned by the arms).
+iterations each, the TK recipe, --ray --cpu-actor (pinned by the arms), and
+both with PREFIX_BN_PER_STEP (CURRICULUM Test 2 "REBUILD WITH THE FIX",
+2026-10-25: PB's fix joined the base; the master G0 is unchanged, an off
+arm; runs dated 2026-10-25, from the run worktree SwitchPlayer-gen1b-run).
 Design and pre-registered reads: CURRICULUM.md "Next experiment
 (pre-registered) -- Test 2: the first swap under the per-generation clip";
 the swap's machinery is the distillation step's ("P3's distillation step";
@@ -148,7 +151,9 @@ NEAR_RANDOM_TOL = 1e-6
 MODE = ["--ray", "--cpu-actor"]
 ENV_ID = "MsPacmanNoFrameskip-v4"
 TAG = "-mspacmannoframeskip-skip4"        # ablation's TAG for ENV_ID, skip 4
-SEEDS = {0: "2026-10-24"}                 # the pre-registered seed and date
+# the pre-registered seed and the rebuild's date (the pre-fix 2026-10-24
+# runs never started)
+SEEDS = {0: "2026-10-25"}
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 # The shared interpreter lives in the main tree (worktrees have no .venv).
@@ -159,7 +164,7 @@ MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # The prep's folder (REPO-relative): set.pkl, vocab.json (written last: the
 # prep's completion signal; it carries student_ceiling), master.json,
 # prep.log.
-PREP_REL = "benchmarks/results/gen1-prep-s0-2026-10-24"
+PREP_REL = "benchmarks/results/gen1-prep-s0-2026-10-25"
 
 
 def prep_dir():
@@ -185,8 +190,10 @@ G0_SNAPSHOT = os.path.join(G0_BASE, f"snapshots{TAG}-{G0_ARM}-seed0",
 DS_ROWS = (0,) + tuple(range(5, 95, 5))
 DS_CURVE_ROWS = (1, 2, 3, 4)
 PREP_SILENT_ALERT_S = 1800
-# Every suite supervise_gen0.py runs, plus this supervisor's and Test 2's.
+# Every suite supervise_gen0.py runs, plus this supervisor's, Test 2's and
+# the fix's (PB's test_pbn.py: the rebuild).
 SUITES = ["tests/test_supervise_gen1.py", "tests/test_gen1.py",
+          "tests/test_pbn.py",
           "tests/test_gen0.py", "tests/test_rgrow.py",
           "tests/test_tokens.py", "tests/test_distill.py",
           "tests/test_mspacman.py", "tests/test_bnrecal.py",
@@ -219,6 +226,11 @@ AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
            "benchmarks/supervisors/supervise_gen0.py",
            "benchmarks/supervisors/supervise_distill.py",
            "benchmarks/probes/probe_exhaustive_eval.py",
+           # read (10)'s mechanism probe (PB's read (1)) and its fixed state
+           # set (binary in git, never converted, so it hashes the same in
+           # an autocrlf tree)
+           "benchmarks/probes/probe_prefix_bn.py",
+           "benchmarks/probes/step0_prefix_bn/states.npz",
            "benchmarks/supervisors/supervise_gen1.py"] + SUITES
 
 
@@ -257,7 +269,8 @@ def command(variant, seed):
 
 def file_hashes(root):
     """sha256 of every AUDITED file's text, CRLF normalized to LF (git's
-    autocrlf round trip must not matter)."""
+    autocrlf round trip must not matter; the one binary, states.npz, is
+    never converted, so the same bytes normalize the same)."""
     import hashlib
     out = {}
     for rel in AUDITED:
@@ -1136,19 +1149,27 @@ def stray_snapshots(base, ckpt, own_ok=False):
     return found
 
 
+def probe_jsonls(variant, seed):
+    """The jsonls the eval hand-off appends this run's records to: the
+    exact evals' two (acting, search) for the run and its offline curve,
+    and read (10)'s (probe_prefix_bn: the run's rows only; the rebuild,
+    as PB's audit r1 B-M1)."""
+    run = run_name(variant, seed)
+    names = [f"probe_exhaustive_eval-{name}{suffix}.jsonl"
+             for name in (run, run + "-offline") for suffix in ("-acting", "")]
+    return [os.path.join(REPO, "benchmarks", "probes", name)
+            for name in names + [f"probe_prefix_bn-{run}.jsonl"]]
+
+
 def stray_probe_rows(variant, seed, ckpt):
-    """This run's probe jsonls (and its offline curve's) holding records
-    while no checkpoint exists."""
+    """This run's probe jsonls (its offline curve's and read (10)'s too)
+    holding records while no checkpoint exists."""
     if os.path.exists(ckpt):
         return []
-    run = run_name(variant, seed)
     out = []
-    for name in (run, run + "-offline"):
-        for suffix in ("-acting", ""):
-            path = os.path.join(REPO, "benchmarks", "probes",
-                                f"probe_exhaustive_eval-{name}{suffix}.jsonl")
-            if any(l.strip() for l in lines_of(path)):
-                out.append(os.path.basename(path))
+    for path in probe_jsonls(variant, seed):
+        if any(l.strip() for l in lines_of(path)):
+            out.append(os.path.basename(path))
     return out
 
 

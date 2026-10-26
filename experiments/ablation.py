@@ -1125,11 +1125,15 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen0
 # halved-clip rule: --token-vocab's vocab.json "student_ceiling"), on TK's
 # within-run schedules; the distilled one's offline phase does not advance
 # them (SCHEDULE_OFFSET_STEPS), so both see the same settings at every
-# online iteration. Seed 0.
+# online iteration. Seed 0. REBUILT WITH THE FIX (PB's decision, 2026-10-25;
+# CURRICULUM Test 2 "REBUILD WITH THE FIX"): both students carry
+# PREFIX_BN_PER_STEP; the master G0 stays an off arm (its prep search keeps
+# its pooled statistics).
 GEN0_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
             "tokens-gen0")
 ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1-distill"] = {
     **ARMS[GEN0_ARM],
+    "PREFIX_BN_PER_STEP": True,
     "SCHEDULE_OFFSET_STEPS": 20000,
     "_student": "distill",
     "_distill_offline_steps": 20000,
@@ -1145,11 +1149,13 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1
             "master-search targets (--distill-set), 20,000 offline gradient "
             "steps (snapshots every 4,000; the last is row 0), then TK's "
             "within-run schedules keyed to the ONLINE steps "
-            "(SCHEDULE_OFFSET_STEPS 20,000). Run as TK. Twin: the "
-            "-gen1-fresh arm.",
+            "(SCHEDULE_OFFSET_STEPS 20,000); PREFIX_BN_PER_STEP (PB's fix, "
+            "the base from 2026-10-25). Run as TK. Twin: the -gen1-fresh "
+            "arm.",
 }
 ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1-fresh"] = {
     **ARMS[GEN0_ARM],
+    "PREFIX_BN_PER_STEP": True,
     "_student": "fresh",
     "_ceiling_from_prep": True,
     "_master_arm": GEN0_ARM,
@@ -1157,8 +1163,9 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1
     "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
             "-tokens-gen0 as the FRESH generation-1 STUDENT (Test 2): the "
             "student vocabulary and its constant ceiling from --token-vocab "
-            "(the prep's vocab.json), from scratch, TK's schedules. Run as "
-            "TK. Twin: the -gen1-distill arm.",
+            "(the prep's vocab.json), from scratch, TK's schedules; "
+            "PREFIX_BN_PER_STEP (PB's fix, the base from 2026-10-25). Run "
+            "as TK. Twin: the -gen1-distill arm.",
 }
 
 # PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
