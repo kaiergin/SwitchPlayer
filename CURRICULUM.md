@@ -1230,6 +1230,35 @@ recorded as ~17:20). The scratchpad launcher is
 renamed launch_gen1.ps1.stopped (PB audit r1 B-L3), so a reboot procedure
 cannot re-arm the pre-fix Test 2 beside PB; Test 2 is rebuilt with the fix
 (a new manifest, worktree and launcher) after PB reads.
+REBUILD WITH THE FIX (pre-registered 2026-10-25, before the rebuild; PB's
+DECISION AFTER: read (1) FIXED and (3) HELD, so the fix joins the base for
+every later arm). Everything above stands except:
+  - BOTH STUDENTS carry PREFIX_BN_PER_STEP, so the pair still differs only
+    in the distillation step. The two arm keys stay (-gen1-distill /
+    -gen1-fresh) with the flag added: they never trained, because the
+    pre-fix Test 2 stopped before its prep. The runs are dated 2026-10-25
+    and run from a new worktree (Y:\SwitchPlayer-gen1b-run), so nothing
+    from the stopped tree is reused.
+  - THE MASTER is unchanged: G0's weights-iter090, an off arm with no
+    per-step sets. The prep's master search (distill.py, under G0's arm)
+    therefore keeps G0's pooled statistics (PB audit r2 A-NIT-3). Test 1's
+    exploratory read shows them clean at G0's own scale (p1_ratio
+    0.65-0.72 at rows 30-90, under PB's 2x line), so the master's policy
+    targets need no re-estimation. Each student's value is its own TD (no
+    value distillation), so nothing of G0's value-prefix head reaches it.
+  - The master gate is settled: G0's deployed mean 60-90 is 1113.86, not
+    NEAR RANDOM; MASTER for read (3) = 1113.86.
+  - NEW READ (10) MECHANISM, per student: probe_prefix_bn.py (PB's read
+    (1)) at rows 30, 55, 75 and 90 (DS2 also at row 0), run by the eval
+    hand-off from the frozen tree on Step 0 (iii)'s 480 states. FIXED as
+    in PB (p1_ratio <= 2), reported in both directions (PB A-L5). A
+    student not FIXED at any of rows 55-90 -> its search is not clean:
+    reads (1)-(9) are reported with that caveat, and the fix is diagnosed
+    before any Test 3 (Kai's call).
+  - The preflight adds tests/test_pbn.py (the fix's suite); the probe and
+    its states join AUDITED.
+  COST unchanged: prep ~0.5 h, DS2 ~17.5 h, FS2 ~15 h (PB ran at TK's
+  pace, 10.1 min/iteration).
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
