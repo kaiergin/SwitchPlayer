@@ -1359,6 +1359,22 @@ as PB's r2 B-L1 was):
 ACCEPTED r2: both auditors ran one no-op command with the system python
 outside the lock (json only, nothing written); r1's "seven mutants" are
 the r1 auditor's own set (r2's are listed above).
+AUDIT r3 (a fresh-eyes check of FIXES r2 at 99c4db3e): nothing above NIT.
+Verified: the read (10) rule reads one way; the docstring matches the
+guard's three sites; each of the three flag cases trips only its own
+assert (all 13 asserts given messages in a patched copy), 9 vacuous
+rewrites x 2 variants all caught, the control passes; the exact fold
+count catches a double fold, a skipped first fold and a skipped step 5;
+post_gen1b.py differs from the r1 derivation by the two intended texts
+only (byte-identical regeneration, <= 79 columns, compiles), its checker
+passes; 193 targeted tests pass. ACCEPTED r3 (NIT): a flag assert
+weakened to spec.get(..., True) passes the new test (a student arm
+without the key is still caught in the preflight by test_gen1 and
+test_pbn); the test does not pin WHICH assert fired; the guard runs
+before the first preflight attempt, not before each 10-min retry (CPU
+contention at worst); PAUSE's "by command line" for the preflight is its
+-m pytest argv over the 20 suites (the tree is its working directory);
+two ragged lines.
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
