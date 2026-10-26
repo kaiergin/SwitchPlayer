@@ -1386,6 +1386,27 @@ that tree, then the master gate, the prep ~0.5 h, DS2) and
 supervise_gen1.py fs2 0 (WAITING for DS2). The stopped pre-fix tree stays
 disarmed. Rerun launch_gen1b.ps1 after a reboot or a pause (idempotent;
 PAUSE also kills a running preflight).
+PREFLIGHT ok 22:26 (manifest + quick probe + 20 suites in the run tree);
+MASTER G0 weights-iter090 (deployed 60-90 1113.86, g 0.828); PREP done
+22:29 in one attempt (4 min). The prep, descriptive (read (7)'s first
+half):
+  recording: 45 games of G0 at temperature 0.125, 135 lives, 31,784 base
+      steps; game returns mean 1176.0 (490-1910).
+  THE CLIP: G0's sign clip (c0 = 1) removes S(1) = 0.344 of the recorded
+      5,292 reward units; the halved-clip rule gives c1 = 11.258 units
+      (112.6 points per base step: pellets, power pellets and the cherry
+      pass whole, ghosts and the later fruit are cut), which removes
+      S(c1) = 0.172. Base steps
+      clipped: 0.42% -> 0.19% of all base steps (3.9% -> 1.7% of the
+      3,469 reward-earning ones).
+  VOCABULARY: 21 of 36 tokens kept (every 4-frame token, by design, plus
+      the 12 longer ones at >= 1% of G0's 5,615 decisions; the largest
+      (3,16) 0.278, (7,32) 0.149, (5,32) 0.146, (6,32) 0.079); 15 dropped.
+      6,607 re-tokenized records (278 dropped-token decisions split into
+      857 extra 4-frame records); 21 uniform fallbacks; mean master visit
+      mass on dropped tokens 0.177.
+DS2 LAUNCHED 22:30 10-25 (attempt 1, fresh): the prefill, then the 20,000
+offline steps (~1 h 20 min to the first checkpoint), then 90 iterations.
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
