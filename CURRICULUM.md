@@ -1436,6 +1436,18 @@ DS2 ROWS 5-30 (interim, 05:12 10-26; 10.1-10.4 min per iteration):
   Tokens (the training evals' play shares, rows 15-30): 32-frame 0.57-
       0.64, 16-frame 0.24-0.33, 4-frame 0.07-0.11; 23.7-25.0 frames per
       decision (~2.4-2.5 decisions per second).
+DS2 ROWS 35-55 (interim, 09:37 10-26): deployed 1722 @35, 1385 @40, 1161
+  @45, 1418 @50, 2064 @55 (SD 229-677); raw 1938, 1361, 909, 1616, 1709.
+  READ (10) row 55: p1_ratio 0.72 -> FIXED (0.682 eval against 0.941);
+      step-1 offset 0.18 running SDs against its step set, 5.30 against
+      the pooled statistics. FIXED at rows 0, 30 and 55 so far.
+  Row 45, descriptive: the training eval's diagnostics spiked for one row
+      (mean |prefix| 4.01 against 0.11-0.24 at every other row, value
+      8.2, H(pi) 1.90, maxp 0.43), with the training loss, the gradient
+      norm (0.175) and the nonfinite count (0) unchanged; back at row 50.
+      Its exact evals (1161 / 909) are DS2's lowest since rows 10 / 5.
+      Earlier runs show the same one-row kind: G0 at row 60 (prefix 2.52,
+      H 2.09), the distillation step's FS at rows 60 and 80-90.
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
