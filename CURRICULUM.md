@@ -1421,6 +1421,21 @@ DS2 ROW 0 (interim, 00:25 10-26; the offline phase took ~1 h 33 min):
       input offset is 0.25 running SDs against its step set (1.78 against
       the pooled statistics).
   Frames per decision, deployed: 22.5 at row 0 (21.3-22.4 offline).
+DS2 ROWS 5-30 (interim, 05:12 10-26; 10.1-10.4 min per iteration):
+  deployed 1226 @5, 1200 @10, 1295 @15, 1533 @20, 1397 @25, 1944 @30
+      (SD 301-510 per row; g 1.68 at row 30, one row); raw 1023, 1638,
+      1317, 1155, 1297, 1309.
+  rows 5-25 (read (2)'s window): deployed 1330.3, raw 1286.0 (FS2's to
+      come). Read (4): DS2 is at level (>= 881.86) from row 0; its lowest
+      row in 5-25 is 1200.0, above row 0's 1065.0: no forgetting as it
+      began to play.
+  READ (10) row 30: p1_ratio 0.73 -> FIXED (0.649 eval against 0.884);
+      the step-1 offset is 0.12 running SDs against its step set and 6.88
+      against the pooled statistics (row 0: 1.78): pooled statistics
+      would already be far off at step 1 by row 30.
+  Tokens (the training evals' play shares, rows 15-30): 32-frame 0.57-
+      0.64, 16-frame 0.24-0.33, 4-frame 0.07-0.11; 23.7-25.0 frames per
+      decision (~2.4-2.5 decisions per second).
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
