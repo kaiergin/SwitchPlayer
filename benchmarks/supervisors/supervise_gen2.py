@@ -70,15 +70,17 @@ python running -m pytest in the run tree: the guard does not count it, so
 a quick resume would run the suites twice), by command line; resume by
 rerunning launch_gen2.ps1 (idempotent). After a REBOOT rerun
 launch_gen2.ps1.
-ABANDON (Kai's call): FIRST stop the supervisor and its trainer, THEN
-create ABANDONED in the run folder. UN-ABANDONING: stop the hand-off
+ABANDON (Kai's call): FIRST stop the supervisor and its trainer or prep
+(by command line: either outlives a supervisor kill), THEN create
+ABANDONED in the run folder. UN-ABANDONING: stop the hand-off
 (post_gen2.py) and its probes, drop the probe rows its abandon pass logged
 as newer than the checkpoint from every probe jsonl of the run (read (10)'s
 probe_prefix_bn-<run>.jsonl included), remove ABANDONED, rerun
 launch_gen2.ps1. A FRESH restart: stop the supervisor, its trainer or prep
 and the hand-off, move the run folder AND its probe jsonls (read (10)'s
 and the "-offline" ones too) aside -- and, to redo the prep too, the prep
-folder (only before G2 trained on it) -- then rerun launch_gen2.ps1.
+folder (only before G2 launched: its checkpoint is bound to the set's
+sha256) -- then rerun launch_gen2.ps1.
 
 Create a run folder before a launch that redirects into it (`>>
 <folder>/supervisor.log`): the shell opens the redirect before this file
@@ -316,7 +318,10 @@ def quick(variant):
     """The import probe for `variant`'s arm (a distilled generation-2
     student of DS2 -- itself a distilled student, with the per-step prefix
     sets -- whose ceiling comes from the prep; PREFIX_BN_PER_STEP default
-    off) and the prep module (a student master's spec)."""
+    off) and the prep module, ending with the prep's own master checks on
+    the real MASTER_SNAPSHOT (distill.master_checks: its spec against this
+    tree's DS2 arm, its final step after its offline steps; audit r1 A-L1 /
+    B-L2: an edit to DS2's arm fails here, not as three failed preps)."""
     arm = VARIANTS[variant]
     return ("import sys; sys.path[:0] = ['.', 'experiments']; "
             "import muzero, ablation, muzero_vtree, distill; "
@@ -348,7 +353,9 @@ def quick(variant):
             "assert hasattr(distill, 'prep') and "
             "hasattr(distill, 'master_spec') and "
             "hasattr(distill, 'halved_ceiling') and "
-            "distill.DROP_SHARE == 0.01")
+            "distill.DROP_SHARE == 0.01; "
+            f"distill.master_checks({MASTER_SNAPSHOT!r}, "
+            f"{MASTER_ITERATIONS})")
 
 
 def run_done(variant, seed):
@@ -623,8 +630,8 @@ def prep_ceiling():
 
 def set_intact():
     """(ok, reason): vocab.json's set_sha256 is set.pkl's, and vocab.json is
-    a prep of DS2's final snapshot (after its offline steps) with a valid
-    student_ceiling."""
+    a prep of DS2's final snapshot (MASTER_SNAPSHOT, after its offline
+    steps; audit r1 B-L3) with a valid student_ceiling."""
     try:
         with open(os.path.join(prep_dir(), "vocab.json"),
                   encoding="utf-8") as f:
@@ -647,6 +654,10 @@ def set_intact():
                        f"after {doc.get('master_iterations')!r} iterations "
                        f"and {doc.get('master_offline_steps')!r} offline "
                        f"steps, not DS2's final snapshot")
+    if doc.get("master_snapshot") != MASTER_SNAPSHOT:
+        return False, (f"vocab.json's master snapshot is "
+                       f"{doc.get('master_snapshot')!r}, not "
+                       f"{MASTER_SNAPSHOT}")
     if not valid_ceiling(doc.get("student_ceiling")):
         return False, (f"vocab.json has no valid student_ceiling "
                        f"({doc.get('student_ceiling')!r})")

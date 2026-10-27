@@ -353,9 +353,11 @@ def master_spec(arm, blob, master):
     (ablation.student_arm: the vocabulary and constant ceiling of its own
     prep), which only its snapshot's spec records. That spec is taken when
     every key but student_arm's (STUDENT_KEYS) equals the arm's, its
-    vocabulary is a student vocabulary of the arm's (or of its own
-    `_master_vocab`), and its ceiling is the constant `_student_ceiling`
-    of a `_ceiling_from_prep` arm."""
+    vocabulary is a student vocabulary of the vocabulary its own master
+    played -- the arm's, or, when that master was itself a student, its
+    `_master_vocab`, required then and only then (student_master_vocab's
+    rule; audit r1 A-L2) -- and its ceiling is the constant
+    `_student_ceiling` of a `_ceiling_from_prep` arm."""
     import ablation
     static = ablation.ARMS[arm]
     if static.get("_student") is None:
@@ -370,9 +372,19 @@ def master_spec(arm, blob, master):
     if not static.get("_ceiling_from_prep"):
         raise SystemExit(f"{master}: a student master must hold its prep's "
                          f"constant ceiling (a _ceiling_from_prep arm)")
-    ablation.validate_student_vocab(
-        spec.get("TOKEN_VOCAB") or (),
-        spec.get("_master_vocab") or static["TOKEN_VOCAB"])
+    parent = static.get("_master_arm")
+    if parent is not None and ablation.ARMS.get(parent, {}).get("_student"):
+        if "_master_vocab" not in spec:
+            raise SystemExit(f"{master}: no _master_vocab, though its own "
+                             f"master {parent!r} is a student")
+        played = ablation.validate_student_vocab(spec["_master_vocab"],
+                                                 static["TOKEN_VOCAB"])
+    elif "_master_vocab" in spec:
+        raise SystemExit(f"{master}: a _master_vocab, though its own master "
+                         f"{parent!r} is no student")
+    else:
+        played = static["TOKEN_VOCAB"]
+    ablation.validate_student_vocab(spec.get("TOKEN_VOCAB") or (), played)
     c = spec.get("_student_ceiling")
     if (isinstance(c, bool) or not isinstance(c, (int, float))
             or not math.isfinite(c) or c <= 0
@@ -405,15 +417,14 @@ def installed(arm, spec):
         ablation.ARMS[arm] = saved
 
 
-# -- the prep ---------------------------------------------------------------------
-def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
-         drop_share=DROP_SHARE, log=print):
-    """Steps 1-5 (module docstring) for one master snapshot; returns the
-    header written."""
+def master_checks(master, master_iterations):
+    """The prep's checks on its master snapshot, before anything is
+    recorded: a known arm, its runtime spec (master_spec), its vocabulary,
+    its acting states, its FINAL step (after its offline steps). Also the
+    generation-2 preflight's, on the real DS2 (audit r1 A-L1 / B-L2: an
+    edit to DS2's arm would otherwise surface only as three failed preps).
+    Returns (blob, arm, spec, offline steps); SystemExit otherwise."""
     import ablation
-    t0 = time.time()
-    out = pathlib.Path(out)
-    out.mkdir(parents=True, exist_ok=True)
     blob = torch.load(str(master), map_location="cpu", weights_only=False)
     arm = blob.get("arm")
     if arm not in ablation.ARMS:
@@ -435,6 +446,21 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                          f"run (the master is its FINAL snapshot"
                          + (f", after {offline} offline steps" if offline
                             else "") + ")")
+    return blob, arm, mspec, offline
+
+
+# -- the prep ---------------------------------------------------------------------
+def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
+         drop_share=DROP_SHARE, log=print):
+    """Steps 1-5 (module docstring) for one master snapshot; returns the
+    header written."""
+    import ablation
+    t0 = time.time()
+    out = pathlib.Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    blob, arm, mspec, offline = master_checks(master, master_iterations)
+    master_vocab = tuple(tuple(int(x) for x in t)
+                         for t in mspec["TOKEN_VOCAB"])
     ablation.ENV_NAME, ablation.FRAMESKIP, ablation.EPISODE_CAP = \
         ENV, FRAMESKIP, EPISODE_CAP
     with installed(arm, mspec), ablation.arm_config(arm) as spec, \

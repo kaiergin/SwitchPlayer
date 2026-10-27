@@ -928,6 +928,51 @@ BUILT 2026-10-27 (pre-audit; the audit loop follows before any launch):
     supervise_gen2's gate on the real DS2: nothing missing; MASTER
     1656.524; its snapshot present.
   - The 22 suites: pass in this tree (one failure on the first run: test_harness's augmentation-off arm list lacked G2's arm, which was added; test_harness then passes).
+AUDIT r1 (two fresh-eyes auditors on ba269387): A (the core) nothing above
+LOW; B (the orchestration) nothing above LOW. Verified in r1:
+  A: on the real DS2 snapshot master_spec passes (its spec differs from
+  the static arm only in student_arm's six keys, types included). The
+  prep's world equals DS2's training world rebuilt through student_arm on
+  its own prep: every muzero global, ACTIONS 21, temperature 0.125, bias
+  0, ceiling 11.2583, PER beta 1.0. An instrumented real prep (1,500 base
+  steps) recorded on the acting states at step 200,000, and every
+  birth-search head call ran in eval mode on its step set (per_step 5);
+  S(c1) 0.266 -> c2 19.99 -> 0.133; 18 of 21 tokens kept; ARMS and the
+  globals were restored after. The G2 student ran end to end on that prep:
+  student_arm, every startup gate with --ray --cpu-actor, the prefill born
+  at 20,000, the offline phase, both probes on its row 0, and a
+  generation-3 master_spec on it. halved_ceiling matched an exact rational
+  solver (3,000 cases, non-integer c0). Generation 1 is unchanged.
+  B: every fs2 removal and G0 -> DS2 change checked. Names and paths agree
+  across the supervisor, the hand-off, the launcher and ablation's naming.
+  The manifest covers everything the run, the prep, the probes and the 22
+  suites execute (an AST import closure). The derivations regenerate byte
+  for byte; check_post_gen2 prints CHECK OK. The 130 tests read no live
+  state, and six seeded supervisor faults were caught.
+FIXES r1 (LOW / NIT; a fresh-eyes r2 check follows):
+  - A-L1 / B-L2: nothing before the prep tried the real DS2 snapshot
+    against this tree's arm, so an edit to DS2's arm (its _doc included)
+    would surface only as three failed preps. The prep's master checks are
+    now distill.master_checks, and the preflight's quick probe ends with
+    it on the real MASTER_SNAPSHOT. It passes on DS2; seven refusal cases
+    are tested on DS2-like snapshots in tmp.
+  - A-L2: master_spec requires `_master_vocab` exactly when the master's
+    own master is a student, and checks that it is a student vocabulary
+    of the arm's (+3 cases; DS2 carrying one is refused).
+  - A-L3: changes to the arm's underscore keys are tested (+4 cases).
+  - B-L1: the suites' import pinning reads every imported name (ast).
+  - B-L3: set_intact also requires vocab.json's master_snapshot to be
+    MASTER_SNAPSHOT (+2 cases).
+  - NITs: ABANDON names the prep; the fresh-restart rule gives its reason
+    (the set's sha256); the quick-probe want list gains the master's
+    _ceiling_from_prep; the launcher refuses a missing hand-off script;
+    two test comments / asserts (A-NIT-2).
+ACCEPTED r1: A-NIT-1 (the prep's vocabulary check is a tautology for a
+student master; kept for G0's path). A-NIT-3 (an equivalent mutant). B-NIT-4's
+commit check: the manifest is committed after its audited commit, so
+_commit is not the worktree's HEAD by design; the supervisor's hash check
+is the gate. B-NIT-5: the date 2026-10-27 is used everywhere and is kept
+even if the launch slips.
 
 ### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
 

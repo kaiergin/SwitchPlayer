@@ -301,7 +301,9 @@ def test_master_offline_steps_are_ds2s(real_sup):
     assert distill.master_offline_steps(ablation.ARMS[FS2_ARM]) == 0
     src = inspect.getsource(distill.prep)
     assert '"master_offline_steps": offline' in src
-    assert "offline = master_offline_steps(mspec)" in src
+    assert "blob, arm, mspec, offline = master_checks(" in src
+    assert "offline = master_offline_steps(mspec)" in inspect.getsource(
+        distill.master_checks)
 
 
 def test_the_alert_bounds(real_sup):
@@ -320,9 +322,25 @@ def test_the_alert_bounds(real_sup):
 
 
 def _imports(src):
-    import re
-    return set(re.findall(r"^\s*(?:import|from)\s+([A-Za-z_]\w*)", src,
-                          re.M))
+    """Every module name an import statement names at any depth: each name
+    of `import a, b.c` (a, b), the module of `from m import x` (m) and its
+    imported names (x: a submodule perhaps; audit r1 B-L1)."""
+    import ast
+    out = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            out.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                out.add(node.module.split(".")[0])
+            out.update(a.name for a in node.names)
+    return out
+
+
+def test_imports_sees_every_name():
+    src = ("import a, b.c" + NL + "from d.e import f, g as h" + NL
+           + "def x():" + NL + "    import i" + NL)
+    assert _imports(src) == {"a", "b", "d", "f", "g", "i"}
 
 
 def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g1sup):
@@ -457,15 +475,79 @@ def test_no_wait_and_fs2_are_gone(real_sup):
         assert word not in src, word
 
 
-def test_supervisor_quick_probe_passes(real_sup):
-    r = _py(real_sup.quick("g2"))
+def _ds2_like(path, **change):
+    """A DS2-like final snapshot (no nets: distill.master_checks reads only
+    its arm, spec, steps and acting states): DS2's arm as student_arm
+    leaves it -- a student vocabulary of TK's 36, a constant ceiling --
+    after 20,000 offline + 90 x 2,000 steps."""
+    import torch
+    spec = {**ablation.ARMS[DS2_ARM],
+            "TOKEN_VOCAB": tuple(t for t in ablation.ARMS[DS2_ARM][
+                "TOKEN_VOCAB"] if t not in ((0, 8), (0, 32))),
+            "_token_vocab_sha256": "a" * 64, "_vocab_set_sha256": "b" * 64,
+            "REWARD_GROWTH_START": 11.25, "REWARD_GROWTH_CEILING": 11.25,
+            "_student_ceiling": 11.25}
+    blob = {"arm": DS2_ARM, "spec": spec, "training_steps": 200000,
+            "iteration": 90, "acting_states": {"representation": {}}}
+    for k, v in change.items():
+        if k in blob:
+            blob[k] = v
+        else:
+            spec[k] = v
+    torch.save(blob, path)
+    return str(path)
+
+
+@pytest.fixture
+def ds2_like(real_sup, monkeypatch, tmp_path):
+    """The quick probe's master checks on a DS2-like snapshot in tmp, not
+    the live DS2 (the preflight's real probe reads the real one)."""
+    monkeypatch.setattr(real_sup, "MASTER_SNAPSHOT",
+                        _ds2_like(tmp_path / "weights-iter090.pth"))
+    return real_sup
+
+
+def test_supervisor_quick_probe_passes(ds2_like):
+    r = _py(ds2_like.quick("g2"))
     assert r.returncode == 0, r.stderr[-2000:]
 
 
-def test_the_quick_probe_tells_the_arms_apart(real_sup):
+def test_the_quick_probe_names_the_real_master_snapshot(real_sup):
+    """The deployed probe ends with the prep's master checks on DS2's real
+    final snapshot (audit r1 A-L1 / B-L2)."""
+    probe = real_sup.quick("g2")
+    assert probe.endswith(f"distill.master_checks("
+                          f"{real_sup.MASTER_SNAPSHOT!r}, 90)")
+    assert real_sup.MASTER_SNAPSHOT.endswith(
+        "mspacman-gen1-distill-s0-2026-10-25" + os.sep
+        + f"snapshots-mspacmannoframeskip-skip4-{DS2_ARM}-seed0" + os.sep
+        + "weights-iter090.pth")
+
+
+@pytest.mark.parametrize("change, why", [
+    # an edit to DS2's arm in this tree (its _doc included): the prep
+    # would refuse DS2 three times
+    ({"_doc": "edited"}, "beyond the student keys: ['_doc']"),
+    ({"PER_BETA_END": 0.5}, "beyond the student keys"),
+    ({"training_steps": 180000}, "after 20000 offline steps"),
+    ({"iteration": 89}, "after 20000 offline steps"),
+    ({"REWARD_GROWTH_START": 1.0}, "constant _student_ceiling"),
+    ({"acting_states": {}}, "no acting_states"),
+    ({"arm": "nope"}, "arm 'nope' unknown"),
+])
+def test_the_quick_probe_fails_on_a_master_the_prep_would_refuse(
+        real_sup, monkeypatch, tmp_path, change, why):
+    monkeypatch.setattr(real_sup, "MASTER_SNAPSHOT",
+                        _ds2_like(tmp_path / "m.pth", **change))
+    r = _py(real_sup.quick("g2"))
+    assert r.returncode != 0 and why in r.stderr, r.stderr[-2000:]
+
+
+def test_the_quick_probe_tells_the_arms_apart(ds2_like):
     """As the student, DS2's arm (its master is G0), FS2's (fresh) and G0's
     (no flag) fail g2's probe; as the master, G0's (no flag) and FS2's
     (fresh) fail it."""
+    real_sup = ds2_like
     probe = real_sup.quick("g2")
     for want in ("spec['PREFIX_BN_PER_STEP'] is True",
                  "master['PREFIX_BN_PER_STEP'] is True",
@@ -475,7 +557,9 @@ def test_the_quick_probe_tells_the_arms_apart(real_sup):
                  "spec['_master_iterations'] == 90",
                  "distill.master_offline_steps(master) == 20000",
                  "hasattr(ablation, 'student_master_vocab')",
-                 "hasattr(distill, 'master_spec')"):
+                 "hasattr(distill, 'master_spec')",
+                 "master['_ceiling_from_prep'] is True",
+                 "distill.master_checks("):
         assert want in probe, want
     student, master = f"ARMS[{G2_ARM!r}]", f"ARMS[{DS2_ARM!r}]"
     assert probe.count(student) == 1 and probe.count(master) == 1
@@ -492,12 +576,13 @@ def test_the_quick_probe_tells_the_arms_apart(real_sup):
 
 @pytest.mark.parametrize("break_", ["arm off", "master off", "default on",
                                     "master offline"])
-def test_each_flag_assert_of_the_quick_probe_bites_alone(real_sup, break_):
+def test_each_flag_assert_of_the_quick_probe_bites_alone(ds2_like, break_):
     """Audit r2 A-NIT-1 (Test 2's), for generation 2: with everything else
     the real arms, each of the three flag asserts alone fails the probe --
     the student's flag off, the master DS2's flag off, the module default
     on -- and so does the master's offline steps (so a vacuous rewrite of
     any of them is caught)."""
+    real_sup = ds2_like
     probe = real_sup.quick("g2")
     prelude = {
         "arm off": f"ablation.ARMS[{G2_ARM!r}]['PREFIX_BN_PER_STEP'] = "
@@ -848,6 +933,7 @@ def _write_prep(sup, good=True, **doc):
     sha = hashlib.sha256(b"set" if good else b"other").hexdigest()
     full = {"set_sha256": sha, "master_arm": DS2_ARM,
             "master_iterations": 90, "master_offline_steps": 20000,
+            "master_snapshot": sup.MASTER_SNAPSHOT,
             "student_ceiling": 7.5, "vocab": [[0, 4], [1, 4]], **doc}
     (d / "vocab.json").write_text(json.dumps(
         {k: v for k, v in full.items() if v != GONE}))
@@ -1114,6 +1200,11 @@ def test_a_prep_that_never_checks_out_fails(sup, prep_env, monkeypatch,
     ({"master_offline_steps": "20000"}, "and '20000' offline steps"),
     ({"master_offline_steps": None}, "and None offline steps"),
     ({"master_offline_steps": GONE}, "and None offline steps"),
+    # the master's own snapshot (audit r1 B-L3: another final snapshot of
+    # DS2's arm, a seed repeat's, is not this prep's master)
+    ({"master_snapshot": "other-ds2.pth"},
+     "master snapshot is 'other-ds2.pth', not "),
+    ({"master_snapshot": GONE}, "master snapshot is None"),
     ({"student_ceiling": None}, "no valid student_ceiling"),
     ({"student_ceiling": 0.0}, "no valid student_ceiling"),
     ({"student_ceiling": True}, "no valid student_ceiling"),

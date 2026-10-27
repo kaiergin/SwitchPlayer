@@ -223,11 +223,37 @@ def test_a_student_master_runs_as_its_snapshots_spec():
     ({"_student_ceiling": float("nan"), "REWARD_GROWTH_START": float("nan"),
       "REWARD_GROWTH_CEILING": float("nan")}, "constant _student_ceiling"),
     ({"TOKEN_VOCAB": _drop(((2, 4),))}, "drops a 4-frame token"),
+    # the arm's underscore keys are compared too (audit r1 A-L3)
+    ({"_distill_offline_steps": 10000}, "beyond the student keys"),
+    ({"_master_arm": TK_ARM}, "beyond the student keys"),
+    ({"_ceiling_from_prep": False}, "beyond the student keys"),
+    ({"_master_iterations": 40}, "beyond the student keys"),
+    # DS2's own master (G0) is no student: no `_master_vocab` (audit r1
+    # A-L2)
+    ({"_master_vocab": DS2_VOCAB}, "no student"),
 ])
 def test_a_student_masters_spec_is_checked(change, match):
     spec = {**_student_spec(ablation.ARMS[DS2_ARM]), **change}
     with pytest.raises(SystemExit, match=match):
         distill.master_spec(DS2_ARM, {"spec": spec}, "m")
+
+
+@pytest.mark.parametrize("change,match", [
+    # a G2-like master needs the vocabulary ITS master (DS2) played
+    ({"_master_vocab": None}, "no _master_vocab"),
+    ({"_master_vocab": TK_VOCAB[1:]}, "slot 0|drops a 4-frame token"),
+    # a token TK's 36 has but DS2 had dropped (audit r1 A-L2: checked
+    # against `_master_vocab`, not the static 36)
+    ({"TOKEN_VOCAB": _drop(G2_DROP[1:])}, "outside the master's"),
+])
+def test_a_student_of_a_student_masters_spec_is_checked(change, match):
+    g2 = {**_student_spec(ablation.ARMS[G2_ARM], G2_VOCAB, 21.75),
+          "_master_vocab": DS2_VOCAB, **change}
+    if g2["_master_vocab"] is None:
+        del g2["_master_vocab"]
+    assert DS2_DROP[0] in _drop(G2_DROP[1:])
+    with pytest.raises(SystemExit, match=match):
+        distill.master_spec(G2_ARM, {"spec": g2}, "m")
 
 
 def test_a_student_masters_spec_missing_a_key_is_refused():
@@ -264,7 +290,6 @@ def test_a_student_masters_final_step_counts_its_offline_steps(
     torch.save(blob, m)
     with pytest.raises(SystemExit, match="after 20000 offline steps"):
         distill.prep(m, 90, tmp_path / "out")
-    assert ablation.ARMS[DS2_ARM].get("_student_ceiling") is None
 
 
 # --------------------------------------------------------------------------
@@ -321,8 +346,9 @@ def test_prep_from_a_student_master(prepped):
     m = distill.reward_magnitudes(lives, 10.0)
     assert h["student_ceiling"] == distill.halved_ceiling(m, 3.0) > 3.0
     assert doc["student_ceiling"] == h["student_ceiling"]
-    # its final temperature and no long-token bias: the schedules read its
-    # online steps (4,000 of 4,000)
+    # its final temperature and no long-token bias (the final snapshot is
+    # past every stage with or without the offset: what this pins is the
+    # recording at the end state, not the offset; audit r1 A-NIT-2)
     assert h["acting_temperature"] == 0.125
     assert h["long_token_bias"] == 0.0
     vocab = tuple(map(tuple, h["vocab"]))
@@ -340,6 +366,7 @@ def test_g2_trains_offline_from_a_student_masters_prep(
         **ablation.ARMS[G2_ARM], "_distill_offline_steps": 4,
         "_distill_snapshot_every": 2, "SCHEDULE_OFFSET_STEPS": 4,
         "_master_arm": MASTER_ARM, "_master_iterations": 2})
+    static = ablation.ARMS[G2_ARM]
     ablation.student_arm(G2_ARM, out / "vocab.json")
     c2 = header["student_ceiling"]
     assert ablation.ARMS[G2_ARM]["_master_vocab"] == DS2_VOCAB
@@ -370,6 +397,8 @@ def test_g2_trains_offline_from_a_student_masters_prep(
     assert row0["spec"]["_master_vocab"] == DS2_VOCAB
     assert row0["spec"]["PREFIX_BN_PER_STEP"] is True
     # a generation-3 prep could take row 0's spec as a student master's
+    # (its process sees the static arm, not student_arm's copy)
+    ablation.ARMS[G2_ARM] = static
     g2 = distill.master_spec(G2_ARM, row0, "row0")
     assert g2["_student_ceiling"] == c2
     assert np.isfinite(c2)
