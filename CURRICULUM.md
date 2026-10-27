@@ -789,6 +789,126 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
+
+(Pre-registration: "Next experiment (pre-registered) -- Test 2", below PB's
+sections; its interim notes there.)
+RUNS (from the run worktree Y:\SwitchPlayer-gen1b-run, detached at
+0467dd90, manifest from the audited fe4ef2ad; one attempt each, no ALERTs,
+both supervisor.err empty): the prep 22:25 -> 22:29 10-25; DS2 22:30 10-25
+-> 15:28 10-26 (61,050 s; the offline phase ~1 h 33 min, then ~10.3
+min/iteration); FS2 15:39 10-26 -> 06:10 10-27 (52,230 s, 9.7
+min/iteration); the hand-off's last evals 06:15 10-27 -- every row in both
+variants (DS2 0 and 5-90 plus its offline curve 1-4, FS2 5-90), all nine
+read (10) rows, no capped game.
+MASTER = G0 weights-iter090 (deployed 60-90 1113.86, g 0.828). THE PREP
+(read (7)'s first half, above in the interim notes): 45 G0 games, 135
+lives, 31,784 base steps, game returns mean 1176.0; S(1) = 0.344 -> c1 =
+11.258 units -> S(c1) = 0.172; 21 of 36 tokens kept (15 dropped: 278 of
+G0's 5,615 decisions, 5.0%; the master's search put 0.177 of its visits on
+them).
+EXACT eval (30 noop starts, prior argmax); DEPLOYED primary, RAW
+secondary, IN = the run's 8-game eval, maxp = the prior's mean max
+probability:
+  iter        0    5   10   15   20   25   30   35   40   45   50   55   60   65   70   75   80   85   90
+  DS2 dep  1065 1226 1200 1295 1533 1397 1944 1722 1385 1161 1418 2064 1525 1798 1448 1514 1636 1825 1851
+  DS2 raw  1119 1023 1638 1317 1155 1297 1309 1938 1361  909 1616 1709 1928 1534 1769 1365 1234 1742 1629
+  DS2 in      - 1125 1156 1315 1882 1452 1955 1609 1382 1226 1260 1982 1261 1888 1506 1276 1615 1665 2265
+  DS2 env     -  3.1  6.8 10.5 14.1 17.5 22.0 25.9 30.4 34.1 37.7 42.0 46.3 50.6 55.5 60.2 65.3 68.0 71.4
+  DS2 maxp    - 0.71 0.69 0.69 0.65 0.67 0.67 0.68 0.69 0.43 0.65 0.67 0.65 0.67 0.65 0.65 0.64 0.71 0.67
+  FS2 dep     -  348  379  430  426  473  805  697  568  678  695  714  672  846  827  849 1062  982 1042
+  FS2 raw     -  474  331  385  465  439  565  620  537  712  600  639  643  898  996  860 1093 1046 1074
+  FS2 in      -  370  349  415  446  441  800  748  491  548  565  601  918  781  825  712 1024  785  944
+  FS2 env     -  2.8  5.4  8.9 11.8 14.7 17.7 20.2 22.7 25.5 28.3 31.3 34.4 38.0 40.9 44.6 48.6 51.6 55.1
+  FS2 maxp    - 0.58 0.55 0.59 0.57 0.71 0.66 0.72 0.70 0.61 0.65 0.68 0.69 0.67 0.67 0.63 0.63 0.67 0.66
+(env in thousands of the student's own base steps; both at the constant
+ceiling 11.258 over the same 21 tokens, TK's schedules on the online
+steps.)
+NEAR RANDOM: neither (DS2 60-90 g 1.385, FS2 0.606).
+READ (0) transfer: row 0 1065.0 deployed (raw 1119.3) against MASTER
+  1113.86: -48.9, descriptive (+-464); NOT TRANSFER FAILED. Offline curve,
+  deployed / raw: 948 / 1115 @4k, 942 / 1149 @8k, 1146 / 1035 @12k, 1326 /
+  1226 @16k, 1065 / 1119 @20k.
+READ (1) level 60-90: DS2 1656.52 (SD 167.2) against FS2 897.19 (SD
+  138.8): +759.3 -> BETTER (band 232). Raw 1600.05 against 944.33: +655.7
+  -> BETTER (band 205).
+READ (2) head start 5-25: DS2 1330.27 against FS2 411.27: +919.0 ->
+  BETTER (band 274.4). Raw 1286.00 against 418.60 (+867.4).
+READ (3) against the master: DS2 1656.52 against 1113.86: +542.7 -> ABOVE
+  (g 1.385; EfficientZero's 1281.2 is g 1). FS2 -216.7 -> SAME.
+READ (4) time to level (the first row >= 881.86): DS2 row 0 (before it
+  played); FS2 row 80 (48,563 env steps). DS2's lowest row in 5-25 is
+  1200.0 (@10) against row 0's 1065.0: no forgetting.
+READ (5) tokens: the 15 dropped tokens held 5.0% of G0's decisions. Play
+  shares (4 / 8 / 16 / 32 frames): DS2 0.05 / 0.04 / 0.27 / 0.64 @5 ->
+  0.10 / 0.03 / 0.22 / 0.64 @90; FS2 0.17 / 0.04 / 0.11 / 0.69 @5 -> 0.17
+  / 0.00 / 0.00 / 0.83 @90 (FS2 all but stops using the 8- and 16-frame
+  tokens). Frames per decision, deployed, rows 60-90: DS2 22.6-24.5, FS2
+  23.1-28.6 (2.4-2.7 and 2.1-2.6 decisions per second; G0 2.6-2.9). FS2
+  against TK-90 (the same recipe over 36 tokens, the growing clip) at
+  60-90: +40.6, inside the band.
+READ (6) stability, the largest adjacent deployed drop from row 45: DS2
+  -539 (2064 @55 -> 1525 @60), FS2 -80 (1062 @80 -> 982 @85). Raw: DS2
+  -403, FS2 -136.
+READ (7) the clip: S(1) 0.344, c1 11.258, S(c1) 0.172 on G0's games (the
+  prep). reward_kept by row: DS2 0.83 @5 -> 0.78 @90, falling steadily;
+  FS2 0.81 @5, 0.94 @60, 0.86 @90 (more of a stronger player's reward is
+  the capped kind).
+READ (8) prior: R = maxp 75-90 / 30-55: DS2 0.670 / 0.633 = 1.06 (0.995
+  without row 45's one-row dip), FS2 0.645 / 0.670 = 0.96 -> both HELD
+  (>= 0.8). Fresh-target entropy without trend in either (DS2 0.49-1.65,
+  FS2 0.46-1.66).
+READ (9) the plateau rule (Step 0 (ii), one parameter set), after the
+  fact: on deployed it never fires on either (DS2 sigma 235.5, best
+  window 55-85 1687.0, last 1656.5; FS2 sigma 53.1, still rising, the last
+  window its best). On raw it fires on DS2 at row 90 (its last row;
+  best window 55-85 1611.5), never on FS2. The rank-based variant fires on
+  DS2 deployed at 55 (its later rows averaged 1656.5 against the window
+  then, 1584.5: a false plateau) and raw at 85.
+READ (10) mechanism: FIXED at every row in both students. DS2 p1_ratio
+  0.84 / 0.73 / 0.72 / 0.46 / 0.52 at rows 0 / 30 / 55 / 75 / 90; FS2 0.69
+  / 0.40 / 0.60 / 0.88 at 30 / 55 / 75 / 90. Against the pooled statistics
+  the step-1 offset would be DS2 1.78 / 6.88 / 5.30 / 4.88 / 4.79 SDs,
+  FS2 0.40 / 0.80 / 3.64 / 6.31: without PB's fix both students' searches
+  would have carried the artifact (DS2 from row 30, FS2 from ~75). No
+  caveat on reads (1)-(9).
+PRE-REGISTERED DECISION:
+  - (1) BETTER -> the distillation step JOINS P3's swap.
+  - TEST 3 (a seed-1 repeat of the pair) runs: read (1) and read (2) are
+    BETTER. Read (10) FIXED throughout -> no diagnosis before it.
+Beyond the letter (one seed, within-run bands -- "consistent with"):
+  - The effect is large: +759 deployed is 3.3 bands (the distillation
+    step's DS - FS was +197, inside its band). Two things changed between
+    the two pairs. Here the students differ ONLY in the distillation step
+    (the earlier pair also differed in clip and temperature schedules),
+    and the master is stronger (G0 1114 against TK-90's 857).
+  - Part of the gap is FS2 being slow: 897, below G0 (1114, -217), the
+    earlier FS (1034) and PB (1032), above TK-90 (857) -- all inside the
+    band -- and it reached level only at row 80. FS2
+    differs from G0 in the vocabulary (21 tokens against 36) and the clip
+    (a constant 11.26 against the sign clip; the fix is NO DIFFERENT by
+    PB). Consistent with: a looser clip from scratch slows a fresh
+    learner (G0, at the sign clip, is the best fresh run so far). That
+    fits Kai's design: loosen the clip only at a swap, where the student
+    starts from the master's play.
+  - DS2 passed its master by 543 (g 1.39 against G0's 0.83) on 71.4k env
+    steps of its own, beyond G0's 90 iterations; its curve is still level
+    to rising at row 90 (the plateau rule does not fire on deployed).
+  - FS2's play collapses onto the 32-frame tokens (0.83 at row 90; the
+    16-frame ones 0.002), while DS2 keeps the 16-frame tokens (0.22-0.31;
+    G0's most-used token was (LEFT, 16) at 0.278).
+    The same 21-token menu, very different use: the distilled start
+    carries the master's token habits.
+  - Row 45's one-row diagnostics spike in DS2 (mean |prefix| 4.01, H(pi)
+    1.90; losses unchanged) is the kind G0 and the earlier FS each showed
+    once; it did not repeat.
+  - Generation 2 (if Kai takes the loop on): DS2's weights-iter090 is the
+    natural next master (training_steps 200,000 = 20,000 offline +
+    180,000 online: the prep must count the offline steps, as noted in
+    Test 2's AMENDMENTS), and the prep must read c0 and the vocabulary
+    from the master's spec (c1 = 11.258 and DS2's 21 tokens become the
+    generation-2 baseline).
+
 ### RESULT -- PB: per-step prefix BatchNorm statistics on the token arm (seed 0), 2026-10-25
 
 RUN (mspacman-tokens-rgrow-pbn-s0-2026-10-25, from the run worktree
