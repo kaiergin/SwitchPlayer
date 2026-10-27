@@ -1001,6 +1001,27 @@ nothing missing) pass. launch_gen2.ps1 started post_gen2.py (sha256
 G2). KEEP Y:\SwitchPlayer-gen1b-run until G2 completes (ACCEPTED r2).
 Rerun launch_gen2.ps1 after a reboot or a pause (idempotent; PAUSE also
 kills a running preflight or prep).
+PREFLIGHT ok 11:32 (manifest + quick probe + 22 suites in the run tree);
+MASTER DS2 weights-iter090 (deployed 60-90 1656.52, g 1.385); PREP done
+11:34 in one attempt (4 min). The prep, descriptive (read (7)'s first
+half):
+  recording: 36 games of DS2 at temperature 0.125 (long-token bias 0), 108
+      lives, 31,862 base steps; game returns mean 2127.8 (840-5000). G0's
+      recording in Test 2's prep: 1176.0.
+  THE CLIP: DS2's ceiling c1 = 11.258 removes S(c1) = 0.273 of the recorded
+      7,660 reward units. The halved-clip rule gives c2 = 22.961 units
+      (229.6 points per base step: the first ghost, 200, now passes whole;
+      the later ghosts and fruit are cut), which removes S(c2) = 0.136.
+      Base steps clipped: 0.33% -> 0.13% of all base steps (2.6% -> 1.0%
+      of the 3,976 reward-earning ones).
+  VOCABULARY: 18 of 21 tokens kept. Dropped: (NOOP, 16), (NOOP, 32) and
+      (DOWNLEFT, 16), which held 1.5% of DS2's 5,572 decisions. Largest
+      kept: (LEFT, 16) 0.236, (DOWNLEFT, 32) 0.183, (UPRIGHT, 32) 0.158,
+      (DOWNRIGHT, 32) 0.107. 5,999 re-tokenized records (85 dropped-token
+      decisions split into 319 extra 4-frame records); 0 uniform
+      fallbacks; mean master visit mass on dropped tokens 0.045.
+G2 LAUNCHED 11:35 10-27 (attempt 1, fresh): the prefill, then the 20,000
+offline steps (~1.5 h to row 0), then 90 iterations (~16 h).
 
 ### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
 
