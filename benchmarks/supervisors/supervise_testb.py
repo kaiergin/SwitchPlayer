@@ -38,9 +38,11 @@ predecessors' final rows never change once they are complete). A stop <= 0
 stop (Kai's call); a predecessor without a completion marker or a final row
 is "PREP FAILED: STOP UNKNOWN" (after two retries a minute apart).
 
-THE CHAIN. f0 has no predecessor (no wait, no prep) -- but, like every run,
-it waits while ANY trainer runs (the guard before the preflight: Generation
-2 may still be training when Test B is launched, and holds f0 back). f{k}
+THE CHAIN. f0 has no predecessor (no wait, no prep). Generation 2 finishes
+first: launch_testb.ps1 refuses to start before G2's completion marker (or
+its ABANDONED file) exists (audit r1 B-M1); the any-trainer guard before
+the preflight -- every run waits while ANY trainer runs -- is the backstop
+for a manual start. f{k}
 (k >= 1) waits (wait_external) for F{k-1} -- in this same run tree -- to
 have its completion marker AND both of its exact-eval probe jsonls to hold
 every row of F{k-1}'s own ablation jsonl (every iteration with an in-run
@@ -687,9 +689,10 @@ def pred_unattended(variant, seed):
 
 def pred_master_stop(variant, seed):
     """The predecessor's supervisor's last give-up line when it is Kai's
-    call -- its master gate's stop or its stop's ("PREP FAILED: MASTER ..."
-    / "PREP FAILED: STOP ..."; after its last launch or preflight line) --
-    else None."""
+    call (KAIS_CALL_STOPS: its master gate's stop, a spent budget's or a
+    deterministic prep check's -- "PREP FAILED: MASTER ..." / "PREP FAILED:
+    STOP NOT POSITIVE ..." / "PREP FAILED: PREP CHECK ..."; after its last
+    launch or preflight line) -- else None."""
     lines = lines_of(predecessor(variant, seed)[3])
     fail = max((i for i, l in enumerate(lines) if l.startswith(
         ("CRASH LOOP", "MAX ATTEMPTS", "PREP FAILED", "NO PROGRESS"))),
@@ -1193,11 +1196,11 @@ def live_trainers():
     or seed; is_trainer): an orphan of an earlier supervisor (the child is
     detached and survives a supervisor kill), a prep (an orphaned one
     keeps the GPU and writes the prep's files), another experiment's run
-    (Generation 2's, when Test B is launched before it completes), a
-    duplicate launch. Python processes only: an editor or a git command
-    naming the file is not a trainer. A python whose command line cannot be
-    read is not counted (counting it could block every launch for good on a
-    foreign process)."""
+    (a manual start beside Generation 2: the launcher waits for its
+    completion), a duplicate launch. Python processes only: an editor or a
+    git command naming the file is not a trainer. A python whose command
+    line cannot be read is not counted (counting it could block every
+    launch for good on a foreign process)."""
     return [pid for pid, cmd in _procs() if is_trainer(cmd)]
 
 

@@ -326,6 +326,23 @@ def test_collect_logs_each_life_before_admission(tmp_path, globals_kept):
     assert run.replay == []
 
 
+def test_reanalyse_sees_the_count_the_actor_played_at(globals_kept):
+    """Audit r1 A-L1 (pinned in r2): the lives' reanalysis -- where the
+    behaviour diagnostics read the env-keyed temperature -- sees the last
+    sync's count; collect advances it only after every life."""
+    seen = []
+    muzero.SCHEDULE_ENV_STEPS = 1000
+    run = SimpleNamespace(
+        env_steps=1000, own_play=None, replay=[],
+        reanalyse=lambda traj, **k: seen.append(muzero.SCHEDULE_ENV_STEPS)
+        or list(traj))
+    a, _ = _life(1)
+    b, _ = _life(2)
+    _pipeline([(a, True, 3), (b, True, 3)], run).collect()
+    assert seen == [1000, 1000]
+    assert run.env_steps == 1006 and muzero.SCHEDULE_ENV_STEPS == 1006
+
+
 def test_collect_without_the_log_is_unchanged(globals_kept):
     run = SimpleNamespace(env_steps=10, own_play=None, replay=[],
                           reanalyse=lambda traj, **k: list(traj))

@@ -1048,6 +1048,44 @@ ACCEPTED r1:
   - Not added: a test that runs SelfPlayActor.play() itself (A's scratch
     run and the pre-launch smoke cover it), and a prep from a STUDENT
     master's log (the smoke's F1 -> F2 swap covers it).
+AUDIT r2 (a fresh-eyes check of FIXES r1 at 55a2d820 and the launcher):
+nothing above LOW. THE AUDIT LOOP IS CLOSED.
+Verified:
+  - The launcher's G2 gate, run alone against mock G2 folders, throws on a
+    full checkpoint, on exactly 1,000,000 bytes and on no checkpoint, and
+    passes on a marker or on ABANDONED. It runs before anything starts,
+    and nothing else starts the supervisors.
+  - The PREP CHECK substrings match distill's real messages as a real
+    child process logs them; progress lines, OOM and paths do not match.
+    The stop reaches the next generation's wait as Kai's call.
+  - master_sha256 matches what distill writes, and no legitimate resume
+    breaks.
+  - STOP UNKNOWN is a plain give-up.
+  - During collect the count equals the last sync's on every path.
+  - A-L4 and A-L5 bind only the env-stopped arms.
+  - Mutants of each fix fail their tests, except A-L1 (below).
+  - test_testb: 51 pass; test_supervise_testb: 190; CHECK OK.
+FIXES r2 (LOW / NIT: tests and text; confirmed by a fresh-eyes r3 check):
+  - LOW-1: A-L1 had no test (reverting it passed every test). A test now
+    records the count inside reanalyse ([1000, 1000]; [1003, 1006] fails).
+  - NIT-2: the stale docs. The supervisor's CHAIN paragraph,
+    live_trainers and the launcher's header said Test B could be launched
+    beside G2 and that the guard holds F0 back; the launcher now waits for
+    G2, and the guard is a backstop. pred_master_stop's docstring now
+    names the narrowed Kai's-call stops. The hand-off's give-up ALERT and
+    docstring now name STOP NOT POSITIVE / PREP CHECK as Kai's call: a
+    relaunch repeats them. check_post_testb asserts it, via
+    make_check_testb.
+  - NIT-4: a prep killed while reading the log (its own progress line
+    last) is retried, not stopped (+1 test); set_intact fails closed on an
+    unreadable master snapshot (+1 test).
+  - NIT-1: the launcher notes KEEP Y:\SwitchPlayer-gen2-run until Test B
+    completes (its G2 gate reads the marker there on every rerun).
+ACCEPTED r2: NIT-3 -- check_life's AssertionError and a corrupt iter-NNN.pkl
+are deterministic but retried (both unlikely: the marker comes after a
+whole log); a transient "device not ready" read as a missing iteration
+would be a false PREP CHECK stop (negligible on a local drive). One
+auditor run started at 7.5 GB of free commit, below the 8 GB rule.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%

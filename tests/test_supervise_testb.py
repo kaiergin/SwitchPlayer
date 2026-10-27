@@ -1664,6 +1664,37 @@ def test_a_deterministic_prep_check_stops_at_once(sup, prep_env, monkeypatch,
                if l.startswith("PREP FAILED"))
 
 
+def test_the_preps_own_progress_line_is_retried(sup, prep_env, monkeypatch,
+                                                capsys):
+    """Audit r2 NIT-4: a prep killed while reading the log leaves its own
+    progress line ("own-play log: <dir>, ...") last -- not a check of the
+    prep's: retried like any other failure."""
+    def exits():
+        d = pathlib.Path(sup.prep_dir("f1"))
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "prep.log", "a", encoding="utf-8") as f:
+            f.write("x\n10-28 06:00 own-play log: benchmarks/results/r/"
+                    "own-play-a-seed0, iterations 1-27 of master "
+                    "weights-iter027.pth (a, 54000 steps); temperatures "
+                    "{}\n")
+    _popen(monkeypatch, sup, [(1, exits)] * 3)
+    assert sup.run_prep("f1", 0, {}) is False
+    out = capsys.readouterr().out
+    assert "PREP CHECK" not in out
+    assert "PREP FAILED after 3 attempts" in out
+
+
+def test_set_intact_needs_the_master_snapshot(sup):
+    """Audit r2 NIT-4: set_intact's read of the master snapshot (its
+    sha256) fails closed."""
+    _finish(sup, "f0", final=27, evals=False, files=False)
+    _write_prep(sup)
+    assert sup.set_intact("f1", 0) == (True, "")
+    os.remove(sup.snapshot_path("f0", 0, 27))
+    ok, why = sup.set_intact("f1", 0)
+    assert not ok and why.startswith("the master snapshot: "), why
+
+
 def test_the_prep_retries_15_min_apart(sup, prep_env, monkeypatch):
     sleeps = []
     monkeypatch.setattr(sup.time, "sleep", sleeps.append)
