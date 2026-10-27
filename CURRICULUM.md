@@ -789,6 +789,126 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test B: a fast lineage from scratch (a swap every 20k env steps, own-play distillation, a per-generation discount) (Kai, 2026-10-27)
+
+DECISION: Kai 2026-10-27, while Generation 2 trains. The comparison that
+prompted it: Ms. Pac-Man at Atari 100k is EZ-V2 2251.0, BBF 2008.3 and
+EfficientZero 1281.2. Our lineage G0 -> DS2 reaches 100k cumulative env
+steps (G0's 59.2k + the 31.8k recording + DS2's own) at DS2 rows 5-15,
+deployed 1200-1295. Kai's choices:
+  - "make the swap constant for now ... after 20k environment steps each
+    time" (the "large slowdown" trigger is discussed below, under Test D);
+  - the discount copied from BBF, 0.97 -> 0.997, changed only at swaps;
+  - the swap data is the master's own recent play;
+  - a 100k env-step budget;
+  - Generation 2 finishes first;
+  - BBF-style resets are a later test (Test C).
+Kai approved the plan's four recommendations:
+  (1) the discount's gap to 1 halves at each swap, capped at 0.997;
+  (2) the within-run schedules restart each generation, compressed to its
+      20k env steps;
+  (3) 20,000 offline steps per swap;
+  (4) a build check that the value support holds the largest value.
+QUESTION: with cheap swaps every 20k env steps, does a lineage from scratch
+reach a higher deployed score at 100k cumulative env steps than the current
+lineage (G0 -> DS2)?
+THE LINEAGE (seed 0; five generations and four swaps; every env step
+counted):
+  F0 is from scratch. It uses TK's recipe (the 36 tokens, policy-only
+    acting, PREFIX_BN_PER_STEP) at the sign clip (c0 = 1) and DISCOUNT 0.97
+    per base step. A base step is 4 frames, the unit of BBF's discount; the
+    token arms' current 0.997 per frame is 0.988 per base step. F0 runs
+    until 20,000 of its own env steps.
+  F1-F4: each is the distilled student of the previous generation's FINAL
+    snapshot, the one from the iteration in which it passed 20,000 env
+    steps. The swap is Test 2's / Generation 2's, with these changes:
+      - THE DATA is the master's own play over its whole generation (~20k
+        base steps). The master's trainer logs it at raw-step resolution,
+        with the decision records, every inner frame and the raw
+        per-base-step rewards, as distill.record captures them. There is no
+        fresh recording, so a swap costs no env steps. The targets are the
+        master's 50-sim birth search over its tokens (the masked read-out),
+        with the master's spec (master_spec).
+      - THE CLIP: the halved-clip rule on the logged games.
+      - THE VOCABULARY: the 1% rule on the logged decisions.
+      - THE DISCOUNT: the gap 1 - g halves, capped at 0.997, so 0.97,
+        0.985, 0.9925, 0.99625, 0.997.
+    Then 20,000 offline steps (snapshots every 4,000; the last is row 0),
+    then online play until 20,000 of its own env steps.
+  WITHIN each generation, TK's schedules restart and run over its 20,000 env
+    steps, keyed to its env-step progress; the offline steps advance none
+    of them. The schedules are the prior-acting temperature (0.5 / 0.25 /
+    0.125, staged), the long-token bias (0.5 -> 0 by 25%), PER beta (0.4 ->
+    1) and the off-policy horizon decay. A generation is ~25-30 iterations
+    at 650-800 env steps each, ~50-60k gradient steps (BBF resets every
+    40k).
+  MASTER GATE at each swap: the master's last two deployed rows averaging
+    NEAR RANDOM (< 502.08) stop the chain (Kai's call). For scale, G0 had
+    740 at 19.8k env steps.
+READS. EXACT eval as before: whole games, 30 noop starts, prior argmax,
+PROBE_ENV=MsPacmanNoFrameskip-v4; DEPLOYED primary, raw secondary. Rows are
+taken every 5 iterations of each generation, plus each generation's final
+snapshot and the students' row 0 and offline curves. Cumulative env steps
+are the lineage's own online env steps (the swaps and the offline phases
+add none).
+  (1) HEADLINE at 100k: the mean deployed score of the lineage's rows in
+      the window [90k, 100k] cumulative env steps (F4's rows there, its
+      final included) against the current lineage's rows in the same window
+      (DS2 rows 0 / 5 / 10 at 91.0k / 94.0k / 97.7k: 1065.0, 1226.3, 1200.0;
+      mean 1163.8). The band is 2 x 216.9 x sqrt(1/n + 1/3) for the lineage's
+      n rows (+-354 for n = 3): BETTER / NO DIFFERENT / WORSE. Raw likewise
+      (DS2 raw 1119.3, 1022.7, 1637.7; mean 1259.9). References, not
+      verdicts: EfficientZero 1281.2, BBF 2008.3, EZ-V2 2251.0 (multi-seed
+      means at 100k agent steps; ours is one seed). Descriptive: the
+      deployed curve against cumulative env steps beside the current
+      lineage's (G0 740 @19.8k, 1154 @39.5k, 1190 @59.2k).
+  (2) per swap: transfer (the student's row 0 against the master's final
+      row), the jump (the student's rows in its first 10 iterations against
+      the master's last two rows), and each generation's improvement rate
+      (deployed score per 1k env steps, OLS over its rows), the input to
+      Test D's trigger.
+  (3) the clip, the discount and the vocabulary per generation;
+      reward_kept by row; the logged set's size and its temperature mix.
+  (4) the prior: policy_maxp and the search targets' entropy by row
+      (generations are too short for Test 1's R windows).
+  (5) mechanism: probe_prefix_bn at each student's row 0 and each
+      generation's final snapshot, FIXED as in PB.
+  (6) stability: the largest adjacent deployed drop within a generation,
+      and across each swap (row 0 against the master's final).
+DECISION AFTER:
+  - (1) BETTER -> the fast lineage becomes the base; Test C (resets) builds
+    on it.
+  - (1) NO DIFFERENT -> Kai's call: the same level at no recording cost.
+  - (1) WORSE -> diagnose before Test C: transfer at the early swaps (read
+    (2)), the low early discount, the smaller distillation sets.
+  CAVEAT: three things change at once against the current lineage (the
+  swap timing, the own-play data, the discount schedule), so the verdict
+  is on the package.
+BUILD (before launch; audited like every build):
+  - The trainer: a raw-resolution log of its own play; an env-step stop
+    with a final snapshot at the stopping iteration; the schedules keyed
+    to the generation's env-step progress; DISCOUNT per arm; the value
+    support checked against the largest value (ceiling / (1 - g)).
+  - The prep: distillation from a master's log instead of a recording;
+    the discount rule (vocab.json "student_discount"); DISCOUNT among the
+    student keys.
+  - The arms F0-F4; a chain supervisor (each generation waits for the
+    previous one's completion and evals); an eval hand-off over the five
+    runs; tests, a manifest, a fresh run tree.
+COST: the build and its audit loop first, then ~1.3 days of training,
+launched after Generation 2 completes (~05:00 10-28).
+LATER (Kai 2026-10-27, not pre-registered yet):
+  - TEST C: BBF-style resets on the winning lineage. Candidates: a student
+    started from a shrink-and-perturb copy of the master (conv layers 50%
+    toward a fresh init), or resets within a generation every ~40k
+    gradient steps.
+  - TEST D: a smart swap trigger, rate-based and game-agnostic. Kai: a
+    plateau can be "a large slowdown in improvement", not only no gain.
+    Candidates: the rate falling below 1/3 of the generation's own peak
+    (on past curves this fires at 40-85 iterations, noisily), or swapping
+    when staying is slower than the rate a swap delivers (the marginal
+    value rule). Both are calibrated on Test B's per-generation rates.
+
 ### Next experiment (pre-registered) -- Generation 2: DS2 as the master, one distilled student (Kai, 2026-10-27)
 
 DECISION: Kai 2026-10-27, after Test 2's RESULT: "Generation 2 next" (over
