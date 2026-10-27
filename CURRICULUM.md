@@ -789,6 +789,104 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Generation 2: DS2 as the master, one distilled student (Kai, 2026-10-27)
+
+DECISION: Kai 2026-10-27, after Test 2's RESULT: "Generation 2 next" (over
+the pre-registered seed-1 repeat; see the RESULT's last note).
+QUESTION: does the loop compound? With DS2 (generation 1's distilled
+student) as the master, the clip's removed share halved again and the
+vocabulary trimmed again by the same rules, does the generation-2 student
+pass DS2 as DS2 passed G0?
+THE SWAP (generation 1 -> 2): every rule is Test 2's; only the master
+changes.
+  MASTER = DS2's final snapshot (weights-iter090: 20,000 offline + 180,000
+    online steps; its acting states); MASTER = its deployed 60-90 mean
+    1656.52 (raw 1600.05). Not NEAR RANDOM (g 1.385).
+  RECORDING, VOCABULARY, RE-TOKENIZATION, TARGETS: Test 2's -- DS2's fresh
+    games at its final temperature (0.125) through its acting states, at
+    raw-step resolution, whole games until >= 31,250 base steps, seed 0;
+    the 1% rule over DS2's 21 tokens, never a 4-frame token; dropped tokens
+    as raw 4-frame records; the masked read-out of DS2's 50-sim birth
+    search, under DS2's own spec (its per-step prefix BN statistics: its
+    search is clean by Test 2's read (10)).
+  THE CLIP (rule (a): each later swap halves again): the master's ceiling
+    is DS2's constant c1 = 11.258 (read from its snapshot's spec); the
+    student's c2 is the smallest c >= c1 with S(c) <= S(c1) / 2 on DS2's
+    recorded games. c2 past the reward supports -> PREP FAILED, Kai's call.
+    Logged: S(c1), c2, S(c2), the shares of base steps clipped.
+ARM (seed 0, 90 iterations): G2 = DS2's arm (the TK recipe,
+  PREFIX_BN_PER_STEP) over the generation-2 vocabulary at the CONSTANT
+  ceiling c2. It gets the distillation step's prefill (DS2's re-tokenized
+  games with master-search targets) and 20,000 offline steps, then TK's
+  within-run schedules keyed to its ONLINE steps (SCHEDULE_OFFSET_STEPS
+  20,000): prior-acting temperature 0.5 / 0.25 / 0.125 staged, long-token
+  bias 0.5 -> 0 by 25%, PER beta 0.4 -> 1, the off-policy horizon decay.
+  This is the proposal's default (b): the clip is the one setting that
+  moves only at a swap. No fresh twin: Kai's choice, since the question is
+  compounding, and Test 2 settled distilled against fresh on one seed.
+READS. EXACT eval as before (whole games, 30 noop starts, prior argmax,
+PROBE_ENV=MsPacmanNoFrameskip-v4); G2's rows 0 and 5-90 plus its offline
+curve (4k, 8k, 12k, 16k); DEPLOYED primary, raw secondary; MASTER = DS2's
+1656.52 (raw 1600.05).
+  NEAR RANDOM first: G2's 60-90 deployed mean < 502.08 is diagnosed
+      before any other read.
+  (0) transfer: row 0 against MASTER, descriptive (+-464); TRANSFER FAILED
+      if row 0 is NEAR RANDOM. The offline curve and DS2's own scores in
+      the recorded games beside it.
+  (1) PRIMARY, against the master: G2's deployed mean 60-90 against
+      MASTER 1656.52, +-232: ABOVE / SAME / BELOW. Raw against 1600.05,
+      +-205.
+  (2) head start: G2's deployed mean of rows 5-25 against DS2's (1330.27),
+      +-274.4: BETTER / NO DIFFERENT / WORSE (two distilled starts, one
+      generation apart).
+  (3) two generations, descriptive: G2's 60-90 against G0's 1113.86 (in
+      g).
+  (4) time to level: the first row >= MASTER - 232 (1424.52), in
+      iterations and in G2's own env steps; G2's lowest row in 5-25
+      against row 0 (forgetting).
+  (5) tokens: the dropped tokens and their share of DS2's recorded play;
+      G2's per-duration play / search shares, frames per decision, the
+      deployed decisions per second.
+  (6) stability: the largest adjacent deployed drop from row 45.
+  (7) the clip: S(c1), c2, S(c2) on DS2's games; reward_kept by row.
+  (8) the prior: R = mean policy_maxp over rows 75-90 / over rows 30-55;
+      HELD >= 0.8, FLATTENED <= 0.6, else PARTIAL; the search targets'
+      entropy by row.
+  (9) the general plateau rule (Step 0 (ii)) after the fact,
+      descriptive.
+  (10) mechanism: probe_prefix_bn.py at rows 0, 30, 55, 75 and 90, FIXED
+      as in PB (p1_ratio <= 2). If G2 is not FIXED at one or more of rows
+      55, 75 and 90, reads (1)-(9) carry that caveat.
+DECISION AFTER:
+  - (1) ABOVE -> the loop compounds over two swaps: Kai's call on
+    generation 3 and on the loop's automation (a plateau-triggered swap,
+    Step 0 (ii)).
+  - (1) SAME -> the second swap kept the master's level without passing
+    it: Kai's call (candidates: the halved clip now reaching rewards the
+    score weighs most; the vocabulary trim; a seed repeat; a fresh twin).
+  - (1) BELOW -> diagnose before any generation 3: transfer by read (0),
+    the clip by read (7), the tokens by read (5).
+  - (0) TRANSFER FAILED -> the generation-2 prep is diagnosed first.
+BUILD (before launch; audited like every build):
+  - experiments/distill.py: a STUDENT master (an arm with `_student`).
+    Its runtime spec comes from its snapshot's spec: the vocabulary, the
+    constant ceiling, the schedule offset and the per-step BN flag,
+    checked against its arm's static keys. Its final training_steps is
+    iterations x 2,000 + its offline steps. The master's ceiling is its
+    constant one.
+  - experiments/ablation.py: the -gen2-distill arm (DS2's arm with
+    `_master_arm` = DS2's arm). student_arm / student_gate must accept a
+    master vocabulary that is itself a student vocabulary: the prep's
+    master_vocab, an ordered subset of TK's 36 that holds every 4-frame
+    token.
+  - A supervisor (supervise_gen2.py, derived from supervise_gen1.py):
+    the master gate on DS2 (its completion marker and both probe jsonls'
+    rows 60-90), the prep, then G2. An eval hand-off (rows 0 and 5-90, the
+    offline curve, read (10) at 0 / 30 / 55 / 75 / 90).
+  - Tests, a manifest, a fresh detached run worktree.
+COST: prep ~5-10 min; G2 ~17 h (DS2's pace); the build and its audit loop
+first.
+
 ### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
 
 (Pre-registration: "Next experiment (pre-registered) -- Test 2", below PB's
@@ -908,6 +1006,10 @@ Beyond the letter (one seed, within-run bands -- "consistent with"):
     Test 2's AMENDMENTS), and the prep must read c0 and the vocabulary
     from the master's spec (c1 = 11.258 and DS2's 21 tokens become the
     generation-2 baseline).
+KAI 2026-10-27, after this RESULT: "Generation 2 next" -- TEST 3 IS NOT RUN
+(the proposal Kai approved framed the seed-1 repeat as "if it lands near
+its bands"; this result is 3.3 bands out). Recorded for a later repeat:
+a fresh seed-1 prep (Kai's answer). Generation 2 is pre-registered above.
 
 ### RESULT -- PB: per-step prefix BatchNorm statistics on the token arm (seed 0), 2026-10-25
 
