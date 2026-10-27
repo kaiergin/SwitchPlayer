@@ -1086,6 +1086,30 @@ are deterministic but retried (both unlikely: the marker comes after a
 whole log); a transient "device not ready" read as a missing iteration
 would be a false PREP CHECK stop (negligible on a local drive). One
 auditor run started at 7.5 GB of free commit, below the 8 GB rule.
+AUDIT r3 (a fresh-eyes check of FIXES r2 at 802ea321 and the scratchpad
+edits): nothing above NIT. Verified:
+  - The A-L1 test fails on the a6d026c3 placement ([1003, 1006]), on a
+    placement after reanalyse and with the line removed; the control
+    passes.
+  - The progress-line test fails only when PREP_CHECKS loses its trailing
+    space. The snapshot test fails on a fail-open set_intact and on a
+    removed try/except.
+  - The text edits change no behaviour. make_check_testb regenerates its
+    check byte for byte and CHECK OK holds; the new assertion fails on the
+    pre-r2 hand-off.
+ACCEPTED r3 (NIT):
+  - A killed prep writes no progress line of its own; the test pins the
+    colon-vs-space distinction, which is what matters.
+  - live_trainers and FIXES r2 say the launcher "waits" for G2; it
+    refuses, and is rerun after G2 completes.
+  - Two test docstrings keep the "launched beside G2" framing (now the
+    backstop case).
+  - make_check_testb.py has lines over 79, like its earlier lines that
+    mirror check_post_gen2.
+  - Two short rewrapped lines.
+  - Pre-existing: prep_log_tail reads the whole append-mode prep.log, so
+    an attempt killed before writing reports the previous attempt's last
+    line (Kai's call either way; rare).
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
