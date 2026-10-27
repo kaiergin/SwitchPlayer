@@ -1072,7 +1072,7 @@ def test_an_undriven_predecessor_is_named_and_its_stops_are_kais_call(
     for stop in ("PREP FAILED: MASTER NEAR RANDOM: F0's deployed mean ...",
                  "PREP FAILED: MASTER ABANDONED: F0's run folder ...",
                  "PREP FAILED: STOP NOT POSITIVE: F1's --stop-env-steps ...",
-                 "PREP FAILED: STOP UNKNOWN: F0 has no completion marker"):
+                 "PREP FAILED: PREP CHECK: the value support (5000 ..."):
         suplog.write_text("F0 complete and evaluated; f1 s0 may start" + NL
                           + stop + NL)
         with pytest.raises(Stop):
@@ -1106,6 +1106,22 @@ def test_f0s_stop_is_the_budget(sup):
     assert sup.stop_env_steps("f0", 0) == sup.BUDGET == 20000
     cmd = sup.command("f0", 0)                   # nothing on disk needed
     assert cmd[cmd.index("--stop-env-steps") + 1] == "20000"
+
+
+def test_a_stop_unknown_is_a_plain_give_up(sup, monkeypatch, capsys):
+    """Audit r1 B-L4: STOP UNKNOWN (a predecessor's final row not settled
+    yet) clears on a rerun -- not Kai's call."""
+    monkeypatch.setattr(sup.time, "sleep", _stop)
+    suplog = pathlib.Path(sup.paths("f1", 0)[1]) / "supervisor.log"
+    suplog.parent.mkdir(parents=True)
+    suplog.write_text("F0 complete and evaluated; f1 s0 may start" + NL
+                      + "PREP FAILED: STOP UNKNOWN: F0 has no completion "
+                      "marker" + NL)
+    with pytest.raises(Stop):
+        sup.wait_external("f2", 0)
+    out = capsys.readouterr().out
+    assert "no live supervise_testb.py f1 -- rerun its launcher" in out
+    assert "Kai's call" not in out
 
 
 def test_an_overshoot_never_accumulates(sup):
@@ -1411,7 +1427,13 @@ def _write_prep(sup, v="f1", good=True, k=27, **doc):
     (d / "set.pkl").write_bytes(b"set")
     sha = hashlib.sha256(b"set" if good else b"other").hexdigest()
     m = sup.master_of(v)
+    # the master's final snapshot (as _finish writes it) and its sha256
+    snap = pathlib.Path(sup.snapshot_path(m, 0, k))
+    if not snap.exists():
+        snap.parent.mkdir(parents=True, exist_ok=True)
+        snap.write_bytes(b"x")
     full = {"set_sha256": sha, "master_arm": sup.VARIANTS[m],
+            "master_sha256": hashlib.sha256(snap.read_bytes()).hexdigest(),
             "master_iterations": k,
             "master_offline_steps": sup.master_offline(v),
             "master_snapshot": sup.snapshot_path(m, 0, k),
@@ -1603,15 +1625,43 @@ def test_a_failed_attempt_names_its_reason(sup, prep_env, monkeypatch,
         d = pathlib.Path(sup.prep_dir("f1"))
         d.mkdir(parents=True, exist_ok=True)
         with open(d / "prep.log", "a", encoding="utf-8") as f:
-            f.write("own-play log: x\nSystemExit: own-play log x: "
-                    "iteration 12 is missing\n\n")
+            f.write("own-play log: x\nRuntimeError: CUDA error: out of "
+                    "memory\n\n")
     _popen(monkeypatch, sup, [(1, exits)] * 3)
     assert sup.run_prep("f1", 0, {}) is False
     out = capsys.readouterr().out
-    assert out.count("its last line: SystemExit: own-play log x: iteration "
-                     "12 is missing") == 3
+    assert out.count("its last line: RuntimeError: CUDA error: out of "
+                     "memory") == 3
     assert "PREP FAILED after 3 attempts" in out
+    assert "PREP CHECK" not in out
     assert sup.prep_log_tail(os.path.join(sup.prep_dir("f1"), "nope")) == ""
+
+
+@pytest.mark.parametrize("why", [
+    "SystemExit: the value support (5000 units) does not hold 2.0 x the "
+    "largest discounted return 2600.0 under the student's ceiling 40.1 and "
+    "discount 0.997",
+    "SystemExit: the halved-clip ceiling 401.0 lies past the reward "
+    "supports",
+    "SystemExit: own-play log x: iteration 12 is missing",
+    "SystemExit: own-play log x: no lives"])
+def test_a_deterministic_prep_check_stops_at_once(sup, prep_env, monkeypatch,
+                                                  capsys, why):
+    """Audit r1 B-L1: distill.py's deterministic refusals (A2's value
+    check among them) are not retried -- PREP FAILED: PREP CHECK at the
+    first attempt (one Popen only), Kai's call."""
+    def exits():
+        d = pathlib.Path(sup.prep_dir("f1"))
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "prep.log", "a", encoding="utf-8") as f:
+            f.write("x\n" + why + "\n")
+    _popen(monkeypatch, sup, [(1, exits)])
+    assert sup.run_prep("f1", 0, {}) is False
+    out = capsys.readouterr().out
+    assert f"PREP FAILED: PREP CHECK: {why[:150]}" in out
+    assert "PREP FAILED after" not in out
+    assert any(l.startswith(sup.KAIS_CALL_STOPS) for l in out.splitlines()
+               if l.startswith("PREP FAILED"))
 
 
 def test_the_prep_retries_15_min_apart(sup, prep_env, monkeypatch):
@@ -1724,6 +1774,9 @@ def test_a_prep_that_never_checks_out_fails(sup, prep_env, monkeypatch,
     ({"student_discount": 0.97}, "student_discount is 0.97"),   # unhalved
     ({"student_discount": 0.9925}, "student_discount is 0.9925"),
     ({"student_discount": 0.98501}, "student_discount is 0.98501"),
+    # the master snapshot's bytes (audit r1 B-L2)
+    ({"master_sha256": "0" * 64}, "master_sha256 is not "),
+    ({"master_sha256": GONE}, "a prep of another timeline's snapshot"),
     ({"student_discount": 0.985}, "")])
 def test_set_intact_checks_the_master_the_log_the_ceiling_and_the_discount(
         sup, doc, why):

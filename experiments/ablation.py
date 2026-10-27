@@ -1536,19 +1536,26 @@ def env_schedule(stop_env_steps):
         muzero.SCHEDULE_ENV_TARGET, muzero.SCHEDULE_ENV_STEPS = saved
 
 
-def env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations):
+def env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations,
+                  snapshot_weights):
     """Test B's arms, checked at startup (before any --overwrite deletion):
     an `_env_stop` arm runs until --stop-env-steps of its own env steps (a
     positive count), its planned length `_nominal_iterations` within the
     --iterations cap, on the pipelined --ray --cpu-actor loop (its
-    own-play log comes from the actor); every other arm refuses
-    --stop-env-steps; OWN_PLAY_LOG needs the actor."""
+    own-play log comes from the actor), with --snapshot-weights (its final
+    snapshot, acting states included, is the next generation's master;
+    audit r1 A-L5); every other arm refuses --stop-env-steps; OWN_PLAY_LOG
+    needs the actor."""
     if spec.get("_env_stop"):
         if (isinstance(stop_env_steps, bool)
                 or not isinstance(stop_env_steps, int)
                 or stop_env_steps <= 0):
             raise SystemExit("an env-stopped generation (Test B) needs "
                              "--stop-env-steps, a positive env-step count")
+        if not snapshot_weights:
+            raise SystemExit("an env-stopped generation (Test B) needs "
+                             "--snapshot-weights (its final snapshot is the "
+                             "next generation's master)")
         nominal = spec.get("_nominal_iterations")
         if not (isinstance(nominal, int) and 0 < nominal <= iterations):
             raise SystemExit(f"_nominal_iterations {nominal!r} must lie "
@@ -2327,6 +2334,12 @@ def student_gate(spec, distill_set, snapshot_weights):
         raise SystemExit(f"{distill_set}: its student_discount "
                          f"{header.get('student_discount')!r} is not "
                          f"--token-vocab's {spec['_student_discount']!r}")
+    if spec.get("_env_stop") and header.get("source") != "own-play log":
+        # Test B: the swap costs no env steps -- never a fresh recording
+        # (audit r1 A-L4)
+        raise SystemExit(f"{distill_set}: a Test B student distils its "
+                         f"master's own-play log, not a "
+                         f"{header.get('source')!r} set")
     if muzero.REWARD_GROWTH_START != muzero.REWARD_GROWTH_CEILING:
         raise SystemExit("the distilled student runs at the master's end-state "
                          "ceiling (REWARD_GROWTH_START == CEILING)")
@@ -4828,9 +4841,6 @@ class RayPipeline:
         for res in results:
             traj, terminated, steps = res[:3]
             self.run.env_steps += steps
-            # Test B: the env-keyed schedules read the generation's count
-            # (inert unless muzero.SCHEDULE_ENV_TARGET is set)
-            muzero.SCHEDULE_ENV_STEPS = self.run.env_steps
             if len(res) > 3:
                 # Test B (OWN_PLAY_LOG): the life at raw-step resolution,
                 # logged as played -- before anything could drop it
@@ -4849,6 +4859,11 @@ class RayPipeline:
                 traj, terminated=terminated, born_step=steps_at_request,
                 birth_nets=birth_nets, birth_prior_nets=prior_nets))
             evict_replay(self.run.replay)
+        # Test B: the env-keyed schedules read the generation's count
+        # (inert unless muzero.SCHEDULE_ENV_TARGET is set) -- advanced
+        # AFTER the lives' reanalysis, whose behaviour diagnostics must see
+        # the count the actor played at (the last sync's; audit r1 A-L1)
+        muzero.SCHEDULE_ENV_STEPS = self.run.env_steps
 
     def request_eval(self, it, episodes, diagnostics, write_row, elapsed_at):
         """Phase 2: greedy eval episodes run on a SECOND actor, concurrent
@@ -5101,7 +5116,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         token_gate(spec, use_ray, cpu_actor, ray_workers)
         reward_growth_gate(use_ray, cpu_actor, ray_workers)
         student_gate(spec, distill_set, snapshot_weights)
-        env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations)
+        env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations,
+                      snapshot_weights)
         if spec.get("_student") and init_weights:
             raise SystemExit("a curriculum P3 student starts from scratch or "
                              "from its distillation set, not --init-weights")
@@ -5116,7 +5132,19 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                   f"{muzero.REWARD_GROWTH_START} -> "
                   f"{muzero.REWARD_GROWTH_CEILING} (log-linear to "
                   f"{muzero.REWARD_GROWTH_END:.0%} of the run)", flush=True)
-        if muzero.SCHEDULE_OFFSET_STEPS:
+        if muzero.SCHEDULE_ENV_TARGET:
+            # Test B (audit r1 A-NIT9): the env-keyed schedules, the offset
+            # then only the prefill's birth step
+            print(f"  [{arm} s{seed}] SCHEDULE_ENV_TARGET "
+                  f"{muzero.SCHEDULE_ENV_TARGET}: the within-run schedules "
+                  f"follow this run's env-step progress (planned run "
+                  f"{muzero.TEMPERATURE_TOTAL_STEPS} steps); the run stops "
+                  f"at the iteration that passes it"
+                  + (f"; SCHEDULE_OFFSET_STEPS "
+                     f"{muzero.SCHEDULE_OFFSET_STEPS}: the prefill's 4.3 age "
+                     f"starts at the first online step"
+                     if muzero.SCHEDULE_OFFSET_STEPS else ""), flush=True)
+        elif muzero.SCHEDULE_OFFSET_STEPS:
             print(f"  [{arm} s{seed}] SCHEDULE_OFFSET_STEPS "
                   f"{muzero.SCHEDULE_OFFSET_STEPS}: the within-run schedules "
                   f"(and the prefill's 4.3 age) read the online steps",

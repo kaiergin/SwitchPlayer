@@ -214,8 +214,17 @@ MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "testb_manifest.json")
 PREP_SILENT_ALERT_S = 1800
 # A predecessor's supervisor stopped on one of these is Kai's call (a rerun
-# of its launcher repeats the stop): the master gate's stops and the stop's.
-KAIS_CALL_STOPS = ("PREP FAILED: MASTER", "PREP FAILED: STOP")
+# of its launcher repeats the stop): the master gate's stops, a spent
+# budget's (not STOP UNKNOWN: a rerun clears that; audit r1 B-L4) and a
+# deterministic check of the prep's (audit r1 B-L1).
+KAIS_CALL_STOPS = ("PREP FAILED: MASTER", "PREP FAILED: STOP NOT POSITIVE",
+                   "PREP FAILED: PREP CHECK")
+# distill.py's deterministic refusals (the last line of a failed prep's
+# log): a retry repeats them, so the prep stops at once, Kai's call -- the
+# value check (A2), the halved ceiling past the reward supports, an
+# incomplete or empty own-play log.
+PREP_CHECKS = ("the value support (", "past the reward supports",
+               "own-play log ")
 # Every suite supervise_gen2.py ran, plus this supervisor's and Test B's.
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",
@@ -930,6 +939,19 @@ def set_intact(variant, seed):
             or abs(d - DISCOUNTS[variant]) > DISCOUNT_TOL):
         return False, (f"vocab.json's student_discount is {d!r}, not "
                        f"{NAMES[variant]}'s {DISCOUNTS[variant]}")
+    # the snapshot's bytes too, not only its path and iteration: a fresh
+    # restart of the master that ends at the same K would otherwise pass
+    # (audit r1 B-L2)
+    hs = hashlib.sha256()
+    try:
+        with open(snap, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 22), b""):
+                hs.update(chunk)
+    except OSError as e:
+        return False, f"the master snapshot: {e}"
+    if doc.get("master_sha256") != hs.hexdigest():
+        return False, (f"vocab.json's master_sha256 is not {snap}'s (a prep "
+                       f"of another timeline's snapshot)")
     return True, ""
 
 
@@ -1052,6 +1074,10 @@ def run_prep(variant, seed, env, redo_ok=True):
             print(f"PREP attempt {attempt} failed (rc={p.returncode}; see "
                   f"{prel}/prep.log)"
                   + (f"; its last line: {tail}" if tail else ""), flush=True)
+            if any(c in tail for c in PREP_CHECKS):
+                print(f"PREP FAILED: PREP CHECK: {tail} -- a retry repeats "
+                      f"it (Kai's call)", flush=True)
+                return False
         if attempt < PREP_ATTEMPTS:
             time.sleep(PREP_RETRY_S)
     print(f"PREP FAILED after {PREP_ATTEMPTS} attempts -- see "

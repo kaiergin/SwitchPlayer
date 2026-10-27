@@ -978,6 +978,76 @@ BUILT 2026-10-27 (pre-audit; the audit loop follows before any launch):
     full 24 suites, and a real end-to-end smoke (Ray, the CLI): a tiny F0
     to its stop -> its own-play log -> a prep --from-log -> a tiny F1.
     Both run before launch.
+AUDIT r1 (two fresh-eyes auditors on a6d026c3): A (the core) found
+nothing above LOW. B (the orchestration) found one MEDIUM.
+Verified in r1:
+  A: a SelfPlayActor built as _make_actor builds it played 12 real lives
+  at synced env counts 0 / 3k / 12k / 16k. The logged temperatures were
+  0.5, 0.5, 0.25, 0.125 and the long-token bias 0.5, 0.2, 0, 0, as the
+  env-keyed schedules require; check_life held on every life;
+  real_done grouped the lives into four games; the round trip through
+  OwnPlayLog was exact. `last` holds on every collect path (pipelined,
+  primed, eager mid-block); nothing is requested after it; a death
+  between row K and the marker replays consistently. Each life is logged
+  once, in order, before admission. The prep --from-log, the discount rule
+  and the value check are correct. Generations 1 and 2 are unchanged.
+  test_testb, test_gen1, test_gen2, test_distill and test_pbn pass.
+  B: names and paths agree across the supervisor, the hand-off, the
+  launcher and what ablation / distill write. The next generation waits
+  for exactly the rows the hand-off produces. The A1 stop is recomputed
+  identically on every start. Stale snapshots and log files from a dead
+  timeline are never read. The manifest covers the 24 suites' imports.
+  No test reads live state, and every stubbed wait is bounded.
+  test_supervise_testb passes (183); check_post_testb reports CHECK OK;
+  make_check_testb regenerates byte for byte.
+FIXES r1 (a fresh-eyes r2 check follows):
+  - B-M1 (MEDIUM): the any-trainer guard holds F0 back only while a G2
+    trainer process is alive. A pause or a reboot during G2 could let
+    F0's preflight and launch race G2's resume. Fix: launch_testb.ps1
+    refuses to start until G2's completion marker (its checkpoint below
+    1 MB) or its ABANDONED file exists.
+  - B-L1: distill.py's deterministic refusals (the value check A2, the
+    halved ceiling past the reward supports, an incomplete or empty
+    own-play log) were retried 3 times, 15 min apart. They now stop at
+    once with PREP FAILED: PREP CHECK (Kai's call; +4 cases).
+  - B-L2: set_intact checks vocab.json's master_sha256 against the master
+    snapshot's bytes, so a fresh restart of the master that ends at the
+    same K is caught (+2 cases).
+  - B-L4: only STOP NOT POSITIVE (a spent budget) is Kai's call; STOP
+    UNKNOWN clears on a rerun (+1 test).
+  - A-L1: the behaviour diagnostics (beh_T, H_act) read the env count the
+    actor played at. collect now advances SCHEDULE_ENV_STEPS after the
+    lives' reanalysis.
+  - A-L4: student_gate refuses a Test B student whose set is not an
+    own-play log, so a swap is never a fresh recording (+2 cases).
+  - A-L5: env_stop_gate requires --snapshot-weights, since the final
+    snapshot is the next generation's master (+1 case).
+  - Test gaps: the value check's failure is now pinned by a slow test, and
+    log_lives's game grouping by a unit test.
+  - NIT: the start-up banner names the env-keyed schedules (A-NIT9); the
+    distill docstring names --from-log.
+ACCEPTED r1:
+  - B-L3: the master gate reads its rows once; a transient read error
+    stops the generation until a relaunch.
+  - A-L2: game returns across a resume can merge a partial game (header
+    only; no read uses it).
+  - A-L3: orphaned weights-iterK / iter-*.pkl after a resume are never
+    read, since K comes from the pruned jsonl (B verified).
+  - A-NIT6: a token's undiscounted inner sum can exceed the per-base-step
+    return by g^-(f/4-1), at most 1.24; this is within the 2x headroom.
+  - A-NIT7: the header's acting_temperature is the master's final value;
+    log_temperatures holds the mix.
+  - A-NIT8: read-only stacks are harmless.
+  - A-NIT10: the eval actor plays greedy, so it reads no schedule.
+  - B-N1 to N7: the gate runs after the preflight; a resume beside a
+    finishing orphan runs the preflight; Rows assumes dict rows; the
+    hand-off's ALERT throttles are shared across runs; check_post_testb
+    must not be rerun beside a live Test B probe; the test helpers' child
+    pythons have no timeout of their own; the hand-off's run_rows does
+    not filter by arm (one arm per folder).
+  - Not added: a test that runs SelfPlayActor.play() itself (A's scratch
+    run and the pre-launch smoke cover it), and a prep from a STUDENT
+    master's log (the smoke's F1 -> F2 swap covers it).
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%

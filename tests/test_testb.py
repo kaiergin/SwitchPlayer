@@ -165,9 +165,9 @@ def test_the_planned_run_is_the_nominal_length():
 # --------------------------------------------------------------------------
 # the stop gate and the loop's stop
 # --------------------------------------------------------------------------
-def _gate(arm, stop, ray=True, cpu=True, iterations=60):
+def _gate(arm, stop, ray=True, cpu=True, iterations=60, snaps=True):
     with ablation.arm_config(arm) as spec:
-        ablation.env_stop_gate(spec, stop, ray, cpu, iterations)
+        ablation.env_stop_gate(spec, stop, ray, cpu, iterations, snaps)
 
 
 @pytest.mark.parametrize("stop", [None, 0, -5, True, 20000.0, "20000"])
@@ -186,6 +186,10 @@ def test_the_gate(monkeypatch, arms):
         _gate(F[0], 20000, iterations=29)
     with pytest.raises(SystemExit, match="--ray --cpu-actor"):
         _gate(F[0], 20000, cpu=False)
+    # the final snapshot is the next generation's master (audit r1 A-L5)
+    with pytest.raises(SystemExit, match="--snapshot-weights"):
+        _gate(F[2], 20000, snaps=False)
+    _gate(G0_ARM, None, snaps=False)                  # not an env stop
     monkeypatch.setitem(ablation.ARMS, F[1], {**ablation.ARMS[F[1]],
                                               "ASYNC_LOOP": True})
     with pytest.raises(SystemExit, match="ASYNC_LOOP"):
@@ -411,11 +415,17 @@ def test_the_gate_checks_the_discount(tmp_path, arms):
               "vocab": [list(t) for t in F1_VOCAB],
               "master_vocab": [list(t) for t in TK_VOCAB],
               "master_snapshot": "m.pth", "master_arm": F[0],
-              "student_ceiling": 11.25, "student_discount": 0.985}
+              "student_ceiling": 11.25, "student_discount": 0.985,
+              "source": "own-play log"}
     good = tmp_path / "set.pkl"
     distill.write_set(good, header, [])
     other = tmp_path / "other.pkl"
     distill.write_set(other, {**header, "student_discount": 0.9925}, [])
+    recorded = tmp_path / "recorded.pkl"
+    distill.write_set(recorded, {**header, "source": "recording"}, [])
+    unmarked = tmp_path / "unmarked.pkl"
+    distill.write_set(unmarked, {k: v for k, v in header.items()
+                                 if k != "source"}, [])
     static = ablation.ARMS[F[1]]
 
     def gate(dset, mutate=None):
@@ -429,6 +439,10 @@ def test_the_gate_checks_the_discount(tmp_path, arms):
     gate(good)
     with pytest.raises(SystemExit, match="its student_discount"):
         gate(other)
+    # never a fresh recording (audit r1 A-L4)
+    for dset in (recorded, unmarked):
+        with pytest.raises(SystemExit, match="own-play log, not a"):
+            gate(dset)
 
     def moved():
         muzero.DISCOUNT = 0.97
@@ -455,6 +469,31 @@ def test_the_discount_rule_halves_the_gap_and_caps():
     assert distill.student_discount_rule(0.997) == 0.997
     assert distill.student_discount_rule(0.988053892081) == pytest.approx(
         0.994026946)
+
+
+def test_log_lives_groups_games_as_record_does(tmp_path, monkeypatch):
+    """A game ends with a life that ended it (real_done) or was truncated
+    (not terminated); a game still running when the log ends is no game
+    return; raw rewards summed (audit r1 test gap)."""
+    monkeypatch.setattr(distill, "check_life", lambda traj, inner: None)
+    log = ablation.OwnPlayLog(tmp_path / "op")
+    lives = [  # (raw reward, terminated, real_done)
+        (10.0, True, False), (20.0, True, True),       # game 0: 30
+        (5.0, False, False),                           # game 1: truncated
+        (7.0, True, False), (1.0, True, True),         # game 2: 8
+        (3.0, True, False)]                            # running: no return
+    for n, (r, term, done) in enumerate(lives):
+        traj = [(None, 0, ()), (None, 1, (r,))]
+        log.write(1 + n // 3, traj, {"inner": [[]], "real_done": done,
+                                     "temperature": 0.25 if n else 0.5},
+                  term, 2, 2 * (n + 1))
+    got, games, total, src = distill.log_lives(tmp_path / "op", 2)
+    assert games == [30.0, 5.0, 8.0]
+    assert [l["game"] for l in got] == [0, 0, 1, 2, 2, 3]
+    assert total == 12 and src["log_lives"] == 6
+    assert src["log_partial_game_lives"] == 1
+    assert src["log_temperatures"] == {"0.5": 1, "0.25": 5}
+    assert src["source"] == "own-play log" and src["log_iterations"] == 2
 
 
 def test_discounted_return_max():
@@ -589,6 +628,20 @@ def test_prep_from_an_own_play_log(logged):
 
 
 @pytest.mark.slow
+def test_the_value_check_refuses_a_support_too_small(logged, monkeypatch,
+                                                     tmp_path):
+    """A2 pinned (audit r1 test gap): the same prep with a value support
+    below 2 x the largest discounted return stops, before any search."""
+    header = logged[0]
+    monkeypatch.setattr(muzero, "VALUE_CEILING",
+                        1.5 * header["value_max_student"])
+    with pytest.raises(SystemExit, match="does not hold 2.0 x the largest"):
+        distill.prep(tmp_path / "weights-iter002.pth", 2, tmp_path / "p2",
+                     log=lambda m: None, from_log=tmp_path / "own-play")
+    assert not (tmp_path / "p2" / "vocab.json").exists()
+
+
+@pytest.mark.slow
 def test_f1_trains_offline_at_the_preps_discount(logged, monkeypatch,
                                                 tmp_path):
     header, out, _, _ = logged
@@ -606,7 +659,7 @@ def test_f1_trains_offline_at_the_preps_discount(logged, monkeypatch,
             ablation.env_schedule(20000):
         muzero.TRAINING_BATCHES = 8
         ablation.student_gate(spec, out / "set.pkl", True)
-        ablation.env_stop_gate(spec, 20000, True, True, 60)
+        ablation.env_stop_gate(spec, 20000, True, True, 60, True)
         assert muzero.DISCOUNT == header["student_discount"]
         run = ablation.Run(F[1], 0, spec)
         try:

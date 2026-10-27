@@ -16,7 +16,10 @@ snapshot comes after its offline steps too (master_offline_steps):
      raw per-base-step rewards) plus every inner base frame play_token
      pushed (ablation.INNER_FRAMES), which the replay never stores. Whole
      games until >= BASE_STEPS base steps. check_life proves each
-     decision's inner frames rebuild the next decision's stack.
+     decision's inner frames rebuild the next decision's stack. Test B
+     (--from-log, Kai 2026-10-27): no recording -- the master's own play
+     over its whole generation, logged by its trainer in the same form
+     (ablation.OwnPlayLog; log_lives), is the set, at no env steps.
   2. VOCABULARY: student_vocabulary drops every token whose share of the
      recorded decisions is below DROP_SHARE, never a 4-frame one (Kai's
      10-17 rule, "drop the least used"; a dropped token must be expressible
