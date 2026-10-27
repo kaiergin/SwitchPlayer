@@ -1142,6 +1142,20 @@ half):
       fallbacks; mean master visit mass on dropped tokens 0.045.
 G2 LAUNCHED 11:35 10-27 (attempt 1, fresh): the prefill, then the 20,000
 offline steps (~1.5 h to row 0), then 90 iterations (~16 h).
+G2 ROW 0 (interim, 13:56 10-27):
+  READ (0) transfer: row 0 (20,000 offline steps, before G2 played) 1350.3
+      deployed (SD 681.7; g 1.071), raw 1526.3, against MASTER 1656.52:
+      -306.2, descriptive (+-464); NOT TRANSFER FAILED. (DS2's row 0 was
+      1065.0 against its master's 1113.86.) The offline curve so far,
+      deployed / raw: 1722 / 1398 @4k, 1498 @8k (the rest of the curve to
+      come: the hand-off's interim probes are waiting for free memory).
+  READ (10) row 0: p1_ratio 0.88 -> FIXED (18 tokens, ceiling 22.96).
+  Frames per decision, deployed: 23.2 at row 0.
+  HOST MEMORY: the supervisor ALERTed at row 10 (14:59): host commit free
+      3.0 GB < 4 GB. The trainer holds steady at ~7.7 GB; the drop is other
+      applications (a browser ~3.5 GB across processes, Steam, Discord) on
+      a 36.8 GB commit limit. The hand-off's interim probes (>= 6 GB) are
+      starved and will catch up in the final pass (>= 4 GB).
 
 ### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
 
