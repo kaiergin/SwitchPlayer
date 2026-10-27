@@ -991,6 +991,16 @@ holds DS2's evals). NIT-1 (master_spec and student_master_vocab test "the
 master is a student" by truthiness / `is None`: equal for every real
 value); NIT-2 (a test checks the message is in stderr, not its last line:
 it is the last line, checked by hand).
+LAUNCHED 2026-10-27 11:21 from Y:\SwitchPlayer-gen2-run (detached, CRLF,
+at ce5e1488; gen2_manifest.json written from the audited 48716683, 52
+AUDITED files). In that tree the manifest check, the real quick probe (the
+prep's master checks on DS2's snapshot) and the DS2 gate (MASTER 1656.524,
+nothing missing) pass. launch_gen2.ps1 started post_gen2.py (sha256
+0a487c93...; log scratchpad post_gen2.log) and supervise_gen2.py g2 0
+(the preflight's 22 suites in that tree, then the master gate, the prep,
+G2). KEEP Y:\SwitchPlayer-gen1b-run until G2 completes (ACCEPTED r2).
+Rerun launch_gen2.ps1 after a reboot or a pause (idempotent; PAUSE also
+kills a running preflight or prep).
 
 ### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
 
