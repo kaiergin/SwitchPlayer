@@ -973,6 +973,24 @@ commit check: the manifest is committed after its audited commit, so
 _commit is not the worktree's HEAD by design; the supervisor's hash check
 is the gate. B-NIT-5: the date 2026-10-27 is used everywhere and is kept
 even if the launch slips.
+AUDIT r2 (a fresh-eyes check of FIXES r1 at 4d36e6a9): nothing above LOW.
+THE AUDIT LOOP IS CLOSED. Verified: prep is unchanged for G0, DS2 and
+G2-like masters (check order, out-dir, master_vocab, header); the deployed
+quick probe passes on the real DS2 in 2 s, and an edit to DS2's arm in a
+copy (its _doc) fails it with the prep's message as stderr's last line,
+which preflight() reports; the `_master_vocab` rule agrees with
+student_arm's; master_snapshot round-trips byte for byte (argv -> header
+-> vocab.json -> set_intact); ten mutants of the fixes each fail their
+tests; the four touched test files pass in an archive copy, slow tests
+included; the launcher parses and its new refusal fires.
+ACCEPTED r2: LOW-1 -- every supervisor start, a resume included, now reads
+DS2's real snapshot (the quick probe), so Y:\SwitchPlayer-gen1b-run must be
+KEPT until G2 completes (a pruned tree would stall a resume at PREFLIGHT,
+hourly, without an ALERT). Procedure, not code: that tree stays (it also
+holds DS2's evals). NIT-1 (master_spec and student_master_vocab test "the
+master is a student" by truthiness / `is None`: equal for every real
+value); NIT-2 (a test checks the message is in stderr, not its last line:
+it is the last line, checked by hand).
 
 ### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
 
