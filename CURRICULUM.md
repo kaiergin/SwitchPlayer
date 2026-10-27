@@ -1487,6 +1487,14 @@ FS2 LAUNCHED 15:39 10-26 (preflight ok, attempt 1, fresh). ROWS 5-30
   Descriptive: FS2 plays the 32-frame tokens 0.69 @5, 0.80-0.93 @10-30
       (DS2: 0.57-0.65), 27.7-30.5 frames per decision (deployed probe);
       proj_erank 4.1-6.6 at rows 15-25, 18.5 at row 30 (DS2 13-27 there).
+FS2 ROWS 35-55 (interim, 00:28 10-27): deployed 697 @35, 568 @40, 678
+  @45, 695 @50, 714 @55 (SD 145-346); raw 620, 537, 712, 600, 639. Not at
+  level (>= 881.86) by row 55 (31,281 env steps). (The distillation
+  step's FS: 60-90 1034.38.)
+  READ (10) row 55, FS2: p1_ratio 0.40 -> FIXED; step-1 offset 0.17
+      against its step set, 0.80 against the pooled statistics.
+  Descriptive: the 32-frame play share stays 0.75-0.85 (rows 35-55);
+      proj_erank 12.8-27.2.
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
