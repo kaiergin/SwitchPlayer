@@ -1472,6 +1472,21 @@ DS2 COMPLETE 15:32 10-26 (RUN COMPLETE, rc 0 after 61,050 s, attempt 1;
       (the constant ceiling 11.26 cuts a growing share: more of DS2's
       reward comes from the capped ghosts and later fruit).
   Reads (1), (2), (5)'s FS2 half and (9) wait for FS2 (~15 h).
+FS2 LAUNCHED 15:39 10-26 (preflight ok, attempt 1, fresh). ROWS 5-30
+  (interim, 20:10): deployed 348 @5, 379 @10, 430 @15, 426 @20, 473 @25,
+  805 @30; raw 474, 331, 385, 465, 439, 565.
+  READ (2) head start 5-25 (final: both arms' rows are in): DS2 1330.27
+      against FS2 411.27: +919.0 -> BETTER (band 274.4). Raw 1286.00
+      against 418.60 (+867.4). (The distillation step: DS 935.00 against
+      FS 772.07, +162.9, NO DIFFERENT.)
+  READ (4), FS2 so far: not at level (>= 881.86) by row 30 (17,661 env
+      steps); DS2 was at level from row 0.
+  READ (10) row 30, FS2: p1_ratio 0.69 -> FIXED; step-1 offset 0.13
+      running SDs against its step set, 0.40 against the pooled statistics
+      (DS2 at row 30: 6.88).
+  Descriptive: FS2 plays the 32-frame tokens 0.69 @5, 0.80-0.93 @10-30
+      (DS2: 0.57-0.65), 27.7-30.5 frames per decision (deployed probe);
+      proj_erank 4.1-6.6 at rows 15-25, 18.5 at row 30 (DS2 13-27 there).
 
 ### RESULT -- Test 1: a generation-0 token master at a constant sign clip (G0, seed 0), 2026-10-25
 
