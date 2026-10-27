@@ -1168,6 +1168,33 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen1
             "as TK. Twin: the -gen1-distill arm.",
 }
 
+# Generation 2 (Kai, 2026-10-27; pre-registered in CURRICULUM): the second
+# swap -- DS2 (the generation-1 distilled student, its final snapshot) the
+# master, one distilled student over the prep's generation-2 vocabulary (a
+# student vocabulary of DS2's: the prep's master_vocab, `_master_vocab` once
+# student_arm applies --token-vocab) at the prep's constant ceiling (the
+# halved-clip rule from DS2's constant ceiling). Everything else DS2's.
+# Seed 0, no fresh twin.
+GEN1_DISTILL_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
+                    "mspacman-tokens-gen1-distill")
+ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen2-distill"] = {
+    **ARMS[GEN1_DISTILL_ARM],
+    "_master_arm": GEN1_DISTILL_ARM,
+    "_master_iterations": 90,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-gen1-distill as the DISTILLED generation-2 STUDENT "
+            "(Generation 2): its master DS2 (the -gen1-distill arm's final "
+            "snapshot); the generation-2 vocabulary (a student vocabulary of "
+            "DS2's) and its constant ceiling from --token-vocab (the prep's "
+            "vocab.json: the halved-clip rule from DS2's ceiling), the "
+            "replay pre-filled with DS2's re-tokenized games and "
+            "master-search targets (--distill-set), 20,000 offline gradient "
+            "steps (snapshots every 4,000; the last is row 0), then TK's "
+            "within-run schedules keyed to the ONLINE steps "
+            "(SCHEDULE_OFFSET_STEPS 20,000); PREFIX_BN_PER_STEP. Run as TK. "
+            "No twin.",
+}
+
 # PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
 # BatchNorm statistics on the token arm", after Step 0 (iii)): TK with the
 # value-prefix head's BatchNorms keeping one set of running statistics per
@@ -1973,6 +2000,21 @@ def student_ceiling(doc, path):
     return float(c)
 
 
+def student_master_vocab(spec, doc, path):
+    """The vocabulary a student's master played, when that master is itself
+    a P3 student (generation 2, Kai 2026-10-27: DS2 ran a student
+    vocabulary of TK's 36): the prep's recorded master_vocab, which must be
+    a student vocabulary of the arm's static TOKEN_VOCAB. None when the
+    master is not a student (G0 played the static vocabulary)."""
+    master_arm = spec.get("_master_arm")
+    if master_arm is None or ARMS.get(master_arm, {}).get("_student") is None:
+        return None
+    if "master_vocab" not in doc:
+        raise SystemExit(f"{path}: no 'master_vocab' (a prep of a student "
+                         f"master records the vocabulary it played)")
+    return validate_student_vocab(doc["master_vocab"], spec["TOKEN_VOCAB"])
+
+
 def student_arm(arm, path):
     """Apply --token-vocab to a student arm: ARMS[arm] becomes a copy with
     the student TOKEN_VOCAB and the file's sha256 (`_token_vocab_sha256`),
@@ -1982,15 +2024,22 @@ def student_arm(arm, path):
     student_ceiling as its constant ceiling (REWARD_GROWTH_START =
     REWARD_GROWTH_CEILING; `_student_ceiling`), from a prep of the arm's
     `_master_arm` at its `_master_iterations` (audit r1 A-L3: FS2 checks
-    its master here, as DS2's set header does). Refuses a non-student
-    arm."""
+    its master here, as DS2's set header does). When that master is itself
+    a student (generation 2), the vocabulary must be a student vocabulary
+    of the master's (the prep's master_vocab, kept as `_master_vocab`).
+    Refuses a non-student arm."""
     spec = ARMS[arm]
     if spec.get("_student") not in ("distill", "fresh"):
         raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
                          f"arms only; '{arm}' is not one")
     vocab, sha, doc = load_student_doc(path, spec["TOKEN_VOCAB"])
+    master_vocab = student_master_vocab(spec, doc, path)
+    if master_vocab is not None:
+        vocab = validate_student_vocab(vocab, master_vocab)
     new = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha,
            "_vocab_set_sha256": doc.get("set_sha256")}
+    if master_vocab is not None:
+        new["_master_vocab"] = master_vocab
     if spec.get("_ceiling_from_prep"):
         for key in ("master_arm", "master_iterations"):
             if doc.get(key) != spec.get(f"_{key}"):
@@ -2055,9 +2104,15 @@ def student_gate(spec, distill_set, snapshot_weights):
                          f"from --token-vocab's")
     parent = ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
                   "mspacman-tokens-rgrow"]["TOKEN_VOCAB"]
-    if tuple(tuple(t) for t in header["master_vocab"]) != tuple(parent):
+    # generation 2: a student master played its own student vocabulary
+    # (student_arm's `_master_vocab`, from the same prep's vocab.json)
+    want = spec.get("_master_vocab")
+    if tuple(tuple(t) for t in header["master_vocab"]) != tuple(
+            tuple(t) for t in (want if want is not None else parent)):
         raise SystemExit(f"{distill_set}: recorded from a master vocabulary "
-                         f"other than the TK arm's")
+                         f"other than " + ("the student master's (its prep's "
+                                           "master_vocab)" if want is not None
+                                           else "the TK arm's"))
     want = spec.get("_vocab_set_sha256")
     if not want or file_sha256(distill_set) != want:
         raise SystemExit(f"{distill_set}: not the set --token-vocab's "

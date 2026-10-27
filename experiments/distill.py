@@ -2,7 +2,10 @@
 CURRICULUM.md): the data side of a master -> student generation swap.
 
 `prep` runs in ONE process, in the MASTER's world (its arm, its run length,
-its 36 tokens):
+its tokens). A master that is itself a P3 student (generation 2, Kai
+2026-10-27: DS2) runs as its snapshot's spec (master_spec: its student
+vocabulary and constant ceiling, which student_arm applied), and its final
+snapshot comes after its offline steps too (master_offline_steps):
 
   1. RECORD: the master snapshot plays fresh games with its training-time
      acting policy -- Run.play_episode(greedy=False): the prior at the
@@ -21,15 +24,16 @@ its 36 tokens):
   2b. THE STUDENT'S CLIP (Test 2, Kai 2026-10-24: the clip loosens only at a
      swap): under REWARD_GROWTH, the student's constant ceiling is the
      smallest that removes HALF the share of reward units the master's
-     ceiling (its arm's, at its final step) removes on the recorded games
-     (halved_ceiling); written to vocab.json as "student_ceiling", which
-     the generation-1 student arms apply (ablation.student_arm).
+     ceiling (its spec's, at its final step: G0's sign clip, DS2's
+     constant c1) removes on the recorded games (halved_ceiling); written
+     to vocab.json as "student_ceiling", which the generation-1 and -2
+     student arms apply (ablation.student_arm).
   3. RE-TOKENIZE (retokenize): a kept token stays one record; a dropped
      token (a, f) becomes its m played base steps as m records of (a, 4),
      each on the stack at that base step and carrying its own raw reward.
   4. TARGETS: the master's birth search (Run._birth_search: the arm's own
      target recipe -- fresh root, 50 sims, Dirichlet noise, RAW weights, a
-     greedy search on a truncated tail) over its 36 tokens on every student
+     greedy search on a truncated tail) over its tokens on every student
      decision state; visit fractions renormalized over the student's tokens
      (masked_targets). The student's value is never distilled.
   5. WRITE <out>/set.pkl (header + one pickle frame per life) and
@@ -44,7 +48,9 @@ Usage:
       --out DIR [--seed 0] [--base-steps 31250]
 """
 import argparse
+import contextlib
 import json
+import math
 import os
 import pathlib
 import pickle
@@ -333,6 +339,72 @@ def read_set(path):
     return header, lives
 
 
+# -- the master's spec (generation 2: a student master) ---------------------------
+# the keys ablation.student_arm sets on a P3 student arm (--token-vocab)
+STUDENT_KEYS = ("TOKEN_VOCAB", "_token_vocab_sha256", "_vocab_set_sha256",
+                "REWARD_GROWTH_START", "REWARD_GROWTH_CEILING",
+                "_student_ceiling", "_master_vocab")
+
+
+def master_spec(arm, blob, master):
+    """The master's runtime spec. A master that is not a P3 student (G0)
+    ran as its arm: ARMS[arm]. A STUDENT master (generation 2, Kai
+    2026-10-27: DS2) ran its arm with --token-vocab applied
+    (ablation.student_arm: the vocabulary and constant ceiling of its own
+    prep), which only its snapshot's spec records. That spec is taken when
+    every key but student_arm's (STUDENT_KEYS) equals the arm's, its
+    vocabulary is a student vocabulary of the arm's (or of its own
+    `_master_vocab`), and its ceiling is the constant `_student_ceiling`
+    of a `_ceiling_from_prep` arm."""
+    import ablation
+    static = ablation.ARMS[arm]
+    if static.get("_student") is None:
+        return static
+    spec = blob.get("spec") or {}
+    bad = sorted(k for k in set(static) | set(spec) if k not in STUDENT_KEYS
+                 and (k not in static or k not in spec
+                      or spec[k] != static[k]))
+    if bad:
+        raise SystemExit(f"{master}: its spec differs from its arm's beyond "
+                         f"the student keys: {bad}")
+    if not static.get("_ceiling_from_prep"):
+        raise SystemExit(f"{master}: a student master must hold its prep's "
+                         f"constant ceiling (a _ceiling_from_prep arm)")
+    ablation.validate_student_vocab(
+        spec.get("TOKEN_VOCAB") or (),
+        spec.get("_master_vocab") or static["TOKEN_VOCAB"])
+    c = spec.get("_student_ceiling")
+    if (isinstance(c, bool) or not isinstance(c, (int, float))
+            or not math.isfinite(c) or c <= 0
+            or spec.get("REWARD_GROWTH_START") != c
+            or spec.get("REWARD_GROWTH_CEILING") != c):
+        raise SystemExit(f"{master}: its ceiling is not a constant "
+                         f"_student_ceiling ({c!r})")
+    return dict(spec)
+
+
+def master_offline_steps(spec):
+    """A distilled student master's offline gradient steps, which precede
+    its first iteration (generation 2's DS2 ends at 20,000 + 90 x 2,000);
+    0 for any other master."""
+    if spec.get("_student") != "distill":
+        return 0
+    return int(spec.get("_distill_offline_steps") or 0)
+
+
+@contextlib.contextmanager
+def installed(arm, spec):
+    """ARMS[arm] = spec for the prep's recording and searches (arm_config
+    and Run read it), restored after."""
+    import ablation
+    saved = ablation.ARMS[arm]
+    ablation.ARMS[arm] = spec
+    try:
+        yield
+    finally:
+        ablation.ARMS[arm] = saved
+
+
 # -- the prep ---------------------------------------------------------------------
 def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
          drop_share=DROP_SHARE, log=print):
@@ -346,21 +418,26 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
     arm = blob.get("arm")
     if arm not in ablation.ARMS:
         raise SystemExit(f"{master}: arm {arm!r} unknown")
+    mspec = master_spec(arm, blob, master)
     master_vocab = tuple(tuple(int(x) for x in t)
                          for t in (blob["spec"].get("TOKEN_VOCAB") or ()))
-    if not master_vocab or master_vocab != tuple(ablation.ARMS[arm]["TOKEN_VOCAB"]):
+    if not master_vocab or master_vocab != tuple(mspec["TOKEN_VOCAB"]):
         raise SystemExit(f"{master}: its TOKEN_VOCAB is not its arm's")
     if not blob.get("acting_states"):
         raise SystemExit(f"{master}: no acting_states (a snapshot of a "
                          f"BN_RECAL_ACTING run is required)")
-    if (int(blob["training_steps"]) != master_iterations * TRAIN_STEPS
+    offline = master_offline_steps(mspec)
+    if (int(blob["training_steps"])
+            != offline + master_iterations * TRAIN_STEPS
             or blob.get("iteration") != master_iterations):
         raise SystemExit(f"{master}: training_steps {blob['training_steps']} "
                          f"is not the end of a {master_iterations}-iteration "
-                         f"run (the master is its FINAL snapshot)")
+                         f"run (the master is its FINAL snapshot"
+                         + (f", after {offline} offline steps" if offline
+                            else "") + ")")
     ablation.ENV_NAME, ablation.FRAMESKIP, ablation.EPISODE_CAP = \
         ENV, FRAMESKIP, EPISODE_CAP
-    with ablation.arm_config(arm) as spec, \
+    with installed(arm, mspec), ablation.arm_config(arm) as spec, \
             ablation._run_length_globals(master_iterations, TRAIN_STEPS), \
             ablation.token_actions():
         run = ablation.Run(arm, seed, spec)
@@ -452,6 +529,7 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
         "master_sha256": ablation.file_sha256(master),
         "master_iterations": master_iterations,
         "master_training_steps": int(blob["training_steps"]),
+        "master_offline_steps": offline,
         "master_vocab": [list(t) for t in master_vocab],
         "vocab": [list(t) for t in vocab],
         "dropped": [list(t) for t in dropped],

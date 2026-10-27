@@ -886,6 +886,48 @@ BUILD (before launch; audited like every build):
   - Tests, a manifest, a fresh detached run worktree.
 COST: prep ~5-10 min; G2 ~17 h (DS2's pace); the build and its audit loop
 first.
+BUILT 2026-10-27 (pre-audit; the audit loop follows before any launch):
+  - experiments/distill.py: master_spec. A STUDENT master (an arm with
+    `_student`) runs as its snapshot's spec when every key but
+    student_arm's (STUDENT_KEYS) equals its arm's, its vocabulary is a
+    student vocabulary of the arm's (or of its own `_master_vocab`) and its
+    ceiling is the constant `_student_ceiling` of a `_ceiling_from_prep`
+    arm. A non-student master runs as its arm, as before. Also:
+    master_offline_steps (its final snapshot = offline steps + iterations x
+    2,000); installed (ARMS[arm] swapped for the prep's recording and
+    searches only, restored even on failure); the header's
+    master_offline_steps.
+  - experiments/ablation.py: the -gen2-distill arm (DS2's arm, with
+    `_master_arm` = DS2's arm). student_master_vocab: when the master is
+    itself a student, student_arm checks the vocabulary against the prep's
+    master_vocab (kept as `_master_vocab`), and student_gate checks the
+    set's master vocabulary against it (TK's 36 for generation 1, as
+    before).
+  - tests/test_gen2.py (25 tests; two slow: a real prep from a DS2-like
+    master at a constant ceiling 3.0 after 4 offline steps, then G2's
+    offline phase on it, whose row 0 a generation-3 prep could read back);
+    test_pbn.py's flag-on arm set gains G2.
+  - benchmarks/supervisors/supervise_gen2.py (from supervise_gen1.py: one
+    variant g2; the master DS2 in Y:\SwitchPlayer-gen1b-run, waited on for
+    its marker and rows 0 and 5-90 of both probe jsonls; the NEAR RANDOM
+    gate on its deployed 60-90; set_intact also requires
+    master_offline_steps 20,000; 22 suites; gen2_manifest.json) and
+    tests/test_supervise_gen2.py (130 cases, from test_supervise_gen1.py:
+    fs2's tests dropped, G0's moved to DS2; six seeded supervisor faults
+    were each caught by the targeted tests).
+  - Scratchpad: make_post_gen2.py -> post_gen2.py (sha256 0a487c93699933e5..., from
+    post_gen1b.py: one run, rows 0 and 5-90, the offline curve 1-4, read
+    (10) at 0 / 30 / 55 / 75 / 90); make_check_gen2.py ->
+    check_post_gen2.py (CHECK OK); launch_gen2.ps1 (worktree
+    Y:\SwitchPlayer-gen2-run).
+  - On the real DS2 snapshot (CPU, under the lock): a one-game prep (600
+    base steps) read DS2 as its spec (200,000 steps = 20,000 offline + 90 x
+    2,000; temperature 0.125, long-token bias 0). On that game S(c1) was
+    0.191 -> c2 = 21.76 -> 0.096, with 18 of 21 tokens kept, and ARMS was
+    restored after. The reward supports allow ceilings up to 400 units.
+    supervise_gen2's gate on the real DS2: nothing missing; MASTER
+    1656.524; its snapshot present.
+  - The 22 suites: pass in this tree (one failure on the first run: test_harness's augmentation-off arm list lacked G2's arm, which was added; test_harness then passes).
 
 ### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
 
