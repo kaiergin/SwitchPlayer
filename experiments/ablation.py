@@ -1195,6 +1195,61 @@ ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen2
             "No twin.",
 }
 
+# Test B (Kai, 2026-10-27; pre-registered in CURRICULUM): a fast lineage
+# from scratch -- five generations F0-F4, each ending at the iteration in
+# which it passes its env-step stop (--stop-env-steps, the supervisor's
+# ~20,000), its within-run schedules following its env-step progress
+# (SCHEDULE_ENV_TARGET; planned length _nominal_iterations), its own play
+# logged at raw-step resolution (OWN_PLAY_LOG) for the next generation's
+# distillation set. F0 is TK at the sign clip with PREFIX_BN_PER_STEP and
+# DISCOUNT 0.97 per base step (BBF's start; the token arms' 0.997 per frame
+# is 0.988 per base step); each later generation is the distilled student
+# of the previous one at the prep's ceiling and discount (the gap 1 - g
+# halved, capped at 0.997).
+FAST_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-fast")
+ARMS[FAST_ARM + "-f0"] = {
+    **ARMS[GEN0_ARM],
+    "PREFIX_BN_PER_STEP": True,
+    "DISCOUNT": 0.97,
+    "OWN_PLAY_LOG": True,
+    "_env_stop": True,
+    "_nominal_iterations": 30,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-gen0 as Test B's generation F0: from scratch at the "
+            "sign clip, PREFIX_BN_PER_STEP, DISCOUNT 0.97 per base step; "
+            "ends at its env-step stop (--stop-env-steps), the within-run "
+            "schedules following its env-step progress (planned length 30 "
+            "iterations); its own play logged at raw-step resolution for "
+            "F1's distillation set. Run as TK.",
+}
+for _k in range(1, 5):
+    ARMS[f"{FAST_ARM}-f{_k}"] = {
+        **ARMS[FAST_ARM + "-f0"],
+        "SCHEDULE_OFFSET_STEPS": 20000,
+        "_student": "distill",
+        "_distill_offline_steps": 20000,
+        "_distill_snapshot_every": 4000,
+        "_ceiling_from_prep": True,
+        "_discount_from_prep": True,
+        "_master_arm": f"{FAST_ARM}-f{_k - 1}",
+        # the master ends at a run-dependent iteration (its env-step stop);
+        # the prep's master_checks pins it against the snapshot
+        "_master_iterations": None,
+        "_doc": f"Test B's generation F{_k}: the distilled student of "
+                f"F{_k - 1}'s final snapshot -- its vocabulary, constant "
+                f"ceiling and discount from --token-vocab (the prep of "
+                f"F{_k - 1}'s own-play log: the 1% rule, the halved-clip "
+                f"rule, the gap 1 - g halved and capped at 0.997), the "
+                f"replay pre-filled with that log's re-tokenized lives and "
+                f"master-search targets (--distill-set), 20,000 offline "
+                f"steps (snapshots every 4,000; the last is row 0), then "
+                f"online play to its env-step stop, the within-run "
+                f"schedules following its env-step progress; its own play "
+                f"logged for the next generation. Run as TK.",
+    }
+del _k
+
 # PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
 # BatchNorm statistics on the token arm", after Step 0 (iii)): TK with the
 # value-prefix head's BatchNorms keeping one set of running statistics per
@@ -1462,6 +1517,56 @@ def token_actions():
         yield
     finally:
         ACTIONS = saved
+
+
+@contextlib.contextmanager
+def env_schedule(stop_env_steps):
+    """Test B: muzero.SCHEDULE_ENV_TARGET = the run's env-step stop (the
+    env-keyed schedules' target) and SCHEDULE_ENV_STEPS = 0, restored after;
+    no stop leaves both untouched (every other run, bit for bit)."""
+    if not stop_env_steps:
+        yield
+        return
+    saved = (muzero.SCHEDULE_ENV_TARGET, muzero.SCHEDULE_ENV_STEPS)
+    muzero.SCHEDULE_ENV_TARGET = int(stop_env_steps)
+    muzero.SCHEDULE_ENV_STEPS = 0
+    try:
+        yield
+    finally:
+        muzero.SCHEDULE_ENV_TARGET, muzero.SCHEDULE_ENV_STEPS = saved
+
+
+def env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations):
+    """Test B's arms, checked at startup (before any --overwrite deletion):
+    an `_env_stop` arm runs until --stop-env-steps of its own env steps (a
+    positive count), its planned length `_nominal_iterations` within the
+    --iterations cap, on the pipelined --ray --cpu-actor loop (its
+    own-play log comes from the actor); every other arm refuses
+    --stop-env-steps; OWN_PLAY_LOG needs the actor."""
+    if spec.get("_env_stop"):
+        if (isinstance(stop_env_steps, bool)
+                or not isinstance(stop_env_steps, int)
+                or stop_env_steps <= 0):
+            raise SystemExit("an env-stopped generation (Test B) needs "
+                             "--stop-env-steps, a positive env-step count")
+        nominal = spec.get("_nominal_iterations")
+        if not (isinstance(nominal, int) and 0 < nominal <= iterations):
+            raise SystemExit(f"_nominal_iterations {nominal!r} must lie "
+                             f"within the --iterations cap {iterations}")
+        if muzero.ASYNC_LOOP:
+            raise SystemExit("an env-stopped generation runs the pipelined "
+                             "iteration loop, not ASYNC_LOOP")
+    elif stop_env_steps:
+        raise SystemExit("--stop-env-steps applies to Test B's env-stopped "
+                         "arms only")
+    if muzero.OWN_PLAY_LOG and not (use_ray and cpu_actor):
+        raise SystemExit("OWN_PLAY_LOG logs the --ray --cpu-actor actor's "
+                         "play")
+
+
+def own_play_dir(arm, seed):
+    """Test B: the run's OwnPlayLog folder, beside its other files."""
+    return RESULTS / f"own-play{TAG}-{arm}-seed{seed}"
 
 
 def build_networks(spec):
@@ -1808,6 +1913,60 @@ def play_token(env, token, stack, inner=None):
 INNER_FRAMES = None
 
 
+class OwnPlayLog:
+    """Test B (Kai, 2026-10-27; CURRICULUM "Test B"): the trainer's own play
+    at raw-step resolution -- the next generation's distillation set, at no
+    extra env steps. One pickle file per iteration (`iter-NNN.pkl`, the
+    iteration whose request the lives answered), one pickle frame per life:
+    {"traj": play_episode's decision records, "inner": play_token's inner
+    frames per decision, "terminated", "real_done" (the game ended with
+    this life), "temperature" (the acting temperature it was sampled at),
+    "steps", "env_steps" (the run's count after it), "iteration"}. A file is
+    TRUNCATED at this process's first write to it: a resume replays the
+    iterations after its checkpoint, so a dead timeline's lives for them
+    are replaced, never mixed in (the reader takes iterations 1..the
+    master's final one only)."""
+
+    def __init__(self, folder):
+        self.folder = pathlib.Path(folder)
+        self.folder.mkdir(parents=True, exist_ok=True)
+        self.written = set()
+
+    def path(self, it):
+        return self.folder / f"iter-{int(it):03d}.pkl"
+
+    def write(self, it, traj, extra, terminated, steps, env_steps):
+        life = {"traj": [tuple(r) for r in traj], "inner": extra["inner"],
+                "terminated": bool(terminated),
+                "real_done": bool(extra["real_done"]),
+                "temperature": float(extra["temperature"]),
+                "steps": int(steps), "env_steps": int(env_steps),
+                "iteration": int(it)}
+        mode = "ab" if it in self.written else "wb"
+        with open(self.path(it), mode) as f:
+            pickle.dump(life, f, protocol=pickle.HIGHEST_PROTOCOL)
+        self.written.add(it)
+
+
+def read_own_play(folder, last_iteration):
+    """The lives of an OwnPlayLog, iterations 1..last_iteration in order
+    (each file's lives in their write order); a missing iteration file
+    raises (the log must be whole for the generation it describes)."""
+    lives = []
+    for it in range(1, int(last_iteration) + 1):
+        p = pathlib.Path(folder) / f"iter-{it:03d}.pkl"
+        if not p.exists():
+            raise SystemExit(f"own-play log {folder}: iteration {it} is "
+                             f"missing")
+        with open(p, "rb") as f:
+            while True:
+                try:
+                    lives.append(pickle.load(f))
+                except EOFError:
+                    break
+    return lives
+
+
 def token_bias_weights(b):
     """TOKEN_LONG_BIAS sampling weights (frames / TOKEN_BASE_FRAMES) ** b per
     TOKEN_VOCAB slot."""
@@ -2042,15 +2201,45 @@ def student_arm(arm, path):
         new["_master_vocab"] = master_vocab
     if spec.get("_ceiling_from_prep"):
         for key in ("master_arm", "master_iterations"):
-            if doc.get(key) != spec.get(f"_{key}"):
+            want = spec.get(f"_{key}")
+            if (key == "master_iterations" and want is None
+                    and spec.get("_env_stop")):
+                # Test B: an env-stopped master ends at a run-dependent
+                # iteration (the prep's master_checks pins it against the
+                # snapshot, and set_sha256 binds this file to that prep)
+                continue
+            if doc.get(key) != want:
                 raise SystemExit(f"{path}: a prep of {key} "
                                  f"{doc.get(key)!r}, not this student's "
-                                 f"{spec.get(f'_{key}')!r}")
+                                 f"{want!r}")
         c = student_ceiling(doc, path)
         new.update({"REWARD_GROWTH_START": c, "REWARD_GROWTH_CEILING": c,
                     "_student_ceiling": c})
+    if spec.get("_discount_from_prep"):
+        # Test B: the prep's per-generation discount (the gap 1 - g
+        # halved at each swap, capped at 0.997)
+        d = student_discount(doc, path)
+        new.update({"DISCOUNT": d, "_student_discount": d})
     ARMS[arm] = new
     return ARMS[arm]
+
+
+def student_discount(doc, path):
+    """Test B: the student's DISCOUNT the prep chose (vocab.json's
+    "student_discount": the master's gap 1 - g halved, capped at
+    STUDENT_DISCOUNT_CAP) -- a float strictly between 0 and 1, at most the
+    cap."""
+    d = doc.get("student_discount")
+    if (isinstance(d, bool) or not isinstance(d, (int, float))
+            or not math.isfinite(d) or not 0 < d < 1
+            or d > STUDENT_DISCOUNT_CAP):
+        raise SystemExit(f"{path}: no valid 'student_discount' ({d!r}) -- "
+                         f"not a Test B prep's vocab.json")
+    return float(d)
+
+
+# Test B: BBF's final discount (per base step), the per-swap rule's cap
+STUDENT_DISCOUNT_CAP = 0.997
 
 
 def student_gate(spec, distill_set, snapshot_weights):
@@ -2088,6 +2277,13 @@ def student_gate(spec, distill_set, snapshot_weights):
                              f"constant student_ceiling ({c!r}); got "
                              f"{muzero.REWARD_GROWTH_START!r} -> "
                              f"{muzero.REWARD_GROWTH_CEILING!r}")
+    if spec.get("_discount_from_prep"):
+        # Test B: the prep's discount, held for the whole run
+        d = spec.get("_student_discount")
+        if d is None or muzero.DISCOUNT != d:
+            raise SystemExit(f"a Test B student runs at the prep's "
+                             f"student_discount ({d!r}); got "
+                             f"{muzero.DISCOUNT!r}")
     if kind == "fresh":
         if distill_set:
             raise SystemExit("the -student-fresh arm takes no --distill-set")
@@ -2126,6 +2322,11 @@ def student_gate(spec, distill_set, snapshot_weights):
         raise SystemExit(f"{distill_set}: its student_ceiling "
                          f"{header.get('student_ceiling')!r} is not "
                          f"--token-vocab's {spec['_student_ceiling']!r}")
+    if (spec.get("_discount_from_prep")
+            and header.get("student_discount") != spec["_student_discount"]):
+        raise SystemExit(f"{distill_set}: its student_discount "
+                         f"{header.get('student_discount')!r} is not "
+                         f"--token-vocab's {spec['_student_discount']!r}")
     if muzero.REWARD_GROWTH_START != muzero.REWARD_GROWTH_CEILING:
         raise SystemExit("the distilled student runs at the master's end-state "
                          "ceiling (REWARD_GROWTH_START == CEILING)")
@@ -2146,6 +2347,9 @@ def student_expect(spec, distill_set):
     out = {"token_vocab": [list(t) for t in muzero.TOKEN_VOCAB]}
     if spec.get("_ceiling_from_prep"):
         out["reward_ceiling"] = spec.get("_student_ceiling")
+    if spec.get("_discount_from_prep"):
+        # Test B: the prep's discount is the recipe too
+        out["discount"] = spec.get("_student_discount")
     if distill_set:
         out["distill_set_sha256"] = file_sha256(distill_set)
     return out
@@ -2308,6 +2512,8 @@ class Run:
         # Cumulative TRAINING env interaction (the Atari-100k x-axis); greedy
         # eval episodes are protocol-exempt and not counted.
         self.env_steps = 0
+        # Test B: an OwnPlayLog under OWN_PLAY_LOG (run_one sets it)
+        self.own_play = None
 
     def set_train_mode(self, training):
         for net in (self.trainer.representation, self.trainer.dynamics,
@@ -4459,7 +4665,10 @@ class RayPipeline:
         # driver's _run_length_globals and shipped as values -- the actor
         # never re-derives them (no duplicated 0.3 formula).
         schedule = {"TEMPERATURE_TOTAL_STEPS": muzero.TEMPERATURE_TOTAL_STEPS,
-                    "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS}
+                    "OFFPOLICY_DECAY_STEPS": muzero.OFFPOLICY_DECAY_STEPS,
+                    # Test B: the env-keyed schedules' target (None: off);
+                    # the count itself arrives with every sync
+                    "SCHEDULE_ENV_TARGET": muzero.SCHEDULE_ENV_TARGET}
         # seed*8191: plain seed+extra made seed s, worker w+1 share RNG
         # streams with seed s+1, worker w (3b audit F7).
         return actor_cls.remote(self.overrides, ACTIONS,
@@ -4513,16 +4722,20 @@ class RayPipeline:
 
     def sync(self):
         steps = self.run.trainer.training_steps
+        # Test B: the env-keyed schedules' count rides along (only then:
+        # every other arm's actors see the unchanged two-argument call)
+        env = ((self.run.env_steps,) if muzero.SCHEDULE_ENV_TARGET
+               else ())
         if self.server is not None:
             # One weight ship for the whole pool; workers only mirror the
             # temperature counter (their set_weights skips empty dicts).
             self.ray.get(self.server.set_weights.remote(
                 self._acting_states(), steps))
-            self.ray.get([w.set_weights.remote({}, steps)
+            self.ray.get([w.set_weights.remote({}, steps, *env)
                           for w in self.workers])
         else:
             self.ray.get(self.actor.set_weights.remote(
-                self._acting_states(), steps))
+                self._acting_states(), steps, *env))
 
     def request(self, it):
         # training_steps captured at REQUEST time: sequential reanalysis of
@@ -4537,6 +4750,9 @@ class RayPipeline:
                 self.seed * 100003 + it * 1009 + e)
                 for e in range(self.episodes_per_iter)]
         self.pending = (futures, self.run.trainer.training_steps)
+        # Test B: the iteration these lives belong to (the own-play log's
+        # file)
+        self._request_it = it
         # Under BIRTH_SEARCH the episode's targets must come from the
         # weights the actor plays with -- the ones just synced -- not the
         # post-training weights collect() would otherwise see (the pattern
@@ -4609,8 +4825,18 @@ class RayPipeline:
         # The request-time count flows as an EXPLICIT stamp -- no rewinding
         # of the live trainer counter, so no window in which the two
         # "current step" sources (trainer vs searcher mirror) disagree.
-        for traj, terminated, steps in results:
+        for res in results:
+            traj, terminated, steps = res[:3]
             self.run.env_steps += steps
+            # Test B: the env-keyed schedules read the generation's count
+            # (inert unless muzero.SCHEDULE_ENV_TARGET is set)
+            muzero.SCHEDULE_ENV_STEPS = self.run.env_steps
+            if len(res) > 3:
+                # Test B (OWN_PLAY_LOG): the life at raw-step resolution,
+                # logged as played -- before anything could drop it
+                self.run.own_play.write(self._request_it, traj, res[3],
+                                        terminated, steps,
+                                        self.run.env_steps)
             # Test-6 admission control (async driver only; None
             # everywhere else): the decision runs BEFORE the append so
             # a dropped episode never evicts stored data to make room
@@ -4856,9 +5082,13 @@ class RayPipeline:
 def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, out,
             checkpoint_every=10, resume=False, overwrite=False,
             init_weights=None, use_ray=False, ray_workers=0,
-            cpu_actor=False, snapshot_weights=False, distill_set=None):
-    with arm_config(arm) as spec, _run_length_globals(iterations, train_steps), \
-            token_actions():
+            cpu_actor=False, snapshot_weights=False, distill_set=None,
+            stop_env_steps=None):
+    # Test B: an env-stopped generation's planned run (the schedules' scale
+    # and the 4.3 decay) is its nominal length, not the --iterations cap
+    planned = ARMS[arm].get("_nominal_iterations") or iterations
+    with arm_config(arm) as spec, _run_length_globals(planned, train_steps), \
+            token_actions(), env_schedule(stop_env_steps):
         if use_ray:
             ray_scope_gate(spec)
         launch_gate(spec, use_ray, cpu_actor)
@@ -4871,6 +5101,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         token_gate(spec, use_ray, cpu_actor, ray_workers)
         reward_growth_gate(use_ray, cpu_actor, ray_workers)
         student_gate(spec, distill_set, snapshot_weights)
+        env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations)
         if spec.get("_student") and init_weights:
             raise SystemExit("a curriculum P3 student starts from scratch or "
                              "from its distillation set, not --init-weights")
@@ -4994,6 +5225,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                             episodes_per_iter, eval_every,
                             ray_workers=ray_workers,
                             student=student_expect(spec, distill_set))
+        if stop_env_steps:
+            # Test B: the env-step stop is the recipe too (absent for every
+            # other run, whose recipe is unchanged)
+            expect["stop_env_steps"] = int(stop_env_steps)
         if muzero.USE_ATARI_WRAPPERS and FRAMESKIP is None:
             # The wrapper stack forces fixed skip 4 regardless; without the
             # flag the TAG lacks "-skip4" and rows would land in the
@@ -5018,6 +5253,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     f"point --init-weights there.")
         refuse_conflicting_state(ck, out, arm, seed, resume, overwrite)
         run = Run(arm, seed, spec)
+        if muzero.OWN_PLAY_LOG:
+            run.own_play = OwnPlayLog(own_play_dir(arm, seed))
         started = time.time()
         start_it = 0
         # Lineage survives a pause/resume via the checkpoint (audit finding:
@@ -5306,6 +5543,9 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             # Paper acting mode reads training progress for its temperature
             # schedule from the searcher's manager; mirror the trainer's count.
             run.searcher.network_manager.training_steps = run.trainer.training_steps
+            # Test B: the env-keyed schedules' count (a resume restored
+            # run.env_steps; collect keeps it current)
+            muzero.SCHEDULE_ENV_STEPS = run.env_steps
             # REWARD_GROWTH: this iteration's ceiling, over the whole buffer,
             # before anything is collected or trained.
             if muzero.REWARD_GROWTH:
@@ -5375,7 +5615,13 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     # (RAY_EAGER_COLLECT may already have collected it mid-
                     # block; pending is then None.)
                     pipeline.collect()
-                if it < iterations:
+            # Test B: an env-stopped generation's LAST iteration is the one
+            # in which its own env steps pass the stop (its episodes all
+            # collected above); every other run's is `iterations`.
+            last = it == iterations or bool(
+                stop_env_steps and run.env_steps >= stop_env_steps)
+            if pipeline:
+                if not last:
                     # No final-iteration sync: nothing plays after the last
                     # collect, and request_eval ships fresh weights itself.
                     pipeline.sync()
@@ -5408,7 +5654,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 print(f"  [{arm} s{seed}] lr decayed x{muzero.LR_DECAY_FACTOR} "
                       f"at iter {it}", flush=True)
 
-            if it == iterations:
+            if last:
                 # Save the trained weights. The first full ablation discarded
                 # 4.9 hours of training because nothing here wrote them out,
                 # which made it impossible to watch an agent afterwards or to
@@ -5420,7 +5666,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 torch.save(weights_blob(run, arm, seed, spec), ckpt)
                 print(f"  saved {ckpt.name}", flush=True)
 
-            if (eval_every and it % eval_every == 0) or it == iterations:
+            if (eval_every and it % eval_every == 0) or last:
                 if snapshot_weights:
                     # W_it: the weights this row's diagnostics and (in
                     # --ray, the eval actor's synced copy) episodes see.
@@ -5441,7 +5687,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     pipeline.request_eval(it, 8, run.evaluate_diagnostics(),
                                           write_row,
                                           round(time.time() - started, 1))
-                    if it == iterations:
+                    if last:
                         pipeline.drain_eval()
                 else:
                     write_row(it, run.evaluate(),
@@ -5449,7 +5695,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
 
             # After the eval/record block, so a resumed run never repeats or
             # skips a jsonl row: it continues at it+1 with row `it` written.
-            if checkpoint_every and it % checkpoint_every == 0 and it != iterations:
+            if checkpoint_every and it % checkpoint_every == 0 and not last:
                 if pipeline:
                     # PREVENTION of skipped rows: no checkpoint may be
                     # written while an eval row it implies is in flight --
@@ -5469,6 +5715,10 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                     "init_weights": init_name})
                 print(f"  [{arm} s{seed}] checkpoint at iter {it} "
                       f"({ck.stat().st_size / 1e9:.1f} GB)", flush=True)
+            if last:
+                # Test B: an env-stopped generation ends here (its final
+                # weights, snapshot and row written above)
+                break
         # Also under --resume with checkpointing off: otherwise the loaded
         # checkpoint survives completion and every later --resume replays
         # the same tail.
@@ -5653,6 +5903,12 @@ def main():
                          "replay before the offline phase; ignored on a "
                          "resume past it (the checkpoint holds the replay), "
                          "but its sha256 must match the checkpoint's")
+    ap.add_argument("--stop-env-steps", type=int, default=None,
+                    metavar="N",
+                    help="Test B's env-stopped arms only (required by "
+                         "them): the run ends at the iteration in which "
+                         "its own env steps pass N; the within-run "
+                         "schedules follow its env-step progress")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
     if args.resume and args.overwrite:
@@ -5722,7 +5978,8 @@ def main():
                         ray_workers=args.ray_workers,
                         cpu_actor=args.cpu_actor,
                         snapshot_weights=args.snapshot_weights,
-                        distill_set=args.distill_set)
+                        distill_set=args.distill_set,
+                        stop_env_steps=args.stop_env_steps)
     plot(out, RESULTS)
 
 

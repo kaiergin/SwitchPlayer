@@ -93,7 +93,11 @@ class SelfPlayActor:
         self.shell.searcher = self.searcher
         self.shell.env_steps = 0
 
-    def set_weights(self, state_dicts, training_steps):
+    def set_weights(self, state_dicts, training_steps, env_steps=None):
+        # Test B: the generation's env-step count, which the env-keyed
+        # schedules read (muzero.SCHEDULE_ENV_TARGET); None leaves it.
+        if env_steps is not None:
+            self.mz.SCHEDULE_ENV_STEPS = int(env_steps)
         nm = self.searcher.network_manager
         if isinstance(nm, RemoteNetworkManager):
             # Weights live on the InferenceServer (the driver syncs it
@@ -124,13 +128,31 @@ class SelfPlayActor:
         unchanged there); mid-match, play_episode's own reset is the one
         respawn no-op EpisodicLifeEnv takes, as in eval and the baselines
         wrapper -- calling both took two (Ms. Pac-Man audit r1 L1). Respawn
-        no-ops are not decisions: env_steps never counted them."""
+        no-ops are not decisions: env_steps never counted them.
+        Under OWN_PLAY_LOG (Test B) a fourth element carries the life at
+        raw-step resolution for the trainer's own-play log: play_token's
+        inner frames (ablation.INNER_FRAMES, set in this process around
+        the one play_episode), whether the game ended with it, and the
+        acting temperature it was sampled at."""
         if self.env.was_real_done:
             self.env.reset(seed=int(episode_seed))
         before = self.shell.env_steps
-        traj, _, _, terminated = self._ablation.Run.play_episode(
-            self.shell, greedy=False, cap=self.episode_cap)
-        return traj, terminated, self.shell.env_steps - before
+        if not self.mz.OWN_PLAY_LOG:
+            traj, _, _, terminated = self._ablation.Run.play_episode(
+                self.shell, greedy=False, cap=self.episode_cap)
+            return traj, terminated, self.shell.env_steps - before
+        temperature = self.mz.prior_acting_temperature(
+            self.searcher.network_manager.training_steps)
+        self._ablation.INNER_FRAMES = []
+        try:
+            traj, _, _, terminated = self._ablation.Run.play_episode(
+                self.shell, greedy=False, cap=self.episode_cap)
+            inner = self._ablation.INNER_FRAMES
+        finally:
+            self._ablation.INNER_FRAMES = None
+        return (traj, terminated, self.shell.env_steps - before,
+                {"inner": inner, "real_done": bool(self.env.was_real_done),
+                 "temperature": float(temperature)})
 
     def eval_episodes(self, seeds):
         """Greedy evaluation GAMES (Run.play_game: every life of a

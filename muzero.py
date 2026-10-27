@@ -498,11 +498,31 @@ TEMPERATURE_TOTAL_STEPS = None
 # same settings at every online iteration as a fresh student. 0 = off (every
 # schedule reads the raw step count, bit for bit).
 SCHEDULE_OFFSET_STEPS = 0
+# Test B (Kai, 2026-10-27): the within-run schedules keyed to a generation's
+# ENV-STEP progress. With SCHEDULE_ENV_TARGET set (the generation's own
+# env-step budget), every schedule reads TEMPERATURE_TOTAL_STEPS x min(1,
+# SCHEDULE_ENV_STEPS / SCHEDULE_ENV_TARGET): the fraction of the planned run
+# is the fraction of the generation's env steps played. SCHEDULE_ENV_STEPS
+# is the generation's own online env-step count, kept current by the
+# trainer and shipped to its actors at every weight sync; an offline phase
+# plays none, so it advances nothing. None = off (bit for bit).
+SCHEDULE_ENV_TARGET = None
+SCHEDULE_ENV_STEPS = 0
+# Test B: the self-play actors return each training life's inner frames
+# (play_token's, at raw-step resolution) for the trainer's own-play log, the
+# next generation's distillation set. False = off (bit for bit).
+OWN_PLAY_LOG = False
 
 
 def schedule_steps(training_steps):
     """The step count the within-run schedules read: training_steps less
-    SCHEDULE_OFFSET_STEPS, floored at 0; training_steps itself when off."""
+    SCHEDULE_OFFSET_STEPS, floored at 0; training_steps itself when off.
+    Under SCHEDULE_ENV_TARGET (with a planned run), the generation's
+    env-step progress scaled to the planned run instead (training_steps is
+    then not read)."""
+    if SCHEDULE_ENV_TARGET and TEMPERATURE_TOTAL_STEPS:
+        frac = min(1.0, SCHEDULE_ENV_STEPS / float(SCHEDULE_ENV_TARGET))
+        return int(TEMPERATURE_TOTAL_STEPS * frac)
     if not SCHEDULE_OFFSET_STEPS:
         return training_steps
     return max(0, training_steps - SCHEDULE_OFFSET_STEPS)

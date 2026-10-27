@@ -897,6 +897,87 @@ BUILD (before launch; audited like every build):
     runs; tests, a manifest, a fresh run tree.
 COST: the build and its audit loop first, then ~1.3 days of training,
 launched after Generation 2 completes (~05:00 10-28).
+AMENDMENTS (the build, before launch):
+  (A1) THE STOP is cumulative, so overshoots do not accumulate. Generation
+      k's --stop-env-steps is 20,000 x (k + 1) minus the final env steps
+      of F0..F(k-1), each read from that run's final in-run row. F0's stop
+      is 20,000. A generation ends at the iteration in which its own env
+      steps pass its stop, and F4 ends at the first iteration past 100k
+      cumulative. The headline window is therefore [90k, F4's end], which
+      is within one iteration of 100k.
+  (A2) THE VALUE CHECK is empirical. The worst case, ceiling / (1 - g),
+      would exceed the value support (5,000 units) from F3 on, although
+      Ms. Pac-Man's values stay far below it. The prep instead requires
+      the value support to hold 2 x the largest discounted, clipped return
+      at any base step of the master's logged games, under the student's
+      ceiling and discount; it records that return in vocab.json
+      ("value_max_student"). Failing the check is PREP FAILED (Kai's
+      call).
+  (A3) The schedules' planned run is the arm's nominal 30 iterations: it
+      is the scale of the env-keyed fractions and of the 4.3 decay (0.3 x
+      30 x 2,000 training steps). The --iterations cap is 60.
+  (A4) The MASTER GATE uses the mean of the master's last two deployed
+      rows, i.e. its two latest in-run iterations (as written above). The
+      master's final snapshot is weights-iterKKK, with K its final
+      iteration (its last in-run row).
+  (A5) READ (5) runs on each student's row 0 and on each generation's
+      final row K. K is known once the run is complete, so the hand-off
+      adds that row in its final pass.
+BUILT 2026-10-27 (pre-audit; the audit loop follows before any launch):
+  - muzero.py: SCHEDULE_ENV_TARGET and SCHEDULE_ENV_STEPS. With a target
+    and a planned run, schedule_steps() returns the env-step progress
+    scaled to the planned run; otherwise it is bit for bit the old
+    function. OWN_PLAY_LOG flag.
+  - experiments/ray_actors.py: SelfPlayActor.set_weights takes the env-step
+    count; under OWN_PLAY_LOG, play() returns each life's inner frames,
+    real_done and acting temperature.
+  - experiments/ablation.py:
+      - the arms F0 (TK at the sign clip, PREFIX_BN_PER_STEP, DISCOUNT
+        0.97, OWN_PLAY_LOG, _env_stop, _nominal_iterations 30) and F1-F4
+        (the distilled student of the previous generation, with
+        _discount_from_prep);
+      - OwnPlayLog / read_own_play, one pickle file per iteration,
+        truncated at a process's first write, so a resume replaces a dead
+        timeline's lives;
+      - env_schedule, env_stop_gate, own_play_dir, --stop-env-steps
+        (part of the resume recipe);
+      - the loop's LAST iteration is the one whose collect passes the
+        stop; nothing is requested after it, and its weights, snapshot and
+        drained row are written, then the loop breaks;
+      - the pipeline ships SCHEDULE_ENV_TARGET to the actor, the env-step
+        count at every sync (only when keyed), and logs every collected
+        life before admission;
+      - student_arm / student_gate / student_expect handle the prep's
+        discount (student_discount, capped at 0.997); an env-stopped
+        student's master_iterations is pinned by master_checks, not by its
+        arm.
+  - experiments/distill.py: prep(from_log=...) / --from-log, which read
+    the master's own-play log in place of the recording (check_life on
+    every life, games grouped as record() groups them);
+    student_discount_rule; discounted_return_max; the value check (A2);
+    DISCOUNT and _student_discount as student keys only for
+    _discount_from_prep arms.
+  - tests/test_testb.py (49 tests, two slow: an F0-like master's own play
+    logged as the actor logs it, its prep from the log, then F1's offline
+    phase at the prep's discount, whose row 0 a later prep reads back as
+    a student master). The flag-on and augmentation arm lists in
+    test_pbn / test_harness gain F0-F4.
+  - benchmarks/supervisors/supervise_testb.py: five variants f0-f4 in one
+    run tree. f0 has no wait and no prep, but the any-trainer guard still
+    holds it while Generation 2 trains. Each f{k} waits for F{k-1}'s
+    marker and evals (dynamic rows), applies the master gate (A4), preps
+    from F{k-1}'s own-play log, and computes its stop (A1). The file has
+    24 suites and testb_manifest.json. tests/test_supervise_testb.py has
+    183 cases; eight seeded supervisor faults were each caught.
+  - Scratchpad: post_testb.py (from post_gen2.py: five runs, dynamic
+    rows, read (5) per (A5), the next run's supervisor waiting on the
+    previous run's exact evals); make_check_testb.py -> check_post_testb.py
+    (CHECK OK); launch_testb.ps1 (worktree Y:\SwitchPlayer-testb-run;
+    starts the hand-off and the five supervisors).
+  - NOT YET RUN, waiting for host memory while Generation 2 trains: the
+    full 24 suites, and a real end-to-end smoke (Ray, the CLI): a tiny F0
+    to its stop -> its own-play log -> a prep --from-log -> a tiny F1.
+    Both run before launch.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%

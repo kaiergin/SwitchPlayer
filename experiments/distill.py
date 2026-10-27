@@ -45,7 +45,7 @@ pre-fills its replay through Run.paper_targets (ablation.distill_prefill).
 
 Usage:
   python experiments/distill.py --master SNAPSHOT.pth --master-iterations N
-      --out DIR [--seed 0] [--base-steps 31250]
+      --out DIR [--seed 0] [--base-steps 31250] [--from-log DIR]
 """
 import argparse
 import contextlib
@@ -219,6 +219,69 @@ def halved_ceiling(mags, c0):
     return float(max(c, c0))
 
 
+# -- 2c. Test B: the student's discount, the value support, the own-play log ------
+# the value support's headroom over the largest discounted return seen
+VALUE_HEADROOM = 2.0
+
+
+def student_discount_rule(g):
+    """Test B (Kai, 2026-10-27): the student's discount per base step -- the
+    master's gap 1 - g halved, capped at BBF's final 0.997
+    (ablation.STUDENT_DISCOUNT_CAP): 0.97, 0.985, 0.9925, 0.99625, 0.997."""
+    import ablation
+    return float(min(ablation.STUDENT_DISCOUNT_CAP, 1.0 - (1.0 - g) / 2.0))
+
+
+def discounted_return_max(lives, unit, ceiling, g):
+    """The largest |discounted return| at any base step of any life, its
+    raw rewards clipped per base step at `ceiling` REWARD_UNITs (sign
+    kept, as grown_reward clips them) and discounted by `g` per base step
+    to the life's end -- what a value target can reach in these games."""
+    best = 0.0
+    for life in lives:
+        steps = [r for rec in life["traj"] for r in rec[2]]
+        ret = 0.0
+        for r in reversed(steps):
+            r = float(r) / float(unit)
+            r = min(r, ceiling) if r >= 0 else -min(-r, ceiling)
+            ret = r + g * ret
+            best = max(best, abs(ret))
+    return float(best)
+
+
+def log_lives(folder, last_iteration):
+    """Test B: a master's own-play log (ablation.OwnPlayLog, iterations
+    1..last_iteration) as record()'s lives -- each life checked
+    (check_life), grouped into games as record() groups them (a game ends
+    with a life that was truncated or ended it: the log's real_done). A
+    game still running when the log ends is no game return. Returns (lives,
+    game returns (raw), base steps, source header fields)."""
+    import ablation
+    entries = ablation.read_own_play(folder, last_iteration)
+    lives, games, total, g_ret = [], [], 0, 0.0
+    temps = {}
+    for e in entries:
+        check_life(e["traj"], e["inner"])
+        lives.append({"traj": e["traj"], "inner": e["inner"],
+                      "terminated": bool(e["terminated"]),
+                      "game": len(games), "steps": int(e["steps"])})
+        total += int(e["steps"])
+        g_ret += sum(float(r) for rec in e["traj"] for r in rec[2])
+        t = repr(float(e["temperature"]))
+        temps[t] = temps.get(t, 0) + 1
+        if not e["terminated"] or e["real_done"]:
+            games.append(g_ret)
+            g_ret = 0.0
+    if not lives:
+        raise SystemExit(f"own-play log {folder}: no lives")
+    return lives, games, total, {
+        "source": "own-play log", "log_dir": str(folder),
+        "log_iterations": int(last_iteration), "log_lives": len(lives),
+        "log_temperatures": temps,
+        "log_partial_game_lives": sum(1 for l in lives
+                                      if l["game"] == len(games))}
+
+
 # -- 3. re-tokenization -----------------------------------------------------------
 def retokenize(traj, inner, master_vocab, student_vocab):
     """One recorded life in the student's vocabulary: 3-field records
@@ -343,7 +406,9 @@ def read_set(path):
 # the keys ablation.student_arm sets on a P3 student arm (--token-vocab)
 STUDENT_KEYS = ("TOKEN_VOCAB", "_token_vocab_sha256", "_vocab_set_sha256",
                 "REWARD_GROWTH_START", "REWARD_GROWTH_CEILING",
-                "_student_ceiling", "_master_vocab")
+                "_student_ceiling", "_master_vocab",
+                # Test B: the prep's per-generation discount
+                "DISCOUNT", "_student_discount")
 
 
 def master_spec(arm, blob, master):
@@ -363,7 +428,11 @@ def master_spec(arm, blob, master):
     if static.get("_student") is None:
         return static
     spec = blob.get("spec") or {}
-    bad = sorted(k for k in set(static) | set(spec) if k not in STUDENT_KEYS
+    # the discount is a student key only where the prep sets it (Test B)
+    excused = (STUDENT_KEYS if static.get("_discount_from_prep") else
+               tuple(k for k in STUDENT_KEYS
+                     if k not in ("DISCOUNT", "_student_discount")))
+    bad = sorted(k for k in set(static) | set(spec) if k not in excused
                  and (k not in static or k not in spec
                       or spec[k] != static[k]))
     if bad:
@@ -392,6 +461,12 @@ def master_spec(arm, blob, master):
             or spec.get("REWARD_GROWTH_CEILING") != c):
         raise SystemExit(f"{master}: its ceiling is not a constant "
                          f"_student_ceiling ({c!r})")
+    if static.get("_discount_from_prep"):
+        d = spec.get("_student_discount")
+        if (isinstance(d, bool) or not isinstance(d, (int, float))
+                or not 0 < d < 1 or spec.get("DISCOUNT") != d):
+            raise SystemExit(f"{master}: its DISCOUNT is not its prep's "
+                             f"_student_discount ({d!r})")
     return dict(spec)
 
 
@@ -451,9 +526,11 @@ def master_checks(master, master_iterations):
 
 # -- the prep ---------------------------------------------------------------------
 def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
-         drop_share=DROP_SHARE, log=print):
+         drop_share=DROP_SHARE, log=print, from_log=None):
     """Steps 1-5 (module docstring) for one master snapshot; returns the
-    header written."""
+    header written. `from_log` (Test B): the master's own-play log folder
+    (ablation.OwnPlayLog, iterations 1..master_iterations) replaces the
+    recording of step 1 -- no env step is played (base_steps unused)."""
     import ablation
     t0 = time.time()
     out = pathlib.Path(out)
@@ -471,13 +548,26 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
             raw_states = load_master(run, blob)
             temp = muzero.prior_acting_temperature(run.trainer.training_steps)
             bias = muzero.token_long_bias(run.trainer.training_steps)
-            set_rep_pred(run, blob["acting_states"])
-            log(f"recording: master {pathlib.Path(master).name} ({arm}, "
-                f"{run.trainer.training_steps} steps), temperature {temp}, "
-                f"long-token bias {bias}, until >= {base_steps} base steps")
-            lives, games, total = record(run, base_steps)
-            log(f"recorded {len(games)} games, {len(lives)} lives, {total} "
-                f"base steps; game returns mean {np.mean(games):.1f} "
+            if from_log is None:
+                set_rep_pred(run, blob["acting_states"])
+                log(f"recording: master {pathlib.Path(master).name} ({arm}, "
+                    f"{run.trainer.training_steps} steps), temperature "
+                    f"{temp}, long-token bias {bias}, until >= {base_steps} "
+                    f"base steps")
+                lives, games, total = record(run, base_steps)
+                source = {"source": "recording"}
+            else:
+                lives, games, total, source = log_lives(from_log,
+                                                        master_iterations)
+                log(f"own-play log: {from_log}, iterations 1-"
+                    f"{master_iterations} of master "
+                    f"{pathlib.Path(master).name} ({arm}, "
+                    f"{run.trainer.training_steps} steps); temperatures "
+                    f"{source['log_temperatures']}")
+            log(f"{'recorded' if from_log is None else 'logged'} "
+                f"{len(games)} games, {len(lives)} lives, {total} base "
+                f"steps; game returns mean "
+                f"{np.mean(games) if games else float('nan'):.1f} "
                 f"[{time.time() - t0:.0f}s]")
             clip = {}
             if muzero.REWARD_GROWTH:
@@ -514,6 +604,32 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                     f"{clip['clip_share_master']:.3f} of {mags.sum():.0f} "
                     f"reward units; the student's ceiling {c1:.4g} removes "
                     f"{clip['clip_share_student']:.3f}")
+            disc = {}
+            if mspec.get("_env_stop"):
+                # Test B: the student's discount (the gap 1 - g halved,
+                # capped), and the value support checked against the
+                # largest discounted clipped return in these games under
+                # the student's ceiling and discount (x2 headroom)
+                if "student_ceiling" not in clip:
+                    raise SystemExit("a Test B prep needs REWARD_GROWTH "
+                                     "(the student's ceiling)")
+                g0 = float(muzero.DISCOUNT)
+                g1 = student_discount_rule(g0)
+                vmax = discounted_return_max(lives, clip["reward_unit"],
+                                             clip["student_ceiling"], g1)
+                if VALUE_HEADROOM * vmax > float(muzero.VALUE_CEILING):
+                    raise SystemExit(
+                        f"the value support ({muzero.VALUE_CEILING} units) "
+                        f"does not hold {VALUE_HEADROOM} x the largest "
+                        f"discounted return {vmax:.1f} under the student's "
+                        f"ceiling {clip['student_ceiling']:.4g} and "
+                        f"discount {g1}")
+                disc = {"master_discount": g0, "student_discount": g1,
+                        "value_max_student": round(vmax, 3),
+                        "value_ceiling": float(muzero.VALUE_CEILING)}
+                log(f"student discount: {g0} -> {g1}; the largest "
+                    f"discounted return {vmax:.1f} units (value support "
+                    f"{muzero.VALUE_CEILING})")
             shares, counts = token_shares(lives, len(master_vocab))
             vocab, dropped = student_vocabulary(master_vocab, shares,
                                                 drop_share)
@@ -572,6 +688,8 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
         "acting_temperature": float(temp), "long_token_bias": float(bias),
         "lives": len(out_lives),
         **clip,
+        **disc,
+        **source,
     }
     write_set(out / "set.pkl", header, out_lives)
     doc = {k: v for k, v in header.items()}
@@ -591,10 +709,13 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--base-steps", type=int, default=BASE_STEPS)
+    # Test B: distil from the master's own-play log instead of recording
+    ap.add_argument("--from-log", default=None, metavar="DIR")
     args = ap.parse_args(argv)
     prep(args.master, args.master_iterations, args.out, seed=args.seed,
          base_steps=args.base_steps,
-         log=lambda m: print(time.strftime("%m-%d %H:%M ") + m, flush=True))
+         log=lambda m: print(time.strftime("%m-%d %H:%M ") + m, flush=True),
+         from_log=args.from_log)
 
 
 if __name__ == "__main__":
