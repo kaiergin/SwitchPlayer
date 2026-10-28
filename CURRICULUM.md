@@ -1322,6 +1322,18 @@ SWAP 1 PREP (F0 -> F1; 11:22-11:27 10-28, attempt 1; read (3)):
       dropped tokens is 0.183. The prep took 268 s.
 F1 LAUNCHED 11:28 10-28 (attempt 1, fresh): the prefill, the 20,000
 offline steps, then online play to 19,492 env steps.
+F1 ROW 0 (interim, 13:35 10-28; offline phase ~2 h):
+  READ (2) transfer: row 0 (20,000 offline steps, before F1 plays) is 872.0
+      deployed (SD 201.5) and 683.0 trainer-BN. The master's final row is
+      537.7 (trainer-BN 729.0), so +334.3 deployed, descriptive (one-row
+      band +-464). Against the master's last two rows (597.2): +274.8.
+      The earlier swaps' row 0 was BELOW the master (DS2 1065 against
+      1114, G2 1350 against 1657). Here it is above, at 20.5k cumulative
+      env steps (G0 had 740 at 19.8k).
+  The offline curve (deployed / trainer-BN): 563 / 807 at 4k, 590 / 637
+      at 8k, 602 / 593 at 12k, 1002 / 664 at 16k; row 0 (20k) 872 / 683.
+  READ (5) row 0: p1_ratio 0.97, so FIXED (18 tokens, ceiling 11.62).
+  Frames per decision, deployed: 7.8 at row 0.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
