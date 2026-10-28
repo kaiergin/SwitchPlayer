@@ -1334,6 +1334,33 @@ F1 ROW 0 (interim, 13:35 10-28; offline phase ~2 h):
       at 8k, 602 / 593 at 12k, 1002 / 664 at 16k; row 0 (20k) 872 / 683.
   READ (5) row 0: p1_ratio 0.97, so FIXED (18 tokens, ceiling 11.62).
   Frames per decision, deployed: 7.8 at row 0.
+F1 COMPLETE (interim, 18:20 10-28; not read against the pre-registration
+until F4):
+  One attempt, no deaths: 6.8 h (24,390 s), of which the prefill and the
+      offline phase took ~2 h. 28 iterations at ~11 min each; F1 stopped
+      at 19,494 env steps (76,000 training steps including the 20,000
+      offline). Cumulative env steps: 40,002.
+  Deployed (exact, acting), rows 0-25 and the final row 28: 872 / 946 /
+      967 / 974 / 945 / 922 / 962, at 20.5k / 24.1k / 27.2k / 30.2k /
+      34.1k / 37.7k / 40.0k cumulative env steps. Trainer-BN: 683 / 788 /
+      735 / 846 / 1142 / 764 / 898. For scale, the current lineage's G0
+      was at 1154 deployed at 39.5k, so the fast lineage is ~190 behind at
+      40k.
+  READ (2): jump: rows 5 and 10 (mean 956.7) against the master's last two
+      rows (597.2) give +359.5. The improvement rate is +2.1 deployed per
+      1k env steps (OLS over the 7 rows, row 0 included), so F1 is flat
+      from row 5 on: its whole gain over F0 came at the swap.
+  MASTER GATE (the swap to F2): rows 25 and 28 average 942.3, at or above
+      502.08, so it PASSES. F2's master is weights-iter028.
+  READ (3): clip 11.62, discount 0.985, 18 tokens; reward_kept 0.86-0.88.
+  READ (4): policy_maxp 0.70 at row 5, then 0.54-0.64 (0.55 at row 28).
+      The search targets' entropy is 1.20-1.52.
+  READ (5) at row 28: p1_ratio 0.56, so FIXED (G2's final row: 0.56).
+  READ (6): the largest adjacent deployed drop is -29 (row 15 -> 20).
+      Across the swap: row 0 is +334 over the master's final row.
+  Tokens: the 4-frame share of play is 0.63 at row 5 and 0.78 at row 28.
+      Frames per decision 10.4 -> 7.1.
+F2 began at 18:19 with STOP 19,998 (60,000 - 40,002).
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
