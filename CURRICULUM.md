@@ -1302,6 +1302,26 @@ acting states.
       34) as the long-token bias decays. Frames per decision 14.7 -> 6.8.
 F1 began at 11:13 with STOP 19,492 (40,000 - 20,508): its preflight, then
 the prep from F0's own-play log.
+SWAP 1 PREP (F0 -> F1; 11:22-11:27 10-28, attempt 1; read (3)):
+  THE DATA: F0's own-play log, iterations 1-34. 34 whole games, 102
+      lives, 20,508 base steps, no partial games. Game returns: mean
+      543.8, median 470. Lives by temperature: 0.5 51, 0.25 24, 0.125 27.
+      This is the whole generation's play, from its start, rather than a
+      fresh recording at the final temperature.
+  THE CLIP: the master's ceiling 1 removes 0.227 of 1,849 reward units.
+      The student's ceiling is 11.62, which removes 0.114. 0.9% of the
+      steps are clipped, against 2.2% at the master's ceiling.
+  THE DISCOUNT: 0.97 -> 0.985. VALUE CHECK: the largest discounted return
+      is 28.8 units; 2x that is within the 5,000-unit support.
+  THE VOCABULARY: 18 of 36 tokens. All 9 4-frame tokens are kept; dropped
+      are (0,16) (0,32) (1,16) (2,8) (2,16) (2,32) (3,8) (4,16) (4,32)
+      (5,8) (5,16) (5,32) (6,8) (6,32) (7,8) (7,16) (8,8) (8,16).
+  TARGETS: 10,418 records, from F0's 50-sim birth search under its spec.
+      470 dropped-token decisions are split into 1,855 extra records.
+      There were 38 uniform fallbacks. The mean visit mass discarded on
+      dropped tokens is 0.183. The prep took 268 s.
+F1 LAUNCHED 11:28 10-28 (attempt 1, fresh): the prefill, the 20,000
+offline steps, then online play to 19,492 env steps.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
