@@ -1274,6 +1274,34 @@ present) started the hand-off post_testb.py and the supervisors f0-f4.
 f0: STOP 20,000 (BUDGET - 0), preflight (the 24 suites), then F0. f1-f4
 wait on their predecessors. Expected: about 30 iterations per generation,
 the first prep after F0; five generations in about a day and a half.
+F0 COMPLETE (interim, 11:15 10-28; not read against the pre-registration
+until F4). Scores in these notes are whole-game unclipped scores (the env's
+summed points). "Trainer-BN" is the pre-registration's "raw" column: the
+same snapshot under the trainer's BN statistics instead of the deployed
+acting states.
+  One attempt, no deaths: 34 iterations in 5.4 h (19,530 s; 8.8 -> 11.0
+      min/iter). F0 stopped at 20,508 env steps after 68,000 training
+      steps (3.3 per env step).
+  Deployed (exact, acting) at rows 5-30 and the final row 34: 299 / 353 /
+      544 / 573 / 593 / 657 / 538, at 2.8k / 6.1k / 9.1k / 12.2k / 15.6k /
+      18.1k / 20.5k env steps. Trainer-BN: 264 / 392 / 883 / 713 / 949 /
+      757 / 729. For scale, the current lineage's G0 was at 740 deployed
+      at 19.8k.
+  READ (2): the improvement rate is +16.8 deployed per 1k env steps (OLS
+      over the 7 rows).
+  MASTER GATE (the swap to F1): rows 30 and 34 average 597.2, at or above
+      502.08, so it PASSES. F1's master is weights-iter034.
+  READ (3): clip c0 = 1, discount 0.97, 36 tokens. reward_kept is 0.976 at
+      row 5 and falls to 0.773 at row 34 as larger rewards appear.
+  READ (4): policy_maxp 0.50 -> 0.64 (0.62-0.67 from row 15 on). The
+      search targets' entropy is 0.82-1.45 (1.11 at row 34).
+  READ (5) at row 34: p1_ratio 0.76, so FIXED.
+  READ (6): the largest adjacent deployed drop is -119 (row 30 -> 34;
+      one-row band +-464).
+  Tokens: the 4-frame share of play rises from 0.43 (row 10) to 0.82 (row
+      34) as the long-token bias decays. Frames per decision 14.7 -> 6.8.
+F1 began at 11:13 with STOP 19,492 (40,000 - 20,508): its preflight, then
+the prep from F0's own-play log.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
