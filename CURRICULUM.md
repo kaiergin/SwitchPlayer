@@ -1361,6 +1361,22 @@ until F4):
   Tokens: the 4-frame share of play is 0.63 at row 5 and 0.78 at row 28.
       Frames per decision 10.4 -> 7.1.
 F2 began at 18:19 with STOP 19,998 (60,000 - 40,002).
+SWAP 2 PREP (F1 -> F2; 18:27-18:30 10-28, attempt 1; read (3)):
+  THE DATA: F1's own-play log, iterations 1-28. 28 whole games, 84 lives,
+      19,494 base steps. Game returns: mean 777.5, median 705, max 1510.
+      Lives by temperature: 0.5 48, 0.25 18, 0.125 18.
+  THE CLIP: the master's ceiling 11.62 removes 0.131 of 2,177 reward
+      units. The student's ceiling 18.10 removes 0.066. The share of steps
+      clipped stays at 1.4%: no step reward falls between the two
+      ceilings, so only the clipped excess shrinks.
+  THE DISCOUNT: 0.985 -> 0.9925. VALUE CHECK: the largest discounted
+      return is 46.5 units; 2x that is within the 5,000-unit support.
+  THE VOCABULARY: 16 of 18 tokens; dropped (0,8) and (6,16). The (7,4)
+      token (DOWNRIGHT, 4 frames) holds 52.6% of the decisions.
+  TARGETS: 10,102 records. 183 dropped-token decisions are split into 364
+      extra records. There were 4 uniform fallbacks. The mean visit mass
+      discarded on dropped tokens is 0.059. The prep took 191 s.
+F2 LAUNCHED 18:31 10-28 (attempt 1, fresh).
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
