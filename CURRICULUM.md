@@ -789,6 +789,103 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
+
+(Pre-registration: "Next experiment (pre-registered) -- Generation 2",
+below Test B's section; its interim notes there.)
+RUN (from the run worktree Y:\SwitchPlayer-gen2-run, detached at ce5e1488,
+manifest from the audited 48716683; one attempt; supervisor.err empty):
+the preflight and prep 11:32 -> 11:34 10-27; G2 11:35 10-27 -> 04:48 10-28
+(62,010 s; the prefill and the offline phase ~1 h 39 min, then ~10.4
+min/iteration); the hand-off's last evals 04:54 10-28 -- every row (0 and
+5-90, the offline curve 1-4), all five read (10) rows, no capped game. One
+ALERT: host commit free 3.0 GB at row 10 (other applications; the trainer
+held steady).
+MASTER = DS2 weights-iter090 (deployed 60-90 1656.52, g 1.385). THE PREP
+(above in the interim notes): 36 DS2 games (mean 2127.8 at temperature
+0.125), 31,862 base steps; c1 11.258 -> c2 22.961; 18 of 21 tokens kept.
+EXACT eval (30 noop starts, prior argmax); DEPLOYED primary, RAW (the
+trainer's BN statistics) secondary, IN = the run's 8-game eval:
+  iter       0    5   10   15   20   25   30   35   40   45   50   55   60   65   70   75   80   85   90
+  G2 dep  1350 1925 1798 2244 1686 1824 2040 1828 1968 1997 1955 1665 2036 2315 2074 1910 2403 2259 1831
+  G2 raw  1526 1268 1624 1610 1772 2001 1900 1868 1846 1961 1885 1897 1909 2028 2663 1885 1985 2615 2435
+  G2 in      - 1629 1764 1878 1684 1694 2309 1882 1859 2230 1836 1555 1998 2280 2165 1966 2609 2185 1954
+  G2 env     -  4.1  9.0 13.0 16.3 20.9 25.2 29.3 33.4 37.1 41.5 45.8 49.9 54.3 58.9 62.8 66.6 71.1 75.4
+  G2 maxp    - 0.58 0.60 0.59 0.57 0.60 0.64 0.63 0.63 0.63 0.65 0.58 0.67 0.65 0.67 0.71 0.67 0.65 0.67
+(env in thousands of G2's own base steps; every score is the unclipped game
+score of a whole game.)
+NEAR RANDOM: no (60-90 deployed g 1.859, raw 1.961).
+READ (0) transfer: row 0 1350.3 deployed (raw 1526.3) against MASTER
+  1656.52: -306.2, descriptive (+-464); NOT TRANSFER FAILED. Offline curve,
+  deployed / raw: 1722 / 1398 @4k, 1498 / 1682 @8k, 1510 / 1725 @12k, 1645
+  / 1674 @16k, 1350 / 1526 @20k. DS2's own recorded games: mean 2127.8.
+READ (1) PRIMARY, against the master: G2 60-90 deployed 2118.24 (SD 213.9)
+  against MASTER 1656.52: +461.7 -> ABOVE (band 232). Raw 2217.14 against
+  1600.05: +617.1 -> ABOVE (band 205).
+READ (2) head start 5-25: G2 1895.20 against DS2's 1330.27: +564.9 ->
+  BETTER (band 274.4). Raw 1654.93.
+READ (3) two generations: G2 g 1.859 against G0's 0.828 (+1004.4 points);
+  DS2 was g 1.385.
+READ (4) time to level (the first row >= 1424.52): row 5 (4,083 env
+  steps). Every deployed row 5-90 is above MASTER itself (lowest 1665 @55).
+  G2's lowest row in 5-25 is 1686.0 (@20) against row 0's 1350.3: no
+  forgetting.
+READ (5) tokens: the 3 dropped tokens held 1.5% of DS2's decisions. Play
+  shares (4 / 8 / 16 / 32 frames): 0.14 / 0.03 / 0.19 / 0.64 @5 -> 0.11 /
+  0.01 / 0.12 / 0.76 @90 (DS2 @90: 0.10 / 0.03 / 0.22 / 0.64); search
+  shares 0.20 / 0.09 / 0.16 / 0.55 @5 -> 0.22 / 0.04 / 0.10 / 0.65 @90.
+  Frames per decision, deployed, rows 60-90: 24.4-26.7 (2.2-2.5 decisions
+  per second; DS2 22.6-24.5); row 0 23.2.
+READ (6) stability, the largest adjacent deployed drop from row 45: -428
+  (2259 @85 -> 1831 @90). Raw: -778 (2663 @70 -> 1885 @75).
+READ (7) the clip: S(c1) 0.273, c2 22.961, S(c2) 0.136 on DS2's games (the
+  prep). reward_kept by row: 0.87 @5 -> 0.91 @90, rising (DS2 at c1 fell
+  0.83 -> 0.78).
+READ (8) prior: R = maxp 75-90 / 30-55 = 0.674 / 0.627 = 1.08 -> HELD.
+  Fresh-target entropy without trend (0.48-1.87; 0.48 a one-row dip @80).
+READ (9) the plateau rule (Step 0 (ii)), after the fact: on deployed the
+  noise-scaled rule fires at row 65 (sigma 224.4; best window then 35-65,
+  1966.2). The rows after it averaged 2095.3, so this is a false plateau.
+  The rank-based variant never fires. On raw neither fires (sigma 120.9;
+  the last window, 60-90, is the best).
+READ (10) mechanism: FIXED at every row. p1_ratio 0.88 / 0.51 / 0.64 /
+  0.47 / 0.56 at rows 0 / 30 / 55 / 75 / 90. Against the pooled
+  statistics the step-1 offset would be 1.52 / 10.23 / 8.51 / 8.18 / 7.66
+  SDs. No caveat on reads (1)-(9).
+PRE-REGISTERED DECISION: (1) ABOVE -> the loop compounds over two swaps:
+  Kai's call on generation 3 and on the loop's automation. Kai's standing
+  call (10-27): Test B (a from-scratch lineage with a swap every 20k env
+  steps, pre-registered above) runs next. Generation 3 of this lineage is
+  not scheduled.
+Beyond the letter (one seed, within-run bands -- "consistent with"):
+  - Both swaps passed their master by about two bands: G0 1114 -> DS2
+    1657 (+543) -> G2 2118 (+462). The gain per swap is not shrinking much
+    yet.
+  - Data cost: G2's level came from about 270k cumulative env steps:
+    - G0's 59.2k;
+    - two 31.8k recordings;
+    - DS2's 71.4k;
+    - G2's 75.4k.
+    EZ-V2 reports 2251.0 at 100k and BBF 2008.3, so G2's score is in their
+    range, but on about 2.7x the data. Test B tests whether the same loop
+    gets there inside 100k (own-play swap data, so no recording cost).
+  - The offline phase: G2's deployed curve was best at 4k offline steps
+    (1722) and lower by 20k (1350). DS2's rose to 16k (1326) and fell at
+    20k (1065). On deployed, the last part of the 20,000 offline steps did
+    not help either student. Test B keeps 20k: noted as a candidate lever
+    for a shorter swap.
+  - Token habits: G2 moves further onto the 32-frame tokens (0.64 -> 0.76)
+    while keeping some 16-frame play (0.12), and acts 2.2-2.5 times a
+    second.
+  - The looser clip (c2 22.96, one ghost of 200 points whole) keeps more of
+    a stronger player's reward: reward_kept rises through the run, where
+    DS2's fell at c1.
+  - The plateau rules fire on noise here (the noise-scaled rule at 65). In
+    Test 2 the rank-based rule did (DS2 at 55). Neither rule yet tells a
+    real slowdown from a noisy level stretch. This supports Kai's
+    constant-swap choice for Test B, and gives Test D's smart trigger a
+    concrete false-positive case to beat.
+
 ### Next experiment (pre-registered) -- Test B: a fast lineage from scratch (a swap every 20k env steps, own-play distillation, a per-generation discount) (Kai, 2026-10-27)
 
 DECISION: Kai 2026-10-27, while Generation 2 trains. The comparison that
