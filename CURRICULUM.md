@@ -1369,6 +1369,17 @@ G2 ROW 0 (interim, 13:56 10-27):
       applications (a browser ~3.5 GB across processes, Steam, Discord) on
       a 36.8 GB commit limit. The hand-off's interim probes (>= 6 GB) are
       starved and will catch up in the final pass (>= 4 GB).
+G2 ROWS 5-45 (interim, 21:15 10-27; not read against the pre-registration
+until row 90):
+  Deployed (exact, acting): 1925 / 1798 / 2244 / 1686 / 1824 / 2040 /
+      1828 / 1968 / 1997 at rows 5-45; mean 1923.3. DS2 at the same rows:
+      1226 / 1200 / 1295 / 1533 / 1397 / 1944 / 1722 / 1385 / 1161, mean
+      1429.2. Raw rows 5-40: 1268 / 1624 / 1610 / 1772 / 2001 / 1900 /
+      1868 / 1846.
+  The offline curve (deployed / raw): 1722 / 1398 @4k, 1498 / 1682 @8k,
+      1510 / 1725 @12k, 1645 / 1674 @16k; row 0 (20k) 1350 / 1526.
+  Env steps at row 45: 37,138. One attempt; no deaths; the interim probes
+      run whenever free commit allows.
 
 ### RESULT -- Test 2: the first swap under the per-generation clip, DS2 against FS2 (seed 0), 2026-10-27
 
