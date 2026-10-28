@@ -1207,6 +1207,65 @@ ACCEPTED r3 (NIT):
   - Pre-existing: prep_log_tail reads the whole append-mode prep.log, so
     an attempt killed before writing reports the previous attempt's last
     line (Kai's call either way; rare).
+PRE-LAUNCH CHECKS (10-28, after G2 completed; nothing else running):
+  - THE 24 SUITES (one at a time, CPU): 23 passed. test_mspacman failed:
+    test_actor_play_continues_the_match_with_one_respawn_noop raised
+    AttributeError, 'SelfPlayActor' object has no attribute 'mz'.
+    - Cause: its _actor_shell builds the actor with object.__new__,
+      skipping __init__ (which sets self.mz), and Test B's play() reads
+      self.mz.OWN_PLAY_LOG. Production builds every actor through
+      __init__.
+    - FIX: the shell sets actor.mz = muzero.
+    - Rounds r1-r3 ran only a subset of the files, and the supervisor's
+      preflight (pytest -x over the 24) would have refused the launch.
+    After the fix test_mspacman passes, as do test_inference_server,
+    test_ray_harness, test_searchact and test_vtree_refresh.
+  - THE SMOKE (scratchpad smoke_testb.py, the real CLI with Ray and the
+    GPU; 20 train steps per iteration, env stop 900, 40 offline steps):
+    f0 79 s, prep1 9 s, f1 160 s, prep2 19 s, all OK.
+    - F0 stopped after iteration 2 (1,205 env steps). It wrote:
+      - an own-play log of 3 lives per iteration (temperature 0.5, then
+        0.25: the env-keyed schedule);
+      - weights-iter002;
+      - a 2.7 kB completion marker.
+    - Prep 1 read F0's log (source "own-play log", 6 lives, 2 games, no
+      partial game):
+      - discount 0.97 -> 0.985;
+      - ceiling 1 -> 13.5 (clip share 0.407 -> 0.204);
+      - value check 21.8 against 5000.
+    - F1: its 40 offline steps (snapshots 20 and 40), then online to its
+      own stop (2 iterations, 1,249 env steps, training steps 80). Its
+      schedules restarted (temperature 0.5 again).
+    - Prep 2, from a STUDENT master (F1):
+      - master offline steps 40;
+      - vocabulary 36 -> 23 (13 dropped, all 16- or 32-frame);
+      - discount 0.985 -> 0.9925, read back from F1's snapshot;
+      - ceiling 13.5 -> 16.75;
+      - value check 24.5.
+AUDIT r4 (fresh eyes: the fix, plus a sweep of the 26 test files outside
+the 24 and the five above): nothing above LOW. THE AUDIT LOOP IS CLOSED.
+  Verified:
+    - The fix runs exactly the pre-Test-B play() path (65d83b1d).
+    - Every production SelfPlayActor is built through __init__ (the
+      training actor, the eval actor, probe_evalpath). The Run shells
+      inside the actors never reach a Test B attribute.
+    - Only sync() passes env_steps, and the 4-tuple branch is reachable
+      only on --ray --cpu-actor F arms.
+    - On a resume, the first sync ships the restored count.
+    - The resolved F0 / F1 specs are as pre-registered.
+    - Sweep: all 26 files pass (slow tests included); none failed.
+  ACCEPTED r4:
+    - LOW-1: no unit test calls SelfPlayActor.play() on the own-play
+      branch (the test_testb fixture copies it inline). The smoke ran
+      that branch through real Ray actors, and both preps' check_life
+      held on every logged life. Covered, as ACCEPTED r1 planned.
+    - NIT-1: ablation.py's INNER_FRAMES comment still says only distill
+      sets it (play() now does too). Comment only, left in the audited
+      file.
+    - NIT-2: the eval actor gets the target but never the count; greedy
+      eval reads no schedule. The refresh actor and the inference server
+      are unreachable for F arms.
+    - NIT-3: collect sets the count for every arm; inert outside Test B.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%

@@ -229,6 +229,7 @@ def _actor_shell(plan):
     actor = object.__new__(ray_actors.SelfPlayActor)
     run = _shell(plan)
     actor.env, actor.shell, actor._ablation = run.env, run, ablation
+    actor.mz = muzero          # as __init__ sets it (play() reads OWN_PLAY_LOG)
     actor.episode_cap = 100
     return actor
 
