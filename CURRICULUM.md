@@ -1266,6 +1266,14 @@ the 24 and the five above): nothing above LOW. THE AUDIT LOOP IS CLOSED.
       eval reads no schedule. The refresh actor and the inference server
       are unreachable for F arms.
     - NIT-3: collect sets the count for every arm; inert outside Test B.
+LAUNCHED 05:33 10-28 (after Generation 2's RESULT) from the run worktree
+Y:\SwitchPlayer-testb-run, detached at 77d5df40; testb_manifest.json from
+the audited 90862862 (55 files). Before the launch, in that tree: the
+manifest check and F0's quick probe passed. launch_testb.ps1 (G2's marker
+present) started the hand-off post_testb.py and the supervisors f0-f4.
+f0: STOP 20,000 (BUDGET - 0), preflight (the 24 suites), then F0. f1-f4
+wait on their predecessors. Expected: about 30 iterations per generation,
+the first prep after F0; five generations in about a day and a half.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
