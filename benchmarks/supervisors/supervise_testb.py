@@ -273,7 +273,10 @@ KAIS_CALL_STOPS = ("PREP FAILED: MASTER", "PREP FAILED: STOP NOT POSITIVE",
 # value check (A2), the halved ceiling past the reward supports, an
 # incomplete or empty own-play log.
 PREP_CHECKS = ("the value support (", "past the reward supports",
-               "own-play log ")
+               "own-play log ",
+               # Test B2's discount rule (audit r3 NIT-1): an unknown rule,
+               # a kept discount past the cap
+               "_discount_rule ", "past the cap")
 # Every suite supervise_gen2.py ran, plus this supervisor's and Test B's.
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",

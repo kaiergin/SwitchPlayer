@@ -897,8 +897,9 @@ swap_discount: the master arm's _discount_rule, Test B's arms none =
 against its master arm's; supervise_testb.py generalized to a lineage
 table (variant letter f = Test B, t = Test B2; configure(), target()); a
 hand-off post_testb2.py, a launcher launch_testb2.ps1 (refuses until F4's
-marker, Test B's hand-off's "all done" and no Test B process), a checker
-check_post_testb2.py and a smoke smoke_testb2.py in the scratchpad;
+marker, Test B's hand-off's "all done" and no Test B probe, prep, trainer
+or supervisor), a checker check_post_testb2.py and a smoke
+smoke_testb2.py in the scratchpad;
 tests in test_testb.py and test_supervise_testb.py, and the T arms added
 to test_pbn.py's and test_harness.py's arm lists.
 AUDIT r1 (two fresh-eyes auditors, 10-29): r1a (the core) one MEDIUM --
@@ -929,6 +930,23 @@ launcher matches only Test B scripts, checks the tree is Test B2's
 build, creates the folders last; the smoke refuses until F4 is complete
 and no supervise_testb.py is alive; target() refuses a variant of
 another lineage).
+AUDIT r3 (fresh eyes, the whole build, static): nothing above LOW --
+LOW: the smoke's guard did not wait for Test B's hand-off to finish F4's
+evals (the launcher's condition); NITs: the prep's two new refusals not
+in PREP_CHECKS (retried, not stopped -- unreachable behind the quick
+probe), the launcher not checking Test B's supervisors, the smoke's
+trainer check missing module-form trainers. FIXES r3: all four (the
+smoke now also requires post_testb.log's "all done" and no Test B
+hand-off, probe or supervisor; PREP_CHECKS gains "_discount_rule " and
+"past the cap", with tests).
+AUDIT r4 (fresh eyes, the r3 fixes): nothing above NIT -- THE AUDIT LOOP
+IS CLOSED (r2, r3, r4 nothing above LOW). ACCEPTED r4 (no edit, so no
+further round): the smoke's script-name check has no python-only filter
+(a non-python process naming those files makes it refuse: a refusal,
+never a risk); the launcher's Test B supervisor pattern misses a
+hand-started supervisor with a quoted path (Test B's launcher never
+quotes); the launcher does not refuse while smoke_testb2.py runs (the
+smoke runs to completion before the launch, by hand).
 
 ### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
 

@@ -1656,7 +1656,10 @@ def test_a_failed_attempt_names_its_reason(sup, prep_env, monkeypatch,
     "SystemExit: the halved-clip ceiling 401.0 lies past the reward "
     "supports",
     "SystemExit: own-play log x: iteration 12 is missing",
-    "SystemExit: own-play log x: no lives"])
+    "SystemExit: own-play log x: no lives",
+    # Test B2's discount rule (audit r3 NIT-1)
+    "SystemExit: _discount_rule 'x' is not one of ('halve', 'keep')",
+    "SystemExit: a kept discount 0.998 past the cap 0.997"])
 def test_a_deterministic_prep_check_stops_at_once(sup, prep_env, monkeypatch,
                                                   capsys, why):
     """Audit r1 B-L1: distill.py's deterministic refusals (A2's value
