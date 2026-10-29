@@ -1387,6 +1387,37 @@ F2 ROW 0 (interim, 20:38 10-28):
       at 8k, 805 / 755 at 12k, 784 / 803 at 16k; row 0 (20k) 746 / 884.
   READ (5) row 0: p1_ratio 0.93, so FIXED (16 tokens, ceiling 18.10).
   Frames per decision, deployed: 8.7 at row 0.
+F2 COMPLETE (interim, 01:05 10-29; not read against the pre-registration
+until F4):
+  One attempt, no deaths: 6.4 h (23,070 s), 26 iterations. F2 stopped at
+      20,124 env steps (72,000 training steps including the 20,000
+      offline). Cumulative env steps: 60,126.
+  Deployed (exact, acting), rows 0-25 and the final row 26: 746 / 799 /
+      923 / 865 / 846 / 772 / 834, at 40.0k / 43.9k / 47.9k / 51.6k /
+      55.6k / 59.4k / 60.1k cumulative env steps. Trainer-BN: 884 / 714 /
+      840 / 932 / 1162 / 1112 / 921.
+  Rows 5-26 average 839.9 deployed, against F1's rows 5-28 at 952.7
+      (-112.8). Trainer-BN averages 946.8 against F1's 862.2 (+84.6). The
+      deployed acting states run 300-340 BELOW trainer-BN at rows 20-25,
+      against the usual deployed >= trainer-BN.
+  For scale, the current lineage's G0 was at 1190 deployed at 59.2k, so
+      the fast lineage is ~356 behind at 60k.
+  READ (2): jump: rows 5 and 10 (mean 860.7) against the master's last two
+      rows (942.3) give -81.6. The improvement rate is +1.5 deployed per
+      1k env steps (OLS over the 7 rows, row 0 included). F2 is flat like
+      F1.
+  MASTER GATE (the swap to F3): rows 25 and 26 average 803.2, at or above
+      502.08, so it PASSES. F3's master is weights-iter026.
+  READ (3): clip 18.10, discount 0.9925, 16 tokens; reward_kept 0.93-0.94.
+  READ (4): policy_maxp falls from 0.62 at row 5 to 0.49 at row 26. The
+      search targets' entropy is 1.23-1.58.
+  READ (5) at row 26: p1_ratio 1.05, so FIXED.
+  READ (6): the largest adjacent deployed drop is -74 (row 20 -> 25).
+      Across the swap: row 0 is -217 against the master's final row.
+  Tokens: F2 plays longer tokens than F1. The 4-frame share of play is
+      0.58-0.65 (F1: 0.63-0.80), the 32-frame share 0.25-0.29, and frames
+      per decision 11.7-13.1 (F1: 7.1-10.4).
+F3 began at 01:04 10-29 with STOP 19,874 (80,000 - 60,126).
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
