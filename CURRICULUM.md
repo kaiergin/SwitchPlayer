@@ -789,6 +789,143 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test C: BBF-style resets in one 100k run, against a no-reset twin (Kai, 2026-10-29)
+
+DECISION: Kai 2026-10-29, while Test B2's T0 trains:
+  - Test C runs resets "alone first". BBF's n-step and discount ramps are
+    left for a follow-up.
+  - It gets a no-reset control twin: "a no reset control isn't a bad
+    idea".
+Background:
+  - In Test B, after F0, every generation is flat within itself: -8.2 to
+    +2.1 deployed per 1k env steps. The progress came at the swaps. One
+    reading is lost plasticity: a network that stops improving on fresh
+    data. A swap is a full reset that passes knowledge on by distillation.
+    BBF instead resets part of the network on a schedule and keeps the
+    replay buffer.
+  - Our stack shows signs of it. Under SGD with coupled weight decay, the
+    faithful Pong runs had lost up to half of the representation's
+    first-layer filters, and about 8% of all BN channels, by iteration 85
+    (redo.py's docstring). TKX, one TK run to 270 iterations, plateaued.
+  - Against: ReDo, a gentler plasticity method (recycling dormant units
+    every 1,000 steps), HURT on Pong under search acting (searchact -11.37
+    against noredo +5.86). Every arm since runs without it.
+QUESTION: in one 100k env-step run from scratch, do periodic BBF-style
+resets reach a higher deployed score at 100k than the same run without
+them?
+BBF'S RESET (verified 10-29 against the released bbf/configs/BBF.gin and
+bbf/agents/spr_agent.py):
+  - every 40k gradient steps (the config's reset_every 20,000 agent steps
+    at 2 updates per step; the paper: "reset every 40k gradient steps"),
+    the encoder and transition model move halfway to a fresh random init
+    (shrink_perturb_keys "encoder,transition_model", shrink_factor 0.5,
+    perturb_factor 0.5; SR-SPR used 20%);
+  - every other layer (the Q head, the SPR projection and predictor) is
+    re-initialized;
+  - the target network is reset with them (reset_target);
+  - the optimizer state is re-initialized except for the kept layers';
+  - resets continue to one interval before the end (no_resets_after =
+    the run's 100k).
+THE RUNS (seed 0; one generation each; every env step counted):
+  C0 (control) is T0's recipe, run from scratch to 100,000 env steps:
+    - TK's 36 tokens, policy-only acting, PREFIX_BN_PER_STEP, the own-play
+      log;
+    - the sign clip c0 = 1 throughout and DISCOUNT 0.98805 per base step;
+    - the env-step stop: the final row is the iteration that passes
+      100,000.
+    The within-run schedules are keyed to the run's env-step progress over
+    a nominal 150 iterations (Test B's 30 per 20k, scaled); the
+    --iterations cap is 300. With no swap, the clip and the 36-token
+    vocabulary never change.
+  C (resets) is C0 plus resets. A reset falls at the end of every 20th
+    iteration (every 40,000 gradient steps at 2,000 per iteration), while
+    the run has played at most 80,000 env steps:
+    - SHRINK AND PERTURB (BBF's encoder and transition model):
+      representation and dynamics. Every parameter becomes 0.5 x itself +
+      0.5 x a fresh draw of its layer's initializer (BN gamma and beta
+      included: fresh 1 and 0). BN running statistics are kept; training
+      re-estimates them.
+    - RE-INITIALIZED (BBF's head, projection and predictor): prediction
+      (policy and value), value_prefix (the reward LSTM and its head) and
+      the projector, BN running statistics included.
+    - THE TARGET MODEL is set to the reset online network (BBF's
+      reset_target). Its copies every 200 steps then resume.
+    - THE OPTIMIZER: SGD momentum is zeroed for the re-initialized
+      parameters and kept for the shrink-and-perturbed ones, as BBF keeps
+      the copied layers' state. The 1,000-step linear lr warmup restarts.
+      This is OUR ADDITION: EfficientZero's SGD at lr 0.2 starts fresh
+      weights with it; BBF's Adam has no warmup.
+    - THE ACTOR HOLD, also OUR ADDITION: we act from the policy head, which
+      a reset re-initializes. For the 10,000 gradient steps after a reset
+      (5 iterations; BBF's post-reset annealing window), weight ships to
+      the actor carry the last pre-reset weights and their recalibrated
+      acting BN statistics. The env-step count still syncs. The birth
+      search, the refresh and every target keep using the learner's
+      online and target nets as always, so no target comes from the
+      pre-reset network.
+    Resets fall after iterations 20, 40, 60 and so on: about 6 in 100k env
+    steps at ~700 env steps per iteration, the last at 66k-80k. In each
+    cycle, row 20 is the pre-reset network and row 25 the network at the
+    hold's end.
+  The runs go one after the other, C first, since the host's memory holds
+  one trainer.
+READS. EXACT eval as before (whole games, 30 noop starts, prior argmax,
+PROBE_ENV MsPacmanNoFrameskip-v4); DEPLOYED primary, trainer-BN secondary.
+Rows every 5 iterations, plus the final.
+  (1) PRIMARY at 100k: C's deployed rows in [90k, C's end] against C0's
+      rows in [90k, C0's end]. The band is 2 x 216.9 x sqrt(1/n_C +
+      1/n_C0): BETTER / NO DIFFERENT / WORSE. Trainer-BN likewise.
+  (2) descriptive, beside Test B, Test B2 and the current lineage:
+      - the deployed mean per 20k window of cumulative env steps (Test B's
+        RESULT's definition);
+      - C0's [90k, end] window against Test B's (1015.9, n = 4), T2's and
+        the current lineage's (1163.8), with the same band rule. This asks
+        whether one long run matches the swap lineages; C0 keeps the sign
+        clip, so the clip differs.
+  (3) per reset (C):
+      - the dip: row 25 of the cycle against row 20;
+      - the recovery: the first row at or above row 20;
+      - the cycle's improvement rate: OLS deployed per 1k env steps over
+        its rows 25-40, against C0's rate over the same rows.
+  (4) plasticity, both runs, every row:
+      - the dormant-unit fraction per net, ReDo's score at <= 0.025 and at
+        <= 0.1. It is scored on a fresh replay sample drawn from a
+        dedicated random generator, on copies of the nets, and nothing is
+        recycled, so training is unchanged.
+      - the representation's first-layer filter norms (the fraction below
+        10% of their init norm);
+      - the logged erank.
+  (5) the prior: policy_maxp and the search targets' entropy by row.
+  (6) mechanism: probe_prefix_bn FIXED, as in PB, at each run's final row
+      and at C's rows 20 and 25 of its first and last cycles.
+  (7) stability: the largest adjacent deployed drop. C's reset dips are
+      reported separately, in (3).
+DECISION AFTER:
+  - (1) BETTER: resets help in our stack. Next is Kai's call among:
+    BBF's n-step and discount ramps on top; resets inside the swap lineage
+    (or a shrink-and-perturbed student); a higher replay ratio.
+  - (1) NO DIFFERENT: resets alone do not pay at this resolution. Kai's
+    call between the ramps bundle and Test D.
+  - (1) WORSE: resets as specified hurt here, as ReDo did. Reads (3) and
+    (4) say why: the dips, the recovery times, and whether the dormant
+    fraction moved.
+CAVEAT: two parts of the reset are ours, the actor hold and the warmup
+restart. The hold changes the data C collects for about 25% of its steps.
+C and C0 differ in nothing else. One seed; the band is the within-run row
+noise.
+BUILD (before launch; audited like every build):
+  - the trainer: the reset schedule (every 20 iterations, up to 80k env
+    steps); the per-net shrink-and-perturb and re-init; the target model;
+    the optimizer state and the warmup restart; the actor hold; the reset
+    state in the checkpoint, so a resume neither repeats nor skips a reset
+    and resumes a hold mid-way; the dormant-fraction and filter-norm row
+    diagnostics (both arms).
+  - the arms C0 and C (ablation.py); a supervisor (C, then C0 once C is
+    complete and evaluated); a hand-off over both runs; a launcher; tests;
+    a manifest and a fresh run tree.
+COST: the build and its audit loop while Test B2 trains (B2 ends about the
+evening of 10-30), then about 28 h per run: results about 11-02.
+
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
 (Pre-registration: "Next experiment (pre-registered) -- Test B", below
