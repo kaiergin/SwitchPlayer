@@ -1474,6 +1474,23 @@ until F4):
 F4 began at 07:35 10-29 with STOP 19,363 (100,000 - 80,637). Its rows from
 90k cumulative env steps on (F4's own 9,363), its final included, form
 read (1)'s headline window.
+SWAP 4 PREP (F3 -> F4; 07:42-07:44 10-29, attempt 1; read (3)):
+  THE DATA: F3's own-play log, iterations 1-27. 27 whole games, 81 lives,
+      20,511 base steps. Game returns: mean 1026.3, median 950, max 1960.
+      Lives by temperature: 0.5 42, 0.25 18, 0.125 21.
+  THE CLIP: the master's ceiling 24.02 removes 0.046 of 2,771 reward
+      units. The student's ceiling 32.07 removes 0.023. The share of steps
+      clipped stays at 0.4%.
+  THE DISCOUNT: 0.99625 -> 0.997 (the cap; the halving rule gives
+      0.998125). VALUE CHECK: the largest discounted return is 71.1 units;
+      2x that is within the 5,000-unit support.
+  THE VOCABULARY: 16 of 16 tokens; none dropped. (7,4) holds 29.8% of the
+      decisions; the 32-frame tokens (3,32), (1,32), (7,32), (8,32) hold
+      47.1% together.
+  TARGETS: 4,671 records, no splits, no fallbacks. The prep took 106 s.
+      The distillation set shrinks each swap as the tokens lengthen:
+      10,418 / 10,102 / 6,601 / 4,671 records over ~20k base steps each.
+F4 LAUNCHED 07:45 10-29 (attempt 1, fresh).
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
