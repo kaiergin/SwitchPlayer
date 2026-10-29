@@ -1064,6 +1064,23 @@ never a risk); the launcher's Test B supervisor pattern misses a
 hand-started supervisor with a quoted path (Test B's launcher never
 quotes); the launcher does not refuse while smoke_testb2.py runs (the
 smoke runs to completion before the launch, by hand).
+PRE-LAUNCH (10-29, after Test B's RESULT): the 24 suites all pass in the
+build tree (13:58). check_post_testb2.py reports CHECK OK. The GPU smoke
+(smoke_testb2.py, a tiny lineage to 900 env steps per generation) passes
+every step: T0 -> prep1 (the discount kept at 0.988053892081) -> T1
+(offline, then online to its stop) -> prep2 from T1's log (a student
+master; kept again), and T2's student_arm takes prep2 at the same
+discount.
+LAUNCHED 14:03 10-29 from the run worktree Y:\SwitchPlayer-testb2-run,
+detached at a8c83a58: testb_manifest.json rewritten from the audited build
+(c57d2a16; seven AUDITED files changed against Test B's). In that tree,
+before the launch: the manifest check and t0's quick probe passed. T0's
+stop is 33,333. launch_testb2.ps1 passed its checks (F4's marker, Test B's
+hand-off log ending "all done", no Test B process alive) and started the
+hand-off post_testb2.py and the supervisors t0-t2. t0 runs its preflight
+(the 24 suites in the run tree), then T0. t1 and t2 wait on their
+predecessors. Expected: about 45-50 iterations per generation, about 28-30
+h in all.
 
 ### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
 
