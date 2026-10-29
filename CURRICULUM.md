@@ -789,6 +789,123 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
+
+(Pre-registration: "Next experiment (pre-registered) -- Test B", below
+Generation 2's RESULT; its interim notes per generation are there.)
+RUN (from the run worktree Y:\SwitchPlayer-testb-run, detached at 77d5df40,
+manifest from the audited 90862862): F0 05:33 10-28 -> F4's last evals
+13:57 10-29 (32.4 h). Each generation ran in one attempt with no deaths;
+every supervisor.err is empty, the hand-off raised no ALERT, and no eval
+game was capped. Every master gate passed. Training steps per generation
+were 68k / 76k / 72k / 74k / 74k, 364k in all, including the 4 x 20k
+offline steps.
+EXACT eval (30 noop starts, prior argmax). Every score is the unclipped
+score of a whole game. DEPLOYED is primary; trainer-BN (the same snapshot
+under the trainer's BN statistics, the pre-registration's "raw") is
+secondary. cum = the lineage's cumulative env steps, in thousands.
+       row     0     5    10    15    20    25  final
+  F0   cum     -   2.8   6.1   9.1  12.2  15.6  18.1 (30)  20.5 (34)
+       dep     -   299   353   544   573   593   657        538
+       tBN     -   264   392   883   713   949   757        729
+  F1   cum  20.5  24.1  27.2  30.2  34.1  37.7  40.0 (28)
+       dep   872   946   967   974   945   922   962
+       tBN   683   788   735   846  1142   764   898
+  F2   cum  40.0  43.9  47.9  51.6  55.6  59.4  60.1 (26)
+       dep   746   799   923   865   846   772   834
+       tBN   884   714   840   932  1162  1112   921
+  F3   cum  60.1  64.7  68.0  71.4  75.3  79.0  80.6 (27)
+       dep  1037  1032  1222   968   854  1072   851
+       tBN   811   787  1022  1532   772   812   803
+  F4   cum  80.6  83.8  87.2  91.7  95.4  99.1 100.5 (27)
+       dep  1005  1174  1091   952  1045   873  1194
+       tBN  1253  1103  1068  1203   944  1274  1202
+READ (1) HEADLINE at 100k: F4's rows in [90k, 100.5k] are rows 15 / 20 /
+  25 / 27 (n = 4): 952.3 / 1045.0 / 872.7 / 1193.7. Their mean is 1015.9
+  deployed (g 0.728), against the current lineage's 1163.8 (DS2 rows 0 /
+  5 / 10; g 0.879): -147.9 -> NO DIFFERENT (band +-331.3). Trainer-BN is
+  1155.6 against 1259.9: -104.3 -> NO DIFFERENT (band +-331.3).
+  References, not verdicts: EfficientZero 1281.2, BBF 2008.3, EZ-V2
+  2251.0. Test B's window is below all three (one seed).
+  Descriptive, the curve against the current lineage: Test B is at 538
+  @20.5k, 962 @40.0k, 834 @60.1k, 851 @80.6k and 1194 @100.5k. G0 was at
+  740 @19.8k, 1154 @39.5k and 1190 @59.2k, then the 31.8k recording, then
+  DS2 at 1065 @91.0k.
+  Means per 20k window of cumulative env steps. A window holds every
+  in-run row whose cumulative env step falls in it, the students' row 0
+  included (Test B2's read (7) uses the same definition):
+      window             0-20k  20-40k  40-60k  60-80k  80-100.5k
+      Test B deployed      503     881     845    1003    1023
+      current deployed     540     896    1107       -    1164 (91-98k)
+      Test B trainer-BN    660     812     934     951    1106
+      current trainer-BN   524     790    1147       -    1260
+  (The Test B2 pre-registration quoted F1 953 and F2 840 for 20-40k and
+  40-60k. Those are generation means over rows 5 to final; the strict
+  windows are 881 and 845.)
+READ (2) per swap: transfer is row 0 against the master's final row; the
+  jump is the student's rows 5 and 10 against the master's last two rows;
+  the rate is the student's OLS deployed rate per 1k env steps.
+      swap      transfer   jump   student rate
+      F0 -> F1      +334   +360           +2.1
+      F1 -> F2      -217    -82           +1.5
+      F2 -> F3      +203   +324           -8.2
+      F3 -> F4      +154   +171           -2.1
+  F0's own rate was +16.8.
+READ (3) the clip, the discount, the vocabulary and the swap data:
+      gen  clip   discount  tokens  reward_kept  set records  lives by temp
+      F0   1      0.97          36  0.98 -> 0.77           -  51 / 24 / 27
+      F1   11.62  0.985         18  0.86-0.88         10,418  48 / 18 / 18
+      F2   18.10  0.9925        16  0.93-0.94         10,102  42 / 18 / 18
+      F3   24.02  0.99625       16  0.96-0.97          6,601  42 / 18 / 21
+      F4   32.07  0.997         16  0.975-0.977        4,671            -
+  The set records column is the distillation set built from that
+  generation's master's log. "Lives by temp" counts that generation's own
+  logged lives at temperature 0.5 / 0.25 / 0.125; F4's log was never
+  read, since no swap followed it. Every value check passed: the largest
+  discounted return was 28.8 / 46.5 / 73.6 / 71.1 units, against a
+  5,000-unit support.
+READ (4) the prior: policy_maxp by generation:
+  - F0: 0.49 -> 0.64;
+  - F1: 0.70 -> 0.55;
+  - F2: 0.62 -> 0.49;
+  - F3: 0.53-0.59;
+  - F4: 0.57-0.65.
+  The search targets' entropy is 0.82-1.45 / 1.20-1.52 / 1.23-1.58 /
+  1.34-1.59 / 1.20-1.63. There is no collapse.
+READ (5) mechanism: FIXED at every probed row. p1_ratio at row 0 / final:
+  F0 - / 0.76, F1 0.97 / 0.56, F2 0.93 / 1.05, F3 1.04 / 0.78, F4 0.47 /
+  0.67.
+READ (6) stability: the largest adjacent deployed drop within each
+  generation is -119 / -29 / -74 / -254 / -172. Across the swaps, row 0
+  against the master's final row is +334 / -217 / +203 / +154. Every
+  value is inside the one-row band (+-464).
+PRE-REGISTERED DECISION: (1) NO DIFFERENT -> Kai's call: the same level
+  at no recording cost. Kai's call (10-29) is already made: Test B2 (two
+  swaps at a constant 0.98805, pre-registered above) runs next.
+Beyond the letter (one seed, within-run bands, so "consistent with"):
+  - Data cost: the current lineage's 1164 window took G0's 59.2k, a 31.8k
+    recording and DS2's first 6.7k. Test B's 1016 took 100k of its own
+    play and no recording. It is 148 lower, inside the band.
+  - The gains come at the swaps. After F0, every generation is flat or
+    falling within itself (+2.1 / +1.5 / -8.2 / -2.1). The jumps sum to
+    +773 (+360 / -82 / +324 / +171). That is more than the lineage's whole
+    progress from F0's final row to F4's (538 -> 1194, +656), so the drift
+    within generations is net negative. Each 20k generation spends most of
+    its online steps on a flat stretch. Test B2 asks whether a longer generation improves within
+    itself or only adds to the flat stretch.
+  - The gap to the current lineage opens at 40-60k (845 against 1107),
+    where G0 was still improving within its own generation. F0 at
+    discount 0.97 kept pace with G0 over 0-20k (503 against 540), so the
+    low starting discount shows no visible cost.
+  - The tokens lengthen each generation. Frames per decision in play are
+    6.8 at F0's end, then 7.1-10.4 (F1), 11.7-13.1 (F2), 15.4-19.5 (F3)
+    and 18.1-22.8 (F4). The distillation sets shrink with them (10,418 ->
+    4,671 records over about 20k base steps each), while the offline
+    phase stays 20,000 steps.
+  - Deployed against trainer-BN: the deployed acting states are not
+    consistently ahead in this lineage. Trainer-BN is higher in F2 (rows
+    5-26: 947 against 840) and F4 (1132 against 1055), lower in F1 and F3.
+
 ### Next experiment (pre-registered) -- Test B2: two swaps in 100k env steps at the original constant discount (Kai, 2026-10-29)
 
 DECISION: Kai 2026-10-29, while Test B's F4 trains: "two swaps with
@@ -1660,6 +1777,30 @@ F4 ROW 0 (interim, 09:44 10-29):
       / 1253.
   READ (5) row 0: p1_ratio 0.47, so FIXED (16 tokens, ceiling 32.07).
   Frames per decision, deployed: 20.2 at row 0.
+F4 COMPLETE (13:57 10-29; read against the pre-registration in "RESULT --
+Test B", above):
+  One attempt, no deaths: 6.1 h (22,020 s), 27 iterations. F4 stopped at
+      19,845 env steps, 482 past its stop of 19,363 (74,000 training steps
+      including the 20,000 offline). Cumulative env steps: 100,482. The
+      hand-off's last evals finished at 13:57 ("all done").
+  Deployed (exact, acting), rows 0-25 and the final row 27: 1005 / 1174 /
+      1091 / 952 / 1045 / 873 / 1194, at 80.6k / 83.8k / 87.2k / 91.7k /
+      95.4k / 99.1k / 100.5k cumulative env steps. Trainer-BN: 1253 / 1103
+      / 1068 / 1203 / 944 / 1274 / 1202.
+  Rows 5-27 average 1054.8 deployed (F3: 999.8) and 1132.2 trainer-BN (F3:
+      954.6).
+  READ (2): jump: rows 5 and 10 (mean 1132.5) against the master's last two
+      rows (961.5) give +171.0. The improvement rate is -2.1 deployed per
+      1k env steps (OLS over the 7 rows, row 0 included).
+  READ (3): clip 32.07, discount 0.997, 16 tokens; reward_kept 0.975-0.977.
+  READ (4): policy_maxp 0.57-0.65. The search targets' entropy is
+      1.20-1.63.
+  READ (5) at row 27: p1_ratio 0.67, so FIXED.
+  READ (6): the largest adjacent deployed drop is -172 (row 20 -> 25).
+      Across the swap: row 0 is +154 against the master's final row.
+  Tokens: the 32-frame share of play is 0.44-0.62 (F3: 0.38-0.52), the
+      4-frame share 0.21-0.34, and frames per decision 18.1-22.8 in play
+      (16.7-21.7 deployed).
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
