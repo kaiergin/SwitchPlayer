@@ -1120,6 +1120,38 @@ FIXES r3 (a fresh-eyes r4 follows):
   - the NITs above (a factor test at 0.8 / 0.2; the scorer prints Test
     B's, Test B2's and the current lineage's 20k windows beside C's and
     C0's).
+AUDIT r4 (fresh eyes on c13ced2d, static; both auditors traced every Test C
+test, the hand-off checker and the smoke by hand): nothing above LOW --
+THE AUDIT LOOP IS CLOSED. By the traces:
+  - all 71 test_testc items and the 12 new and 4 edited supervisor tests
+    pass, none vacuous;
+  - check_post_testc passes against the regenerated hand-off;
+  - all three smoke steps pass at the measured pace;
+  - no other suite breaks.
+ACCEPTED r4 (no edit, so no further round):
+  - RESET lines are echoed twice after a supervisor restart, because the
+    attempt log is appended to and its read position starts at 0. Valid
+    lines raise no ALERT.
+  - An orphan trainer's RESET lines are not read. Its rows are still
+    checked by reset_alert.
+  - Coverage the GPU smoke carries instead of the suites:
+      - no CPU end-to-end run_one test of a reset and its resume;
+      - no main() test of r0 through an attempt;
+      - the supervisor's RESET regex is not run on the smoke's real
+        trainer lines.
+  - The dormant test's dead-unit check is weak, and the seed half of the
+    fresh draw's key is untested.
+  - The smoke's margin ends at a mean pace of 1,000 env steps per
+    iteration (measured: 500-690).
+  - NITs: wording (docstrings, the smoke's "lost row" comment), the
+    scorer's edge cases (a torn final line, a reset row without an eval),
+    the smoke's relative out dir, check_post_testc not covering the RESET
+    echo.
+  - None of this has run yet. Host commit stayed below the 8 GB test
+    floor all afternoon while T0 trains: the trainer holds about 7.8 GB.
+    The suites (with C's preflight), check_post_testc and the GPU smoke
+    run after Test B2, before the launch. A failure there is fixed and
+    re-audited before any launch.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
