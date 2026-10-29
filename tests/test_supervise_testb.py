@@ -3320,3 +3320,50 @@ def test_reset_rows_print_and_alert(sup, monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "EVAL f0 s0 iter 5" in out and "resets" not in out
     assert "ALERT" not in out
+
+
+def test_the_trainers_reset_lines_are_checked_exactly(sup):
+    """Audit r3b LOW-1: rows see every 5th iteration only; the RESET line
+    shows the reset's own iteration, step and env steps."""
+    sup.configure("r")
+    assert sup.reset_line_alert(1, 20, 40000, 13000) is None
+    assert sup.reset_line_alert(4, 80, 160000, 80000) is None
+    assert sup.reset_line_alert(1, 21, 42000, 13700) == (
+        "RESET 1 after iteration 21 (step 42000, 13700 env steps); the "
+        "schedule's reset 1 lands after iteration 20 (step 40000) with env "
+        "steps <= 80000")
+    assert sup.reset_line_alert(2, 40, 80001, 26000)       # off step
+    assert sup.reset_line_alert(6, 120, 240000, 80001)     # past the cutoff
+    sup.configure("n")
+    assert "has no resets" in sup.reset_line_alert(1, 20, 40000, 13000)
+
+
+def test_reset_lines_are_echoed_as_the_log_grows(sup, tmp_path, capsys):
+    sup.configure("r")
+    log = tmp_path / "supv2_1.log"
+    lines = sup.ResetLines("r0", 0)
+    good = ("  [arm s0] RESET 1 after iter 20 (step 40000, 13000 env steps): "
+            "representation+dynamics shrunk ...")
+    bad = ("  [arm s0] RESET 2 after iter 41 (step 82000, 27000 env steps): "
+           "...")
+    log.write_text("iter 19 ..." + NL + good + NL + "half a li")
+    lines.emit(str(log))
+    out = capsys.readouterr().out
+    assert out == ("RESET r0 s0 1 after iter 20 (step 40000, 13000 env "
+                   "steps)" + NL)
+    with open(log, "a") as f:
+        f.write("ne" + NL + bad + NL)
+    lines.emit(str(log))
+    lines.emit(str(log))                       # nothing new: nothing printed
+    out = capsys.readouterr().out
+    assert out.count("RESET r0 s0 2 after iter 41") == 1
+    assert ("ALERT: r0 s0: RESET 2 after iteration 41 (step 82000, 27000 "
+            "env steps); the schedule's reset 2 lands after iteration 40 "
+            "(step 80000)") in out
+    assert "RESET r0 s0 1 " not in out          # never re-read
+    lines.emit(str(tmp_path / "missing.log"))   # a missing log: nothing
+    # the control and Test B: inert
+    for letter, v in (("n", "n0"), ("f", "f0")):
+        sup.configure(letter)
+        sup.ResetLines(v, 0).emit(str(log))
+    assert capsys.readouterr().out == ""

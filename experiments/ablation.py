@@ -4753,7 +4753,7 @@ def bbf_reset(run, pipeline, it):
         state (SGD momentum) is cleared; the shrunk nets' is kept (BBF
         keeps the copied layers');
       - the lagged target model, both buffers, becomes the reset online
-        nets (BBF's reset_target), synced at this step;
+        nets (our version of BBF's reset_target: A7), synced at this step;
       - the lr warmup restarts here (muzero.LR_WARMUP_ORIGIN);
       - the actor keeps the pre-reset acting states (the pipeline's last
         ship) until RESET_HOLD_STEPS gradient steps later (run.hold), while

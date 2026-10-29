@@ -439,6 +439,25 @@ def test_the_reset_is_bbfs(in_arm, capsys):
             "until step 50000") in out
 
 
+def test_the_shrink_and_perturb_factors_are_not_swapped(in_arm,
+                                                        monkeypatch):
+    """Audit r3a NIT-3: the registered factors are both 0.5; unequal ones
+    show which weighs the old parameters and which the fresh draw."""
+    spec = in_arm(C)
+    monkeypatch.setattr(muzero, "RESET_SHRINK_FACTOR", 0.8)
+    monkeypatch.setattr(muzero, "RESET_PERTURB_FACTOR", 0.2)
+    run = make_run(spec)
+    trained(run)
+    old = {k: p.detach().clone()
+           for k, p in run.trainer.representation.named_parameters()}
+    fresh = ablation.fresh_networks(spec, (0, 1, 0xB8F))
+    new = dict(fresh["representation"].named_parameters())
+    ablation.bbf_reset(run, None, 20)
+    for k, p in run.trainer.representation.named_parameters():
+        assert torch.allclose(p, 0.8 * old[k] + 0.2 * new[k], rtol=0,
+                              atol=1e-6), k
+
+
 def test_the_reset_is_keyed_on_seed_and_index(in_arm):
     spec = in_arm(C)
     a, b = make_run(spec), make_run(spec)
@@ -521,7 +540,12 @@ def test_the_target_double_buffer_runs_on_from_the_reset(in_arm, synced_at):
     tr = run.trainer
     assert tr._target_synced_at == 39900
     if synced_at == 40000:
-        tr._ensure_target_model()              # the refresh's sync
+        # the run's even iteration: the last in-training sync at 39,800,
+        # then the refresh's at 40,000 -- the target takes the earlier
+        # snapshot, the snapshot becomes the PRE-reset nets (audit r3a
+        # MEDIUM-1: from the helper's 39,900 no sync is due at 40,000)
+        tr._target_synced_at = 39800
+        tr._ensure_target_model()
         assert tr._target_synced_at == 40000
     ablation.bbf_reset(run, None, 20)
     assert tr._target_synced_at == 40000
@@ -626,7 +650,8 @@ def test_the_actor_keeps_the_held_weights_until_the_holds_end(monkeypatch):
     monkeypatch.setattr(muzero, "SCHEDULE_ENV_TARGET", 100000)
     tr = SimpleNamespace(training_steps=42000)
     run = SimpleNamespace(trainer=tr, env_steps=14000,
-                          hold={"until": 50000, "held": "HELD"})
+                          hold={"until": 50000, "from": 40000,
+                                "held": "HELD"})
     shipped = []
     pipe = _pipe(monkeypatch, run, shipped)
     pipe.sync()
@@ -685,7 +710,8 @@ def test_the_behaviour_prior_follows_the_hold_the_birth_search_does_not(
     monkeypatch.setattr(muzero, "BN_RECAL_ACTING", True)
     tr = SimpleNamespace(training_steps=44000)
     run = SimpleNamespace(trainer=tr, env_steps=14000,
-                          hold={"until": 50000, "held": "HELD"})
+                          hold={"until": 50000, "from": 40000,
+                                "held": "HELD"})
     pipe = _pipe(monkeypatch, run, [])
     pipe.request(23)
     assert pipe._birth_acting == "HELD" and pipe._birth_states == "STATES"
@@ -757,7 +783,7 @@ def test_a_reset_runs_rows_count_its_resets_and_held_ships(in_arm):
     spec = in_arm(C)
     run = make_run(spec, steps=42000)
     run.reset_log = [{"index": 1}]
-    run.hold = {"until": 50000, "held": {}}
+    run.hold = {"until": 50000, "from": 40000, "held": {}}
     run.held_ships = [42000]
     row = run.evaluate_diagnostics()
     assert row["resets"] == 1 and row["held_ships"] == 1

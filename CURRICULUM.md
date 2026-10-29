@@ -1092,6 +1092,34 @@ FIXES r2 (a fresh-eyes r3 follows):
       bootstraps come from an untrained value head of another network,
       and BBF's EMA target (tau 0.005) is pulled to the online net within
       about 1,000 steps anyway.
+AUDIT r3 (fresh eyes on dd5a77af, static): nothing affecting the runs.
+  - A-MEDIUM: a TEST bug. The double-buffer test's 40,000 case could never
+    pass (from the helper's sync at 39,900 no sync is due at 40,000), so
+    the suite would fail red and block the launch's preflight.
+  - B-MEDIUM: the smoke's margins (cutoff 6,000, stop 9,000) failed a
+    correct build at a mean pace of 750 env steps per iteration or more.
+  - LOW: no test of the current build has run yet (memory below the
+    floor all afternoon); the supervisor checked resets only at row
+    resolution (every 5th iteration).
+  - NITs: a docstring still crediting BBF for the target reset; test
+    holds without "from"; unequal shrink / perturb factors untested; the
+    scorer's read (7) label, its env filter and read (2)'s other lineages;
+    the smoke invisible to the supervisors' trainer guard; the hand-off's
+    gave-up text.
+FIXES r3 (a fresh-eyes r4 follows):
+  - the test: the 40,000 case steps the stamp back to 39,800 first, as
+    the run's last in-training sync, so the refresh's sync really
+    snapshots the pre-reset nets before the reset;
+  - the smoke: cutoff 8,000, stop 13,000 (two resets up to a mean of
+    1,000 env steps per iteration; the cutoff bites while 4 iterations
+    play under 5,000);
+  - the supervisor reads the trainer's RESET lines from each attempt's
+    log, echoes them to its log and ALERTs any reset off its exact
+    iteration, step or cutoff (ResetLines, reset_line_alert); the hand-off
+    echoes them;
+  - the NITs above (a factor test at 0.8 / 0.2; the scorer prints Test
+    B's, Test B2's and the current lineage's 20k windows beside C's and
+    C0's).
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 

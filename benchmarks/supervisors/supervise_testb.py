@@ -1528,6 +1528,65 @@ class Rows:
                       f"< {COMMIT_ALERT_GB:g} GB -- memory creep?", flush=True)
 
 
+RESET_LINE = re.compile(r"\] RESET (\d+) after iter (\d+) \(step (\d+), "
+                        r"(\d+) env steps\)")
+
+
+def reset_line_alert(n, it, steps, env):
+    """Test C: the trainer's RESET line for reset `n` (after iteration
+    `it`, at training step `steps`, `env` env steps) against the schedule,
+    exactly -- reset n lands after iteration n x the cycle (RESET_EVERY_STEPS
+    / TRAIN_STEPS), at step n x RESET_EVERY_STEPS, with env steps at most
+    RESET_UNTIL_ENV_STEPS (the rows' check, reset_alert, sees only every 5th
+    iteration: audit r3b LOW-1). None, or the ALERT's text."""
+    knobs = LINEAGES[LINEAGE].get("resets") or {}
+    every = knobs.get("RESET_EVERY_STEPS")
+    if not every:
+        return f"a RESET line, but lineage {LINEAGE!r} has no resets"
+    cycle, until = every // TRAIN_STEPS, knobs["RESET_UNTIL_ENV_STEPS"]
+    if (it, steps) != (n * cycle, n * every) or env > until:
+        return (f"RESET {n} after iteration {it} (step {steps}, {env} env "
+                f"steps); the schedule's reset {n} lands after iteration "
+                f"{n * cycle} (step {n * every}) with env steps <= {until}")
+    return None
+
+
+class ResetLines:
+    """Test C: the trainer's RESET lines in an attempt's log (read as it
+    grows, whole lines only), each echoed as "RESET ..." and checked by
+    reset_line_alert. Inert for a lineage without resets."""
+
+    def __init__(self, variant, seed):
+        self.variant, self.seed = variant, seed
+        self.pos = {}
+
+    def emit(self, path):
+        if not (LINEAGES[LINEAGE].get("resets") or {}).get(
+                "RESET_EVERY_STEPS"):
+            return
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return
+        start = self.pos.get(path, 0)
+        end = data.rfind(b"\n") + 1
+        if end <= start:
+            return
+        for line in data[start:end].decode("utf-8", "replace").splitlines():
+            m = RESET_LINE.search(line)
+            if not m:
+                continue
+            n, it, steps, env = map(int, m.groups())
+            print(f"RESET {self.variant} s{self.seed} {n} after iter {it} "
+                  f"(step {steps}, {env} env steps)", flush=True)
+            alert = reset_line_alert(n, it, steps, env)
+            if alert:
+                print(f"ALERT: {self.variant} s{self.seed}: {alert}",
+                      flush=True)
+        self.pos[path] = end
+
+
 def reset_alert(r, envs):
     """Test C (a lineage whose "resets" knobs reset): the row's "resets"
     against the schedule -- one reset after every row j before it that is
@@ -1790,6 +1849,9 @@ def main(argv):
     # still printed and checked.
     rows = Rows(jsonl, variant, seed)
     rows.prime()
+    # Test C: the trainer's RESET lines (each attempt's log, read as it
+    # grows), echoed and checked exactly against the schedule
+    resets = ResetLines(variant, seed)
     # The guard once before the preflight too (as PB's audit r1 B-L2): the
     # suites (Ray-spinning slow tests among them) never run beside a live
     # trainer or prep -- an orphan of this run on a resume (its rows
@@ -1901,6 +1963,7 @@ def main(argv):
         alerted = 0.0
         while p.poll() is None:
             rows.emit()
+            resets.emit(log.name)
             try:
                 idle = time.time() - max(os.path.getmtime(log.name), born)
             except OSError:
@@ -1912,6 +1975,7 @@ def main(argv):
             time.sleep(30)
         log.close()
         rows.emit()
+        resets.emit(log.name)
         rc = p.returncode
         lifetime = time.time() - born
         snapshot(deaths_log, variant, seed, attempt, rc, lifetime)
