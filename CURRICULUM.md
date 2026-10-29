@@ -789,6 +789,96 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test B2: two swaps in 100k env steps at the original constant discount (Kai, 2026-10-29)
+
+DECISION: Kai 2026-10-29, while Test B's F4 trains: "two swaps with
+constant 0.988 after Test B". Kai asked whether Test B learns more slowly
+and whether swapping every 20k is too often. The interim reads behind the
+question:
+  - After the first generation, Test B's generations barely improve
+      within themselves: rates +2.1 / +1.5 / -8.2 deployed per 1k env
+      steps for F1-F3, against F0's +16.8. The gains come at the swaps
+      (jumps +360 / -82 / +324).
+  - Against G0, deployed means per 20k window of cumulative env steps:
+      0-20k G0 540 vs F0 503; 20-40k 896 vs F1 953; 40-60k 1107 vs F2 840.
+      The gap opens at the second swap.
+  - The distillation sets shrink as the tokens lengthen: 10,418 / 10,102
+      / 6,601 / 4,671 records.
+  - The discount: the token arms' original is 0.997 per frame, i.e.
+      0.997^4 = 0.98807 per base step, constant over G0 -> DS2 -> G2.
+      Test B's ladder ran 0.97 -> 0.997 per base step. F0 at 0.97 kept
+      pace with G0, so the low start did not visibly hurt. The constant is
+      chosen because the ladder is tied to the swap count (with two swaps
+      it would stop at 0.9925) and because 0.98807 is the setting behind
+      every positive result so far.
+QUESTION: on the same 100k env-step budget, do fewer and longer
+generations (two swaps, three generations of ~33.3k env steps) at the
+original constant discount reach a higher deployed score at 100k than
+Test B's four swaps? And than the current lineage?
+THE LINEAGE (seed 0; three generations T0-T2; every env step counted):
+  T0 is from scratch: Test B's F0 recipe (TK's 36 tokens, policy-only
+    acting, PREFIX_BN_PER_STEP, sign clip c0 = 1, the own-play log) at
+    DISCOUNT 0.98807 per base step. It runs until 33,333 of its own env
+    steps.
+  T1, T2: each is the distilled student of the previous generation's final
+    snapshot, through Test B's swap unchanged: the master's own play over
+    its whole generation (~33k base steps), the halved-clip rule, the 1%
+    vocabulary rule, the master's 50-sim birth search targets, 20,000
+    offline steps, then online play. THE ONE CHANGE: the student's
+    discount equals the master's (0.98807 at every swap). The value check
+    (A2) still runs.
+  THE STOP (Test B's A1): generation k's --stop-env-steps is
+    round(100,000 x (k + 1) / 3) minus the final env steps of T0..T(k-1):
+    33,333 for T0. T2 ends at the first iteration past 100k cumulative.
+  WITHIN each generation, TK's schedules restart over its env steps, as in
+    Test B. The nominal run is 50 iterations (Test B's 30 for 20k, scaled
+    by 5/3); the --iterations cap is 100.
+  MASTER GATE at each swap: Test B's (the master's last two deployed rows
+    averaging NEAR RANDOM, < 502.08, stop the chain; Kai's call).
+READS. EXACT eval as before (whole games, 30 noop starts, prior argmax,
+PROBE_ENV=MsPacmanNoFrameskip-v4); DEPLOYED primary, trainer-BN secondary.
+Rows every 5 iterations of each generation, plus each generation's final
+snapshot and the students' row 0 and offline curves. Cumulative env steps
+are the lineage's own online env steps.
+  (1a) PRIMARY at 100k: the mean deployed score of T2's rows in [90k, T2's
+      end] cumulative env steps (its final included; n rows) against
+      Test B's rows in the same window (F4's, its final included; n_B
+      rows). The band is 2 x 216.9 x sqrt(1/n + 1/n_B): BETTER / NO
+      DIFFERENT / WORSE. Trainer-BN likewise.
+  (1b) against the current lineage, as in Test B's (1): DS2 rows 0 / 5 /
+      10 (mean 1163.8; trainer-BN 1259.9), band 2 x 216.9 x sqrt(1/n +
+      1/3). References, not verdicts: EfficientZero 1281.2, BBF 2008.3,
+      EZ-V2 2251.0.
+  (2)-(6): Test B's reads (2)-(6) per swap and per generation (transfer,
+      jump and the OLS improvement rate; the clip, the discount, the
+      vocabulary, reward_kept, the set's size and temperature mix; the
+      prior; read (5) probe_prefix_bn at each student's row 0 and each
+      generation's final row; stability).
+  (7) descriptive: the deployed mean per 20k window of cumulative env
+      steps, beside Test B's and the current lineage's (G0 540 / 896 /
+      1107 at 0-20k / 20-40k / 40-60k; DS2 1163.8 at 91-98k).
+  (8) descriptive: T0 against G0 over the first 33k env steps (the same
+      discount; T0 adds PREFIX_BN_PER_STEP, the own-play log and schedules
+      compressed to 33k).
+DECISION AFTER:
+  - (1a) BETTER: fewer, longer generations beat four swaps. The generation
+    length becomes an input to Test D's trigger (a minimum length).
+  - (1a) NO DIFFERENT: the swap count at this resolution is not the lever.
+    Kai's call between Test C and Test D.
+  - (1a) WORSE: more frequent swaps are better; Test D can explore
+    shorter generations.
+  CAVEAT: against Test B two things change, the swap count (4 -> 2) and
+  the discount (the ladder -> constant 0.98807), so (1a) is on the pair.
+  Against the current lineage, the swap timing (one swap after 59k plus a
+  31.8k recording, against two at ~33k and ~67k with no recording) and
+  the own-play data differ.
+BUILD (before launch; audited like every build): the arms T0-T2; the
+prep's constant-discount rule; Test B's chain supervisor, hand-off and
+launcher generalized to a three-generation lineage; tests, a manifest, a
+fresh run tree. No change to Test B's behaviour.
+COST: the build and its audit loop while F4 trains, then ~1.3 days of
+training, launched after Test B's RESULT.
+
 ### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
 
 (Pre-registration: "Next experiment (pre-registered) -- Generation 2",
