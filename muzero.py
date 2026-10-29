@@ -1265,6 +1265,11 @@ SGD_MOMENTUM = 0.9
 # lands at step 101k, inside their final 20k no-collection steps, so their
 # runs trained at a constant lr while collecting data.
 LR_WARMUP_STEPS = 0
+# The warmup's origin step (Test C, Kai 2026-10-29; CURRICULUM "Test C:
+# BBF-style resets"): a reset (ablation.bbf_reset) restarts the warmup from
+# its own step, as at the run's start. 0 = the run's start (every other
+# arm, bit for bit).
+LR_WARMUP_ORIGIN = 0
 # Skip any update whose clipped gradient norm is NaN/Inf instead of applying
 # it (the check costs one device sync per step, hence opt-in). EfficientZero
 # trains under AMP, whose GradScaler skips such steps; in fp32 one bad step
@@ -1304,6 +1309,31 @@ REDO_BATCH = 256
 # it would re-randomize most of the projector every pass (Kai, 2026-09-26).
 REDO_NETS = ("representation", "dynamics", "prediction", "value_prefix",
              "projector")
+# Test C (Kai, 2026-10-29; CURRICULUM "Test C: BBF-style resets in one 100k
+# run"): BBF's periodic resets (Schwarzer et al. 2023; its released config,
+# bbf/configs/BBF.gin: every 40k gradient steps the encoder and transition
+# model move halfway to a fresh random init, every other layer is
+# re-initialized, the target network is reset with them). 0 = off.
+# ablation.bbf_reset runs at the end of the iteration whose training step
+# count reaches the next multiple of RESET_EVERY_STEPS, while the run has
+# played at most RESET_UNTIL_ENV_STEPS env steps: every parameter of the
+# nets in RESET_SHRINK_NETS becomes RESET_SHRINK_FACTOR x itself +
+# RESET_PERTURB_FACTOR x a fresh draw of its initializer (their BN running
+# statistics kept), the nets in RESET_REINIT_NETS become a fresh draw
+# (statistics included); for RESET_HOLD_STEPS gradient steps after it the
+# actor keeps playing the pre-reset weights.
+RESET_EVERY_STEPS = 0
+RESET_UNTIL_ENV_STEPS = 0
+RESET_SHRINK_NETS = ()
+RESET_REINIT_NETS = ()
+RESET_SHRINK_FACTOR = 0.5
+RESET_PERTURB_FACTOR = 0.5
+RESET_HOLD_STEPS = 0
+# Test C's plasticity read (both of its runs): every eval row scores each
+# ReDo unit (redo.dormancy_stats; nothing is recycled) on a uniform replay
+# sample from a dedicated generator and logs the dormant fractions per net,
+# plus the representation's first-layer filter norms.
+DORMANT_DIAGNOSTIC = False
 
 
 def decay_optimizer_lr(optimizers, factor):
@@ -1332,10 +1362,12 @@ def apply_lr_warmup(optimizers, training_steps):
     """EfficientZero's adjust_lr warmup: lr = LEARNING_RATE * step / warm for
     step < warm, then LEARNING_RATE. Touches the optimizers only up to and
     including the boundary step, so any later lr change (LR_DECAY_AT) is left
-    alone."""
-    if not LR_WARMUP_STEPS or training_steps > LR_WARMUP_STEPS:
+    alone. The step counts from LR_WARMUP_ORIGIN (a Test C reset's step; 0
+    otherwise)."""
+    t = training_steps - LR_WARMUP_ORIGIN
+    if not LR_WARMUP_STEPS or t > LR_WARMUP_STEPS or t < 0:
         return
-    lr = LEARNING_RATE * min(1.0, training_steps / LR_WARMUP_STEPS)
+    lr = LEARNING_RATE * min(1.0, t / LR_WARMUP_STEPS)
     for opt in optimizers:
         for group in opt.param_groups:
             group["lr"] = lr

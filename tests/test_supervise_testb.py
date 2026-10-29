@@ -502,16 +502,16 @@ def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g2sup):
         assert (ROOT / rel).exists(), rel
     assert len(set(sup.AUDITED)) == len(sup.AUDITED)
     assert set(sup.SUITES) <= set(sup.AUDITED)
-    assert len(set(sup.SUITES)) == len(sup.SUITES) == 24
-    # every suite supervise_gen2.py ran, after this supervisor's and Test
-    # B's (first: -x stops on them before the slow suites)
-    assert sup.SUITES[:2] == ["tests/test_supervise_testb.py",
-                              "tests/test_testb.py"]
-    assert sup.SUITES[2:] == g2sup.SUITES
+    assert len(set(sup.SUITES)) == len(sup.SUITES) == 25
+    # every suite supervise_gen2.py ran, after this supervisor's, Test B's
+    # and Test C's (first: -x stops on them before the slow suites)
+    assert sup.SUITES[:3] == ["tests/test_supervise_testb.py",
+                              "tests/test_testb.py", "tests/test_testc.py"]
+    assert sup.SUITES[3:] == g2sup.SUITES
     assert set(g2sup.AUDITED) <= set(sup.AUDITED)
     assert set(sup.AUDITED) - set(g2sup.AUDITED) == {
         "tests/test_supervise_testb.py", "tests/test_testb.py",
-        "benchmarks/supervisors/supervise_testb.py"}
+        "tests/test_testc.py", "benchmarks/supervisors/supervise_testb.py"}
     assert [r for r in sup.AUDITED if not r.endswith(".py")] == [
         "pytest.ini", "benchmarks/probes/step0_prefix_bn/states.npz"]
     for rel in ("experiments/ablation.py", "experiments/distill.py",
@@ -612,11 +612,14 @@ def test_supervisor_refuses_bad_arguments(sup, monkeypatch, capsys):
                  ["f1", "0", "--no-wait"], ["f1", "0", "--stop-env-steps"],
                  # Test B2's lineage: three generations, seed 0
                  ["t3", "0"], ["t", "0"], ["t0", "1"], ["T0", "0"],
-                 ["t01", "0"], ["t1", "0", "1"]):
+                 ["t01", "0"], ["t1", "0", "1"],
+                 # Test C's: one run each, seed 0
+                 ["r1", "0"], ["n1", "0"], ["r0", "1"], ["n0", "1"],
+                 ["R0", "0"], ["r", "0"], ["n", "0"]):
         assert sup.main(argv) == 2, argv
     out = capsys.readouterr().out
     assert ("usage: supervise_testb.py <variant: ['f0', 'f1', 'f2', 'f3', "
-            "'f4', 't0', 't1', 't2']> <seed: [0]>") in out
+            "'f4', 't0', 't1', 't2', 'r0', 'n0']> <seed: [0]>") in out
 
 
 def test_no_generation_2_leftovers(real_sup):
@@ -2267,7 +2270,7 @@ def test_f0_runs_preflight_then_each_launch_guarded_without_a_prep(
     assert sup.main(["f0", "0"]) == 1                 # 5 quick deaths
     out = capsys.readouterr().out
     assert "CRASH LOOP" in out
-    assert ("preflight ok (manifest + quick probe + 24 suites); starting f0 "
+    assert ("preflight ok (manifest + quick probe + 25 suites); starting f0 "
             f"s0 ({F[0]}, --stop-env-steps 20000, at most 60 iterations)") \
         in out
     # no wait, no prep, no prep integrity: f0 has none
@@ -2820,7 +2823,8 @@ LINEAGE_NAMES = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES",
 
 def test_test_b2s_lineage_and_test_bs_unchanged(real_sup):
     sup = real_sup
-    assert set(sup.LINEAGES) == {"f", "t"} and sup.TOTAL_ENV_STEPS == 100000
+    assert set(sup.LINEAGES) == {"f", "t", "r", "n"}
+    assert sup.TOTAL_ENV_STEPS == 100000
     loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
     assert loaded["LINEAGE"] == "f"         # the module loads as Test B's
     sup.configure("t")
@@ -3019,3 +3023,212 @@ def test_test_b2s_prep_must_keep_the_discount(tsup):
         assert sup.set_intact("t1", 0) == (False, (
             f"vocab.json's discount_rule is {shown}, not the lineage's "
             f"'keep'"))
+
+
+
+# --------------------------------------------------------------------------
+# Test C (Kai, 2026-10-29): r0 (BBF-style resets), then n0 (the control)
+# --------------------------------------------------------------------------
+RESET = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+         "tokens-reset")
+LONG = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+        "tokens-long")
+C_DATE = "2026-10-30"
+
+
+@pytest.fixture
+def nsup(sup):
+    """`sup` bound to Test C's control lineage, as main() binds it for
+    n0."""
+    sup.configure("n")
+    return sup
+
+
+def test_test_cs_lineages(real_sup):
+    sup = real_sup
+    loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
+    sup.configure("r")
+    assert (sup.LINEAGE, sup.GENERATIONS) == ("r", 1)
+    assert sup.VARIANTS == {"r0": RESET + "-r0"}
+    assert sup.RUNS == {"r0": "mspacman-reset-r0"}
+    assert sup.NAMES == {"r0": "R0"}
+    assert sup.SEEDS == {0: C_DATE} and sup.PREP_PREFIX is None
+    assert (sup.ITERATIONS, sup.NOMINAL_ITERATIONS) == (300, 150)
+    assert sup.DISCOUNTS == {"r0": KEPT} and sup.DISCOUNT_RULE == "keep"
+    assert sup.target("r0") == 100000
+    assert sup.upstream("r0") is None and not sup.is_student("r0")
+    assert sup.run_name("r0", 0) == f"mspacman-reset-r0-s0-{C_DATE}"
+    sup.configure("n")
+    # the "after" run's names are bound too: n0's wait reads R0's files
+    assert sup.VARIANTS == {"n0": LONG + "-n0", "r0": RESET + "-r0"}
+    assert sup.RUNS == {"n0": "mspacman-long-n0", "r0": "mspacman-reset-r0"}
+    assert sup.NAMES == {"n0": "N0", "r0": "R0"}
+    assert sup.DISCOUNTS == {"n0": KEPT}
+    assert sup.target("n0") == 100000
+    with pytest.raises(SystemExit, match="r0 is not of the bound lineage"):
+        sup.target("r0")
+    assert sup.upstream("n0") == "r0" and sup.master_of("n0") is None
+    assert not sup.is_student("n0")
+    assert sup.run_name("r0", 0) == f"mspacman-reset-r0-s0-{C_DATE}"
+    assert sup.run_name("n0", 0) == f"mspacman-long-n0-s0-{C_DATE}"
+    for arm in (RESET + "-r0", LONG + "-n0"):
+        spec = ablation.ARMS[arm]
+        assert spec["_env_stop"] is True and spec["OWN_PLAY_LOG"] is True
+        assert spec["_nominal_iterations"] == 150
+        assert spec["DISCOUNT"] == KEPT and "_student" not in spec
+        assert spec["DORMANT_DIAGNOSTIC"] is True
+    assert {k: ablation.ARMS[RESET + "-r0"][k]
+            for k in sup.RESET_KNOBS} == sup.RESET_KNOBS
+    assert sup.LINEAGES["r"]["resets"] is sup.RESET_KNOBS
+    assert sup.LINEAGES["n"]["resets"] == {"RESET_EVERY_STEPS": 0}
+    # Test B's and Test B2's names and numbers come back exactly
+    sup.configure("f")
+    assert {k: getattr(sup, k) for k in LINEAGE_NAMES} == loaded
+    for v in V:
+        assert sup.upstream(v) == sup.master_of(v)
+    sup.configure("t")
+    assert sup.VARIANTS == dict(zip(TV, T))
+    for v in TV:
+        assert sup.upstream(v) == sup.master_of(v)
+
+
+def test_test_cs_stops_and_commands_are_test_bs_recipe(sup):
+    fsup = _load(SUPERVISORS / "supervise_testb.py", "supervise_testb_f")
+    for letter, arm in (("r", RESET + "-r0"), ("n", LONG + "-n0")):
+        sup.configure(letter)
+        v = letter + "0"
+        assert sup.stop_env_steps(v, 0) == 100000
+        want = [x.replace(F[0], arm) for x in fsup.command("f0", 0, 100000)]
+        want[want.index("--iterations") + 1] = "300"
+        c = sup.command(v, 0)
+        assert c == want, v
+        assert c[c.index("--arms") + 1] == arm
+        assert "--token-vocab" not in c and "--distill-set" not in c
+    # n0's stop is its own 100,000, never less R0's
+    _finish(sup, "r0", final=140, env=100500, evals=False, files=False)
+    assert sup.stop_env_steps("n0", 0) == 100000
+
+
+def test_n0_waits_for_r0_complete_and_evaluated(nsup):
+    sup = nsup
+    name, marker, probes, suplog, script, pvar, flag = sup.predecessor("n0",
+                                                                      0)
+    base = sup.paths("r0", 0)[1]
+    assert (name, script, pvar) == ("R0", "supervise_testb.py", "r0")
+    assert marker == sup.paths("r0", 0)[3]
+    assert suplog == os.path.join(base, "supervisor.log")
+    assert flag == os.path.join(base, "ABANDONED")
+    assert [os.path.basename(p) for p, _r in probes] == [
+        f"probe_exhaustive_eval-mspacman-reset-r0-s0-{C_DATE}{s}.jsonl"
+        for s in ("-acting", "")]
+    assert sup.pred_missing("n0", 0) == [
+        "completion marker (no checkpoint)",
+        "in-run rows (its ablation jsonl holds none)"]
+    rows = _finish(sup, "r0", final=143, env=100500, evals=False,
+                   files=False)
+    assert rows[-1] == 143 and rows[0] == 5
+    missing = sup.pred_missing("n0", 0)
+    assert len(missing) == 2 and all(
+        f"mspacman-reset-r0-s0-{C_DATE}" in m for m in missing), missing
+    _rows(_probe(sup, "r0", "-acting"), rows)
+    assert len(sup.pred_missing("n0", 0)) == 1
+    _rows(_probe(sup, "r0", ""), rows)
+    assert sup.pred_missing("n0", 0) == []
+    # no master files (no prep): none can be missing
+    assert sup.master_files_missing("n0", 0) == []
+    assert sup.wait_external("n0", 0) == "ready"
+
+
+def test_n0_stops_on_an_abandoned_r0(nsup, capsys):
+    sup = nsup
+    base = pathlib.Path(sup.paths("r0", 0)[1])
+    base.mkdir(parents=True)
+    (base / "ABANDONED").write_text("")
+    assert sup.wait_external("n0", 0) == "failed"
+    out = capsys.readouterr().out
+    assert ("AFTER ABANDONED: R0's run folder holds an ABANDONED file -- N0 "
+            "does not start (Kai's call)") in out
+    assert "PREP FAILED" not in out and "MASTER" not in out
+
+
+def test_n0_keeps_waiting_on_an_unfinished_r0(nsup, monkeypatch, capsys):
+    sup = nsup
+    sleeps = []
+
+    def sleep(s):
+        sleeps.append(s)
+        if len(sleeps) == 2:
+            _finish(sup, "r0", final=140, env=100500, files=False)
+
+    monkeypatch.setattr(sup.time, "sleep", sleep)
+    assert sup.wait_external("n0", 0) == "ready"
+    out = capsys.readouterr().out
+    assert ("WAITING for R0 before n0 s0 [0 h]: missing completion marker"
+            in out)
+    assert "R0 complete and evaluated; n0 s0 may start" in out
+    # (nothing drives R0 here: no live supervise_testb.py r0)
+    assert ("ALERT: R0 is unfinished and nothing drives it: no live "
+            "supervise_testb.py r0 -- rerun its launcher") in out
+
+
+def test_main_starts_r0_at_once_and_waits_n0_on_r0(sup, monkeypatch,
+                                                   capsys):
+    calls = []
+    monkeypatch.setattr(sup, "other_supervisors", lambda v: [])
+    monkeypatch.setattr(sup, "settle_stop",
+                        lambda v, s: calls.append(("stop", v)) or None)
+    monkeypatch.setattr(sup, "wait_external",
+                        lambda v, s: calls.append(("wait", v)) or "ready")
+    assert sup.main(["r0", "0"]) == 1          # (the stub stop: None)
+    assert ("r0 s0 starts the lineage: no predecessor to wait for"
+            in capsys.readouterr().out)
+    assert calls == [("stop", "r0")]
+    calls.clear()
+    assert sup.main(["n0", "0"]) == 1
+    assert calls == [("wait", "n0"), ("stop", "n0")]
+    assert sup.LINEAGE == "n"
+    calls.clear()
+    monkeypatch.setattr(sup, "wait_external",
+                        lambda v, s: calls.append(("wait", v)) or "failed")
+    assert sup.main(["n0", "0"]) == 1
+    assert calls == [("wait", "n0")]           # no stop, no launch
+
+
+def test_test_cs_quick_probes_pass_and_their_reset_asserts_bite(sup):
+    """r0's probe pins the reset knobs, n0's their absence; both the
+    plasticity read and the module defaults off; Test B's and Test B2's
+    probes carry none of it."""
+    codes = []
+    for letter in ("r", "n"):
+        sup.configure(letter)
+        codes.append(sup.quick(letter + "0", 0))
+    for letter, v in (("f", "f0"), ("t", "t0")):
+        sup.configure(letter)
+        q = sup.quick(v, 0)
+        assert "RESET_" not in q and "DORMANT" not in q
+    a = "ablation.ARMS"
+    r0, n0 = RESET + "-r0", LONG + "-n0"
+    breaks = [(0, f"{a}[{r0!r}]['RESET_EVERY_STEPS'] = 20000"),
+              (0, f"{a}[{r0!r}]['RESET_HOLD_STEPS'] = 0"),
+              (0, f"{a}[{r0!r}]['RESET_SHRINK_FACTOR'] = 0.2"),
+              (0, f"del {a}[{r0!r}]['RESET_REINIT_NETS']"),
+              (0, f"{a}[{r0!r}]['DORMANT_DIAGNOSTIC'] = False"),
+              (1, f"{a}[{n0!r}]['RESET_EVERY_STEPS'] = 40000"),
+              (1, f"{a}[{n0!r}]['DORMANT_DIAGNOSTIC'] = False"),
+              (1, f"{a}[{n0!r}]['_nominal_iterations'] = 50")]
+    broken = []
+    for i, prelude in breaks:
+        anchor = f"spec = ablation.ARMS[{(r0, n0)[i]!r}]; "
+        assert codes[i].count(anchor) == 1
+        broken.append(codes[i].replace(anchor, prelude + "; " + anchor))
+    got = _py_each(broken + codes)
+    for code, g in zip(broken, got):
+        assert g.startswith("AssertionError"), (code[-300:], g)
+    assert got[len(broken):] == ["ok", "ok"]
+    # a module default switched on: its own child (EACH restores no reset
+    # flag)
+    head = "import muzero, ablation, muzero_vtree, distill; "
+    flipped = codes[1].replace(head, head + "muzero.RESET_EVERY_STEPS = "
+                               "40000; ")
+    assert flipped != codes[1]
+    assert _py_each([flipped])[0].startswith("AssertionError")

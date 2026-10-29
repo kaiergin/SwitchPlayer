@@ -925,6 +925,72 @@ BUILD (before launch; audited like every build):
     a manifest and a fresh run tree.
 COST: the build and its audit loop while Test B2 trains (B2 ends about the
 evening of 10-30), then about 28 h per run: results about 11-02.
+AMENDMENTS (the build, before launch):
+  (A1) THE STORED TARGETS. The text above says "no target comes from the
+      pre-reset network". That holds for every NEW target: the birth
+      search, the refresh, the value bootstraps through the target model.
+      It does not hold for the policy targets already in the replay at a
+      reset. Those are the pre-reset network's birth searches. They stay,
+      as BBF keeps its replay, until the refresh re-searches them (12 lives
+      every 2 iterations, so a full pass takes about 25 iterations) or
+      they are evicted (the buffer turns over in about 50 iterations). So
+      for much of each 20-iteration cycle the new heads also learn from the
+      old network's searches. This makes our reset softer than BBF's,
+      which stores no policy targets. Re-searching the whole buffer at a
+      reset was rejected: the fresh heads' near-uniform searches would
+      replace good targets with noise for about 25 iterations. PER
+      priorities are kept too.
+  (A2) NAMES. C is r0: arm ...-tokens-reset-r0, run
+      mspacman-reset-r0-s0-2026-10-30. C0 is n0: arm ...-tokens-long-n0,
+      run mspacman-long-n0-s0-2026-10-30. They are the chain supervisor's
+      one-run lineages "r" and "n". n0 starts "after" r0, once R0 is
+      complete and its exact evals have landed.
+  (A3) READ (4)'s references:
+      - The filter read compares each first-layer filter with 10% of the
+        median filter norm of a fresh draw of that layer (Conv2d's default
+        init). The run's own init norms are not kept.
+      - The dormant fractions are over ReDo's units in all five nets
+        (single-consumer layers; residual-stream producers excluded), the
+        projector included.
+  (A4) THE HOLD ships the actor's last pre-reset weights, with their
+      BN-recalibrated acting statistics. The eval rows and the snapshots
+      always take the learner's. The behaviour diagnostics' prior follows
+      the hold.
+BUILT 2026-10-29 (pre-audit; the audit loop follows before any launch):
+  - muzero.py: the RESET_* knobs and DORMANT_DIAGNOSTIC (all off by
+    default); LR_WARMUP_ORIGIN (0, so every other arm's warmup is
+    unchanged).
+  - experiments/ablation.py:
+      - the arms ...-tokens-long-n0 (C0) and ...-tokens-reset-r0 (C);
+      - reset_gate, run at startup;
+      - reset_due, fresh_networks (a dedicated torch RNG keyed on the seed
+        and the reset index), bbf_reset;
+      - the reset lands after the row's snapshot and eval request and
+        before its checkpoint; the in-flight game is birth-searched by the
+        reset nets;
+      - RayPipeline._actor_states (the hold): sync and the behaviour prior
+        use it, the eval actor and the snapshots do not;
+      - the checkpoint's "resets" (the log and the hold, for reset arms
+        only), restoring the warmup origin on a resume;
+      - warmup_origin around each run;
+      - the rows' "resets" / "acting_held" (reset arms) and the plasticity
+        read (Run.dormant_stats: dormant_025 / dormant_10 per net and
+        overall, conv1_weak_frac);
+      - Run.uniform_windows: ReDo's sampler extracted and shared, its draws
+        unchanged.
+  - benchmarks/supervisors/supervise_testb.py: the lineages "r" and "n"
+    (RESET_KNOBS pinned by the quick probe); "after" with upstream(); the
+    "after" run's names bound with the lineage's; run_name dated by the
+    variant's own lineage; AFTER ABANDONED; tests/test_testc.py among the
+    suites (25).
+  - Tests: tests/test_testc.py (new); test_supervise_testb.py (the Test C
+    lineages; 25 suites); the arm lists in test_pbn.py and test_harness.py.
+  - Scratchpad: post_testc.py (generated from post_testb2.py by
+    make_post_testc.py), check_post_testc.py (CHECK OK), launch_testc.ps1
+    (it refuses until T2's marker, Test B2's hand-off's "all done" and no
+    Test B2 process alive), smoke_testc.py (a tiny reset run; a kill after
+    its first reset's checkpoint and a resume; a tiny control run; GPU,
+    after Test B2).
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 

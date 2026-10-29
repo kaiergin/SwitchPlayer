@@ -1296,6 +1296,50 @@ for _k in range(1, 3):
     }
 del _k
 
+# Test C (Kai, 2026-10-29; pre-registered in CURRICULUM "Test C: BBF-style
+# resets in one 100k run, against a no-reset twin"): T0's recipe run from
+# scratch to 100,000 env steps (planned length 150 iterations: Test B's 30
+# per 20k), without resets (C0, "-long-n0") and with BBF's periodic resets
+# (C, "-reset-r0"); both log the plasticity diagnostics
+# (DORMANT_DIAGNOSTIC). No swap follows either, so the sign clip and the 36
+# tokens hold throughout. The variant suffixes are the chain supervisor's
+# (supervise_testb.py lineages "n" and "r").
+LONG_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-long")
+RESET_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+             "tokens-reset")
+ARMS[LONG_ARM + "-n0"] = {
+    **ARMS[TWO_ARM + "-t0"],
+    "_nominal_iterations": 150,
+    "DORMANT_DIAGNOSTIC": True,
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-two-t0 as Test C's control C0: one run from scratch at "
+            "the sign clip, PREFIX_BN_PER_STEP, DISCOUNT 0.997^4 per base "
+            "step, to its env-step stop (--stop-env-steps 100000), the "
+            "within-run schedules following its env-step progress (planned "
+            "length 150 iterations); no reset, no swap; the dormant-unit and "
+            "first-layer filter diagnostics in every row. Run as TK.",
+}
+ARMS[RESET_ARM + "-r0"] = {
+    **ARMS[LONG_ARM + "-n0"],
+    "RESET_EVERY_STEPS": 40000,
+    "RESET_UNTIL_ENV_STEPS": 80000,
+    "RESET_SHRINK_NETS": ("representation", "dynamics"),
+    "RESET_REINIT_NETS": ("prediction", "value_prefix", "projector"),
+    "RESET_SHRINK_FACTOR": 0.5,
+    "RESET_PERTURB_FACTOR": 0.5,
+    "RESET_HOLD_STEPS": 10000,
+    "_doc": "Test C's C: the control C0 plus BBF's periodic resets -- after "
+            "every 40,000 gradient steps (20 iterations) while the run has "
+            "played at most 80,000 env steps, the representation and "
+            "dynamics move halfway to a fresh init (shrink 0.5, perturb "
+            "0.5), the prediction, value prefix and projector are "
+            "re-initialized, the target model is reset with them, their SGD "
+            "momentum is zeroed and the lr warmup restarts; for the next "
+            "10,000 gradient steps the actor keeps the pre-reset weights. "
+            "Run as TK.",
+}
+
 # PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
 # BatchNorm statistics on the token arm", after Step 0 (iii)): TK with the
 # value-prefix head's BatchNorms keeping one set of running statistics per
@@ -1582,6 +1626,19 @@ def env_schedule(stop_env_steps):
         muzero.SCHEDULE_ENV_TARGET, muzero.SCHEDULE_ENV_STEPS = saved
 
 
+@contextlib.contextmanager
+def warmup_origin():
+    """Test C: a run's resets move muzero.LR_WARMUP_ORIGIN (bbf_reset, a
+    resume's load_run_checkpoint); it starts at 0 and is restored after, so
+    a sweep's next arm warms up from its own start."""
+    saved = muzero.LR_WARMUP_ORIGIN
+    muzero.LR_WARMUP_ORIGIN = 0
+    try:
+        yield
+    finally:
+        muzero.LR_WARMUP_ORIGIN = saved
+
+
 def env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations,
                   snapshot_weights):
     """Test B's arms, checked at startup (before any --overwrite deletion):
@@ -1615,6 +1672,67 @@ def env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations,
     if muzero.OWN_PLAY_LOG and not (use_ray and cpu_actor):
         raise SystemExit("OWN_PLAY_LOG logs the --ray --cpu-actor actor's "
                          "play")
+
+
+def reset_gate(spec, use_ray, cpu_actor, ray_workers, train_steps,
+               init_weights):
+    """Test C's resets, checked at startup (before any --overwrite
+    deletion): RESET_EVERY_STEPS runs on the pipelined --ray --cpu-actor
+    iteration loop (the hold acts on its one actor; no worker pool, no
+    ASYNC_LOOP, no offloaded or saturating refresh), from scratch (no
+    student, no --init-weights), never beside ReDo, with the lagged target
+    model (the reset resets it); RESET_SHRINK_NETS and RESET_REINIT_NETS
+    split the five nets between them; the reset period and the hold are
+    whole iterations (so a reset lands at an iteration's end and a hold ends
+    at a row); the factors are positive. Without RESET_EVERY_STEPS, no
+    other RESET_* knob may be set."""
+    every = muzero.RESET_EVERY_STEPS
+    if not every:
+        if (muzero.RESET_UNTIL_ENV_STEPS or muzero.RESET_SHRINK_NETS
+                or muzero.RESET_REINIT_NETS or muzero.RESET_HOLD_STEPS):
+            raise SystemExit("the RESET_* knobs need RESET_EVERY_STEPS")
+        return
+    if not (use_ray and cpu_actor) or ray_workers:
+        raise SystemExit("RESET_EVERY_STEPS runs on the pipelined --ray "
+                         "--cpu-actor loop (the hold acts on its one actor)")
+    if (muzero.ASYNC_LOOP or muzero.REFRESH_OFFLOAD
+            or muzero.REFRESH_SATURATE):
+        raise SystemExit("RESET_EVERY_STEPS runs the iteration loop with the "
+                         "inline refresh: no ASYNC_LOOP, REFRESH_OFFLOAD or "
+                         "REFRESH_SATURATE")
+    if spec.get("_student") or init_weights:
+        raise SystemExit("a reset run starts from scratch (no student, no "
+                         "--init-weights)")
+    if muzero.REDO_EVERY:
+        raise SystemExit("RESET_EVERY_STEPS and ReDo are exclusive (one "
+                         "plasticity mechanism at a time)")
+    if not muzero.USE_TARGET_MODEL:
+        raise SystemExit("RESET_EVERY_STEPS resets the lagged target model: "
+                         "it needs USE_TARGET_MODEL")
+    shrink = tuple(muzero.RESET_SHRINK_NETS)
+    reinit = tuple(muzero.RESET_REINIT_NETS)
+    if (set(shrink) & set(reinit) or len(set(shrink)) != len(shrink)
+            or len(set(reinit)) != len(reinit)
+            or set(shrink) | set(reinit) != set(NET_NAMES)):
+        raise SystemExit(f"RESET_SHRINK_NETS {shrink} and RESET_REINIT_NETS "
+                         f"{reinit} must split the nets {NET_NAMES}")
+    hold = muzero.RESET_HOLD_STEPS
+    if (isinstance(every, bool) or not isinstance(every, int)
+            or every % train_steps or isinstance(hold, bool)
+            or not isinstance(hold, int) or hold < 0 or hold % train_steps
+            or hold >= every):
+        raise SystemExit(f"RESET_EVERY_STEPS {every!r} and RESET_HOLD_STEPS "
+                         f"{hold!r} must be whole iterations of "
+                         f"--train-steps {train_steps}, the hold shorter")
+    until = muzero.RESET_UNTIL_ENV_STEPS
+    if isinstance(until, bool) or not isinstance(until, int) or until <= 0:
+        raise SystemExit(f"RESET_UNTIL_ENV_STEPS {until!r} must be a "
+                         f"positive env-step count")
+    for name in ("RESET_SHRINK_FACTOR", "RESET_PERTURB_FACTOR"):
+        f = getattr(muzero, name)
+        if (isinstance(f, bool) or not isinstance(f, (int, float))
+                or not 0 < f <= 1):
+            raise SystemExit(f"{name} {f!r} must lie in (0, 1]")
 
 
 def own_play_dir(arm, seed):
@@ -2594,6 +2712,12 @@ class Run:
         self.env_steps = 0
         # Test B: an OwnPlayLog under OWN_PLAY_LOG (run_one sets it)
         self.own_play = None
+        # Test C (RESET_EVERY_STEPS): the resets done, one dict each
+        # (index, iteration, training_steps, env_steps), and the actor's
+        # hold after the latest ({"until": step, "held": the acting states
+        # it keeps}); both checkpointed
+        self.reset_log = []
+        self.hold = None
 
     def set_train_mode(self, training):
         for net in (self.trainer.representation, self.trainer.dynamics,
@@ -2601,26 +2725,21 @@ class Run:
                     self.trainer.projector):
             net.train(training)
 
-    def redo_step(self):
-        """One ReDo pass (redo.py): score every recyclable unit on a fresh
-        UNIFORM replay sample of REDO_BATCH unroll windows (root obs + the
-        next UNROLL_STEPS stored actions; no augmentation, no PER) and
-        recycle the tau-dormant ones in the live nets. The sample and the
-        reinit draws come from generators keyed on (seed, training step), so
-        a pass is reproducible across a resume and never touches the global
-        numpy/torch streams. Returns units recycled."""
-        import redo
-        steps = self.trainer.training_steps
-        rng = np.random.default_rng((self.seed, steps, 0x7ED0))
+    def uniform_windows(self, rng, n):
+        """(obs, actions) of `n` unroll windows drawn uniformly from the
+        replay by `rng` (a numpy Generator): each a root observation (float
+        in [0, 1]) and the next UNROLL_STEPS stored actions, on the
+        trainer's device; None when no trajectory holds a whole window.
+        ReDo's sample, and Test C's dormant-unit read's."""
         K = muzero.UNROLL_STEPS
         # Valid window starts: K real actions after the root (the final
         # record's action is a placeholder, never a real one).
         starts = [(ti, len(t) - 1 - K) for ti, t in enumerate(self.replay)
                   if len(t) - 1 - K >= 0]
         if not starts:
-            return 0
-        sizes = np.array([n + 1 for _, n in starts], dtype=np.int64)
-        picks = rng.choice(int(sizes.sum()), size=int(muzero.REDO_BATCH))
+            return None
+        sizes = np.array([m + 1 for _, m in starts], dtype=np.int64)
+        picks = rng.choice(int(sizes.sum()), size=n)
         bounds = np.cumsum(sizes)
         obs, acts = [], []
         for p in picks:
@@ -2633,6 +2752,72 @@ class Run:
         dev = self.trainer.device
         obs = torch.tensor(np.stack(obs), dtype=torch.float32, device=dev) / 255.0
         acts = torch.tensor(np.asarray(acts), dtype=torch.long, device=dev)
+        return obs, acts
+
+    def dormant_stats(self):
+        """Test C's plasticity read (DORMANT_DIAGNOSTIC), for a row: the
+        fraction of ReDo's units (redo.recyclable_units over all five nets)
+        whose normalized activation score (redo.dormancy_stats, on train-mode
+        copies: the live nets and their statistics untouched) is <= 0.025
+        and <= 0.1, per net and overall, on a uniform replay sample of
+        REDO_BATCH windows from a generator keyed on (seed, training step)
+        -- the global numpy / torch streams are never drawn; and the
+        fraction of the representation's first-layer filters whose norm is
+        below 10% of the median filter norm of a fresh draw of that layer
+        (a dedicated torch generator). Nothing is recycled."""
+        import redo
+        steps = self.trainer.training_steps
+        rng = np.random.default_rng((self.seed, steps, 0xD0A7))
+        out = {}
+        windows = self.uniform_windows(rng, int(muzero.REDO_BATCH))
+        if windows is not None:
+            obs, acts = windows
+            nets = {n: getattr(self.trainer, n) for n in redo.ALL_NETS}
+            units = redo.recyclable_units(nets, include=redo.ALL_NETS)
+            scores = redo.dormancy_scores(nets, obs, acts, units)
+            for tau, key in ((0.025, "dormant_025"), (0.1, "dormant_10")):
+                per, all_n, all_d = {}, 0, 0
+                for net in redo.ALL_NETS:
+                    s = [scores[u] for u in units
+                         if u.net == net and u in scores]
+                    n = sum(x.numel() for x in s)
+                    d = sum(int((x <= tau).sum()) for x in s)
+                    per[net] = round(d / n, 4) if n else None
+                    all_n, all_d = all_n + n, all_d + d
+                out[key] = per
+                out[key + "_all"] = round(all_d / all_n, 4) if all_n else None
+        conv = self.trainer.representation.conv1.weight.detach()
+        ref = getattr(self, "_filter_ref", None)
+        if ref is None:
+            fresh = torch.empty_like(conv, device="cpu")
+            gen = torch.Generator().manual_seed(
+                int(np.random.default_rng((self.seed, 0xF11)).integers(2**62)))
+            # Conv2d's default init (kaiming_uniform_ at a = sqrt(5)):
+            # U(-b, b), b = 1 / sqrt(fan_in)
+            bound = 1.0 / math.sqrt(conv[0].numel())
+            fresh.uniform_(-bound, bound, generator=gen)
+            ref = float(fresh.flatten(1).norm(dim=1).median())
+            self._filter_ref = ref
+        norms = conv.flatten(1).norm(dim=1)
+        out["conv1_weak_frac"] = round(float((norms < 0.1 * ref).float()
+                                             .mean()), 4)
+        return out
+
+    def redo_step(self):
+        """One ReDo pass (redo.py): score every recyclable unit on a fresh
+        UNIFORM replay sample of REDO_BATCH unroll windows (root obs + the
+        next UNROLL_STEPS stored actions; no augmentation, no PER) and
+        recycle the tau-dormant ones in the live nets. The sample and the
+        reinit draws come from generators keyed on (seed, training step), so
+        a pass is reproducible across a resume and never touches the global
+        numpy/torch streams. Returns units recycled."""
+        import redo
+        steps = self.trainer.training_steps
+        rng = np.random.default_rng((self.seed, steps, 0x7ED0))
+        windows = self.uniform_windows(rng, int(muzero.REDO_BATCH))
+        if windows is None:
+            return 0
+        obs, acts = windows
         nets = {n: getattr(self.trainer, n) for n in redo.ALL_NETS}
         units = redo.recyclable_units(nets, include=tuple(muzero.REDO_NETS))
         scores, raw, inputs = redo.dormancy_stats(nets, obs, acts, units)
@@ -3742,6 +3927,18 @@ class Run:
             errs.update(stats)
         # BIRTH_SEARCH and ReDo accounting (2026-09-26), same pattern.
         self._merge_row_stats(errs)
+        if muzero.RESET_EVERY_STEPS:
+            # Test C: the resets so far (a row written before its
+            # iteration's reset counts it out) and whether the actor's next
+            # game plays the held pre-reset weights
+            errs["resets"] = len(self.reset_log)
+            hold = self.hold
+            errs["acting_held"] = bool(
+                hold is not None
+                and self.trainer.training_steps < hold["until"])
+        if muzero.DORMANT_DIAGNOSTIC:
+            # Test C's plasticity read (both runs)
+            errs.update(self.dormant_stats())
 
         return errs
 
@@ -4026,6 +4223,12 @@ def save_run_checkpoint(run, path, meta):
              list(idx)) for u, idx in plan.items()]
     if diag:
         state["diag_stats"] = diag
+    if muzero.RESET_EVERY_STEPS:
+        # Test C: the resets done and the actor's hold (its held acting
+        # states), so a resume neither repeats nor skips a reset and keeps
+        # a hold; only then, so every other arm's head is unchanged
+        state["resets"] = {"log": [dict(r) for r in run.reset_log],
+                           "hold": _cpu_state(run.hold)}
     state["rng"] = {
         "np": np.random.get_state(),
         "py": random.getstate(),
@@ -4116,6 +4319,12 @@ def load_run_checkpoint(run, path, expect):
             run._redo_last_plan = {redo.Unit(*f): list(idx) for f, idx in v}
         else:
             setattr(run, k, dict(v))
+    if "resets" in state:
+        # Test C: the warmup counts from the latest reset's step
+        run.reset_log = [dict(r) for r in state["resets"]["log"]]
+        run.hold = state["resets"]["hold"]
+        muzero.LR_WARMUP_ORIGIN = (run.reset_log[-1]["training_steps"]
+                                   if run.reset_log else 0)
     np.random.set_state(state["rng"]["np"])
     random.setstate(state["rng"]["py"])
     torch.set_rng_state(state["rng"]["torch"])
@@ -4481,6 +4690,111 @@ def redo_due(steps):
     return bool(every) and steps > every and steps % every == every // 2
 
 
+def reset_due(run, last):
+    """Test C: is a reset due at the end of this iteration? The next one
+    (len(run.reset_log) + 1) is due once the training steps reach its
+    multiple of RESET_EVERY_STEPS, while the run's env steps are at most
+    RESET_UNTIL_ENV_STEPS -- never at the run's last iteration (nothing
+    trains after it). Env steps only grow, so once past the cutoff no reset
+    follows."""
+    every = muzero.RESET_EVERY_STEPS
+    if not every or last:
+        return False
+    return (run.trainer.training_steps >= (len(run.reset_log) + 1) * every
+            and run.env_steps <= muzero.RESET_UNTIL_ENV_STEPS)
+
+
+def fresh_networks(spec, key):
+    """A fresh draw of the five nets (build_networks: each layer's own
+    initializer) under a dedicated torch RNG seeded from `key`; the global
+    torch stream is untouched (the nets initialize on the CPU, then
+    move)."""
+    seed = int(np.random.default_rng(key).integers(2**62))
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        return build_networks(spec)
+
+
+def bbf_reset(run, pipeline, it):
+    """Test C's reset (BBF's, CURRICULUM "Test C"), at the end of iteration
+    `it` -- after its row's snapshot and diagnostics, before its
+    checkpoint:
+      - every parameter of RESET_SHRINK_NETS (representation, dynamics)
+        becomes RESET_SHRINK_FACTOR x itself + RESET_PERTURB_FACTOR x a
+        fresh draw (BN gamma / beta included); their BN running statistics
+        stay;
+      - RESET_REINIT_NETS (prediction, value prefix, projector) become a
+        fresh draw, running statistics included, and their optimizers'
+        state (SGD momentum) is cleared; the shrunk nets' is kept (BBF
+        keeps the copied layers');
+      - the lagged target model, both buffers, becomes the reset online
+        nets (BBF's reset_target), synced at this step;
+      - the lr warmup restarts here (muzero.LR_WARMUP_ORIGIN);
+      - the actor keeps the pre-reset acting states (the pipeline's last
+        ship) until RESET_HOLD_STEPS gradient steps later (run.hold), while
+        the in-flight game's birth search and every later target use the
+        reset nets.
+    The fresh draw is keyed on (seed, reset index), so a resume that
+    repeats a reset repeats it exactly."""
+    tr = run.trainer
+    index = len(run.reset_log) + 1
+    steps = tr.training_steps
+    # the actor's pre-reset weights: what the last sync shipped (cached at
+    # this step)
+    held = pipeline._acting_states() if pipeline is not None else None
+    fresh = fresh_networks(run.spec, (run.seed, index, 0xB8F))
+    with torch.no_grad():
+        for n in muzero.RESET_SHRINK_NETS:
+            new = dict(fresh[n].named_parameters())
+            for name, p in getattr(tr, n).named_parameters():
+                p.mul_(float(muzero.RESET_SHRINK_FACTOR)).add_(
+                    new[name], alpha=float(muzero.RESET_PERTURB_FACTOR))
+        for n in muzero.RESET_REINIT_NETS:
+            getattr(tr, n).load_state_dict(fresh[n].state_dict())
+    for n in muzero.RESET_REINIT_NETS:
+        getattr(tr, dict(zip(NET_NAMES, OPT_NAMES))[n]).state.clear()
+    del fresh
+    tr._ensure_target_model()
+    online = ((tr.representation, tr.target_representation),
+              (tr.prediction, tr.target_prediction),
+              (tr.dynamics, tr.target_dynamics),
+              (tr.value_prefix, tr.target_value_prefix))
+    snap = [{k: v.detach().clone() for k, v in net.state_dict().items()}
+            for net, _ in online]
+    for (_, target), s in zip(online, snap):
+        target.load_state_dict(s)
+        target.eval()
+    tr._target_snapshot = snap
+    tr._target_synced_at = steps
+    if hasattr(tr, "invalidate_bootstrap_cache"):
+        tr.invalidate_bootstrap_cache()
+    muzero.LR_WARMUP_ORIGIN = steps
+    if pipeline is not None:
+        # every cache keyed on the step count now holds pre-reset weights
+        pipeline._states_cache = (None, None)
+        pipeline._acting_cache = (None, None)
+        pipeline._target_states_cache = (None, None)
+        pipeline._refresh_shipped_stamp = None
+        if pipeline.pending is not None and muzero.BIRTH_SEARCH:
+            # the in-flight game (played on the pre-reset weights) is
+            # birth-searched by the reset nets
+            pipeline._birth_states = pipeline._states()
+    until = steps + muzero.RESET_HOLD_STEPS
+    run.hold = ({"until": until, "held": held}
+                if held is not None and muzero.RESET_HOLD_STEPS else None)
+    run.reset_log.append({"index": index, "iteration": it,
+                          "training_steps": steps,
+                          "env_steps": run.env_steps})
+    print(f"  [{run.arm} s{run.seed}] RESET {index} after iter {it} (step "
+          f"{steps}, {run.env_steps} env steps): "
+          f"{'+'.join(muzero.RESET_SHRINK_NETS)} shrunk x"
+          f"{muzero.RESET_SHRINK_FACTOR} + {muzero.RESET_PERTURB_FACTOR} x "
+          f"fresh; {'+'.join(muzero.RESET_REINIT_NETS)} re-initialized; "
+          f"target reset; warmup restarts"
+          + (f"; the actor holds the pre-reset weights until step {until}"
+             if run.hold else ""), flush=True)
+
+
 def after_train_step(run):
     """Per-gradient-step hook, called by every training loop right after the
     step counter advances. Today: ReDo on its redo_due() schedule, plus the
@@ -4792,6 +5106,16 @@ class RayPipeline:
             self._acting_cache = (stamp, {**states, **recal})
         return self._acting_cache[1]
 
+    def _actor_states(self):
+        """What the self-play ACTOR plays with: _acting_states(), except
+        during a Test C hold (run.hold, after a reset: until its step) --
+        then the pre-reset acting states it keeps. The eval actor and the
+        snapshots always take _acting_states()."""
+        hold = getattr(self.run, "hold", None)
+        if hold is not None and self.run.trainer.training_steps < hold["until"]:
+            return hold["held"]
+        return self._acting_states()
+
     def snapshot_acting_states(self):
         """For save_weight_snapshot: the shipped representation /
         prediction acting states under BN_RECAL_ACTING, else None."""
@@ -4806,16 +5130,20 @@ class RayPipeline:
         # every other arm's actors see the unchanged two-argument call)
         env = ((self.run.env_steps,) if muzero.SCHEDULE_ENV_TARGET
                else ())
+        # Test C: past its hold's end the held states are dropped
+        hold = getattr(self.run, "hold", None)
+        if hold is not None and steps >= hold["until"]:
+            self.run.hold = None
         if self.server is not None:
             # One weight ship for the whole pool; workers only mirror the
             # temperature counter (their set_weights skips empty dicts).
             self.ray.get(self.server.set_weights.remote(
-                self._acting_states(), steps))
+                self._actor_states(), steps))
             self.ray.get([w.set_weights.remote({}, steps, *env)
                           for w in self.workers])
         else:
             self.ray.get(self.actor.set_weights.remote(
-                self._acting_states(), steps, *env))
+                self._actor_states(), steps, *env))
 
     def request(self, it):
         # training_steps captured at REQUEST time: sequential reanalysis of
@@ -4840,8 +5168,9 @@ class RayPipeline:
         # the step count and returns clones, so this is the synced set.
         self._birth_states = self._states() if muzero.BIRTH_SEARCH else None
         # BN_RECAL_ACTING: the rep/pred the actor SAMPLES from this game
-        # (the synced acting set) -- for the behaviour prior only.
-        self._birth_acting = (self._acting_states()
+        # (the synced acting set; during a Test C hold the held one) -- for
+        # the behaviour prior only.
+        self._birth_acting = (self._actor_states()
                               if muzero.BIRTH_SEARCH and muzero.BN_RECAL_ACTING
                               else None)
 
@@ -5170,7 +5499,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
     # and the 4.3 decay) is its nominal length, not the --iterations cap
     planned = ARMS[arm].get("_nominal_iterations") or iterations
     with arm_config(arm) as spec, _run_length_globals(planned, train_steps), \
-            token_actions(), env_schedule(stop_env_steps):
+            token_actions(), env_schedule(stop_env_steps), warmup_origin():
         if use_ray:
             ray_scope_gate(spec)
         launch_gate(spec, use_ray, cpu_actor)
@@ -5185,6 +5514,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         student_gate(spec, distill_set, snapshot_weights)
         env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations,
                       snapshot_weights)
+        reset_gate(spec, use_ray, cpu_actor, ray_workers, train_steps,
+                   init_weights)
         if spec.get("_student") and init_weights:
             raise SystemExit("a curriculum P3 student starts from scratch or "
                              "from its distillation set, not --init-weights")
@@ -5787,6 +6118,13 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                 else:
                     write_row(it, run.evaluate(),
                               run.trainer.training_steps, run.env_steps)
+
+            # Test C: a reset at this iteration's end -- after its row's
+            # snapshot and diagnostics (row `it` is the pre-reset network,
+            # its eval actor already synced), before its checkpoint (which
+            # then holds the reset and the hold)
+            if reset_due(run, last):
+                bbf_reset(run, pipeline, it)
 
             # After the eval/record block, so a resumed run never repeats or
             # skips a jsonl row: it continues at it+1 with row `it` written.

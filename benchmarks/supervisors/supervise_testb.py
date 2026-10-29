@@ -43,6 +43,20 @@ post_testb2.py. For Test B2, read the text below's "five" / "f0-f4" /
 "F4" / launch_testb.ps1 / post_testb.py as "three" / "t0-t2" / "T2" /
 launch_testb2.ps1 / post_testb2.py.
 
+TEST C (Kai, 2026-10-29; CURRICULUM.md "Next experiment (pre-registered)
+-- Test C: BBF-style resets in one 100k run, against a no-reset twin"):
+two one-run lineages from scratch to 100,000 env steps (--iterations 300
+around a planned 150), r0 (...-tokens-reset-r0: BBF's periodic resets)
+and then n0 (...-tokens-long-n0: the control). n0's lineage starts "after"
+r0 (LINEAGES "after", upstream()): it waits for R0's completion marker and
+exact evals as a student waits for its master -- but with no prep and no
+master gate (an R0 with an ABANDONED file stops it: AFTER ABANDONED, Kai's
+call). Its stop is its own target, 100,000. From their own run worktree
+(launch_testc.ps1, hand-off post_testc.py):
+
+    python benchmarks/supervisors/supervise_testb.py r0 0
+    python benchmarks/supervisors/supervise_testb.py n0 0
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
 round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
@@ -161,6 +175,19 @@ FAST_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
             "tokens-fast")
 TWO_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
            "tokens-two")
+RESET_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+             "tokens-reset")
+LONG_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-long")
+# Test C's reset knobs (CURRICULUM "Test C"): the reset run's arm pins them
+# (its lineage's "resets": quick() asserts them), the control's pins them
+# off
+RESET_KNOBS = {"RESET_EVERY_STEPS": 40000, "RESET_UNTIL_ENV_STEPS": 80000,
+               "RESET_SHRINK_NETS": ("representation", "dynamics"),
+               "RESET_REINIT_NETS": ("prediction", "value_prefix",
+                                     "projector"),
+               "RESET_SHRINK_FACTOR": 0.5, "RESET_PERTURB_FACTOR": 0.5,
+               "RESET_HOLD_STEPS": 10000}
 # The lineages, keyed by a variant's letter: Test B's "f" (F0-F4, ~20,000
 # env steps each, the discount ladder) and Test B2's "t" (Kai 2026-10-29:
 # T0-T2, ~33,333 each, the token arms' constant 0.997^4 per base step).
@@ -168,7 +195,11 @@ TWO_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
 # near the arms' planned length "nominal" = _nominal_iterations);
 # "discounts" the pre-registered discount per base step of each generation
 # under the prep's "rule" (distill.discount_rule: Test B's gap 1 - g halved
-# at each swap, capped at 0.997; Test B2's kept); "date" the runs'.
+# at each swap, capped at 0.997; Test B2's kept); "date" the runs'. Test C
+# (Kai 2026-10-29): two one-run lineages to 100,000 env steps, "r" (C:
+# BBF-style resets) and "n" (C0: the no-reset control), which starts only
+# "after" r0 is complete and evaluated; "resets" the reset knobs quick()
+# pins.
 LINEAGES = {
     "f": {"arm": FAST_ARM, "run": "mspacman-fast", "prep": "fast-prep",
           "generations": 5, "iterations": 60, "nominal": 30,
@@ -178,6 +209,15 @@ LINEAGES = {
           "generations": 3, "iterations": 100, "nominal": 50,
           "discounts": (0.997 ** 4,) * 3,
           "rule": "keep", "date": "2026-10-29"},
+    "r": {"arm": RESET_ARM, "run": "mspacman-reset", "prep": None,
+          "generations": 1, "iterations": 300, "nominal": 150,
+          "discounts": (0.997 ** 4,), "rule": "keep",
+          "date": "2026-10-30", "resets": RESET_KNOBS},
+    "n": {"arm": LONG_ARM, "run": "mspacman-long", "prep": None,
+          "generations": 1, "iterations": 300, "nominal": 150,
+          "discounts": (0.997 ** 4,), "rule": "keep",
+          "date": "2026-10-30", "resets": {"RESET_EVERY_STEPS": 0},
+          "after": "r0"},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
@@ -192,9 +232,12 @@ def configure(letter):
     spec = LINEAGES[letter]
     LINEAGE, GENERATIONS = letter, spec["generations"]
     names = [f"{letter}{k}" for k in range(GENERATIONS)]
-    VARIANTS = {v: f"{spec['arm']}-{v}" for v in names}
-    RUNS = {v: f"{spec['run']}-{v}" for v in names}
-    NAMES = {v: v.upper() for v in names}
+    # Test C: a lineage that starts "after" another lineage's run binds that
+    # run's names too (its wait reads that run's files)
+    known = names + ([spec["after"]] if spec.get("after") else [])
+    VARIANTS = {v: f"{LINEAGES[v[0]]['arm']}-{v}" for v in known}
+    RUNS = {v: f"{LINEAGES[v[0]]['run']}-{v}" for v in known}
+    NAMES = {v: v.upper() for v in known}
     ITERATIONS, NOMINAL_ITERATIONS = spec["iterations"], spec["nominal"]
     DISCOUNTS = dict(zip(names, spec["discounts"]))
     DISCOUNT_RULE = spec["rule"]
@@ -277,8 +320,10 @@ PREP_CHECKS = ("the value support (", "past the reward supports",
                # Test B2's discount rule (audit r3 NIT-1): an unknown rule,
                # a kept discount past the cap
                "_discount_rule ", "past the cap")
-# Every suite supervise_gen2.py ran, plus this supervisor's and Test B's.
+# Every suite supervise_gen2.py ran, plus this supervisor's, Test B's and
+# Test C's.
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
+          "tests/test_testc.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",
           "tests/test_supervise_gen1.py", "tests/test_gen1.py",
           "tests/test_pbn.py",
@@ -341,8 +386,19 @@ def is_student(variant):
     return master_of(variant) is not None
 
 
+def upstream(variant):
+    """The run `variant` waits for: a student's master F{k-1}, else its
+    lineage's "after" run (Test C: n0 after r0 -- never a master: no prep,
+    no master gate); None when it waits for no run."""
+    m = master_of(variant)
+    return m if m is not None else LINEAGES[variant[0]].get("after")
+
+
 def run_name(variant, seed):
-    return f"{RUNS[variant]}-s{seed}-{SEEDS[seed]}"
+    """The run's folder name, dated by the variant's own lineage (Test C's
+    "after" run by its own; SEEDS still rejects an unknown seed)."""
+    SEEDS[seed]
+    return f"{RUNS[variant]}-s{seed}-{LINEAGES[variant[0]]['date']}"
 
 
 def paths(variant, seed):
@@ -538,6 +594,17 @@ def quick(variant, seed):
             "hasattr(distill, 'student_discount_rule') and "
             "hasattr(distill, 'master_checks'); "
             f"assert distill.discount_rule(spec) == {DISCOUNT_RULE!r}; ")
+    resets = LINEAGES[LINEAGE].get("resets")
+    if resets is not None:
+        # Test C: the reset knobs its lineage pins (the control's off), the
+        # module defaults off, the plasticity read on
+        code += ("assert muzero.RESET_EVERY_STEPS == 0 and "
+                 "muzero.DORMANT_DIAGNOSTIC is False; "
+                 "assert spec['DORMANT_DIAGNOSTIC'] is True; "
+                 "assert hasattr(ablation, 'bbf_reset') and "
+                 "hasattr(ablation, 'reset_gate'); "
+                 + "".join(f"assert spec.get({k!r}, muzero.{k}) == {v!r}; "
+                           for k, v in resets.items()))
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "
@@ -676,13 +743,13 @@ def master_final(variant, seed):
 def predecessor(variant, seed):
     """What `variant` waits for: (name, marker, [(probe jsonl, rows)],
     supervisor.log, supervisor script, its variant arg, its ABANDONED
-    file) -- F{k-1} in this tree (supervise_testb.py f{k-1}); None for f0.
-    Its rows are DYNAMIC: every in-run row its own ablation jsonl holds
-    (complete once its marker is there), after row 0 when it is a student
-    -- and then its offline curve's rows 1-4 too. (Read (5) is not waited
-    for: the hand-off's last probe_prefix_bn may still run beside the next
-    preflight.)"""
-    m = master_of(variant)
+    file) -- F{k-1} in this tree (supervise_testb.py f{k-1}), or Test C's
+    "after" run (upstream()); None for f0. Its rows are DYNAMIC: every
+    in-run row its own ablation jsonl holds (complete once its marker is
+    there), after row 0 when it is a student -- and then its offline
+    curve's rows 1-4 too. (Read (5) is not waited for: the hand-off's last
+    probe_prefix_bn may still run beside the next preflight.)"""
+    m = upstream(variant)
     if m is None:
         return None
     _, base, _, ck, _ = paths(m, seed)
@@ -704,7 +771,7 @@ def pred_missing(variant, seed):
     jsonls hold every row."""
     name, marker, probes, _, _, _, _ = predecessor(variant, seed)
     out = marker_missing(marker)
-    if not run_rows(master_of(variant), seed):
+    if not run_rows(upstream(variant), seed):
         out.append("in-run rows (its ablation jsonl holds none)")
     for path, rows in probes:
         got = probe_rows(path)
@@ -789,12 +856,21 @@ def master_abandoned_msg(variant):
             f"fallback master (Kai's call)")
 
 
+def after_abandoned_msg(variant):
+    """Test C: the stop when the "after" run's folder holds an ABANDONED
+    file (no prep: not a PREP FAILED)."""
+    return (f"AFTER ABANDONED: {NAMES[upstream(variant)]}'s run folder holds "
+            f"an ABANDONED file -- {NAMES[variant]} does not start (Kai's "
+            f"call)")
+
+
 def wait_external(variant, seed):
-    """Block until the predecessor F{k-1} has completed AND its evals have
-    landed ("ready"; at once for f0, which has none), this run's ABANDONED
-    file appears ("abandoned"), or F{k-1}'s ABANDONED file appears
-    ("failed": PREP FAILED: MASTER ABANDONED is printed); hourly WAITING
-    lines and ALERTs."""
+    """Block until the predecessor F{k-1} (or Test C's "after" run) has
+    completed AND its evals have landed ("ready"; at once for f0, which has
+    none), this run's ABANDONED file appears ("abandoned"), or the
+    predecessor's ABANDONED file appears ("failed": PREP FAILED: MASTER
+    ABANDONED is printed -- AFTER ABANDONED for an "after" run); hourly
+    WAITING lines and ALERTs."""
     if predecessor(variant, seed) is None:
         return "ready"
     name, _, _, _, _, _, flag = predecessor(variant, seed)
@@ -804,7 +880,9 @@ def wait_external(variant, seed):
         if abandoned(base):
             return "abandoned"
         if os.path.exists(flag):
-            print(f"PREP FAILED: {master_abandoned_msg(variant)}", flush=True)
+            print(f"PREP FAILED: {master_abandoned_msg(variant)}"
+                  if is_student(variant) else after_abandoned_msg(variant),
+                  flush=True)
             return "failed"
         missing = pred_missing(variant, seed)
         if not missing:
@@ -841,8 +919,11 @@ def wait_external(variant, seed):
 def master_files_missing(variant, seed):
     """F{k-1}'s final snapshot and its own-play log's iteration files
     1..K, once F{k-1} is complete (its marker and its final row), where
-    they do not exist: the prep reads both."""
+    they do not exist: the prep reads both. [] for a non-student (Test C's
+    "after" run is no master)."""
     m = master_of(variant)
+    if m is None:
+        return []
     try:
         k, snap = master_final(variant, seed)
     except SystemExit:
@@ -1614,16 +1695,17 @@ def main(argv):
     if launched(base, ckpt):
         print(f"RESUMING {variant} s{seed}: it started before (checkpoint or "
               f"launch logged) -- no wait", flush=True)
-    elif not student:
+    elif predecessor(variant, seed) is None:
         print(f"{variant} s{seed} starts the lineage: no predecessor to wait "
               f"for (the guard still waits out any trainer)", flush=True)
     else:
+        # a student's master, or Test C's "after" run
         got = wait_external(variant, seed)
         if got == "abandoned":
             print(f"ABANDONED {variant} s{seed}: the run folder holds an "
                   f"ABANDONED file -- not launching", flush=True)
             return 0
-        if got != "ready":           # PREP FAILED: MASTER ABANDONED
+        if got != "ready":      # MASTER ABANDONED / AFTER ABANDONED
             return 1
     # THE STOP, before the preflight (a spent budget wastes no suites); the
     # same on every start: the predecessors' final rows never change.
