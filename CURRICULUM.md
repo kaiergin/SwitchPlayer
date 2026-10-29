@@ -1491,6 +1491,16 @@ SWAP 4 PREP (F3 -> F4; 07:42-07:44 10-29, attempt 1; read (3)):
       The distillation set shrinks each swap as the tokens lengthen:
       10,418 / 10,102 / 6,601 / 4,671 records over ~20k base steps each.
 F4 LAUNCHED 07:45 10-29 (attempt 1, fresh).
+F4 ROW 0 (interim, 09:44 10-29):
+  READ (2) transfer: row 0 is 1005.3 deployed (SD 280.2) and 1253.0
+      trainer-BN. The master's final row is 851.3 (trainer-BN 803.3), so
+      +154.0 deployed, descriptive (one-row band +-464); trainer-BN is
+      +449.7.
+  The offline curve (deployed / trainer-BN): 983 / 1077 at 4k, 1607 /
+      1042 at 8k, 940 / 1325 at 12k, 1046 / 1180 at 16k; row 0 (20k) 1005
+      / 1253.
+  READ (5) row 0: p1_ratio 0.47, so FIXED (16 tokens, ceiling 32.07).
+  Frames per decision, deployed: 20.2 at row 0.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
