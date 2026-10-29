@@ -3153,14 +3153,12 @@ def test_n0_stops_on_an_abandoned_r0(nsup, capsys):
 
 def test_n0_keeps_waiting_on_an_unfinished_r0(nsup, monkeypatch, capsys):
     sup = nsup
-    sleeps = []
 
-    def sleep(s):
-        sleeps.append(s)
-        if len(sleeps) == 2:
+    def effect(n):
+        if n == 2:
             _finish(sup, "r0", final=140, env=100500, files=False)
 
-    monkeypatch.setattr(sup.time, "sleep", sleep)
+    monkeypatch.setattr(sup.time, "sleep", _bounded(effect))
     assert sup.wait_external("n0", 0) == "ready"
     out = capsys.readouterr().out
     assert ("WAITING for R0 before n0 s0 [0 h]: missing completion marker"
@@ -3232,3 +3230,93 @@ def test_test_cs_quick_probes_pass_and_their_reset_asserts_bite(sup):
                                "40000; ")
     assert flipped != codes[1]
     assert _py_each([flipped])[0].startswith("AssertionError")
+
+
+def test_each_runs_name_is_dated_by_its_own_lineage(sup, monkeypatch):
+    """Audit r1b NIT-3: r and n share a date, so the lineages test alone
+    would pass with the bound lineage's date too."""
+    monkeypatch.setitem(sup.LINEAGES["r"], "date", "2026-11-01")
+    sup.configure("n")
+    assert sup.SEEDS == {0: C_DATE}
+    assert sup.run_name("r0", 0) == "mspacman-reset-r0-s0-2026-11-01"
+    assert sup.run_name("n0", 0) == f"mspacman-long-n0-s0-{C_DATE}"
+    assert sup.paths("r0", 0)[0].endswith("-2026-11-01")
+    with pytest.raises(KeyError):
+        sup.run_name("r0", 1)                 # SEEDS still rejects seed 1
+
+
+def _row(it, env, **extra):
+    return {"iteration": it, "env_steps": env, **extra}
+
+
+def test_the_reset_schedule_is_checked_row_by_row(sup):
+    """Audit r1b LOW-1: a reset after every 20th iteration whose row's env
+    steps are <= 80,000 -- counted in the LATER rows -- and its 4 held
+    weight ships (the syncs after iterations j + 1 .. j + 4)."""
+    sup.configure("r")
+    envs = {}
+    seq = [(5, 3000, 0), (20, 13000, 0), (25, 16500, 1), (40, 26000, 1),
+           (45, 29500, 2), (60, 40000, 2), (80, 53000, 3), (100, 66000, 4),
+           (120, 80000, 5), (125, 83400, 6), (140, 93000, 6),
+           (143, 100500, 6)]
+    for it, env, n in seq:
+        row = _row(it, env, resets=n, held_ships=4 * n)
+        assert sup.reset_alert(row, envs) is None, it
+        envs[it] = env
+    # past the cutoff at row 120: no 7th reset (nor its ships)
+    envs[120] = 80001
+    assert sup.reset_alert(_row(125, 83400, resets=6, held_ships=24),
+                           envs) == (
+        "resets 6, the schedule's 5 (a reset after every 20th iteration "
+        "while env steps <= 80000); held_ships 24, the schedule's 20 (4 "
+        "held weight ships after each reset)")
+    # a reset that never fired, a missing field, a bool
+    assert "the schedule's 1" in sup.reset_alert(
+        _row(25, 16500, resets=0, held_ships=4), {20: 13000})
+    assert "resets None" in sup.reset_alert(_row(25, 16500, held_ships=4),
+                                            {20: 13000})
+    assert sup.reset_alert(_row(25, 16500, resets=True, held_ships=4),
+                           {20: 13000})
+    # a hold that shipped the learner's weights (no held ship)
+    assert sup.reset_alert(_row(25, 16500, resets=1, held_ships=0),
+                           {20: 13000}) == (
+        "held_ships 0, the schedule's 4 (4 held weight ships after each "
+        "reset)")
+    # mid-hold (a resume's rows are every 5, but the count is per sync)
+    assert sup.reset_alert(_row(22, 14000, resets=1, held_ships=2),
+                           {20: 13000}) is None
+    # the control and Test B / B2 are never checked
+    for letter in ("n", "f", "t"):
+        sup.configure(letter)
+        assert sup.reset_alert(_row(25, 16500, resets=7), {20: 1}) is None
+
+
+def test_reset_rows_print_and_alert(sup, monkeypatch, tmp_path, capsys):
+    sup.configure("r")
+    monkeypatch.setattr(sup, "run_ceiling", lambda v: 1.0)
+    jsonl = tmp_path / "a.jsonl"
+    rows = sup.Rows(str(jsonl), "r0", 0)
+    plastic = {"resets": 0, "held_ships": 0, "dormant_025_all": 0.12,
+               "dormant_10_all": 0.3, "conv1_weak_frac": 0.0,
+               "reward_ceiling": 1.0}
+    jsonl.write_text(json.dumps(_row(20, 13000, **plastic)) + NL)
+    rows.prime()                       # a supervisor restart: row 20 known
+    with open(jsonl, "a") as f:
+        f.write(json.dumps(_row(25, 16500, **plastic)) + NL)
+    rows.emit()
+    out = capsys.readouterr().out
+    assert ("| resets 0  held ships 0  dormant 0.12 / 0.3  conv1 weak 0.0 "
+            "|") in out
+    assert ("ALERT: r0 s0 row 25: resets 0, the schedule's 1 (a reset "
+            "after every 20th iteration while env steps <= 80000); "
+            "held_ships 0, the schedule's 4") in out
+    # a row without the read prints as before
+    sup.configure("f")
+    rows = sup.Rows(str(tmp_path / "b.jsonl"), "f0", 0)
+    (tmp_path / "b.jsonl").write_text(json.dumps(
+        _row(5, 3000, reward_ceiling=1.0)) + NL)
+    monkeypatch.setattr(sup, "run_ceiling", lambda v: 1.0)
+    rows.emit()
+    out = capsys.readouterr().out
+    assert "EVAL f0 s0 iter 5" in out and "resets" not in out
+    assert "ALERT" not in out

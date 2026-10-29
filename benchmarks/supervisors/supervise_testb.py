@@ -57,6 +57,12 @@ call). Its stop is its own target, 100,000. From their own run worktree
     python benchmarks/supervisors/supervise_testb.py r0 0
     python benchmarks/supervisors/supervise_testb.py n0 0
 
+For Test C read the text below's "five" / "f0-f4" / "F4" / "F{k-1}" /
+launch_testb.ps1 / post_testb.py as "two" / "r0, n0" / "N0" / "R0 (n0's
+'after' run)" / launch_testc.ps1 / post_testc.py; neither run has a prep,
+a master or a row 0. Each r0 row's "resets" is checked against the
+schedule (reset_alert: an ALERT when off it).
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
 round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
@@ -599,10 +605,12 @@ def quick(variant, seed):
         # Test C: the reset knobs its lineage pins (the control's off), the
         # module defaults off, the plasticity read on
         code += ("assert muzero.RESET_EVERY_STEPS == 0 and "
-                 "muzero.DORMANT_DIAGNOSTIC is False; "
+                 "muzero.DORMANT_DIAGNOSTIC is False and "
+                 "muzero.LR_WARMUP_ORIGIN == 0; "
                  "assert spec['DORMANT_DIAGNOSTIC'] is True; "
                  "assert hasattr(ablation, 'bbf_reset') and "
-                 "hasattr(ablation, 'reset_gate'); "
+                 "hasattr(ablation, 'reset_gate') and "
+                 "hasattr(ablation, 'warmup_origin'); "
                  + "".join(f"assert spec.get({k!r}, muzero.{k}) == {v!r}; "
                            for k, v in resets.items()))
     m = master_of(variant)
@@ -1427,6 +1435,18 @@ class Rows:
         self.jsonl, self.variant, self.seed = jsonl, variant, seed
         self.seen, self.last = set(), None
         self.ceiling = None
+        # Test C: {iteration: env_steps} of the rows so far (the reset
+        # schedule's check, reset_alert)
+        self.envs = {}
+
+    def _note(self, line):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            return None
+        if isinstance(r, dict) and isinstance(r.get("iteration"), int):
+            self.envs[r["iteration"]] = r.get("env_steps")
+        return r if isinstance(r, dict) else None
 
     def lines(self):
         try:
@@ -1437,7 +1457,9 @@ class Rows:
             return []
 
     def prime(self):
-        self.seen.update(l.strip() for l in self.lines())
+        for line in self.lines():
+            self.seen.add(line.strip())
+            self._note(line)
 
     def emit(self):
         for line in self.lines():
@@ -1445,9 +1467,9 @@ class Rows:
             if key in self.seen:
                 continue
             self.seen.add(key)
-            try:
-                r = json.loads(line)
-            except ValueError:
+            prior = dict(self.envs)
+            r = self._note(line)
+            if r is None:
                 continue
             el = r.get("elapsed_s")
             per = "n/a"
@@ -1474,18 +1496,29 @@ class Rows:
             pre = (" | prefix %s  prefix_step1 %s (control %s)" % (
                 r.get("prefix"), r.get("prefix_step1"),
                 r.get("prefix_step1_control")))
+            # Test C's rows: the resets so far and the plasticity read
+            plastic = ("" if "conv1_weak_frac" not in r else
+                       " | resets %s  held ships %s  dormant %s / %s  conv1 "
+                       "weak %s" % (
+                           r.get("resets", "-"), r.get("held_ships", "-"),
+                           r.get("dormant_025_all"), r.get("dormant_10_all"),
+                           r.get("conv1_weak_frac")))
             print("EVAL %s s%d iter %s  train %s  env %s  return %s  H(pi) %s "
                   " maxp %s  erank %s  freshH %s%s | ceiling %s  kept %s  "
-                  "max %s%s | elapsed %s s, %s min/iter" % (
+                  "max %s%s%s | elapsed %s s, %s min/iter" % (
                       self.variant, self.seed, r.get("iteration"),
                       r.get("train_steps"), r.get("env_steps"),
                       r.get("return_mean"), r.get("policy_entropy"),
                       r.get("policy_maxp"), r.get("proj_erank"),
                       r.get("fresh_target_entropy"), pre,
                       r.get("reward_ceiling"), r.get("reward_kept"),
-                      r.get("reward_max"), tok, el, per),
+                      r.get("reward_max"), tok, plastic, el, per),
                   flush=True)
-            for alert in row_alerts(r, per, self.ceiling):
+            alerts = row_alerts(r, per, self.ceiling)
+            reset = reset_alert(r, prior)
+            if reset:
+                alerts.append(reset)
+            for alert in alerts:
                 print(f"ALERT: {self.variant} s{self.seed} row "
                       f"{r.get('iteration')}: {alert}", flush=True)
             free = commit_free_gb()
@@ -1493,6 +1526,45 @@ class Rows:
                 print(f"ALERT: {self.variant} s{self.seed} row "
                       f"{r.get('iteration')}: host commit free {free:.1f} GB "
                       f"< {COMMIT_ALERT_GB:g} GB -- memory creep?", flush=True)
+
+
+def reset_alert(r, envs):
+    """Test C (a lineage whose "resets" knobs reset): the row's "resets"
+    against the schedule -- one reset after every row j before it that is
+    a multiple of the cycle (RESET_EVERY_STEPS / TRAIN_STEPS iterations)
+    with env steps at most RESET_UNTIL_ENV_STEPS (the trainer resets at
+    the end of such an iteration, after its row; never at the final one,
+    which has no later row). `envs`: {iteration: env_steps} of the run's
+    earlier rows. None, or the ALERT's text (a reset that never fired, or
+    fired off schedule, would otherwise only show in the RESULT)."""
+    knobs = LINEAGES[LINEAGE].get("resets") or {}
+    every = knobs.get("RESET_EVERY_STEPS")
+    it = r.get("iteration")
+    if (not every or not isinstance(it, int) or isinstance(it, bool)
+            or it < 1):
+        return None
+    cycle, until = every // TRAIN_STEPS, knobs["RESET_UNTIL_ENV_STEPS"]
+    resets = [j for j, e in envs.items()
+              if isinstance(j, int) and j % cycle == 0 and 0 < j < it
+              and isinstance(e, int) and not isinstance(e, bool)
+              and e <= until]
+    # the held ships: after a reset at the end of iteration j, the syncs at
+    # the ends of iterations j + 1 .. j + H - 1 (H = the hold in
+    # iterations; the one at j + H ships the learner's) -- those up to this
+    # row's own sync (the final iteration has no sync: never within a hold
+    # here, the cutoff sits ~20k env steps before the stop)
+    held = knobs["RESET_HOLD_STEPS"] // TRAIN_STEPS - 1
+    want_ships = sum(min(held, it - j) for j in resets)
+    got, ships = r.get("resets"), r.get("held_ships")
+    out = []
+    if got != len(resets) or isinstance(got, bool):
+        out.append(f"resets {got!r}, the schedule's {len(resets)} (a reset "
+                   f"after every {cycle}th iteration while env steps <= "
+                   f"{until})")
+    if ships != want_ships or isinstance(ships, bool):
+        out.append(f"held_ships {ships!r}, the schedule's {want_ships} ("
+                   f"{held} held weight ships after each reset)")
+    return "; ".join(out) or None
 
 
 def row_alerts(r, per, ceiling):

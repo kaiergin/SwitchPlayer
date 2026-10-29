@@ -991,6 +991,63 @@ BUILT 2026-10-29 (pre-audit; the audit loop follows before any launch):
     Test B2 process alive), smoke_testc.py (a tiny reset run; a kill after
     its first reset's checkpoint and a resume; a tiny control run; GPU,
     after Test B2).
+AUDIT r1 (two fresh-eyes auditors on 25b41262, static: host memory stayed
+below the test floor while T0 trains): A (the trainer core) and B (the
+chain) found nothing above LOW but one MEDIUM:
+  - B-MEDIUM: the smoke's stop (2,500 env steps) could end it at iteration
+    4, before its second reset, failing a correct build.
+  - A-LOW-1: fresh_networks seeded through torch.manual_seed, which also
+    reseeds every CUDA generator; fork_rng(devices=[]) restores only the
+    CPU one. The run would continue on a restarted CUDA stream (root
+    noise) after each reset: deterministic, no bias, but not the claimed
+    isolation.
+  - A-LOW-2: reset_gate lacked refusals the registered arms cannot reach
+    (LR_DECAY_AT, which a warmup restart would undo; search acting whose
+    stored targets come from the actor; LR_WARMUP_STEPS 0).
+  - A-LOW-3 / B-NIT-1: the row field acting_held was always False (the
+    hold ends exactly on a row), so nothing showed the hold happened.
+  - B-LOW-1: nothing watched the reset schedule while the runs train.
+  - B-LOW-2: the scorer only pointed at Test B2's T2 window.
+  - B-LOW-3: no documented path if Test B2 ends abnormally.
+  - Test gaps: A-TEST-1 (a fake pipeline could not catch a hold that
+    carries the reset weights), A-TEST-2 (a vacuous synced-at check),
+    A-TEST-3 (no CUDA or Python-random check), B-NIT-2/3 (an unbounded
+    sleep stub; the run date's own-lineage dating unpinned).
+  - Notes, no change: A-NIT-1 (held games are stamped with their request
+    step, under-aging them by 2-8k steps against a 90k-step horizon
+    decay); A-NIT-2 (a reset's target stamp can equal the sync before it;
+    every stamp-keyed cache is dropped explicitly); A-NIT-3 (iteration 20's
+    refresh runs before the reset, so its 12 lives keep pre-reset targets
+    for a full rotation -- within A1).
+FIXES r1 (a fresh-eyes r2 follows):
+  - the smoke: a reset every 3 iterations with a 2-iteration hold, so a
+    held ship really happens; stop 5,000; its assertions follow the run's
+    final iteration and read the trainer's own lines; the kill lands after
+    the iteration-4 checkpoint, mid-hold;
+  - fresh_networks seeds torch.default_generator only (+ test);
+  - reset_gate refuses LR_DECAY_AT, LR_WARMUP_STEPS 0, and new targets not
+    all from the birth search (+ tests);
+  - acting_held is replaced by held_ships: the distinct steps at which the
+    actor was shipped the held weights, checkpointed (a resume's re-ship
+    counts once);
+  - the supervisor checks each r0 row's resets and held_ships against the
+    schedule (reset_alert: 4 held ships per reset) and prints both with
+    the plasticity read;
+  - the scorer computes T2's window and the trainer-BN columns, read (7),
+    the dormant fractions per net, and lists rows lacking an eval;
+  - the launcher documents the path if Test B2 ends abnormally (Kai's
+    call), and that post_testb2.log must be kept;
+  - the hand-off counts n0's renewed WAITING lines as live (B-NIT-5);
+  - quick() pins LR_WARMUP_ORIGIN 0 and warmup_origin (B-NIT-7);
+  - tests: the hold on the real pipeline (A-TEST-1), the target double
+    buffer after a reset (A-TEST-2), the RNG checks (A-TEST-3), a bounded
+    sleep, the run dates.
+AMENDMENTS (audit r1):
+  (A5) The rows carry "held_ships" (cumulative) instead of "acting_held".
+  (A6) The CAVEAT's "25% of its steps" is about 20%: the hold changes
+      iterations 22-25 of each cycle (4 ships, 12 lives). Iteration 21
+      plays the pre-reset weights through the pipeline's normal
+      one-iteration lag either way.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 

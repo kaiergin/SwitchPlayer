@@ -12,6 +12,7 @@ import contextlib
 import copy
 import inspect
 import pathlib
+import random
 import sys
 from types import SimpleNamespace
 
@@ -87,13 +88,15 @@ def make_run(spec, arm=C, steps=40000, env=13000):
         setattr(tr, o, muzero.make_optimizer(getattr(tr, n).parameters()))
     run.trainer = tr
     run.replay, run.env_steps = [], env
-    run.reset_log, run.hold = [], None
+    run.reset_log, run.hold, run.held_ships = [], None, []
     return run
 
 
 def trained(run):
     """Give the run a trained-looking state: momentum in every optimizer,
-    moved BN statistics, a synced target model the online nets then left."""
+    moved BN statistics, a target model synced 200 steps BEFORE the run's
+    step (so a reset's own stamp is visible: audit r1a TEST-2) that the
+    online nets then left."""
     tr = run.trainer
     for n, o in zip(ablation.NET_NAMES, ablation.OPT_NAMES):
         net, opt = getattr(tr, n), getattr(tr, o)
@@ -106,7 +109,10 @@ def trained(run):
                 if isinstance(m, torch.nn.modules.batchnorm._BatchNorm):
                     m.running_mean.normal_()
                     m.running_var.uniform_(0.5, 2.0)
+    steps = tr.training_steps
+    tr.training_steps = steps - 200
     tr._ensure_target_model()
+    tr.training_steps = steps
     with torch.no_grad():
         for n in ablation.NET_NAMES:
             for p in getattr(tr, n).parameters():
@@ -234,6 +240,16 @@ def test_both_arms_pass_their_gates_at_the_launch_recipe(in_arm):
             ablation.env_stop_gate(spec, 100000, True, True, 300, True)
 
 
+def test_search_acting_with_birth_targets_passes_the_gate(in_arm,
+                                                          monkeypatch):
+    """The birth search still makes every target under
+    SEARCH_ACT_BIRTH_TARGETS: only the action comes from the actor."""
+    spec = in_arm(C)
+    monkeypatch.setattr(muzero, "USE_SEARCH_ACTING", True)
+    monkeypatch.setattr(muzero, "SEARCH_ACT_BIRTH_TARGETS", True)
+    ablation.reset_gate(spec, True, True, 0, 2000, None)
+
+
 GATE_CASES = [
     ({}, dict(use_ray=False), "pipelined --ray --cpu-actor"),
     ({}, dict(cpu_actor=False), "pipelined --ray --cpu-actor"),
@@ -245,6 +261,11 @@ GATE_CASES = [
     ({}, dict(spec={"_student": "distill"}), "from scratch"),
     ({"REDO_EVERY": 1000}, {}, "ReDo are exclusive"),
     ({"USE_TARGET_MODEL": False}, {}, "USE_TARGET_MODEL"),
+    # audit r1a LOW-2
+    ({"LR_DECAY_AT": 0.75}, {}, "undo LR_DECAY_AT"),
+    ({"LR_WARMUP_STEPS": 0}, {}, "needs LR_WARMUP_STEPS"),
+    ({"BIRTH_SEARCH": False}, {}, "needs BIRTH_SEARCH"),
+    ({"USE_SEARCH_ACTING": True}, {}, "needs BIRTH_SEARCH"),
     ({"RESET_SHRINK_NETS": ("representation",)}, {}, "must split"),
     ({"RESET_SHRINK_NETS": ("representation", "dynamics", "prediction")},
      {}, "must split"),
@@ -346,11 +367,13 @@ def test_the_reset_is_bbfs(in_arm, capsys):
                  for o in ablation.OPT_NAMES}
     fresh = ablation.fresh_networks(spec, (0, 1, 0xB8F))
     pipe = FakePipe()
-    rng = (torch.get_rng_state(), np.random.get_state()[1].copy())
+    rng = (torch.get_rng_state(), np.random.get_state()[1].copy(),
+           random.getstate())
     ablation.bbf_reset(run, pipe, 20)
     # the global streams are untouched
     assert torch.equal(torch.get_rng_state(), rng[0])
     assert np.array_equal(np.random.get_state()[1], rng[1])
+    assert random.getstate() == rng[2]
     # shrink and perturb: 0.5 x itself + 0.5 x a fresh draw, every
     # parameter (BN affines included); running statistics kept
     for n in SHRINK:
@@ -393,7 +416,8 @@ def test_the_reset_is_bbfs(in_arm, capsys):
     # the hold's end; the caches dropped; the in-flight game birth-searched
     # by the reset nets
     assert pipe.calls == ["acting", "states"]
-    assert run.hold == {"until": 50000, "held": pipe.payload}
+    assert set(run.hold) == {"until", "held"} and run.hold["until"] == 50000
+    assert run.hold["held"] is pipe.payload
     assert pipe._states_cache == pipe._acting_cache == (None, None)
     assert pipe._target_states_cache == (None, None)
     assert pipe._refresh_shipped_stamp is None
@@ -453,6 +477,111 @@ def test_a_reset_before_the_first_target_sync_builds_the_target(in_arm):
                  states(run.trainer.prediction))
 
 
+def test_the_fresh_draw_never_seeds_cuda(in_arm, monkeypatch):
+    """Audit r1a LOW-1: torch.manual_seed would reseed every CUDA
+    generator, which fork_rng(devices=[]) does not restore."""
+    spec = in_arm(C)
+    calls = []
+    for name in ("manual_seed_all", "manual_seed"):
+        monkeypatch.setattr(torch.cuda, name,
+                            lambda *a, name=name: calls.append(name))
+    a = ablation.fresh_networks(spec, (0, 1, 0xB8F))
+    b = ablation.fresh_networks(spec, (0, 1, 0xB8F))
+    assert calls == []
+    for n in ablation.NET_NAMES:
+        assert equal(states(a[n]), states(b[n])), n
+
+
+def _perturb(run, scale):
+    with torch.no_grad():
+        for n in ablation.NET_NAMES:
+            for p in getattr(run.trainer, n).parameters():
+                p.add_(scale * torch.randn_like(p))
+
+
+def test_the_target_double_buffer_runs_on_from_the_reset(in_arm):
+    """Audit r1a TEST-2: the reset's stamp, then the 200-step syncs -- the
+    target stays the reset nets until the sync after next."""
+    spec = in_arm(C)
+    run = make_run(spec)
+    trained(run)                               # synced at 39,800
+    tr = run.trainer
+    assert tr._target_synced_at == 39800
+    ablation.bbf_reset(run, None, 20)
+    assert tr._target_synced_at == 40000
+    reset = states(tr.prediction)
+    seq = []
+    for ts in (40000, 40100, 40200, 40400):
+        tr.training_steps = ts
+        tr._ensure_target_model()
+        seq.append((ts, tr._target_synced_at,
+                    equal(states(tr.target_prediction), reset)))
+        _perturb(run, 0.001)                   # "training"
+    assert seq == [(40000, 40000, True), (40100, 40000, True),
+                   (40200, 40200, True), (40400, 40400, False)], seq
+
+
+def test_the_hold_on_the_real_pipeline(in_arm, monkeypatch):
+    """Audit r1a TEST-1: the pipeline's own _states / _acting_states /
+    _actor_states / sync / request on real nets (a fake actor), in
+    run_one's order at a reset iteration: the hold carries EXACTLY the
+    pre-reset states shipped at 40,000 -- a reset that ran before taking
+    them would hold the reset nets -- the in-flight game is birth-searched
+    by the reset nets, the ships at 42k-48k are held, from 50k the
+    learner's; held_ships records each held ship once."""
+    spec = in_arm(C)
+    monkeypatch.setattr(muzero, "BN_RECAL_FRAMES", 64)
+    run = make_run(spec)
+    run.replay = _replay()
+    trained(run)
+    pipe = object.__new__(ablation.RayPipeline)
+    pipe.run, pipe.server, pipe.seed, pipe.episodes_per_iter = run, None, 0, 3
+    pipe.ray = SimpleNamespace(get=lambda x: x)
+    shipped = []
+    pipe.actor = SimpleNamespace(
+        set_weights=Remote(lambda st, steps, *env:
+                           shipped.append((st, steps))),
+        play=Remote(lambda seed: f"game{seed}"))
+    pipe.pending = None
+    pipe._states_cache = pipe._acting_cache = (None, None)
+    pipe._target_states_cache = (None, None)
+    pipe._refresh_shipped_stamp = None
+    pipe._birth_states = pipe._birth_acting = None
+    pre = {n: states(getattr(run.trainer, n))
+           for n in ("dynamics", "value_prefix")}
+    # iteration 20's end: sync, request(21), (the row), the reset
+    pipe.sync()
+    pipe.request(21)
+    s20 = shipped[-1][0]
+    assert pipe._birth_acting is s20
+    ablation.bbf_reset(run, pipe, 20)
+    assert run.hold["held"] is s20 and run.hold["until"] == 50000
+    for n in ("dynamics", "value_prefix"):
+        assert equal(run.hold["held"][n], pre[n]), n
+        assert not equal(states(getattr(run.trainer, n)), pre[n]), n
+    assert equal(pipe._birth_states["prediction"],
+                 states(run.trainer.prediction))
+    assert run.held_ships == []
+    # iterations 21-26: train, sync, request
+    kinds = []
+    for it in range(21, 27):
+        _perturb(run, 0.001)
+        run.trainer.training_steps = it * 2000
+        pipe.sync()
+        pipe.request(it + 1)
+        st = shipped[-1][0]
+        # (the learner's acting states: raw nets + recalibrated BN stats)
+        live = st is pipe._acting_states() and equal(
+            st["dynamics"], states(run.trainer.dynamics))
+        kinds.append("HELD" if st is s20 else "LIVE" if live else "??")
+        assert pipe._birth_acting is (s20 if st is s20 else st)
+        assert equal(pipe._birth_states["prediction"],
+                     states(run.trainer.prediction))
+    assert kinds == ["HELD"] * 4 + ["LIVE"] * 2, kinds
+    assert run.hold is None
+    assert run.held_ships == [42000, 44000, 46000, 48000]
+
+
 # --------------------------------------------------------------------------
 # the hold in the pipeline
 # --------------------------------------------------------------------------
@@ -485,6 +614,7 @@ def test_the_actor_keeps_the_held_weights_until_the_holds_end(monkeypatch):
     shipped = []
     pipe = _pipe(monkeypatch, run, shipped)
     pipe.sync()
+    pipe.sync()                    # a resume's re-ship at the same step
     tr.training_steps = 48000
     pipe.sync()
     assert run.hold is not None
@@ -493,8 +623,11 @@ def test_the_actor_keeps_the_held_weights_until_the_holds_end(monkeypatch):
     assert run.hold is None                   # dropped at the hold's end
     tr.training_steps = 52000
     pipe.sync()
-    assert shipped == [("HELD", 42000, (14000,)), ("HELD", 48000, (14000,)),
-                       ("LIVE", 50000, (14000,)), ("LIVE", 52000, (14000,))]
+    assert shipped == [("HELD", 42000, (14000,)), ("HELD", 42000, (14000,)),
+                       ("HELD", 48000, (14000,)), ("LIVE", 50000, (14000,)),
+                       ("LIVE", 52000, (14000,))]
+    # each held ship's step, once
+    assert run.held_ships == [42000, 48000]
 
 
 def test_a_run_without_a_hold_ships_its_acting_states(monkeypatch):
@@ -504,6 +637,7 @@ def test_a_run_without_a_hold_ships_its_acting_states(monkeypatch):
     shipped = []
     _pipe(monkeypatch, run, shipped).sync()
     assert shipped == [("LIVE", 5, ())]
+    assert not hasattr(run, "held_ships")
 
 
 def test_the_behaviour_prior_follows_the_hold_the_birth_search_does_not(
@@ -541,6 +675,7 @@ def test_the_checkpoint_carries_the_resets_and_the_hold(
                     "env_steps": 13000}]
     held = {"representation": {"conv1.weight": torch.randn(3, 2)}}
     a.hold = {"until": 50000, "held": held}
+    a.held_ships = [42000, 44000]
     path = tmp_path / "resume.ckpt"
     ablation.save_run_checkpoint(a, path, META)
     b = mk()
@@ -550,6 +685,7 @@ def test_the_checkpoint_carries_the_resets_and_the_hold(
     assert b.hold["until"] == 50000
     assert torch.equal(b.hold["held"]["representation"]["conv1.weight"],
                        held["representation"]["conv1.weight"])
+    assert b.held_ships == [42000, 44000]
     assert muzero.LR_WARMUP_ORIGIN == 40000
     # past the hold: none; no reset yet: the warmup's origin is 0
     a.hold, a.reset_log = None, []
@@ -578,17 +714,17 @@ def test_no_other_arms_checkpoint_changes(monkeypatch, origin, tmp_path,
 # --------------------------------------------------------------------------
 # the rows: the reset fields and the plasticity read
 # --------------------------------------------------------------------------
-def test_a_reset_runs_rows_count_its_resets_and_the_hold(in_arm):
+def test_a_reset_runs_rows_count_its_resets_and_held_ships(in_arm):
     spec = in_arm(C)
     run = make_run(spec, steps=42000)
     run.reset_log = [{"index": 1}]
     run.hold = {"until": 50000, "held": {}}
+    run.held_ships = [42000]
     row = run.evaluate_diagnostics()
-    assert row["resets"] == 1 and row["acting_held"] is True
-    run.trainer.training_steps = 50000
-    assert run.evaluate_diagnostics()["acting_held"] is False
-    run.hold = None
-    assert run.evaluate_diagnostics()["acting_held"] is False
+    assert row["resets"] == 1 and row["held_ships"] == 1
+    assert "acting_held" not in row
+    del run.held_ships                        # a run built before the field
+    assert run.evaluate_diagnostics()["held_ships"] == 0
     # the plasticity read, here without a replay: the filters only
     assert "conv1_weak_frac" in row and "dormant_025" not in row
 
@@ -597,7 +733,7 @@ def test_the_controls_rows_carry_the_read_and_no_reset_fields(in_arm):
     spec = in_arm(C0)
     run = make_run(spec, arm=C0)
     row = run.evaluate_diagnostics()
-    assert "resets" not in row and "acting_held" not in row
+    assert "resets" not in row and "held_ships" not in row
     assert "conv1_weak_frac" in row
 
 

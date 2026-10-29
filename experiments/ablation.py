@@ -1709,6 +1709,21 @@ def reset_gate(spec, use_ray, cpu_actor, ray_workers, train_steps,
     if not muzero.USE_TARGET_MODEL:
         raise SystemExit("RESET_EVERY_STEPS resets the lagged target model: "
                          "it needs USE_TARGET_MODEL")
+    # (audit r1a LOW-2) the warmup a reset restarts sets the lr absolutely
+    if muzero.LR_DECAY_AT:
+        raise SystemExit("RESET_EVERY_STEPS restarts the lr warmup to "
+                         "LEARNING_RATE, which would undo LR_DECAY_AT")
+    if not muzero.LR_WARMUP_STEPS:
+        raise SystemExit("RESET_EVERY_STEPS restarts the lr warmup: it needs "
+                         "LR_WARMUP_STEPS")
+    # ... and every NEW target comes from the learner's birth search: an
+    # actor's own search during the hold would store the pre-reset
+    # network's targets
+    if not muzero.BIRTH_SEARCH or (muzero.USE_SEARCH_ACTING
+                                   and not muzero.SEARCH_ACT_BIRTH_TARGETS):
+        raise SystemExit("RESET_EVERY_STEPS needs BIRTH_SEARCH to make every "
+                         "new target (search acting only under "
+                         "SEARCH_ACT_BIRTH_TARGETS)")
     shrink = tuple(muzero.RESET_SHRINK_NETS)
     reinit = tuple(muzero.RESET_REINIT_NETS)
     if (set(shrink) & set(reinit) or len(set(shrink)) != len(shrink)
@@ -2713,11 +2728,13 @@ class Run:
         # Test B: an OwnPlayLog under OWN_PLAY_LOG (run_one sets it)
         self.own_play = None
         # Test C (RESET_EVERY_STEPS): the resets done, one dict each
-        # (index, iteration, training_steps, env_steps), and the actor's
-        # hold after the latest ({"until": step, "held": the acting states
-        # it keeps}); both checkpointed
+        # (index, iteration, training_steps, env_steps), the actor's hold
+        # after the latest ({"until": step, "held": the acting states it
+        # keeps}) and the steps at which the held states were shipped
+        # (held_ships, distinct); all checkpointed
         self.reset_log = []
         self.hold = None
+        self.held_ships = []
 
     def set_train_mode(self, training):
         for net in (self.trainer.representation, self.trainer.dynamics,
@@ -3929,13 +3946,13 @@ class Run:
         self._merge_row_stats(errs)
         if muzero.RESET_EVERY_STEPS:
             # Test C: the resets so far (a row written before its
-            # iteration's reset counts it out) and whether the actor's next
-            # game plays the held pre-reset weights
+            # iteration's reset counts it out) and the weight ships that
+            # carried the held pre-reset states so far (audit r1a LOW-3: a
+            # row-time "held now" flag is always False, the hold ending on
+            # a row)
             errs["resets"] = len(self.reset_log)
-            hold = self.hold
-            errs["acting_held"] = bool(
-                hold is not None
-                and self.trainer.training_steps < hold["until"])
+            errs["held_ships"] = len(getattr(self, "held_ships", None)
+                                     or [])
         if muzero.DORMANT_DIAGNOSTIC:
             # Test C's plasticity read (both runs)
             errs.update(self.dormant_stats())
@@ -4228,7 +4245,9 @@ def save_run_checkpoint(run, path, meta):
         # states), so a resume neither repeats nor skips a reset and keeps
         # a hold; only then, so every other arm's head is unchanged
         state["resets"] = {"log": [dict(r) for r in run.reset_log],
-                           "hold": _cpu_state(run.hold)}
+                           "hold": _cpu_state(run.hold),
+                           "held_ships": list(getattr(run, "held_ships",
+                                                      []))}
     state["rng"] = {
         "np": np.random.get_state(),
         "py": random.getstate(),
@@ -4323,6 +4342,7 @@ def load_run_checkpoint(run, path, expect):
         # Test C: the warmup counts from the latest reset's step
         run.reset_log = [dict(r) for r in state["resets"]["log"]]
         run.hold = state["resets"]["hold"]
+        run.held_ships = list(state["resets"].get("held_ships", []))
         muzero.LR_WARMUP_ORIGIN = (run.reset_log[-1]["training_steps"]
                                    if run.reset_log else 0)
     np.random.set_state(state["rng"]["np"])
@@ -4707,11 +4727,14 @@ def reset_due(run, last):
 def fresh_networks(spec, key):
     """A fresh draw of the five nets (build_networks: each layer's own
     initializer) under a dedicated torch RNG seeded from `key`; the global
-    torch stream is untouched (the nets initialize on the CPU, then
+    torch streams are untouched (the nets initialize on the CPU, then
     move)."""
     seed = int(np.random.default_rng(key).integers(2**62))
     with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
+        # the CPU generator only: torch.manual_seed would also reseed every
+        # CUDA generator, which fork_rng(devices=[]) does not restore
+        # (audit r1a LOW-1)
+        torch.default_generator.manual_seed(seed)
         return build_networks(spec)
 
 
@@ -5130,10 +5153,18 @@ class RayPipeline:
         # every other arm's actors see the unchanged two-argument call)
         env = ((self.run.env_steps,) if muzero.SCHEDULE_ENV_TARGET
                else ())
-        # Test C: past its hold's end the held states are dropped
+        # Test C: past its hold's end the held states are dropped; within
+        # it, the ship's step is recorded (held_ships: once per step, so a
+        # resume's re-ship at its checkpoint's step counts once)
         hold = getattr(self.run, "hold", None)
         if hold is not None and steps >= hold["until"]:
             self.run.hold = None
+        elif hold is not None:
+            ships = getattr(self.run, "held_ships", None)
+            if ships is None:
+                ships = self.run.held_ships = []
+            if steps not in ships:
+                ships.append(steps)
         if self.server is not None:
             # One weight ship for the whole pool; workers only mirror the
             # temperature counter (their set_weights skips empty dicts).
