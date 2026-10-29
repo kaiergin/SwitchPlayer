@@ -1683,9 +1683,10 @@ def reset_gate(spec, use_ray, cpu_actor, ray_workers, train_steps,
     student, no --init-weights), never beside ReDo, with the lagged target
     model (the reset resets it); RESET_SHRINK_NETS and RESET_REINIT_NETS
     split the five nets between them; the reset period and the hold are
-    whole iterations (so a reset lands at an iteration's end and a hold ends
-    at a row); the factors are positive. Without RESET_EVERY_STEPS, no
-    other RESET_* knob may be set."""
+    whole iterations (so a reset lands at an iteration's end and a hold
+    ends at one -- at a row too under the registered recipe's
+    --eval-every 5); the factors are positive. Without RESET_EVERY_STEPS,
+    no other RESET_* knob may be set."""
     every = muzero.RESET_EVERY_STEPS
     if not every:
         if (muzero.RESET_UNTIL_ENV_STEPS or muzero.RESET_SHRINK_NETS
@@ -2729,9 +2730,10 @@ class Run:
         self.own_play = None
         # Test C (RESET_EVERY_STEPS): the resets done, one dict each
         # (index, iteration, training_steps, env_steps), the actor's hold
-        # after the latest ({"until": step, "held": the acting states it
-        # keeps}) and the steps at which the held states were shipped
-        # (held_ships, distinct); all checkpointed
+        # after the latest ({"until": step, "from": the reset's step,
+        # "held": the acting states it keeps}) and the steps after a reset
+        # at which the held states were shipped (held_ships, distinct); all
+        # checkpointed
         self.reset_log = []
         self.hold = None
         self.held_ships = []
@@ -4803,7 +4805,11 @@ def bbf_reset(run, pipeline, it):
             # birth-searched by the reset nets
             pipeline._birth_states = pipeline._states()
     until = steps + muzero.RESET_HOLD_STEPS
-    run.hold = ({"until": until, "held": held}
+    # "from": the reset's step -- a ship AT it (a resume's pipeline
+    # construction from this iteration's checkpoint) re-sends what the
+    # uninterrupted run shipped before the reset, not a held ship (audit
+    # r2b MEDIUM-1)
+    run.hold = ({"until": until, "from": steps, "held": held}
                 if held is not None and muzero.RESET_HOLD_STEPS else None)
     run.reset_log.append({"index": index, "iteration": it,
                           "training_steps": steps,
@@ -5155,11 +5161,14 @@ class RayPipeline:
                else ())
         # Test C: past its hold's end the held states are dropped; within
         # it, the ship's step is recorded (held_ships: once per step, so a
-        # resume's re-ship at its checkpoint's step counts once)
+        # resume's re-ship at its checkpoint's step counts once; and only
+        # AFTER the reset's own step -- a resume from the reset iteration's
+        # checkpoint re-ships at that step what the run shipped before the
+        # reset: audit r2b MEDIUM-1)
         hold = getattr(self.run, "hold", None)
         if hold is not None and steps >= hold["until"]:
             self.run.hold = None
-        elif hold is not None:
+        elif hold is not None and steps > hold.get("from", -1):
             ships = getattr(self.run, "held_ships", None)
             if ships is None:
                 ships = self.run.held_ships = []

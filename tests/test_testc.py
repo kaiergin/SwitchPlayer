@@ -94,9 +94,11 @@ def make_run(spec, arm=C, steps=40000, env=13000):
 
 def trained(run):
     """Give the run a trained-looking state: momentum in every optimizer,
-    moved BN statistics, a target model synced 200 steps BEFORE the run's
-    step (so a reset's own stamp is visible: audit r1a TEST-2) that the
-    online nets then left."""
+    moved BN statistics, a target model synced 100 steps BEFORE the run's
+    step -- less than the 200-step interval, so the reset's own
+    _ensure_target_model() does not sync and only bbf_reset's lines can
+    set the target's stamp and snapshot (audit r1a TEST-2, r2a LOW-1) --
+    that the online nets then left."""
     tr = run.trainer
     for n, o in zip(ablation.NET_NAMES, ablation.OPT_NAMES):
         net, opt = getattr(tr, n), getattr(tr, o)
@@ -110,7 +112,7 @@ def trained(run):
                     m.running_mean.normal_()
                     m.running_var.uniform_(0.5, 2.0)
     steps = tr.training_steps
-    tr.training_steps = steps - 200
+    tr.training_steps = steps - 100
     tr._ensure_target_model()
     tr.training_steps = steps
     with torch.no_grad():
@@ -345,6 +347,10 @@ def test_the_reset_lands_after_the_rows_eval_before_the_checkpoint():
     src = inspect.getsource(ablation.run_one)
     loop = src[src.index("for it in range(start_it + 1, iterations + 1):"):]
     i = loop.index("if reset_due(run, last):")
+    # the iteration's sync and its next game's request come first: the
+    # hold keeps what that sync shipped (audit r2a NIT-2)
+    assert (loop.index("pipeline.sync()")
+            < loop.index("pipeline.request(it + 1)") < i)
     assert loop.index("pipeline.request_eval(it, 8,") < i
     assert loop.index("save_weight_snapshot(") < i
     assert i < loop.index("save_run_checkpoint(run, ck, {")
@@ -416,7 +422,8 @@ def test_the_reset_is_bbfs(in_arm, capsys):
     # the hold's end; the caches dropped; the in-flight game birth-searched
     # by the reset nets
     assert pipe.calls == ["acting", "states"]
-    assert set(run.hold) == {"until", "held"} and run.hold["until"] == 50000
+    assert set(run.hold) == {"until", "from", "held"}
+    assert run.hold["until"] == 50000 and run.hold["from"] == 40000
     assert run.hold["held"] is pipe.payload
     assert pipe._states_cache == pipe._acting_cache == (None, None)
     assert pipe._target_states_cache == (None, None)
@@ -499,14 +506,23 @@ def _perturb(run, scale):
                 p.add_(scale * torch.randn_like(p))
 
 
-def test_the_target_double_buffer_runs_on_from_the_reset(in_arm):
-    """Audit r1a TEST-2: the reset's stamp, then the 200-step syncs -- the
-    target stays the reset nets until the sync after next."""
+@pytest.mark.parametrize("synced_at", [39900, 40000])
+def test_the_target_double_buffer_runs_on_from_the_reset(in_arm, synced_at):
+    """Audit r1a TEST-2 / r2a LOW-1: the reset's stamp and snapshot, then
+    the 200-step syncs -- the target stays the reset nets until the sync
+    after next. Two orders: a sync 100 steps before the reset (only
+    bbf_reset's stamp keeps the next sync at 40,200), and the run's own at
+    an even iteration -- the refresh synced at 40,000 just before the
+    reset, its snapshot the PRE-reset nets, which only bbf_reset's
+    snapshot keeps out of the target at 40,200."""
     spec = in_arm(C)
     run = make_run(spec)
-    trained(run)                               # synced at 39,800
+    trained(run)                               # synced at 39,900
     tr = run.trainer
-    assert tr._target_synced_at == 39800
+    assert tr._target_synced_at == 39900
+    if synced_at == 40000:
+        tr._ensure_target_model()              # the refresh's sync
+        assert tr._target_synced_at == 40000
     ablation.bbf_reset(run, None, 20)
     assert tr._target_synced_at == 40000
     reset = states(tr.prediction)
@@ -630,6 +646,29 @@ def test_the_actor_keeps_the_held_weights_until_the_holds_end(monkeypatch):
     assert run.held_ships == [42000, 48000]
 
 
+def test_a_resumes_reship_at_the_resets_own_step_is_no_held_ship(
+        monkeypatch):
+    """Audit r2b MEDIUM-1: a resume from the reset iteration's own
+    checkpoint constructs the pipeline at the reset's step; its sync ships
+    the held states -- what the run shipped there before the reset -- but
+    counts no held ship (else every later row reads 5 per reset)."""
+    monkeypatch.setattr(muzero, "SCHEDULE_ENV_TARGET", None)
+    tr = SimpleNamespace(training_steps=40000)
+    run = SimpleNamespace(trainer=tr, env_steps=13000, held_ships=[],
+                          hold={"until": 50000, "from": 40000,
+                                "held": "HELD"})
+    shipped = []
+    pipe = _pipe(monkeypatch, run, shipped)
+    pipe.sync()
+    assert shipped == [("HELD", 40000, ())] and run.held_ships == []
+    for steps in (42000, 44000, 46000, 48000, 50000):
+        tr.training_steps = steps
+        pipe.sync()
+    assert run.held_ships == [42000, 44000, 46000, 48000]
+    assert [s for _st, s, _e in shipped] == [40000, 42000, 44000, 46000,
+                                             48000, 50000]
+
+
 def test_a_run_without_a_hold_ships_its_acting_states(monkeypatch):
     monkeypatch.setattr(muzero, "SCHEDULE_ENV_TARGET", None)
     run = SimpleNamespace(trainer=SimpleNamespace(training_steps=5),
@@ -674,7 +713,7 @@ def test_the_checkpoint_carries_the_resets_and_the_hold(
     a.reset_log = [{"index": 1, "iteration": 20, "training_steps": 40000,
                     "env_steps": 13000}]
     held = {"representation": {"conv1.weight": torch.randn(3, 2)}}
-    a.hold = {"until": 50000, "held": held}
+    a.hold = {"until": 50000, "from": 40000, "held": held}
     a.held_ships = [42000, 44000]
     path = tmp_path / "resume.ckpt"
     ablation.save_run_checkpoint(a, path, META)
@@ -682,7 +721,7 @@ def test_the_checkpoint_carries_the_resets_and_the_hold(
     muzero.LR_WARMUP_ORIGIN = 0
     ablation.load_run_checkpoint(b, path, EXPECT)
     assert b.reset_log == a.reset_log and b.reset_log is not a.reset_log
-    assert b.hold["until"] == 50000
+    assert b.hold["until"] == 50000 and b.hold["from"] == 40000
     assert torch.equal(b.hold["held"]["representation"]["conv1.weight"],
                        held["representation"]["conv1.weight"])
     assert b.held_ships == [42000, 44000]

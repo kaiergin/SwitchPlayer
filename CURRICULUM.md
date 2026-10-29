@@ -1048,6 +1048,50 @@ AMENDMENTS (audit r1):
       iterations 22-25 of each cycle (4 ships, 12 lives). Iteration 21
       plays the pre-reset weights through the pipeline's normal
       one-iteration lag either way.
+AUDIT r2 (fresh eyes on 97a846d3, static: memory below the test floor):
+both auditors found the same MEDIUM, and LOWs:
+  - MEDIUM: held_ships counted 5 for a reset after a resume from that
+    reset iteration's own checkpoint (every reset iteration is a
+    checkpoint iteration at --checkpoint-every 2). The pipeline's
+    construction sync re-ships, at the reset's step, what the run shipped
+    there before the reset. No effect on training; the counter would be
+    wrong and every later row would raise a false ALERT.
+  - A-LOW-1: the r1 target tests still could not detect the loss of
+    bbf_reset's snapshot or stamp lines: the reset's own target sync fired
+    200 steps after the helper's.
+  - A-LOW-2: BBF's reset_target is not "the target becomes the reset
+    online network" (see A7).
+  - B-LOW-1: the smoke never covered the cutoff, the supervisor's check on
+    real rows, or a resume from a reset's own checkpoint.
+  - B-LOW-2: the scorer's read (7) included C's reset dips (read (3)'s).
+  - NITs: the gate's docstring, the run_one order the hold relies on (sync
+    and the next request before the reset) unpinned, the supervisor
+    docstring, the hand-off's live lines (RESUMING, STOP), the launcher's
+    KEEP note, the scorer's notes and labels, the smoke's Tee and out dirs.
+FIXES r2 (a fresh-eyes r3 follows):
+  - the hold records its reset's step ("from"), and a held ship counts only
+    after it (+ a test of the resume re-ship);
+  - the target tests: the helper syncs 100 steps before the reset, and the
+    double-buffer test runs in both orders (that, and the run's own: the
+    refresh's sync at the reset's step);
+  - the smoke: a reset every 4 iterations (each a row and a checkpoint, as
+    in the run), the cutoff at 6,000 env steps (it bites mid-run), every
+    row through the supervisor's own reset_alert, the kill at reset 1's
+    own checkpoint (the MEDIUM's resume point), fresh out dirs;
+  - the scorer's read (7) without the reset dips (shown apart), read (6)'s
+    rows, notes when a trainer-BN verdict cannot be given;
+  - the NITs above.
+  (A7) THE TARGET: the pre-registration credits "the target model is set
+      to the reset online network" to BBF's reset_target. BBF's code
+      (spr_agent.py jit_reset, read 10-29 by audit r2a) draws a SECOND
+      independent init for the target instead: its encoder and transition
+      model become 0.5 x the target's own weights + 0.5 x that draw, and
+      its other layers that draw. We copy the reset online nets into both
+      buffers of our hard-lagged target and keep that. A random target
+      unrelated to the online nets would make the next 200-400 steps'
+      bootstraps come from an untrained value head of another network,
+      and BBF's EMA target (tau 0.005) is pulled to the online net within
+      about 1,000 steps anyway.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 

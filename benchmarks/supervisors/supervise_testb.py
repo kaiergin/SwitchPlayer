@@ -60,8 +60,8 @@ call). Its stop is its own target, 100,000. From their own run worktree
 For Test C read the text below's "five" / "f0-f4" / "F4" / "F{k-1}" /
 launch_testb.ps1 / post_testb.py as "two" / "r0, n0" / "N0" / "R0 (n0's
 'after' run)" / launch_testc.ps1 / post_testc.py; neither run has a prep,
-a master or a row 0. Each r0 row's "resets" is checked against the
-schedule (reset_alert: an ALERT when off it).
+a master or a row 0. Each r0 row's "resets" and "held_ships" are checked
+against the schedule (reset_alert: an ALERT when off it).
 
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
