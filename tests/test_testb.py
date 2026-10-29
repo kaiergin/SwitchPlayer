@@ -7,8 +7,10 @@ the arms, the env-keyed schedules (off: bit for bit), the stop gate, the
 own-play log and its reader, the actor's and the pipeline's logging, the
 loop's stop, student_arm's / student_gate's discount, the prep's discount
 rule, value check and log reader, master_spec's discount -- and, slow, a
-prep from a real logged F0-like master and F1's offline phase on it. CPU
-only."""
+prep from a real logged F0-like master and F1's offline phase on it. Test
+B2 (Kai, 2026-10-29): its arms T0-T2 (F0-F2 at the token arms' constant
+discount 0.997^4 and a planned 50 iterations), the swap's discount rule
+"keep" and, slow, a prep from a T0-like master that keeps it. CPU only."""
 import inspect
 import json
 import pathlib
@@ -38,6 +40,10 @@ DS2_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
 FAST = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
         "tokens-fast")
 F = [f"{FAST}-f{k}" for k in range(5)]
+# Test B2 (Kai, 2026-10-29): three generations at the constant discount
+TWO = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+       "tokens-two")
+T = [f"{TWO}-t{k}" for k in range(3)]
 ENV_ID = "MsPacmanNoFrameskip-v4"
 TK_VOCAB = ablation.ARMS[TK_ARM]["TOKEN_VOCAB"]
 DROP = ((0, 8), (0, 32), (5, 16), (1, 16))
@@ -47,7 +53,7 @@ F1_VOCAB = tuple(t for t in TK_VOCAB if t not in DROP)
 @pytest.fixture
 def arms(monkeypatch):
     """ARMS restored after a test applies --token-vocab."""
-    for arm in F + [G0_ARM, DS2_ARM, TK_ARM]:
+    for arm in F + T + [G0_ARM, DS2_ARM, TK_ARM]:
         monkeypatch.setitem(ablation.ARMS, arm, ablation.ARMS[arm])
 
 
@@ -95,6 +101,30 @@ def test_each_later_generation_is_the_previous_ones_distilled_student(k):
     assert fk["_student"] == "distill"
     assert fk["_ceiling_from_prep"] is True
     assert fk["_discount_from_prep"] is True
+
+
+def test_t0_is_f0_at_the_token_arms_discount_and_a_planned_50():
+    f0, t0 = ablation.ARMS[F[0]], ablation.ARMS[T[0]]
+    d = {k for k in set(f0) | set(t0) if f0.get(k) != t0.get(k)}
+    assert d == {"DISCOUNT", "_nominal_iterations", "_discount_rule", "_doc"}
+    # G0's (and every token arm's) 0.997 per frame, exactly
+    assert t0["DISCOUNT"] == ablation.ARMS[G0_ARM]["DISCOUNT"] == 0.997 ** 4
+    assert t0["_nominal_iterations"] == 50 and t0["_discount_rule"] == "keep"
+
+
+@pytest.mark.parametrize("k", [1, 2])
+def test_each_later_t_generation_is_fs_student_at_the_kept_discount(k):
+    t0, tk, f1 = (ablation.ARMS[T[0]], ablation.ARMS[T[k]],
+                  ablation.ARMS[F[1]])
+    d = {key for key in set(t0) | set(tk) if t0.get(key) != tk.get(key)}
+    assert d == {"SCHEDULE_OFFSET_STEPS", "_student", "_distill_offline_steps",
+                 "_distill_snapshot_every", "_ceiling_from_prep",
+                 "_discount_from_prep", "_master_arm", "_doc"}
+    d = {key for key in set(f1) | set(tk) if f1.get(key) != tk.get(key)}
+    assert d == {"DISCOUNT", "_nominal_iterations", "_discount_rule",
+                 "_master_arm", "_doc"}
+    assert tk["_master_arm"] == T[k - 1]
+    assert tk["DISCOUNT"] == 0.997 ** 4 and tk["_discount_rule"] == "keep"
 
 
 # --------------------------------------------------------------------------
@@ -488,6 +518,115 @@ def test_the_discount_rule_halves_the_gap_and_caps():
         0.994026946)
 
 
+def test_the_swaps_discount_rule_is_the_masters_arms():
+    """Test B2: the master's arm names the rule -- Test B's arms none
+    ("halve"), Test B2's "keep" -- and anything else stops the prep."""
+    assert distill.DISCOUNT_RULES == ("halve", "keep")
+    for arm in F:
+        assert distill.discount_rule(ablation.ARMS[arm]) == "halve"
+        assert "_discount_rule" not in ablation.ARMS[arm]
+    for arm in T:
+        assert distill.discount_rule(ablation.ARMS[arm]) == "keep"
+    assert distill.discount_rule({}) == "halve"
+    for bad in ("Keep", None, "", "halved", 1):
+        with pytest.raises(SystemExit, match="_discount_rule"):
+            distill.discount_rule({"_discount_rule": bad})
+    g = 0.997 ** 4
+    assert distill.swap_discount(g, "keep") == g
+    halved = distill.swap_discount(0.97, "halve")
+    assert halved == distill.student_discount_rule(0.97)
+    assert halved == pytest.approx(0.985)
+    src = inspect.getsource(distill.prep)
+    assert "rule = discount_rule(mspec)" in src
+    assert "g1 = swap_discount(g0, rule)" in src
+    for bad in ("Keep", None):
+        with pytest.raises(SystemExit, match="_discount_rule"):
+            distill.swap_discount(g, bad)
+    # a kept discount the student would refuse stops the prep (r2a NIT-2)
+    assert distill.swap_discount(0.997, "keep") == 0.997
+    with pytest.raises(SystemExit, match="past the cap 0.997"):
+        distill.swap_discount(0.998, "keep")
+
+
+def test_a_t_student_takes_the_preps_kept_discount(tmp_path, arms):
+    g = 0.997 ** 4
+    kept = {"discount_rule": "keep", "master_discount": g}
+    ablation.student_arm(T[1], _doc_file(tmp_path, d=g, master_arm=T[0],
+                                         **kept))
+    spec = ablation.ARMS[T[1]]
+    assert spec["DISCOUNT"] == spec["_student_discount"] == g
+    with ablation.arm_config(T[1]):
+        assert muzero.DISCOUNT == g
+
+
+@pytest.mark.parametrize("arm, doc, why", [
+    # a T student: its master T0's rule "keep" and discount, exactly
+    (1, {"d": 0.994026946, "discount_rule": "keep",
+         "master_discount": 0.997 ** 4}, "not the kept master discount"),
+    (1, {"d": 0.97, "discount_rule": "keep", "master_discount": 0.97},
+     "not the kept master discount"),
+    (1, {"d": 0.997 ** 4, "discount_rule": "halve",
+         "master_discount": 0.997 ** 4}, "not this student's master's 'keep'"),
+    (1, {"d": 0.997 ** 4, "master_discount": 0.997 ** 4},
+     "rule 'halve', not this student's master's 'keep'"),
+    # an F student: its master F0's "halve" (a prep without a rule is one)
+    (0, {"d": 0.985, "discount_rule": "keep", "master_discount": 0.985},
+     "not this student's master's 'halve'")])
+def test_student_arm_checks_the_preps_rule_against_its_master(
+        tmp_path, arms, arm, doc, why):
+    """Audit r1a LOW-3: a prep's rule must be the student's master arm's,
+    and a "keep" prep's discount the master's own."""
+    student, master = (T[1], T[0]) if arm else (F[1], F[0])
+    with pytest.raises(SystemExit, match=why):
+        ablation.student_arm(student, _doc_file(tmp_path, master_arm=master,
+                                                **doc))
+
+
+def test_a_t2_student_checks_its_student_masters_rule(tmp_path, arms):
+    """Audit r2a LOW-1: T2's master T1 is itself a student (the prep
+    records the vocabulary it played): the kept discount is checked against
+    T1's arm, as T1's against T0's."""
+    g = 0.997 ** 4
+    played = [list(t) for t in TK_VOCAB if t not in DROP[:2]]
+    kept = {"master_vocab": played, "discount_rule": "keep",
+            "master_discount": g}
+    static = ablation.ARMS[T[2]]
+    ablation.student_arm(T[2], _doc_file(tmp_path, d=g, master_arm=T[1],
+                                         **kept))
+    spec = ablation.ARMS[T[2]]
+    assert spec["DISCOUNT"] == spec["_student_discount"] == g
+    assert [list(t) for t in spec["_master_vocab"]] == played
+    for doc, why in (({"d": 0.994026946, "master_discount": 0.994026946},
+                      "not the kept master discount"),
+                     ({"d": g, "discount_rule": "halve"},
+                      "not this student's master's 'keep'")):
+        ablation.ARMS[T[2]] = static
+        with pytest.raises(SystemExit, match=why):
+            ablation.student_arm(T[2], _doc_file(
+                tmp_path, master_arm=T[1], **{**kept, **doc}))
+
+
+def test_student_arm_refuses_an_unknown_master_arm(tmp_path, arms):
+    ablation.ARMS[T[1]] = {**ablation.ARMS[T[1]], "_master_arm": "nope"}
+    with pytest.raises(SystemExit, match="master arm 'nope' is unknown"):
+        ablation.student_arm(T[1], _doc_file(
+            tmp_path, d=0.997 ** 4, master_arm="nope", discount_rule="keep",
+            master_discount=0.997 ** 4))
+
+
+def test_the_master_spec_of_a_t_student_master():
+    g = 0.997 ** 4
+    t1 = {**ablation.ARMS[T[1]], "TOKEN_VOCAB": F1_VOCAB,
+          "_token_vocab_sha256": "a" * 64, "_vocab_set_sha256": "b" * 64,
+          "REWARD_GROWTH_START": 11.25, "REWARD_GROWTH_CEILING": 11.25,
+          "_student_ceiling": 11.25, "DISCOUNT": g, "_student_discount": g}
+    got = distill.master_spec(T[1], {"spec": t1}, "m")
+    assert got == t1 and distill.discount_rule(got) == "keep"
+    with pytest.raises(SystemExit, match="beyond the student keys"):
+        distill.master_spec(T[1], {"spec": {**t1, "_discount_rule": "halve"}},
+                            "m")
+
+
 def test_log_lives_groups_games_as_record_does(tmp_path, monkeypatch):
     """A game ends with a life that ended it (real_done) or was truncated
     (not terminated); a game still running when the log ends is no game
@@ -554,18 +693,22 @@ MASTER_ARM = "test-fast-master"
 
 
 @pytest.fixture
-def logged(monkeypatch, tmp_path, restore_rngs, arms):  # noqa: F811
+def logged(request, monkeypatch, tmp_path, restore_rngs,  # noqa: F811
+           arms):
     """An F0-like master (random nets, a 4-sim search for speed, ending
     after 2 iterations) whose own play -- a few lives with rewards past one
     unit (_boosted) -- is logged as SelfPlayActor.play logs it, then
-    prepped from the log."""
+    prepped from the log. Indirectly parametrized with T[0]: a T0-like
+    master (Test B2's lineage: the "keep" rule) instead."""
+    base = getattr(request, "param", F[0])
+    student = T[1] if base == T[0] else F[1]
     _pin(monkeypatch)
     for k in ("SCHEDULE_ENV_TARGET", "SCHEDULE_ENV_STEPS", "OWN_PLAY_LOG"):
         monkeypatch.setattr(muzero, k, getattr(muzero, k))
-    static = {**ablation.ARMS[F[0]], "ACT_SEARCH_SIMS": 4}
+    static = {**ablation.ARMS[base], "ACT_SEARCH_SIMS": 4}
     monkeypatch.setitem(ablation.ARMS, MASTER_ARM, static)
-    monkeypatch.setitem(ablation.ARMS, F[1], {
-        **ablation.ARMS[F[1]], "_master_arm": MASTER_ARM})
+    monkeypatch.setitem(ablation.ARMS, student, {
+        **ablation.ARMS[student], "_master_arm": MASTER_ARM})
     ablation.ENV_NAME, ablation.FRAMESKIP, ablation.ACTIONS = ENV_ID, 4, 9
     log = ablation.OwnPlayLog(tmp_path / "own-play")
     with ablation.arm_config(MASTER_ARM) as spec, \
@@ -630,6 +773,7 @@ def test_prep_from_an_own_play_log(logged):
     assert h["master_ceiling"] == 1.0 and h["student_ceiling"] > 1.0
     assert h["master_discount"] == 0.97
     assert h["student_discount"] == pytest.approx(0.985)
+    assert h["discount_rule"] == "halve"
     logged_lives = distill.log_lives(pathlib.Path(h["log_dir"]), 2)[0]
     m = distill.reward_magnitudes(logged_lives, 10.0)
     assert h["student_ceiling"] == distill.halved_ceiling(m, 1.0)
@@ -642,6 +786,27 @@ def test_prep_from_an_own_play_log(logged):
     assert doc["student_discount"] == h["student_discount"]
     assert any("own-play log" in line for line in logs)
     assert any("student discount: 0.97 -> 0.985" in line for line in logs)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("logged", [T[0]], indirect=True)
+def test_a_test_b2_prep_keeps_the_masters_discount(logged):
+    """Test B2: the same prep from a T0-like master's log keeps its
+    discount, and the value check runs under it."""
+    header, out, logs, lives = logged
+    h, _recs = distill.read_set(out / "set.pkl")
+    g = 0.997 ** 4
+    assert h["master_discount"] == h["student_discount"] == g
+    assert h["discount_rule"] == "keep"
+    assert h["master_ceiling"] == 1.0 and h["student_ceiling"] > 1.0
+    logged_lives = distill.log_lives(pathlib.Path(h["log_dir"]), 2)[0]
+    assert h["value_max_student"] == pytest.approx(
+        distill.discounted_return_max(logged_lives, 10.0,
+                                      h["student_ceiling"], g), abs=1e-3)
+    doc = json.loads((out / "vocab.json").read_text())
+    assert doc["student_discount"] == g and doc["discount_rule"] == "keep"
+    assert any(f"student discount: {g} -> {g} (rule keep)" in line
+               for line in logs)
 
 
 @pytest.mark.slow
@@ -659,41 +824,48 @@ def test_the_value_check_refuses_a_support_too_small(logged, monkeypatch,
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("logged", [F[0], T[0]], indirect=True)
 def test_f1_trains_offline_at_the_preps_discount(logged, monkeypatch,
                                                 tmp_path):
+    """F1 -- and T1 (Test B2, audit r1a NIT-6: the kept discount) -- on
+    the prep of a logged master's play."""
     header, out, _, _ = logged
-    monkeypatch.setitem(ablation.ARMS, F[1], {
-        **ablation.ARMS[F[1]], "_distill_offline_steps": 4,
+    s1 = T[1] if header["discount_rule"] == "keep" else F[1]
+    monkeypatch.setitem(ablation.ARMS, s1, {
+        **ablation.ARMS[s1], "_distill_offline_steps": 4,
         "_distill_snapshot_every": 2, "SCHEDULE_OFFSET_STEPS": 4})
-    static = ablation.ARMS[F[1]]
-    ablation.student_arm(F[1], out / "vocab.json")
+    static = ablation.ARMS[s1]
+    ablation.student_arm(s1, out / "vocab.json")
     results = tmp_path / "f1"
     results.mkdir()
     ablation.RESULTS, ablation.TAG = results, "-test"
     _, lives = distill.read_set(out / "set.pkl")
-    with ablation.arm_config(F[1]) as spec, \
+    with ablation.arm_config(s1) as spec, \
             ablation._run_length_globals(30, 3), ablation.token_actions(), \
             ablation.env_schedule(20000):
         muzero.TRAINING_BATCHES = 8
         ablation.student_gate(spec, out / "set.pkl", True)
         ablation.env_stop_gate(spec, 20000, True, True, 60, True)
         assert muzero.DISCOUNT == header["student_discount"]
-        run = ablation.Run(F[1], 0, spec)
+        run = ablation.Run(s1, 0, spec)
         try:
             ablation.distill_prefill(run, lives)
-            ablation.distill_offline(run, F[1], 0, spec, True)
+            ablation.distill_offline(run, s1, 0, spec, True)
             assert run.trainer.training_steps == 4
             # the offline phase played no env step: every schedule at 0
             assert muzero.SCHEDULE_ENV_STEPS == 0
             assert muzero.prior_acting_temperature(4) == 0.5
         finally:
             run.env.close()
-    row0 = torch.load(results / f"snapshots-test-{F[1]}-seed0" /
+    row0 = torch.load(results / f"snapshots-test-{s1}-seed0" /
                       "weights-iter000.pth", weights_only=False)
     assert row0["spec"]["DISCOUNT"] == header["student_discount"]
     assert row0["spec"]["_student_discount"] == header["student_discount"]
-    # F2's prep could take it as its student master (its process sees the
-    # static arm, not student_arm's copy)
-    ablation.ARMS[F[1]] = static
-    got = distill.master_spec(F[1], row0, "row0")
+    # the next prep could take it as its student master (its process sees
+    # the static arm, not student_arm's copy)
+    ablation.ARMS[s1] = static
+    got = distill.master_spec(s1, row0, "row0")
     assert got["DISCOUNT"] == header["student_discount"]
+    if s1 == T[1]:
+        assert got["_discount_rule"] == "keep"
+        assert got["DISCOUNT"] == 0.997 ** 4

@@ -235,6 +235,39 @@ def student_discount_rule(g):
     return float(min(ablation.STUDENT_DISCOUNT_CAP, 1.0 - (1.0 - g) / 2.0))
 
 
+# Test B2 (Kai, 2026-10-29): the swap's discount rule, named by the master's
+# arm: Test B's "halve" (its arms carry no _discount_rule) or Test B2's
+# "keep" (the student keeps the master's discount).
+DISCOUNT_RULES = ("halve", "keep")
+
+
+def discount_rule(spec):
+    """The swap's discount rule in the master's spec (`_discount_rule`,
+    default "halve"); SystemExit on any other value."""
+    rule = spec.get("_discount_rule", "halve")
+    if rule not in DISCOUNT_RULES:
+        raise SystemExit(f"_discount_rule {rule!r} is not one of "
+                         f"{DISCOUNT_RULES}")
+    return rule
+
+
+def swap_discount(g, rule):
+    """The student's discount per base step under `rule`: the master's `g`
+    ("keep") or student_discount_rule(g) ("halve"); SystemExit on any other
+    rule."""
+    if rule == "keep":
+        import ablation
+        if float(g) > ablation.STUDENT_DISCOUNT_CAP:
+            # (the student would refuse it: ablation.student_discount)
+            raise SystemExit(f"a kept discount {g!r} past the cap "
+                             f"{ablation.STUDENT_DISCOUNT_CAP}")
+        return float(g)
+    if rule == "halve":
+        return student_discount_rule(g)
+    raise SystemExit(f"_discount_rule {rule!r} is not one of "
+                     f"{DISCOUNT_RULES}")
+
+
 def discounted_return_max(lives, unit, ceiling, g):
     """The largest |discounted return| at any base step of any life, its
     raw rewards clipped per base step at `ceiling` REWARD_UNITs (sign
@@ -610,14 +643,16 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
             disc = {}
             if mspec.get("_env_stop"):
                 # Test B: the student's discount (the gap 1 - g halved,
-                # capped), and the value support checked against the
-                # largest discounted clipped return in these games under
-                # the student's ceiling and discount (x2 headroom)
+                # capped; Test B2: the master's, kept), and the value
+                # support checked against the largest discounted clipped
+                # return in these games under the student's ceiling and
+                # discount (x2 headroom)
                 if "student_ceiling" not in clip:
                     raise SystemExit("a Test B prep needs REWARD_GROWTH "
                                      "(the student's ceiling)")
+                rule = discount_rule(mspec)
                 g0 = float(muzero.DISCOUNT)
-                g1 = student_discount_rule(g0)
+                g1 = swap_discount(g0, rule)
                 vmax = discounted_return_max(lives, clip["reward_unit"],
                                              clip["student_ceiling"], g1)
                 if VALUE_HEADROOM * vmax > float(muzero.VALUE_CEILING):
@@ -628,11 +663,12 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                         f"ceiling {clip['student_ceiling']:.4g} and "
                         f"discount {g1}")
                 disc = {"master_discount": g0, "student_discount": g1,
+                        "discount_rule": rule,
                         "value_max_student": round(vmax, 3),
                         "value_ceiling": float(muzero.VALUE_CEILING)}
-                log(f"student discount: {g0} -> {g1}; the largest "
-                    f"discounted return {vmax:.1f} units (value support "
-                    f"{muzero.VALUE_CEILING})")
+                log(f"student discount: {g0} -> {g1} (rule {rule}); the "
+                    f"largest discounted return {vmax:.1f} units (value "
+                    f"support {muzero.VALUE_CEILING})")
             shares, counts = token_shares(lives, len(master_vocab))
             vocab, dropped = student_vocabulary(master_vocab, shares,
                                                 drop_share)

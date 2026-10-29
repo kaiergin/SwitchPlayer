@@ -805,11 +805,11 @@ question:
   - The distillation sets shrink as the tokens lengthen: 10,418 / 10,102
       / 6,601 / 4,671 records.
   - The discount: the token arms' original is 0.997 per frame, i.e.
-      0.997^4 = 0.98807 per base step, constant over G0 -> DS2 -> G2.
+      0.997^4 = 0.98805 per base step, constant over G0 -> DS2 -> G2.
       Test B's ladder ran 0.97 -> 0.997 per base step. F0 at 0.97 kept
       pace with G0, so the low start did not visibly hurt. The constant is
       chosen because the ladder is tied to the swap count (with two swaps
-      it would stop at 0.9925) and because 0.98807 is the setting behind
+      it would stop at 0.9925) and because 0.98805 is the setting behind
       every positive result so far.
 QUESTION: on the same 100k env-step budget, do fewer and longer
 generations (two swaps, three generations of ~33.3k env steps) at the
@@ -818,14 +818,14 @@ Test B's four swaps? And than the current lineage?
 THE LINEAGE (seed 0; three generations T0-T2; every env step counted):
   T0 is from scratch: Test B's F0 recipe (TK's 36 tokens, policy-only
     acting, PREFIX_BN_PER_STEP, sign clip c0 = 1, the own-play log) at
-    DISCOUNT 0.98807 per base step. It runs until 33,333 of its own env
+    DISCOUNT 0.98805 per base step. It runs until 33,333 of its own env
     steps.
   T1, T2: each is the distilled student of the previous generation's final
     snapshot, through Test B's swap unchanged: the master's own play over
     its whole generation (~33k base steps), the halved-clip rule, the 1%
     vocabulary rule, the master's 50-sim birth search targets, 20,000
     offline steps, then online play. THE ONE CHANGE: the student's
-    discount equals the master's (0.98807 at every swap). The value check
+    discount equals the master's (0.98805 at every swap). The value check
     (A2) still runs.
   THE STOP (Test B's A1): generation k's --stop-env-steps is
     round(100,000 x (k + 1) / 3) minus the final env steps of T0..T(k-1):
@@ -868,7 +868,7 @@ DECISION AFTER:
   - (1a) WORSE: more frequent swaps are better; Test D can explore
     shorter generations.
   CAVEAT: against Test B two things change, the swap count (4 -> 2) and
-  the discount (the ladder -> constant 0.98807), so (1a) is on the pair.
+  the discount (the ladder -> constant 0.98805), so (1a) is on the pair.
   Against the current lineage, the swap timing (one swap after 59k plus a
   31.8k recording, against two at ~33k and ~67k with no recording) and
   the own-play data differ.
@@ -878,6 +878,57 @@ launcher generalized to a three-generation lineage; tests, a manifest, a
 fresh run tree. No change to Test B's behaviour.
 COST: the build and its audit loop while F4 trains, then ~1.3 days of
 training, launched after Test B's RESULT.
+AMENDMENTS (the build, before launch):
+  (A1) THE PREFILL CAP. A master's whole generation (~33.4-34k base steps)
+      is more than the replay holds (MAX_REPLAY_TRANSITIONS 31,250). The
+      student's prefill therefore evicts the oldest master lives to the
+      cap, as Test 2's DS2 did: roughly the master's first 3-4 iterations
+      (its 0.5-temperature start). The prep's clip, vocabulary and value
+      check still read the whole log. Read (3) adds the trainer log's
+      "distillation set: ... evicted to the caps" line, the lives and base
+      steps the student actually started from.
+  (A2) The discount's value is 0.997^4 = 0.988053892 (0.98805; the text
+      above first said 0.98807), bit-identical to G0's DISCOUNT.
+BUILT 2026-10-29 (pre-audit): the arms T0-T2 (experiments/ablation.py
+TWO_ARM: F0 / F1 with DISCOUNT 0.997^4, _nominal_iterations 50 and
+_discount_rule "keep"); the prep's rule (distill.discount_rule /
+swap_discount: the master arm's _discount_rule, Test B's arms none =
+"halve"; vocab.json "discount_rule"), student_arm's check of a prep's rule
+against its master arm's; supervise_testb.py generalized to a lineage
+table (variant letter f = Test B, t = Test B2; configure(), target()); a
+hand-off post_testb2.py, a launcher launch_testb2.ps1 (refuses until F4's
+marker, Test B's hand-off's "all done" and no Test B process), a checker
+check_post_testb2.py and a smoke smoke_testb2.py in the scratchpad;
+tests in test_testb.py and test_supervise_testb.py, and the T arms added
+to test_pbn.py's and test_harness.py's arm lists.
+AUDIT r1 (two fresh-eyes auditors, 10-29): r1a (the core) one MEDIUM --
+the T arms broke two preflight suites' arm lists (test_pbn, test_harness)
+-- and LOWs: the prefill cap (A1), no student-side check of the prep's
+rule; r1b (the chain) nothing above LOW -- the hand-off's echo list held
+F names, the launcher only checked that Test B's hand-off exited, the
+smoke lacked a trainer guard and keep checks. FIXES r1: all of them, plus
+the NITs (swap_discount raises on an unknown rule; the bite test accepts
+only AssertionError; a Test B2 run_prep test; T1's offline phase in the
+slow test; the text's 0.98805). Not changed: comparing the manifest's
+_commit to the run tree's HEAD (that HEAD is the manifest's own commit;
+the preflight's hash check catches a stale manifest). The first suite run
+then caught a test bug of the r1 fixes (the bite test's distill patch
+leaked into later probes of the same child): fixed (its own child).
+AUDIT r2 (fresh eyes, static: host memory below the test floor while F4
+trains): r2a (the core) nothing above LOW -- LOW: no test of T2's rule
+check against a STUDENT master (T1); NITs: an unknown master arm, a kept
+discount past the cap only refused at the student, wording. r2b (the
+chain) nothing above LOW -- LOW: the launcher's Test B process pattern
+also matched a preflight's quick-probe children (a false refusal); the
+smoke did not require Test B to be over; NITs: run folders created before
+the checks, the manifest pins also matching Test B's tree, target() not
+checking the lineage. FIXES r2: all of them (a T2 unit test and the
+smoke's prep2 step taking prep2 as T2; student_arm refuses an unknown
+master arm; swap_discount refuses a kept discount past 0.997; the
+launcher matches only Test B scripts, checks the tree is Test B2's
+build, creates the folders last; the smoke refuses until F4 is complete
+and no supervise_testb.py is alive; target() refuses a variant of
+another lineage).
 
 ### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
 

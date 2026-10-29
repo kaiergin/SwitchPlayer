@@ -1250,6 +1250,52 @@ for _k in range(1, 5):
     }
 del _k
 
+# Test B2 (Kai, 2026-10-29; pre-registered in CURRICULUM): Test B's lineage
+# with two swaps -- three generations T0-T2 of ~33,333 env steps each
+# (planned length 50 iterations) -- at the token arms' original constant
+# DISCOUNT, 0.997 per frame (0.997^4 per base step), in every generation:
+# the prep keeps the master's discount for the student (_discount_rule
+# "keep"; Test B's arms carry none, so distill.discount_rule's default
+# "halve").
+TWO_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+           "tokens-two")
+ARMS[TWO_ARM + "-t0"] = {
+    **ARMS[FAST_ARM + "-f0"],
+    "DISCOUNT": 0.997 ** 4,
+    "_nominal_iterations": 50,
+    "_discount_rule": "keep",
+    "_doc": "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman"
+            "-tokens-fast-f0 as Test B2's generation T0: from scratch at the "
+            "sign clip, PREFIX_BN_PER_STEP, the token arms' DISCOUNT 0.997^4 "
+            "per base step (0.997 per frame); ends at its env-step stop "
+            "(--stop-env-steps), the within-run schedules following its "
+            "env-step progress (planned length 50 iterations); its own play "
+            "logged at raw-step resolution for T1's distillation set. Run as "
+            "TK.",
+}
+for _k in range(1, 3):
+    ARMS[f"{TWO_ARM}-t{_k}"] = {
+        **ARMS[FAST_ARM + "-f1"],
+        "DISCOUNT": 0.997 ** 4,
+        "_nominal_iterations": 50,
+        "_discount_rule": "keep",
+        "_master_arm": f"{TWO_ARM}-t{_k - 1}",
+        "_doc": f"Test B2's generation T{_k}: the distilled student of "
+                f"T{_k - 1}'s final snapshot through Test B's swap -- its "
+                f"vocabulary and constant ceiling from --token-vocab (the "
+                f"prep of T{_k - 1}'s own-play log: the 1% rule, the "
+                f"halved-clip rule), its discount the master's (0.997^4 per "
+                f"base step: the prep's _discount_rule \"keep\"), the "
+                f"replay pre-filled with that log's re-tokenized lives and "
+                f"master-search targets (--distill-set), 20,000 offline "
+                f"steps (snapshots every 4,000; the last is row 0), then "
+                f"online play to its env-step stop, the within-run "
+                f"schedules following its env-step progress (planned length "
+                f"50 iterations); its own play logged for the next "
+                f"generation. Run as TK.",
+    }
+del _k
+
 # PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
 # BatchNorm statistics on the token arm", after Step 0 (iii)): TK with the
 # value-prefix head's BatchNorms keeping one set of running statistics per
@@ -2193,7 +2239,9 @@ def student_arm(arm, path):
     its master here, as DS2's set header does). When that master is itself
     a student (generation 2), the vocabulary must be a student vocabulary
     of the master's (the prep's master_vocab, kept as `_master_vocab`).
-    Refuses a non-student arm."""
+    An arm with `_discount_from_prep` (Test B) takes the prep's
+    student_discount, whose rule must be its master arm's (Test B2's
+    "keep": the master's own discount). Refuses a non-student arm."""
     spec = ARMS[arm]
     if spec.get("_student") not in ("distill", "fresh"):
         raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
@@ -2224,8 +2272,27 @@ def student_arm(arm, path):
                     "_student_ceiling": c})
     if spec.get("_discount_from_prep"):
         # Test B: the prep's per-generation discount (the gap 1 - g
-        # halved at each swap, capped at 0.997)
+        # halved at each swap, capped at 0.997; Test B2: the master's)
         d = student_discount(doc, path)
+        # Test B2 (audit r1a LOW-3): the prep ran under this student's
+        # master arm's rule, and "keep" kept that master's discount (the
+        # master arm's static DISCOUNT: under "keep", every generation's)
+        import distill
+        if spec.get("_master_arm") not in ARMS:
+            raise SystemExit(f"{path}: this student's master arm "
+                             f"{spec.get('_master_arm')!r} is unknown")
+        master = ARMS[spec["_master_arm"]]
+        rule = distill.discount_rule(master)
+        if doc.get("discount_rule", "halve") != rule:
+            raise SystemExit(f"{path}: a prep under the discount rule "
+                             f"{doc.get('discount_rule', 'halve')!r}, not "
+                             f"this student's master's {rule!r}")
+        if rule == "keep" and not (
+                d == doc.get("master_discount") == master.get("DISCOUNT")):
+            raise SystemExit(f"{path}: student_discount {d!r} is not the "
+                             f"kept master discount (vocab.json's "
+                             f"{doc.get('master_discount')!r}, the master "
+                             f"arm's {master.get('DISCOUNT')!r})")
         new.update({"DISCOUNT": d, "_student_discount": d})
     ARMS[arm] = new
     return ARMS[arm]
@@ -2234,8 +2301,8 @@ def student_arm(arm, path):
 def student_discount(doc, path):
     """Test B: the student's DISCOUNT the prep chose (vocab.json's
     "student_discount": the master's gap 1 - g halved, capped at
-    STUDENT_DISCOUNT_CAP) -- a float strictly between 0 and 1, at most the
-    cap."""
+    STUDENT_DISCOUNT_CAP; Test B2: the master's own) -- a float strictly
+    between 0 and 1, at most the cap."""
     d = doc.get("student_discount")
     if (isinstance(d, bool) or not isinstance(d, (int, float))
             or not math.isfinite(d) or not 0 < d < 1
@@ -2288,7 +2355,7 @@ def student_gate(spec, distill_set, snapshot_weights):
         # Test B: the prep's discount, held for the whole run
         d = spec.get("_student_discount")
         if d is None or muzero.DISCOUNT != d:
-            raise SystemExit(f"a Test B student runs at the prep's "
+            raise SystemExit(f"a Test B / B2 student runs at the prep's "
                              f"student_discount ({d!r}); got "
                              f"{muzero.DISCOUNT!r}")
     if kind == "fresh":

@@ -6,16 +6,22 @@ the old fixed master, to F{k-1}, in this same tree), plus the chain's own:
 f0 (no wait, no prep, but the guard), each f{k} waiting for F{k-1}'s marker
 and evals over its DYNAMIC rows (its ablation jsonl's in-run rows, its
 final iteration K among them; row 0 and the offline curve only after a
-student), THE STOP (BUDGET x (k + 1) less the earlier generations' final
-env steps: an overshoot never accumulates; a spent budget stops the
-chain), the master F{k-1}'s final snapshot at K, the NEAR RANDOM gate on
-its last two deployed rows, the prep's --from-log and --master-iterations
-K, set_intact's master / own-play log / discount checks, command() and the
-quick probe per variant, the guard / manifest / prep-integrity order
-before each launch, the child's environment, the stray-state rules (a
-student's own pre-checkpoint snapshots excepted), the singleton per
-variant, NO PROGRESS and the row alerts at each run's ceiling. CPU only,
-no launches.
+student), THE STOP (target(): 20,000 x (k + 1), less the earlier
+generations' final env steps: an overshoot never accumulates; a spent
+budget stops the chain), the master F{k-1}'s final snapshot at K, the NEAR
+RANDOM gate on its last two deployed rows, the prep's --from-log and
+--master-iterations K, set_intact's master / own-play log / discount
+checks, command() and the quick probe per variant, the guard / manifest /
+prep-integrity order before each launch, the child's environment, the
+stray-state rules (a student's own pre-checkpoint snapshots excepted), the
+singleton per variant, NO PROGRESS and the row alerts at each run's
+ceiling. CPU only, no launches.
+
+Test B2 (Kai, 2026-10-29; the last section): the same supervisor bound to
+the lineage "t" (configure; main() binds a variant's) -- three generations
+T0-T2 of ~33,333 env steps at the constant discount 0.997^4, the prep's
+rule "keep": its constants, stops, command, paths, quick probe and
+set_intact's rule check; Test B's own constants come back unchanged.
 
 No test reads LIVE state (the distillation step's audit r5 HIGH): the `sup`
 fixture points REPO (every run folder, probe jsonl, prep and snapshot of
@@ -252,15 +258,16 @@ def _finish(sup, v, final=27, env=20400, value=700.0, evals=True,
     return rows
 
 
-def _master_like(path, k, final, **change):
+def _master_like(path, k, final, arms=F, discounts=DISCOUNTS, **change):
     """F{k}'s final snapshot as distill.master_checks reads it (no nets:
     its arm, spec, steps and acting states): F0 as its arm after `final` x
     2,000 steps; a student as ablation.student_arm leaves its arm -- a
     student vocabulary (of its master's, kept as _master_vocab when that
     master is a student too), its prep's constant ceiling and discount --
-    after 20,000 offline + `final` x 2,000 steps."""
+    after 20,000 offline + `final` x 2,000 steps. `arms` / `discounts`: the
+    lineage's (Test B's F0-F4 by default; Test B2's T0-T2)."""
     import torch
-    spec = dict(ablation.ARMS[F[k]])
+    spec = dict(ablation.ARMS[arms[k]])
     steps = final * 2000
     if k:
         c = 2.0 * k + 3.25
@@ -268,12 +275,12 @@ def _master_like(path, k, final, **change):
                      "_token_vocab_sha256": "a" * 64,
                      "_vocab_set_sha256": "b" * 64,
                      "REWARD_GROWTH_START": c, "REWARD_GROWTH_CEILING": c,
-                     "_student_ceiling": c, "DISCOUNT": DISCOUNTS[k],
-                     "_student_discount": DISCOUNTS[k]})
+                     "_student_ceiling": c, "DISCOUNT": discounts[k],
+                     "_student_discount": discounts[k]})
         if k >= 2:
             spec["_master_vocab"] = VOCABS[k - 1]
         steps += 20000
-    blob = {"arm": F[k], "spec": spec, "training_steps": steps,
+    blob = {"arm": arms[k], "spec": spec, "training_steps": steps,
             "iteration": final, "acting_states": {"representation": {}}}
     for key, val in change.items():
         if key in blob:
@@ -290,7 +297,8 @@ def _master_ready(sup, v, final=27, **change):
     m = sup.master_of(v)
     _finish(sup, m, final=final)
     return _master_like(sup.snapshot_path(m, 0, final), sup.gen(m), final,
-                        **change)
+                        arms=list(sup.VARIANTS.values()),
+                        discounts=list(sup.DISCOUNTS.values()), **change)
 
 
 def test_the_sup_fixture_redirects_every_path(sup, tmp_path):
@@ -327,8 +335,8 @@ def test_recipe_is_gen2s_with_the_fast_arms_the_cap_and_the_stop(sup,
     assert sup.RUNS == {v: f"mspacman-fast-{v}" for v in V}
     assert sup.NAMES == {v: f"F{k}" for k, v in enumerate(V)}
     assert sup.SEEDS == {0: DATE}
-    assert (sup.ITERATIONS, sup.NOMINAL_ITERATIONS, sup.BUDGET) == (60, 30,
-                                                                    20000)
+    assert (sup.ITERATIONS, sup.NOMINAL_ITERATIONS, sup.target("f0")) == (
+        60, 30, 20000)
     assert sup.TRAIN_STEPS == g2sup.TRAIN_STEPS == 2000
     _finish(sup, "f0", final=27, env=20400, evals=False, files=False)
     g2 = g2sup.command("g2", 0)
@@ -601,11 +609,14 @@ def test_supervisor_refuses_bad_arguments(sup, monkeypatch, capsys):
     for argv in ([], ["f0"], ["0"], ["f0", "1"], ["f5", "0"], ["g2", "0"],
                  ["ds2", "0"], ["F0", "0"], ["f", "0"], ["f01", "0"],
                  ["f-1", "0"], ["f0", "x"], ["f0", "0", "1"], ["0", "f0"],
-                 ["f1", "0", "--no-wait"], ["f1", "0", "--stop-env-steps"]):
+                 ["f1", "0", "--no-wait"], ["f1", "0", "--stop-env-steps"],
+                 # Test B2's lineage: three generations, seed 0
+                 ["t3", "0"], ["t", "0"], ["t0", "1"], ["T0", "0"],
+                 ["t01", "0"], ["t1", "0", "1"]):
         assert sup.main(argv) == 2, argv
     out = capsys.readouterr().out
     assert ("usage: supervise_testb.py <variant: ['f0', 'f1', 'f2', 'f3', "
-            "'f4']> <seed: [0]>") in out
+            "'f4', 't0', 't1', 't2']> <seed: [0]>") in out
 
 
 def test_no_generation_2_leftovers(real_sup):
@@ -1100,10 +1111,10 @@ def test_an_undriven_predecessor_is_named_and_its_stops_are_kais_call(
 
 
 # --------------------------------------------------------------------------
-# THE STOP: BUDGET x (k + 1) less the earlier generations' final env steps
+# THE STOP: 20,000 x (k + 1) less the earlier generations' final env steps
 # --------------------------------------------------------------------------
 def test_f0s_stop_is_the_budget(sup):
-    assert sup.stop_env_steps("f0", 0) == sup.BUDGET == 20000
+    assert sup.stop_env_steps("f0", 0) == sup.target("f0") == 20000
     cmd = sup.command("f0", 0)                   # nothing on disk needed
     assert cmd[cmd.index("--stop-env-steps") + 1] == "20000"
 
@@ -1440,8 +1451,9 @@ def _write_prep(sup, v="f1", good=True, k=27, **doc):
             "source": "own-play log", "log_dir": sup.own_play_rel(m, 0),
             "log_iterations": k, "student_ceiling": 7.5,
             "master_discount": sup.DISCOUNTS[m],
-            "student_discount": distill.student_discount_rule(
-                sup.DISCOUNTS[m]),
+            "student_discount": distill.swap_discount(
+                sup.DISCOUNTS[m], sup.DISCOUNT_RULE),
+            "discount_rule": sup.DISCOUNT_RULE,
             "vocab": [[0, 4], [1, 4]], **doc}
     (d / "vocab.json").write_text(json.dumps(
         {key: val for key, val in full.items() if val != GONE}))
@@ -1805,6 +1817,11 @@ def test_a_prep_that_never_checks_out_fails(sup, prep_env, monkeypatch,
     ({"student_discount": 0.97}, "student_discount is 0.97"),   # unhalved
     ({"student_discount": 0.9925}, "student_discount is 0.9925"),
     ({"student_discount": 0.98501}, "student_discount is 0.98501"),
+    # the lineage's rule (Test B2): a prep without one is Test B's "halve"
+    ({"discount_rule": GONE}, ""),
+    ({"discount_rule": "keep"},
+     "discount_rule is 'keep', not the lineage's 'halve'"),
+    ({"discount_rule": None}, "discount_rule is None, not the lineage's"),
     # the master snapshot's bytes (audit r1 B-L2)
     ({"master_sha256": "0" * 64}, "master_sha256 is not "),
     ({"master_sha256": GONE}, "a prep of another timeline's snapshot"),
@@ -2772,3 +2789,230 @@ def test_prep_ceiling(sup, text, want):
         pathlib.Path(sup.prep_dir("f1"), "vocab.json").write_text(text)
     assert sup.prep_ceiling("f1") == want
     assert sup.run_ceiling("f1") == want
+
+
+
+# --------------------------------------------------------------------------
+# Test B2 (Kai, 2026-10-29): the same chain over three generations t0-t2
+# --------------------------------------------------------------------------
+TWO = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+       "tokens-two")
+T = [f"{TWO}-t{k}" for k in range(3)]
+TV = [f"t{k}" for k in range(3)]
+T_DATE = "2026-10-29"
+KEPT = 0.997 ** 4                 # the token arms' 0.997 per frame
+
+
+@pytest.fixture
+def tsup(sup):
+    """`sup` bound to Test B2's lineage, as main() binds it for t0-t2."""
+    sup.configure("t")
+    return sup
+
+
+LINEAGE_NAMES = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES",
+                 "ITERATIONS", "NOMINAL_ITERATIONS", "DISCOUNTS",
+                 "DISCOUNT_RULE", "SEEDS", "PREP_PREFIX")
+
+
+def test_test_b2s_lineage_and_test_bs_unchanged(real_sup):
+    sup = real_sup
+    assert set(sup.LINEAGES) == {"f", "t"} and sup.TOTAL_ENV_STEPS == 100000
+    loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
+    assert loaded["LINEAGE"] == "f"         # the module loads as Test B's
+    sup.configure("t")
+    assert (sup.LINEAGE, sup.GENERATIONS) == ("t", 3)
+    assert sup.VARIANTS == dict(zip(TV, T))
+    assert sup.RUNS == {v: f"mspacman-two-{v}" for v in TV}
+    assert sup.NAMES == {"t0": "T0", "t1": "T1", "t2": "T2"}
+    assert sup.SEEDS == {0: T_DATE} and sup.PREP_PREFIX == "two-prep"
+    assert (sup.ITERATIONS, sup.NOMINAL_ITERATIONS) == (100, 50)
+    assert sup.DISCOUNTS == {v: KEPT for v in TV}
+    assert sup.DISCOUNT_RULE == "keep"
+    assert [sup.target(v) for v in TV] == [33333, 66667, 100000]
+    with pytest.raises(SystemExit, match="f0 is not of the bound lineage"):
+        sup.target("f0")
+    for k, v in enumerate(TV):
+        spec = ablation.ARMS[sup.VARIANTS[v]]
+        assert spec["_env_stop"] is True and spec["OWN_PLAY_LOG"] is True
+        assert spec["_nominal_iterations"] == sup.NOMINAL_ITERATIONS
+        assert spec["DISCOUNT"] == sup.DISCOUNTS[v] == KEPT
+        assert distill.discount_rule(spec) == sup.DISCOUNT_RULE
+        assert sup.gen(v) == k and sup.is_student(v) == (k > 0)
+        assert sup.master_of(v) == (TV[k - 1] if k else None)
+        if k:
+            assert spec["_master_arm"] == T[k - 1]
+            assert sup.master_offline(v) == distill.master_offline_steps(
+                ablation.ARMS[T[k - 1]]) == (20000 if k > 1 else 0)
+    # Test B's own names and numbers come back exactly
+    sup.configure("f")
+    assert {k: getattr(sup, k) for k in LINEAGE_NAMES} == loaded
+    assert [sup.target(v) for v in V] == [20000 * (k + 1) for k in range(5)]
+    for v in V:
+        assert distill.discount_rule(
+            ablation.ARMS[sup.VARIANTS[v]]) == sup.DISCOUNT_RULE == "halve"
+
+
+def test_main_binds_the_variants_lineage(sup, monkeypatch, capsys):
+    monkeypatch.setattr(sup, "other_supervisors", lambda v: [])
+    monkeypatch.setattr(sup, "run_done", lambda v, s: True)
+    assert sup.main(["t1", "0"]) == 0
+    assert sup.LINEAGE == "t" and sup.VARIANTS == dict(zip(TV, T))
+    assert "RUN COMPLETE t1 s0" in capsys.readouterr().out
+    assert sup.main(["f2", "0"]) == 0
+    assert sup.LINEAGE == "f" and sup.VARIANTS == dict(zip(V, F))
+
+
+def test_test_b2s_stops_fill_its_100k(tsup):
+    sup = tsup
+    assert sup.stop_env_steps("t0", 0) == 33333
+    _finish(sup, "t0", final=48, env=33600, evals=False, files=False)
+    assert sup.stop_env_steps("t1", 0) == 66667 - 33600
+    _finish(sup, "t1", final=47, env=33200, evals=False, files=False)
+    assert sup.stop_env_steps("t2", 0) == 100000 - 66800
+
+
+def test_a_spent_test_b2_budget_names_its_generations(tsup):
+    _finish(tsup, "t0", final=48, env=60000, evals=False, files=False)
+    _finish(tsup, "t1", final=47, env=40000, evals=False, files=False)
+    with pytest.raises(SystemExit, match=(
+            r"STOP NOT POSITIVE: T2's --stop-env-steps would be 0 = 100000 "
+            r"- 100000 \(the final env steps of T0, T1: \[60000, 40000\]\)")):
+        tsup.stop_env_steps("t2", 0)
+
+
+def test_test_b2s_command_is_test_bs_at_its_cap(tsup):
+    sup = tsup
+    fsup = _load(SUPERVISORS / "supervise_testb.py", "supervise_testb_f")
+    for k, v in enumerate(TV):
+        f = V[k]
+        want = [x.replace(F[k], sup.VARIANTS[v])
+                .replace(fsup.prep_rel(f), sup.prep_rel(v))
+                for x in fsup.command(f, 0, 123)]
+        want[want.index("--iterations") + 1] = "100"
+        assert sup.command(v, 0, 123) == want, v
+    c0 = sup.command("t0", 0)
+    assert c0[c0.index("--stop-env-steps") + 1] == "33333"
+    assert c0[c0.index("--arms") + 1] == T[0] and "--token-vocab" not in c0
+    prep = f"benchmarks/results/two-prep-t1-s0-{T_DATE}"
+    c1 = sup.command("t1", 0, 123)
+    assert c1[c1.index("--token-vocab") + 1] == prep + "/vocab.json"
+    assert c1[c1.index("--distill-set") + 1] == prep + "/set.pkl"
+
+
+def test_test_b2s_paths_and_chain(tsup):
+    sup = tsup
+    for k, v in enumerate(TV):
+        rel, base, jsonl, ckpt, deaths = sup.paths(v, 0)
+        assert rel == f"benchmarks/results/mspacman-two-{v}-s0-{T_DATE}"
+        assert ckpt.endswith(f"resume-mspacmannoframeskip-skip4-{T[k]}"
+                             f"-seed0.ckpt")
+        assert sup.own_play_rel(v, 0) == (
+            f"{rel}/own-play-mspacmannoframeskip-skip4-{T[k]}-seed0")
+        assert sup.prep_rel(v) == (
+            f"benchmarks/results/two-prep-{v}-s0-{T_DATE}")
+    assert sup.predecessor("t0", 0) is None
+    name, marker, probes, _log, script, pvar, _flag = sup.predecessor("t2",
+                                                                     0)
+    assert (name, script, pvar) == ("T1", "supervise_testb.py", "t1")
+    assert marker == sup.paths("t1", 0)[3]
+    assert [os.path.basename(p) for p, _r in probes] == [
+        f"probe_exhaustive_eval-mspacman-two-t1-s0-{T_DATE}{s}.jsonl"
+        for s in ("-acting", "", "-offline-acting", "-offline")]
+    _finish(sup, "t0", final=48, env=33600)
+    _finish(sup, "t1", final=47, env=33200)
+    assert sup.pred_missing("t2", 0) == []
+    assert sup.master_final("t2", 0) == (47, sup.snapshot_path("t1", 0, 47))
+
+
+@pytest.mark.parametrize("k", range(3))
+def test_test_b2s_quick_probe_passes(tsup, k):
+    if k:
+        _master_ready(tsup, TV[k], final=48)
+    r = _py(tsup.quick(TV[k], 0))
+    assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_each_test_b2_discount_assert_of_the_quick_probe_bites(tsup):
+    """The constant discount and the "keep" rule, each alone: T0's
+    DISCOUNT, its rule or its planned length; a master's or a student's
+    _discount_rule; a prep rule that halves."""
+    sup = tsup
+    for k in (1, 2):
+        _master_ready(sup, TV[k], final=48)
+    a = "ablation.ARMS"
+    breaks = {
+        "t0": [f"{a}[{T[0]!r}]['DISCOUNT'] = 0.97",
+               f"{a}[{T[0]!r}]['_discount_rule'] = 'halve'",
+               f"{a}[{T[0]!r}]['_nominal_iterations'] = 30"],
+        "t1": [f"{a}[{T[0]!r}]['_discount_rule'] = 'halve'",
+               f"{a}[{T[1]!r}]['_discount_rule'] = 'halve'"],
+        "t2": [f"{a}[{T[1]!r}]['_discount_rule'] = 'halve'"]}
+    codes, controls = [], []
+    for v, preludes in breaks.items():
+        probe = sup.quick(v, 0)
+        anchor = f"spec = ablation.ARMS[{sup.VARIANTS[v]!r}]; "
+        assert probe.count(anchor) == 1
+        for prelude in preludes:
+            codes.append(probe.replace(anchor, prelude + "; " + anchor))
+        controls.append(probe)
+    got = _py_each(codes + controls)
+    # a prep rule that halves: it patches distill itself, which EACH does
+    # not restore, so it runs in a child of its own
+    anchor = f"spec = ablation.ARMS[{T[1]!r}]; "
+    halving = controls[1].replace(
+        anchor, "distill.swap_discount = lambda g, r: "
+        "distill.student_discount_rule(g); " + anchor)
+    assert halving != controls[1]
+    for code, g in zip(codes + [halving], got[:len(codes)]
+                       + _py_each([halving])):
+        # an assert of the probe's own, never the master checks' SystemExit
+        # (audit r1b NIT-4)
+        assert g.startswith("AssertionError"), (code[-300:], g)
+    assert got[len(codes):] == ["ok"] * 3            # the controls
+
+
+def test_test_b2s_prep_reads_t0s_final_snapshot_and_log(tsup, monkeypatch,
+                                                        capsys):
+    """run_prep under Test B2's lineage, the real master gate: T0's final
+    snapshot and own-play log, Test B2's prep folder (audit r1b NIT-7)."""
+    sup = tsup
+    _finish(sup, "t0", final=48, env=33600)
+    monkeypatch.setattr(sup, "wait_no_trainer", lambda *a: None)
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+    runs = []
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(sup, "t1", k=48))],
+           runs)
+    assert sup.run_prep("t1", 0, {}) is True
+    out = capsys.readouterr().out
+    want = ("MASTER T0: " + sup.snapshot_path("t0", 0, 48)
+            + " (iteration 48; deployed mean of its last two rows 700.00")
+    assert want in out
+    assert "PREP done (attempt 1): " + sup.prep_rel("t1") in out
+    args, _k = runs[0]
+    assert args == [sup.PY, "experiments/distill.py", "--master",
+                    sup.snapshot_path("t0", 0, 48), "--master-iterations",
+                    "48", "--out",
+                    f"benchmarks/results/two-prep-t1-s0-{T_DATE}", "--seed",
+                    "0", "--from-log", sup.own_play_rel("t0", 0)]
+    pick = json.loads(pathlib.Path(sup.prep_dir("t1"), "master.json")
+                      .read_text())
+    assert pick["which"] == "T0" and pick["iterations"] == 48
+
+
+def test_test_b2s_prep_must_keep_the_discount(tsup):
+    sup = tsup
+    _finish(sup, "t0", final=48, evals=False, files=False)
+    _write_prep(sup, "t1", k=48)
+    assert sup.set_intact("t1", 0) == (True, "")
+    halved = distill.student_discount_rule(KEPT)
+    _write_prep(sup, "t1", k=48, student_discount=halved)
+    assert sup.set_intact("t1", 0) == (False, (
+        f"vocab.json's student_discount is {halved!r}, not T1's {KEPT}"))
+    for rule, shown in (("halve", "'halve'"), (GONE, "'halve'"),
+                        (None, "None")):
+        _write_prep(sup, "t1", k=48, discount_rule=rule)
+        assert sup.set_intact("t1", 0) == (False, (
+            f"vocab.json's discount_rule is {shown}, not the lineage's "
+            f"'keep'"))

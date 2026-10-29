@@ -111,7 +111,9 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-rgrow-pbn",
                         "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-gen2-distill",
                         *(f"effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-fast-f{k}"
-                          for k in range(5))):
+                          for k in range(5)),
+                        *(f"effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-two-t{k}"
+                          for k in range(3))):
             assert spec["USE_AUGMENTATION"] is False, name
 
 

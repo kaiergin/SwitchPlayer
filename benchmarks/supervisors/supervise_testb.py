@@ -26,11 +26,30 @@ per variant, `predecessor()`, `wait_external`).
     python benchmarks/supervisors/supervise_testb.py f4 0
     python benchmarks/supervisors/supervise_testb.py --write-manifest
 
+TEST B2 (Kai, 2026-10-29; CURRICULUM.md "Next experiment (pre-registered)
+-- Test B2: two swaps in 100k env steps at the original constant
+discount"): the same chain over THREE generations t0-t2 (...-tokens-two-t0
+.. -t2; ~33,333 env steps each, --iterations 100 around a planned 50; the
+token arms' constant DISCOUNT 0.997^4 per base step, which the prep keeps
+for each student: _discount_rule "keep"), from its own run worktree:
+
+    python benchmarks/supervisors/supervise_testb.py t0 0   (.. t2 0)
+
+The variant's letter picks its lineage (LINEAGES, configure()); every rule
+below holds for both. "F{k}" below is generation k of either lineage (T{k}
+in Test B2); Test B2's launcher (launch_testb2.ps1) waits for Test B's F4
+and its hand-off's "all done" instead of Generation 2, and its hand-off is
+post_testb2.py. For Test B2, read the text below's "five" / "f0-f4" /
+"F4" / launch_testb.ps1 / post_testb.py as "three" / "t0-t2" / "T2" /
+launch_testb2.ps1 / post_testb2.py.
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
-accumulate): generation k's --stop-env-steps is BUDGET x (k + 1) minus the
-cumulative env steps of F0..F(k-1) at their final rows (a generation's
-final env steps: the env_steps of the last row of its own ablation jsonl,
-which the trainer writes at its final iteration); F0's is BUDGET = 20,000.
+accumulate): generation k's --stop-env-steps is target() --
+round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
+-- minus the cumulative env steps of F0..F(k-1) at their final rows (a
+generation's final env steps: the env_steps of the last row of its own
+ablation jsonl, which the trainer writes at its final iteration); F0's is
+target(f0) = 20,000 (Test B2's t0: 33,333).
 It is computed after the wait and before the preflight, on EVERY start (a
 resume included: the trainer's resume recipe holds it, and the
 predecessors' final rows never change once they are complete). A stop <= 0
@@ -140,26 +159,56 @@ import time
 
 FAST_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
             "tokens-fast")
-GENERATIONS = 5
-VARIANTS = {f"f{k}": f"{FAST_ARM}-f{k}" for k in range(GENERATIONS)}
-RUNS = {f"f{k}": f"mspacman-fast-f{k}" for k in range(GENERATIONS)}
-NAMES = {f"f{k}": f"F{k}" for k in range(GENERATIONS)}
-# The --iterations CAP: each run ends at its env-step stop, ~25-35
-# iterations (the arms' planned length _nominal_iterations).
-ITERATIONS = 60
-NOMINAL_ITERATIONS = 30
+TWO_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+           "tokens-two")
+# The lineages, keyed by a variant's letter: Test B's "f" (F0-F4, ~20,000
+# env steps each, the discount ladder) and Test B2's "t" (Kai 2026-10-29:
+# T0-T2, ~33,333 each, the token arms' constant 0.997^4 per base step).
+# "iterations" is the --iterations CAP (each run ends at its env-step stop,
+# near the arms' planned length "nominal" = _nominal_iterations);
+# "discounts" the pre-registered discount per base step of each generation
+# under the prep's "rule" (distill.discount_rule: Test B's gap 1 - g halved
+# at each swap, capped at 0.997; Test B2's kept); "date" the runs'.
+LINEAGES = {
+    "f": {"arm": FAST_ARM, "run": "mspacman-fast", "prep": "fast-prep",
+          "generations": 5, "iterations": 60, "nominal": 30,
+          "discounts": (0.97, 0.985, 0.9925, 0.99625, 0.997),
+          "rule": "halve", "date": "2026-10-28"},
+    "t": {"arm": TWO_ARM, "run": "mspacman-two", "prep": "two-prep",
+          "generations": 3, "iterations": 100, "nominal": 50,
+          "discounts": (0.997 ** 4,) * 3,
+          "rule": "keep", "date": "2026-10-29"},
+}
+# Every lineage's budget: generation k's stop brings its cumulative env
+# steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
+TOTAL_ENV_STEPS = 100000
+
+
+def configure(letter):
+    """Bind lineage `letter`'s names and numbers (LINEAGES) module-wide:
+    the module loads as Test B's ("f"); main() binds its variant's."""
+    global LINEAGE, GENERATIONS, VARIANTS, RUNS, NAMES, ITERATIONS
+    global NOMINAL_ITERATIONS, DISCOUNTS, DISCOUNT_RULE, SEEDS, PREP_PREFIX
+    spec = LINEAGES[letter]
+    LINEAGE, GENERATIONS = letter, spec["generations"]
+    names = [f"{letter}{k}" for k in range(GENERATIONS)]
+    VARIANTS = {v: f"{spec['arm']}-{v}" for v in names}
+    RUNS = {v: f"{spec['run']}-{v}" for v in names}
+    NAMES = {v: v.upper() for v in names}
+    ITERATIONS, NOMINAL_ITERATIONS = spec["iterations"], spec["nominal"]
+    DISCOUNTS = dict(zip(names, spec["discounts"]))
+    DISCOUNT_RULE = spec["rule"]
+    # the pre-registered seed and the runs' date
+    SEEDS = {0: spec["date"]}
+    PREP_PREFIX = spec["prep"]
+
+
+configure("f")
 TRAIN_STEPS = 2000
-# Env steps per generation: generation k's stop brings the lineage's
-# cumulative env steps to BUDGET x (k + 1).
-BUDGET = 20000
 # F0's constant ceiling: the sign clip (REWARD_GROWTH_START = CEILING = 1);
 # a student's is its prep's student_ceiling.
 F0_CEILING = 1.0
-# The pre-registered discount per base step: F0's 0.97, then the gap 1 - g
-# halved at each swap, capped at 0.997 (distill.student_discount_rule);
-# DISCOUNT_TOL absorbs the rule's float rounding.
-DISCOUNTS = {"f0": 0.97, "f1": 0.985, "f2": 0.9925, "f3": 0.99625,
-             "f4": 0.997}
+# DISCOUNT_TOL absorbs the halving rule's float rounding.
 DISCOUNT_TOL = 1e-9
 DISCOUNT_CAP = 0.997
 # A distilled student's offline steps before its iteration 1 (and so its
@@ -205,8 +254,6 @@ NEAR_RANDOM_TOL = 1e-6
 MODE = ["--ray", "--cpu-actor"]
 ENV_ID = "MsPacmanNoFrameskip-v4"
 TAG = "-mspacmannoframeskip-skip4"        # ablation's TAG for ENV_ID, skip 4
-# the pre-registered seed and the runs' date
-SEEDS = {0: "2026-10-28"}
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 # The shared interpreter lives in the main tree (worktrees have no .venv).
@@ -275,15 +322,15 @@ AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
 
 
 def gen(variant):
-    """The generation k of `variant` ("f<k>")."""
+    """The generation k of `variant` ("f<k>"; Test B2's "t<k>")."""
     return int(variant[1:])
 
 
 def master_of(variant):
     """The variant whose final snapshot is `variant`'s master (F{k-1}'s);
-    None for f0 (from scratch)."""
+    None for f0 / t0 (from scratch)."""
     k = gen(variant)
-    return f"f{k - 1}" if k else None
+    return f"{variant[0]}{k - 1}" if k else None
 
 
 def is_student(variant):
@@ -310,7 +357,7 @@ def prep_rel(variant):
     """A student's prep folder (REPO-relative): set.pkl, vocab.json
     (written last: the prep's completion signal; it carries student_ceiling
     and student_discount), master.json, prep.log. f0 has none."""
-    return f"benchmarks/results/fast-prep-{variant}-s0-{SEEDS[0]}"
+    return f"benchmarks/results/{PREP_PREFIX}-{variant}-s0-{SEEDS[0]}"
 
 
 def prep_dir(variant):
@@ -339,26 +386,39 @@ def probe_path(probe_run, suffix):
                         f"probe_exhaustive_eval-{probe_run}{suffix}.jsonl")
 
 
+def target(variant):
+    """The lineage's cumulative env steps after `variant`'s generation k:
+    round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) -- Test B's 20,000 x
+    (k + 1), Test B2's 33,333 / 66,667 / 100,000. SystemExit for a variant
+    of another lineage than the bound one (audit r2b NIT-3)."""
+    if variant[:1] != LINEAGE:
+        raise SystemExit(f"{variant} is not of the bound lineage "
+                         f"{LINEAGE!r}")
+    return round(TOTAL_ENV_STEPS * (gen(variant) + 1) / GENERATIONS)
+
+
 def stop_env_steps(variant, seed):
-    """Generation k's --stop-env-steps: BUDGET x (k + 1) minus F0..F(k-1)'s
-    final env steps (final_row), so one generation's overshoot past its
-    stop shortens the next instead of accumulating; F0's is BUDGET.
+    """Generation k's --stop-env-steps: target() minus F0..F(k-1)'s final
+    env steps (final_row), so one generation's overshoot past its stop
+    shortens the next instead of accumulating; F0's is target(f0).
     SystemExit "STOP UNKNOWN" while a predecessor is not complete, "STOP NOT
     POSITIVE" when the lineage has spent its budget (Kai's call)."""
     k = gen(variant)
+    earlier = [f"{variant[0]}{j}" for j in range(k)]
     spent = []
-    for j in range(k):
+    for v in earlier:
         try:
-            spent.append(final_row(f"f{j}", seed)[1])
+            spent.append(final_row(v, seed)[1])
         except SystemExit as e:
             raise SystemExit(f"STOP UNKNOWN: {e}")
-    target = BUDGET * (k + 1)
-    stop = target - sum(spent)
+    target_steps = target(variant)
+    stop = target_steps - sum(spent)
     if stop <= 0:
-        names = ", ".join(f"F{j}" for j in range(k))
+        names = ", ".join(NAMES[v] for v in earlier)
         raise SystemExit(f"STOP NOT POSITIVE: {NAMES[variant]}'s "
-                         f"--stop-env-steps would be {stop} = {target} - "
-                         f"{sum(spent)} (the final env steps of {names}: "
+                         f"--stop-env-steps would be {stop} = "
+                         f"{target_steps} - {sum(spent)} (the final env "
+                         f"steps of {names}: "
                          f"{spent}) -- the lineage spent its budget (Kai's "
                          f"call)")
     return stop
@@ -439,10 +499,11 @@ def write_manifest():
 
 def quick(variant, seed):
     """The import probe for `variant`'s arm (Test B's: PREFIX_BN_PER_STEP,
-    the own-play log, the env-step stop at a planned 30 iterations; every
-    flag's module default off) and the prep module. f0: from scratch at
-    DISCOUNT 0.97 and the sign clip. A student: the distilled student of
-    F{k-1}'s arm, at its prep's ceiling and discount -- ending with the
+    the own-play log, the env-step stop at the lineage's planned length;
+    every flag's module default off) and the prep module. f0: from scratch
+    at the lineage's first DISCOUNT and the sign clip. A student: the
+    distilled student of F{k-1}'s arm, at its prep's ceiling and discount
+    (the lineage's rule applied to the master's) -- ending with the
     prep's own master checks on F{k-1}'s REAL final snapshot
     (distill.master_checks: its spec against this tree's arm, its final
     step after its offline steps; Generation 2's audit r1 A-L1 / B-L2: an
@@ -472,7 +533,8 @@ def quick(variant, seed):
             "hasattr(muzero, 'schedule_steps'); "
             "assert hasattr(distill, 'log_lives') and "
             "hasattr(distill, 'student_discount_rule') and "
-            "hasattr(distill, 'master_checks'); ")
+            "hasattr(distill, 'master_checks'); "
+            f"assert distill.discount_rule(spec) == {DISCOUNT_RULE!r}; ")
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "
@@ -497,8 +559,9 @@ def quick(variant, seed):
         f"assert distill.master_offline_steps(master) == "
         f"{master_offline(variant)}; "
         f"assert ablation.STUDENT_DISCOUNT_CAP == {DISCOUNT_CAP}; "
-        f"assert abs(distill.student_discount_rule({DISCOUNTS[m]}) - "
-        f"{DISCOUNTS[variant]}) <= {DISCOUNT_TOL}; "
+        f"assert distill.discount_rule(master) == {DISCOUNT_RULE!r}; "
+        f"assert abs(distill.swap_discount({DISCOUNTS[m]}, "
+        f"{DISCOUNT_RULE!r}) - {DISCOUNTS[variant]}) <= {DISCOUNT_TOL}; "
         "assert hasattr(ablation, 'student_gate') and "
         "hasattr(ablation, 'student_arm') and "
         "hasattr(ablation, 'student_discount') and "
@@ -896,7 +959,8 @@ def set_intact(variant, seed):
     a prep of F{k-1}'s final snapshot (its arm, its final iteration K, its
     offline steps, that snapshot's path) from F{k-1}'s own-play log (source
     and folder), with a valid student_ceiling and the pre-registered
-    student_discount (DISCOUNTS: the gap 1 - g halved, capped)."""
+    student_discount (DISCOUNTS) under the lineage's rule (DISCOUNT_RULE;
+    a vocab.json without one is Test B's "halve")."""
     try:
         with open(os.path.join(prep_dir(variant), "vocab.json"),
                   encoding="utf-8") as f:
@@ -942,6 +1006,10 @@ def set_intact(variant, seed):
             or abs(d - DISCOUNTS[variant]) > DISCOUNT_TOL):
         return False, (f"vocab.json's student_discount is {d!r}, not "
                        f"{NAMES[variant]}'s {DISCOUNTS[variant]}")
+    if doc.get("discount_rule", "halve") != DISCOUNT_RULE:
+        return False, (f"vocab.json's discount_rule is "
+                       f"{doc.get('discount_rule', 'halve')!r}, not the "
+                       f"lineage's {DISCOUNT_RULE!r}")
     # the snapshot's bytes too, not only its path and iteration: a fresh
     # restart of the master that ends at the same K would otherwise pass
     # (audit r1 B-L2)
@@ -1104,9 +1172,9 @@ def settle_stop(variant, seed):
             if k < 2:
                 time.sleep(60)
             continue
-        target = BUDGET * (gen(variant) + 1)
-        print(f"STOP {variant} s{seed}: --stop-env-steps {stop} = {target} - "
-              f"{target - stop} (the lineage's target after "
+        steps = target(variant)
+        print(f"STOP {variant} s{seed}: --stop-env-steps {stop} = {steps} - "
+              f"{steps - stop} (the lineage's target after "
               f"{NAMES[variant]}, less the earlier generations' final env "
               f"steps)", flush=True)
         return stop
@@ -1495,9 +1563,14 @@ def main(argv):
         pass
     if "--write-manifest" in argv:
         return write_manifest()
+    if argv and argv[0][:1] in LINEAGES:
+        # the variant's lineage: Test B's f0-f4 or Test B2's t0-t2
+        configure(argv[0][:1])
     if (len(argv) != 2 or argv[0] not in VARIANTS
             or not argv[1].isdigit() or int(argv[1]) not in SEEDS):
-        print(f"usage: supervise_testb.py <variant: {sorted(VARIANTS)}> "
+        every = [f"{c}{k}" for c, spec in LINEAGES.items()
+                 for k in range(spec["generations"])]
+        print(f"usage: supervise_testb.py <variant: {every}> "
               f"<seed: {sorted(SEEDS)}> | --write-manifest", flush=True)
         return 2
     variant, seed = argv[0], int(argv[1])
