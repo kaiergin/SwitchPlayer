@@ -1377,6 +1377,16 @@ SWAP 2 PREP (F1 -> F2; 18:27-18:30 10-28, attempt 1; read (3)):
       extra records. There were 4 uniform fallbacks. The mean visit mass
       discarded on dropped tokens is 0.059. The prep took 191 s.
 F2 LAUNCHED 18:31 10-28 (attempt 1, fresh).
+F2 ROW 0 (interim, 20:38 10-28):
+  READ (2) transfer: row 0 is 745.7 deployed (SD 138.0) and 884.0
+      trainer-BN. The master's final row is 962.3 (trainer-BN 897.7), so
+      -216.6 deployed, descriptive (one-row band +-464); trainer-BN is
+      -13.7. Unlike swap 1, there is no jump at this swap; it sits below
+      the master like the current lineage's swaps (DS2 -49, G2 -306).
+  The offline curve (deployed / trainer-BN): 803 / 736 at 4k, 844 / 843
+      at 8k, 805 / 755 at 12k, 784 / 803 at 16k; row 0 (20k) 746 / 884.
+  READ (5) row 0: p1_ratio 0.93, so FIXED (16 tokens, ceiling 18.10).
+  Frames per decision, deployed: 8.7 at row 0.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
