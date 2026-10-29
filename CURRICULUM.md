@@ -1433,6 +1433,17 @@ SWAP 3 PREP (F2 -> F3; 01:13-01:15 10-29, attempt 1; read (3)):
   TARGETS: 6,601 records (F2's longer tokens: fewer decisions per base
       step), no splits, no uniform fallbacks. The prep took 130 s.
 F3 LAUNCHED 01:16 10-29 (attempt 1, fresh).
+F3 ROW 0 (interim, 03:16 10-29):
+  READ (2) transfer: row 0 is 1037.0 deployed (SD 199.0) and 811.0
+      trainer-BN. The master's final row is 834.3 (trainer-BN 921.3), so
+      +202.7 deployed, descriptive (one-row band +-464); trainer-BN is
+      -110.3.
+  The offline curve (deployed / trainer-BN): 863 / 862 at 4k, 915 / 1093
+      at 8k, 977 / 1058 at 12k, 1091 / 1086 at 16k; row 0 (20k) 1037 /
+      811. Deployed rises through the offline phase, unlike F2's flat
+      curve.
+  READ (5) row 0: p1_ratio 1.04, so FIXED (16 tokens, ceiling 24.02).
+  Frames per decision, deployed: 15.6 at row 0, the longest so far.
 LATER (Kai 2026-10-27, not pre-registered yet):
   - TEST C: BBF-style resets on the winning lineage. Candidates: a student
     started from a shrink-and-perturb copy of the master (conv layers 50%
