@@ -789,6 +789,133 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Test B2: two swaps in 100k env steps at the constant discount, three generations T0-T2 (seed 0), 2026-10-30
+
+(Pre-registration: "Next experiment (pre-registered) -- Test B2", below
+Test B's RESULT; the interim notes per generation are there.)
+RUN (from the run worktree Y:\SwitchPlayer-testb2-run, detached at
+a8c83a58, manifest from the audited c57d2a16): launched 14:03 10-29, T2's
+last evals 17:13 10-30 (27.2 h). Each generation ran in one attempt with
+no deaths. Every supervisor.err is empty, the hand-off raised no ALERT,
+and no eval game was capped. Both master gates passed. Training steps per
+generation were 94k / 112k / 104k, 310k in all, including the 2 x 20k
+offline steps.
+EXACT eval (30 noop starts, prior argmax). Every score is the unclipped
+score of a whole game. DEPLOYED is primary; trainer-BN is secondary. cum =
+the lineage's cumulative env steps, in thousands.
+       row     0     5    10    15    20    25    30    35    40    45  final
+  T0   cum     -   3.2   6.3   9.9  13.9  17.6  21.4  25.1  28.6  32.0  33.6 (47)
+       dep     -   400   601   714   690   706   768   701   705   746  1062
+       tBN     -   181   614   701  1184   731   933   743   739   754   759
+  T1   cum  33.6  37.0  40.2  44.1  47.5  51.1  55.0  58.7  62.6  66.4  67.1 (46)
+       dep   892   730   656   850   901  1045  1849  1123  1668  1406  1314
+       tBN   719   696   697   766  1036  1175  1156  1750  1463  1474  1259
+  T2   cum  67.1  70.6  74.7  78.6  82.9  86.5  90.4  94.4  98.4     - 100.1 (42)
+       dep  1559  1517  1468  1457  1482  1528  1539  1592  1688     -  1699
+       tBN  1207  1703  1392  1654  1421  1515  1490  1587  1681     -  1663
+  The offline phases' checkpoints 1-4, deployed / trainer-BN: T1 710 / 633,
+  706 / 736, 740 / 834, 745 / 898; T2 1655 / 1237, 1406 / 1461, 1391 /
+  1296, 1431 / 1540.
+READ (1a) PRIMARY at 100k: T2's rows in [90k, 100.1k] are rows 30 / 35 /
+  40 / 42 (n = 4): 1539.3 / 1592.0 / 1687.7 / 1699.0. Their mean is 1629.5
+  deployed (g 1.358), against Test B's F4 window of 1015.9 (n = 4): +613.6
+  -> BETTER (band +-306.7). Trainer-BN is 1605.2 against 1155.6: +449.7 ->
+  BETTER (band +-306.7).
+READ (1b) against the current lineage (DS2 rows 0 / 5 / 10, 1163.8):
+  +465.7 -> BETTER (band +-331.3). Trainer-BN 1605.2 against 1259.9:
+  +345.3 -> BETTER (band +-331.3, a margin of 14). References, not
+  verdicts: EfficientZero 1281.2, BBF 2008.3, EZ-V2 2251.0. B2's window is
+  above EfficientZero and below BBF and EZ-V2 (one seed).
+READ (2) per swap: transfer is row 0 against the master's final row; the
+  jump is the student's rows 5 and 10 against the master's last two rows;
+  the rate is the student's OLS deployed rate per 1k env steps.
+      swap      transfer   jump   student rate
+      T0 -> T1      -169   -211          +24.5
+      T1 -> T2      +245   +133           +5.2
+  T0's own rate was +11.6. T0's final row (1062) sits +316 above its row
+  45, so the first swap's transfer and jump are measured against a high
+  single row; against T0's rows 30-45 (730), T1's row 0 is +162.
+READ (3) the clip, the discount, the vocabulary and the swap data:
+      gen  clip   discount  tokens  reward_kept   set records  lives by temp
+      T0   1      0.98805       36  0.49 -> 0.79            -  72 / 33 / 36
+      T1   7.26   0.98805       22  0.84-0.93           7,174  72 / 33 / 33
+      T2   17.40  0.98805       18  0.84-0.89           6,564            -
+  The set records column is the distillation set built from that
+  generation's master's log (141 / 138 lives over 33,616 / 33,436 base
+  steps). A1's prefill cap evicted the oldest 13 lives (2,942 base steps)
+  and 12 lives (2,831), so the students started from 128 / 126 master
+  lives (31,126 / 31,079 base steps). "Lives by temp" counts that
+  generation's own logged lives at temperature 0.5 / 0.25 / 0.125; T2's
+  log was never read, since no swap followed it. The discount was kept at
+  every swap (rule "keep"). Both value checks passed: the largest
+  discounted return was 27.1 / 46.3 units, against a 5,000-unit support.
+READ (4) the prior: policy_maxp is 0.59-0.80 in T0 (0.64 at row 5, 0.59
+  at its final row), 0.64-0.72 in T1 and 0.63-0.70 in T2. The search
+  targets' entropy is 1.00-1.45 / 1.14-1.76 / 0.87-1.74; the 0.87 is T2's
+  final row alone. There is no collapse.
+READ (5) mechanism: FIXED at every probed row. p1_ratio at row 0 / final:
+  T0 - / 0.31, T1 0.64 / 0.30, T2 0.78 / 0.29.
+READ (6) stability: the largest adjacent deployed drop within each
+  generation (row 0 included) is -67 (T0, rows 30 -> 35) / -725 (T1, rows
+  30 -> 35) / -49 (T2, rows 5 -> 10). T1's -725 is outside the one-row
+  band (+-464). It follows a +803 rise into row 30 (1849), and trainer-BN
+  rose over the same pair (1156 -> 1750), so row 30 is a single high row,
+  not a collapse. Across the swaps, row 0 against the master's final row
+  is -169 / +245. T2 never dropped by more than 49 and rose at every row
+  from row 15 on.
+READ (7) means per 20k window of cumulative env steps (every in-run row
+  whose cumulative env step falls in the window, the students' row 0
+  included; n per B2 window 5 / 7 / 6 / 7 / 6):
+      window              0-20k  20-40k  40-60k  60-80k  80-100k
+      Test B2 deployed      622     801    1071    1484    1588
+      Test B deployed       503     881     845    1003    1023
+      current deployed      540     896    1107       -    1164 (91-98k)
+      Test B2 trainer-BN    682     763    1097    1450    1559
+      Test B trainer-BN     660     812     934     951    1106
+      current trainer-BN    524     790    1147       -    1260
+READ (8) T0 against G0 over the first 33.6k env steps (rows 5-47 against
+  G0's rows 5-50, n = 10 each): deployed 709.2 against 665.8 (+43.4,
+  inside the band of +-194.0); trainer-BN 734.0 against 632.1. The shapes
+  differ. G0 rose steadily (162 @2.8k -> 740 @19.8k -> 875 @32.9k). T0
+  reached 714 by 9.9k and then stayed at 690-768 until its final row
+  (1062), with its schedules compressed to 33k.
+PRE-REGISTERED DECISION: (1a) BETTER -> fewer, longer generations beat
+  four swaps; the generation length becomes an input to Test D's trigger
+  (a minimum length). CAVEAT (pre-registered): against Test B two things
+  changed, the swap count (4 -> 2) and the discount (Test B's ladder ->
+  the constant 0.98805), so (1a) is on the pair. Kai's call (10-30) is
+  already made: the Test C series (BBF's proposed changes) runs first,
+  starting with C and its no-reset twin C0. Then, if B2 holds up, a
+  multi-seed swap-count curve (0-4 swaps at one constant discount), which
+  separates the swap count from the discount. C0 (T0's recipe to 100k,
+  no swap) gives the first 0-swap seed.
+Beyond the letter (one seed, within-run bands, so "consistent with"):
+  - Longer generations improve within themselves. T1 rose from 892 at
+    row 0 to 1463 over rows 40-46 (+24.5 per 1k env steps), and T2 rose
+    steadily from row 15 to its end (1457 -> 1699). Test B's generations
+    after F0 were flat or falling (+2.1 / +1.5 / -8.2 / -2.1).
+  - Where the gains came: across the swaps, the jumps are -211 / +133.
+    Within the generations, row 0 to the final row is +422 (T1) and +140
+    (T2). Test B was the reverse: its gains came at the swaps.
+  - The gap to Test B opens at 40-60k (1071 against 845) and widens to
+    +481 at 60-80k and +565 at 80-100k. Against the current lineage, B2
+    is level through 40-60k (1071 against 1107) and 424 higher in the last
+    window (1588 against 1164), at no recording cost.
+  - Decision speed (frames per decision in the in-run evals): T0 22.5-25.4,
+    T1 19.7-23.4, T2 18.9-21.8, so about 2.4-3.2 decisions per second at
+    60 fps from the start, like G0 (20.9-23.0 at rows 60-90). Test B's F0
+    at discount 0.97 was at 6.8, and its tokens lengthened only over the
+    generations. The vocabulary shrank 36 -> 22 -> 18 (Test B: 36 -> 18
+    -> 16 -> 16 -> 16).
+  - The distillation sets: 7,174 / 6,564 records from about 33.5k base
+    steps each, against Test B's 10,418 -> 4,671 from about 20k each.
+  - T0 against Test B's F0 (0-20k: 622 against 503) also differs in the
+    discount (0.98805 against 0.97), so part of B2's lead over Test B
+    may come from the discount itself. The swap-count curve at one
+    discount separates the two.
+  - Deployed and trainer-BN are level in B2's final window (1629.5
+    against 1605.2).
+
 ### Next experiment (pre-registered) -- Test C: BBF-style resets in one 100k run, against a no-reset twin (Kai, 2026-10-29)
 
 DECISION: Kai 2026-10-29, while Test B2's T0 trains:
