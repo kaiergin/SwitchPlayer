@@ -1509,6 +1509,11 @@ SWAP 2 PREP 08:04: t2's preflight passed; MASTER T1 = iteration 46 (the
 deployed mean of its last two rows 1360, g 1.081); PREP done on attempt 1;
 T2's stop 32,948 env steps (100,000 less 67,052). T2 LAUNCHED 08:07 10-30
 (attempt 1, fresh).
+T2 ROWS 0-5 (10:45 10-30). The offline phase's checkpoints 1-4, deployed /
+trainer-BN: 1655 / 1237, 1406 / 1461, 1391 / 1296, 1431 / 1540. Row 0 (the
+student after distillation, 67,052 cumulative env steps): 1559 / 1207,
+above the master's 1360. Row 5 (70,573): in-run return 1716; the projector
+erank 29.7 (no early dip this time; T1's was 4.06).
 
 ### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
 
