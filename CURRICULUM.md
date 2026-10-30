@@ -789,6 +789,135 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Queued experiment (pre-registered) -- E0: an action-equivalence census on the agent's own play (Kai, 2026-10-30)
+
+DECISION: Kai, 2026-10-30. He asked whether an inverse dynamics model on
+the agent's own play can find which actions actually have consequences:
+  "actions 'left - up - left - no action - no action - up' might result
+  in the exact same game play as 'left - no action - no action - no
+  action - no action' due to the dynamics of the game and a bunch of the
+  inputs not actually making a difference depending on what the current
+  state of the game is. I want to figure out if there is a way to use the
+  inverse dynamics model on its own gameplay to then discover what tokens
+  might overall simplify search."
+  "I don't want to reinforce behavior but I do want to take successful
+  behavior and see if it generalizes into other places."
+Kai's answers (10-30) to the three questions:
+  - When: in the gap after C0 completes, before the next BBF test.
+  - Ground truth: the emulator's state save/restore is "ok for now as a
+    test to see if the theory holds". It does not work long term: it
+    would train the IDM faster than real-time play allows in environments
+    with no simulator.
+  - Equivalence: "identical frames work for now". Later it may have to be
+    identical latents.
+THE IDEA: at a given state many inputs, or input sequences, are
+outcome-equivalent: they lead to the same game. Formally this is an MDP
+homomorphism (Ravindran & Barto): (state, action) pairs with identical
+transitions and rewards merge. Search needs one representative per
+outcome class. Today 50 simulations spread over 18-36 children, many of
+them possibly duplicates. Duplicates split the visits and blur the policy
+targets. Merging them lets the same simulations go deeper, or lets fewer
+simulations do the same work: the real-time lever. The deployed agent
+plays the prior and does not search; search builds the training targets
+(the 50-sim birth search, the refresh).
+QUESTION (E0, measurement only): on the agent's own state distribution,
+how many distinct outcomes do the tokens, and short input sequences,
+actually produce per state? That is the action space's effective
+branching factor, against its nominal size. If it is close to the
+nominal size, grouping cannot pay on this game, and the line stops here
+cheaply.
+METHOD:
+  - THE MAIN LINE: Test B2's final T2 snapshot (iteration 42) plays
+    whole games as the exact eval plays them: deployed acting states,
+    prior argmax, MsPacmanNoFrameskip-v4, noop starts 1..N, the 3000
+    base-step per-life cap. N = 30 games, the exact eval's count.
+  - AT EVERY DECISION of the main line, the emulator state is saved and
+    branches are played from it. After each branch the state is
+    restored, and the main line plays the agent's own token.
+  - TOKEN BRANCHES: all 36 grid tokens (9 actions x 4, 8, 16 and 32
+    frames), not only T2's 18. Each token is followed by no input (NOOP)
+    until a common window ends 60 frames (1 s) after the longest token
+    (32 + 60 = 92 frames from the decision). A short token with no input
+    after it is thereby compared with a long one: Kai's example.
+  - SEQUENCE BRANCHES: every sequence of L = 1, 2, 3 base steps (4
+    frames each; 9, 81 and 729 sequences), each followed by NOOP to a
+    common window of 12 + 60 frames. Expanded breadth-first, with
+    identical emulator states merged: identical states have identical
+    futures under the same inputs, so the classes are exact.
+  - EQUIVALENCE (Kai): two branches are equivalent when every raw frame
+    of the common window is identical. Secondary, stricter: identical
+    emulator state at the window's end, which also catches state the
+    screen does not show yet (a buffered input, a random-number byte).
+  - THE GAME END: a branch in which a life is lost is compared like any
+    other (its frames show the loss).
+READS:
+  (1) PRIMARY: the effective branching factor of T2's own vocabulary,
+      the mean over decisions of the number of frame-equivalence classes
+      among its 18 tokens, against 18. Also for the full 36-token grid,
+      against 36. With the distribution over decisions (median, the 10th
+      and 90th percentiles).
+  (2) by duration: classes among the 9 actions at 4, 8, 16 and 32 frames.
+      Across durations: how often a short token followed by no input
+      equals a longer token of the same action (is the duration choice
+      redundant?).
+  (3) sequences: the number of distinct outcomes k_L for L = 1, 2, 3,
+      against 9^L, and the per-step growth k_L / k_(L-1).
+  (4) free decisions: the share of decisions where every token is
+      equivalent (the choice changed nothing), and the share with at most
+      two classes (plausibly "continue" against "reverse").
+  (5) the prior's split: at each decision, the entropy of T2's prior over
+      its tokens against the entropy of the same mass summed over the
+      frame classes. The gap is the uncertainty spent on choices that
+      change nothing: the blur that merged search would remove.
+  (6) frames against emulator state: classes under the strict definition
+      against the frame definition. A large gap means hidden state (a
+      buffered input or a random-number byte) separates choices the screen
+      cannot yet tell apart.
+DECISION AFTER (ratios, so the rule carries to other games):
+  - (1) at most half the nominal size: grouping can at least double what
+    search spends per distinct choice. Next: E1 (can a learned model,
+    trained on the agent's own play alone, recover these classes?), then
+    E2.
+  - (1) above three quarters of the nominal size: grouping does not pay
+    on Ms. Pac-Man. Kai's call (another game, Tetris, or stop).
+  - In between: Kai's call.
+THE LINE AFTER E0 (designed, not pre-registered; each is pre-registered
+on its own once the one before it reads):
+  - E1: a learned equivalence model, scored against E0's census. Two
+    candidates: an IDM p(token | s_t, s_t+k) trained on the agent's own
+    logged play (tokens it cannot tell apart are equivalent), and the
+    existing dynamics model (children whose predicted next latents
+    coincide). Training data is the agent's own play only; the emulator's
+    branches only score the model, per Kai's long-term rule. The IDM's
+    known trap is confusing "equivalent" with "never tried here"; the
+    census exposes it.
+  - E2: merged search. At each node, children are grouped by predicted
+    outcome and one per class is expanded; the class's visits go to a
+    canonical token (the simplest input). Two arms against the
+    unmerged recipe: the same simulations (deeper search), and fewer
+    simulations (the same play for less compute).
+  - E3: tokens from successful play. Recorded sequences are canonicalized
+    by the equivalence model, so that Kai's two sequences become one
+    effect. Frequent effects are mined from high-advantage stretches and
+    added as tokens at a swap, in the freed vocabulary slots. The student
+    learns when to use them unaided: vocabulary, not policy, as in P5. The
+    likely Ms. Pac-Man token is variable-length, "this way until the next
+    decision point"; there the dynamics model must also predict the
+    token's length, for the discount. This is P5e with the IDM trained on
+    the agent's own play, brought forward.
+  - Later (Kai): equivalence by identical latents instead of frames, for
+    environments with no simulator.
+PRIOR ART: action elimination (Zahavy et al. 2018, irrelevant actions
+dropped in a text game's large action space); abstraction inside tree
+search (Jiang, Singh & Lewis 2014, approximate homomorphisms in UCT;
+Anand et al. 2015, ASAP-UCT); an inverse model on the agent's own play to
+find what it controls (Pathak et al. 2017; Choi et al. 2019 on Atari).
+BUILD: a new probe (benchmarks/probes/probe_action_census.py) and its
+tests. No trainer file changes; the live Test C run tree is untouched.
+Audited like every build, the tests run after C0.
+COST: about 1-3 h of one process (the policy on the GPU, the emulator on
+the CPU), in the gap after C0, before the next BBF test.
+
 ### RESULT -- Test B2: two swaps in 100k env steps at the constant discount, three generations T0-T2 (seed 0), 2026-10-30
 
 (Pre-registration: "Next experiment (pre-registered) -- Test B2", below
