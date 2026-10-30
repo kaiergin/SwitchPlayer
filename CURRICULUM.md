@@ -1461,6 +1461,14 @@ passed; MASTER T0 = iteration 47 (the deployed mean of its last two rows
 904, g 0.612); PREP done on attempt 1; T1's stop 33,051 env steps (the
 lineage's 66,667 less T0's 33,616). T1 LAUNCHED 22:13 10-29 (attempt 1,
 fresh).
+T1 ROWS 0-5 (00:49 10-30). The offline phase's checkpoints 1-4, deployed /
+trainer-BN: 710 / 633, 706 / 736, 740 / 834, 745 / 898. Row 0 (the
+student after distillation): 892 / 719, level with the master's 904. Row
+5 (3,339 env steps): in-run return 726. Its projector erank is 4.06, the
+lowest early value in these lineages. T0 went 16 -> 34 -> 7-8 (rows 25-30)
+-> 20-24 at its end; G2 was 6.8 at row 10 and 32-40 from row 30 on; Test
+B's F0-F4 stayed 16-59 throughout. One row of a diagnostic, not a read:
+watched over T1's next rows.
 
 ### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
 
