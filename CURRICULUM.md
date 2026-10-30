@@ -1469,6 +1469,24 @@ lowest early value in these lineages. T0 went 16 -> 34 -> 7-8 (rows 25-30)
 -> 20-24 at its end; G2 was 6.8 at row 10 and 32-40 from row 30 on; Test
 B's F0-F4 stayed 16-59 throughout. One row of a diagnostic, not a read:
 watched over T1's next rows.
+T1 COMPLETE 07:45 10-30 (attempt 1, no deaths; 46 iterations, 33,436 env
+steps, 9.5 h). The erank recovered: 11, 18, 19, 19, 30, 28, 33, 27, 34
+(rows 10-46). Deployed / trainer-BN by row (cumulative env steps): 0
+(33,616) 892 / 719; 5 (36,955) 730 / 696; 10 (40,232) 656 / 697; 15
+(44,119) 850 / 766; 20 (47,527) 901 / 1036; 25 (51,139) 1045 / 1175; 30
+(54,951) 1849 / 1156; 35 (58,743) 1123 / 1750; 40 (62,640) 1668 / 1463;
+45 (66,396) 1406 / 1474; 46 (67,052) 1314 / 1259. Within T1, row 0's 892
+-> rows 40-46's 1463 deployed: a rise inside the generation, unlike Test
+B's flat-to-negative within-generation rates after F0. The 20k windows so
+far, deployed (n) / trainer-BN: 0-20k 622 (5) / 682; 20-40k 801 (7) / 763;
+40-60k 1071 (6) / 1097; 60-80k 1462 (3, open until T2's rows) / 1399.
+Test B's: 503 / 881 / 845 / 1003 / 1023; the current lineage's: 540 / 896
+/ 1107 / - / 1164. Read (5) at row 46: p1 0.225 eval vs 0.750 trainer-BN.
+No read before the RESULT; the primary read is the [90k, end] window.
+SWAP 2 PREP 08:04: t2's preflight passed; MASTER T1 = iteration 46 (the
+deployed mean of its last two rows 1360, g 1.081); PREP done on attempt 1;
+T2's stop 32,948 env steps (100,000 less 67,052). T2 LAUNCHED 08:07 10-30
+(attempt 1, fresh).
 
 ### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
 
