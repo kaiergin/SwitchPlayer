@@ -1301,6 +1301,31 @@ the C tests with BBF proposed changes are tested."
     window against C0's), but only as a single-seed read.
   - C and C0 keep the built order (C first, then C0): no change to the
     audited supervisor.
+PRE-LAUNCH (10-30, after Test B2's RESULT, nothing else running): the 25
+suites all pass in the build tree (17:17-17:32). The GPU smoke
+(smoke_testc.py, 20 gradient steps per iteration, a reset every 4
+iterations, a 2-iteration hold, the cutoff at 8,000 env steps, the stop
+at 13,000) passes every step:
+  - r0: resets after iterations 4, 8 and 12 (2,562 / 5,290 / 7,521 env
+    steps); the cutoff stops the fourth; the stop at iteration 23. Every
+    row's resets and held ships pass the supervisor's reset_alert, and the
+    RESET lines match.
+  - kill: killed right after iteration 4's checkpoint (reset 1's own step,
+    the hold open); the resume did not repeat reset 1, and resets 2 and 3
+    followed after iterations 8 and 12.
+  - n0: the control runs clean (the plasticity read, no reset fields, no
+    RESET line).
+LAUNCHED 18:17 10-30 from the run worktree Y:\SwitchPlayer-testc-run,
+detached at d682fa5e: testb_manifest.json rewritten from the audited
+build (2a51e527; seven AUDITED files changed against Test B2's, and
+test_testc.py added). In that tree, before the launch: the manifest check
+and the quick probes of r0 and n0 passed, both with a 100,000 env-step
+stop. launch_testc.ps1 passed its checks and started the hand-off
+post_testc.py and the supervisors r0 and n0. r0's preflight (manifest,
+quick probe, the 25 suites in the run tree) passed. C LAUNCHED 18:29
+(attempt 1, fresh). n0 waits for C's completion and evals. Expected: about
+140-150 iterations and about 28 h per run. Reset 1 is due after
+iteration 20.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
