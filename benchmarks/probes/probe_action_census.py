@@ -353,7 +353,8 @@ def check_snapshot(vocab, env):
 def exact_eval_row(path):
     """The snapshot's deployed exact-eval row (probe_exhaustive_eval's
     -acting file next to this probe, or in the run tree's probes folder),
-    or None. `path` is resolved by the caller."""
+    or None; the last matching row of the first file holding one (a
+    re-evaluated iteration's newest). `path` is resolved by the caller."""
     run = path.parent.parent.name
     it = int(path.stem[-3:]) if path.stem[-3:].isdigit() else None
     dirs = [HERE] + ([path.parents[3] / "probes"]
@@ -362,6 +363,7 @@ def exact_eval_row(path):
         f = d / f"probe_exhaustive_eval-{run}-acting.jsonl"
         if not f.exists():
             continue
+        found = None
         for line in f.read_text().splitlines():
             try:
                 r = json.loads(line)
@@ -369,7 +371,9 @@ def exact_eval_row(path):
                 continue
             if (r.get("iteration") == it and "max_noop" not in r
                     and r.get("env") == ENV_ID and "games" in r):
-                return r
+                found = r
+        if found is not None:
+            return found
     return None
 
 
@@ -383,22 +387,27 @@ def same_game(played, ref):
             and int(ref[3]) == int(played[3]))
 
 
-def validity(games, ref, censused, argmax_mismatches, replay_mismatches):
+def validity(games, ref, censused, argmax_mismatches, replay_mismatches,
+             n_games=None):
     """A3: (ok, reasons). `games` {noop: played tuple}; `ref` the exact-eval
     row or None (a smoke run without one: ok None, nothing compared);
-    `censused` {noop: decisions censused} (checked against the game's
-    decisions when the census was not cut short)."""
+    `censused` {noop: decisions censused}, against the game's decisions
+    (at most MAX_DECISIONS); `n_games` the games a full run must play (it
+    stops at the first game that differs from the exact eval)."""
     reasons = []
+    if n_games is not None and len(games) < n_games:
+        reasons.append(f"stopped after {len(games)} of {n_games} games")
     if ref is not None:
         for n, g in games.items():
             r = ref["games"].get(str(n))
             if r is None or not same_game(g, r):
                 reasons.append(f"game {n} {list(g)} != exact eval {r}")
-    if not MAX_DECISIONS:
-        for n, g in games.items():
-            if censused.get(n) != int(g[3]):
-                reasons.append(f"game {n}: {censused.get(n)} decisions "
-                               f"censused of {int(g[3])}")
+    for n, g in games.items():
+        want = (int(g[3]) if not MAX_DECISIONS
+                else min(MAX_DECISIONS, int(g[3])))
+        if censused.get(n) != want:
+            reasons.append(f"game {n}: {censused.get(n)} decisions "
+                           f"censused of {want}")
     if argmax_mismatches:
         reasons.append(f"{argmax_mismatches} decisions whose prior argmax "
                        f"is not the agent's token")
@@ -425,6 +434,10 @@ def main(argv):
     if pe.SEARCH_SIMS:
         raise SystemExit("the census plays the prior argmax: unset "
                          "PROBE_SEARCH_SIMS")
+    if GAMES < 1 or SEQ_EVERY < 1 or MAX_DECISIONS < 0:
+        raise SystemExit(f"CENSUS_GAMES {GAMES} and CENSUS_SEQ_EVERY "
+                         f"{SEQ_EVERY} must be >= 1, CENSUS_MAX_DECISIONS "
+                         f"{MAX_DECISIONS} >= 0")
     path = pathlib.Path(argv[0]).resolve()
     vocab = pe.snapshot_vocab(path)
     check_snapshot(vocab, pe.ENV)
@@ -450,12 +463,20 @@ def main(argv):
                     census.game, census.index = n, 0
                     games[n] = pe.play(run, n)
                     censused[n] = census.index
+                    same = (None if ref is None else same_game(
+                        games[n], ref["games"].get(str(n), ())))
                     print(f"game {n}: return {games[n][0]:.0f}, "
                           f"{games[n][3]} decisions, {len(census.recs)} "
-                          f"censused [{time.time() - t0:.0f}s]", flush=True)
+                          f"censused [{time.time() - t0:.0f}s]"
+                          + ("" if same is None else " MATCH" if same else
+                             f" MISMATCH (exact eval "
+                             f"{ref['games'].get(str(n))})"), flush=True)
+                    if same is False and not SMOKE:
+                        break                  # VOID whatever follows
         ok, reasons = validity(games, ref, censused,
                                census.argmax_mismatches,
-                               census.replay_mismatches)
+                               census.replay_mismatches,
+                               n_games=None if SMOKE else GAMES)
         rec = {"snapshot": str(path), "run": run_name,
                "iteration": (int(path.stem[-3:]) if path.stem[-3:].isdigit()
                              else None),
@@ -467,9 +488,14 @@ def main(argv):
                                                   games.values()])), 3),
                "exact_eval_mean": None if ref is None else ref["exact_mean"],
                "secs": round(time.time() - t0),
+               "threads": torch.get_num_threads(),
                **summarize(census.recs, len(vocab)),
                "main_line_ok": ok, "void_reasons": reasons}
         if ok is False:
+            rec["verdict_if_valid"] = rec["verdict"]
+            for k in ("verdict_1", "verdict_1b"):
+                if k in rec:
+                    rec[k] = "VOID"
             rec["verdict"] = "VOID (" + "; ".join(reasons)[:300] + ")"
         with open(HERE / f"probe_action_census-{run_name}"
                          f"{'-smoke' if SMOKE else ''}.jsonl", "a") as f:

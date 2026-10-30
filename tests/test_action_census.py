@@ -43,12 +43,12 @@ def test_importing_the_census_changes_nothing_process_wide():
             "assert 'probe_exhaustive_eval' not in sys.modules; "
             "assert os.environ.get('PROBE_ACTING_STATES') is None; "
             "assert os.environ.get('PROBE_ENV') is None; "
-            "assert os.environ.get('CUDA_VISIBLE_DEVICES') is None; "
+            "assert os.environ.get('CUDA_VISIBLE_DEVICES') == '-1'; "
             "print('ok')").format(p=str(PROBES), e=str(ROOT / "experiments"),
                                   r=str(ROOT))
     env = {k: v for k, v in os.environ.items()
-           if k not in ("PROBE_ACTING_STATES", "PROBE_ENV",
-                        "CUDA_VISIBLE_DEVICES")}
+           if k not in ("PROBE_ACTING_STATES", "PROBE_ENV")}
+    env["CUDA_VISIBLE_DEVICES"] = "-1"        # never the live run's GPU
     r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env,
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0 and "ok" in r.stdout, r.stderr[-2000:]
@@ -104,8 +104,26 @@ class _LeakyALE(_ALE):
         return np.array([self.pos, self.acts], dtype=np.int64)
 
 
+class _WrapALE(_ALE):
+    """Positions wrap at 4: RIGHT for 4 frames ends in NOOP's state through
+    different frames."""
+
+    def act(self, a):
+        super().act(a)
+        self.pos %= 4
+
+
 ACTIONS = list(range(9))
 SMALL_GRID = tuple((a, f) for a in range(9) for f in (4, 8))
+
+
+def test_strict_tokens_carry_the_frames():
+    """RIGHT x4 and NOOP x4 end in one emulator state through different
+    frames: the end state alone would merge them (audit r2b LOW-3)."""
+    ale = _WrapALE()
+    frames, strict, _ = pc.token_census(ale, ACTIONS, ale.cloneState(),
+                                        grid=((0, 4), (2, 4)), window=6)
+    assert frames[0] != frames[1] and strict[0] != strict[1]
 
 
 def test_tokens_with_the_same_frames_share_a_class_and_hidden_state_is_strict():
@@ -289,9 +307,13 @@ def test_the_verdict_follows_the_primary_ratio(classes, verdict):
     assert s["ratio_vocab"] == pytest.approx(np.mean(classes) / 18, abs=1e-4)
 
 
-def test_the_verdict_uses_the_unrounded_ratio():
+def test_the_verdict_rule_on_the_unrounded_ratio():
     assert pc.verdict(0.50004) == "KAI'S CALL (in between)"
     assert pc.verdict(0.5) == "E1" and pc.verdict(0.75) != pc.verdict(0.7501)
+    # summarize applies it before any rounding: 9 / 17.9999 = 0.500003
+    s = pc.summarize(_recs_flat([9, 9]), 17.9999)
+    assert s["ratio_vocab"] == 0.5
+    assert s["verdict_1"] == "KAI'S CALL (in between)"
 
 
 def test_the_vocabulary_ratio_is_not_the_grids():
@@ -315,6 +337,20 @@ def test_read_1b_over_the_decisions_where_input_matters():
                             "(in between))")
     s = pc.summarize(_recs_flat([1, 1]), 18)          # nothing live
     assert "verdict_1b" not in s and s["verdict"] == "E1"
+
+
+def test_read_1b_counts_the_vocabulary_on_the_live_decisions():
+    """A live decision (grid classes > 1) whose vocabulary sits in one
+    class: (1b) is the vocabulary's classes, and "live" is the grid's
+    (audit r2b LOW-1)."""
+    one = pc.decision_record(1, 0, 0, [0, 1], _part([0, 0, 1, 2, 0, 1, 1, 1,
+                                                     1]),
+                             list(range(36)), [1.0, 0.0])
+    assert one["classes_vocab"] == 1 and one["classes_grid"] == 3
+    twelve = _recs_flat([12])[0]
+    s = pc.summarize([one, twelve], 18)
+    assert s["live_share"] == 1.0
+    assert s["ratio_vocab_live"] == pytest.approx(13 / 36, abs=1e-4)
 
 
 def test_the_summary_reads():
@@ -467,6 +503,8 @@ def test_the_exact_eval_row_is_found(tmp_path, monkeypatch):
              "games": games},
             {"iteration": 40, "exact_mean": 7.0, "env": ENV_ID,
              "games": games},
+            {"iteration": 42, "exact_mean": 1500.0, "env": ENV_ID,
+             "games": games},                             # superseded
             {"iteration": 42, "exact_mean": 1699.0, "env": ENV_ID,
              "games": games}]
     snaps = _row_tree(tmp_path, rows)
@@ -493,8 +531,12 @@ def test_the_validity_checks(monkeypatch):
     assert ok is False and "119 decisions censused of 120" in why[0]
     ok, why = pc.validity(games, ref, censused, 1, 2)
     assert ok is False and len(why) == 2
-    monkeypatch.setattr(pc, "MAX_DECISIONS", 5)    # a cut census: not counted
+    ok, why = pc.validity({1: games[1]}, ref, {1: 150}, 0, 0, n_games=2)
+    assert ok is False and why == ["stopped after 1 of 2 games"]
+    monkeypatch.setattr(pc, "MAX_DECISIONS", 5)    # a cut census: <= 5
     assert pc.validity(games, ref, {1: 5, 2: 5}, 0, 0) == (True, [])
+    ok, why = pc.validity(games, ref, {1: 5, 2: 4}, 0, 0)
+    assert ok is False and "4 decisions censused of 5" in why[0]
 
 
 # --------------------------------------------------------------------------
@@ -532,7 +574,7 @@ def test_the_real_census_sees_inputs_restores_and_repeats(mspacman):
     assert actions[0] == ale_py.Action.NOOP        # the branches' no input
     start = _controllable(mspacman)
     before = start.serialize()
-    grid = ((0, 4), (0, 8), (3, 8), (3, 8), (2, 4))
+    grid = ((0, 4), (0, 8), (3, 8), (3, 8), (2, 8))
     a = pc.token_census(ale, actions, start, grid=grid, window=20)
     assert ale.cloneState().serialize() == before
     b = pc.token_census(ale, actions, start, grid=grid, window=20)
@@ -540,6 +582,7 @@ def test_the_real_census_sees_inputs_restores_and_repeats(mspacman):
     frames = a[0]
     assert frames[0] == frames[1]                  # NOOP x4 + NOOP = NOOP x8
     assert frames[2] == frames[3]                  # the same token twice
+    assert frames[2] != frames[0] or frames[4] != frames[0]   # inputs show
 
 
 def test_the_game_continues_identically_after_a_census(mspacman):
@@ -576,7 +619,7 @@ def test_the_four_noop_tokens_are_always_one_class(mspacman):
 # end to end: a censused game is the exact eval's game
 # --------------------------------------------------------------------------
 _E2E = r"""
-import json, pathlib, sys
+import json, pathlib, shutil, sys
 sys.path[:0] = [{probes!r}, {exp!r}, {root!r}]
 import torch
 import ablation, muzero
@@ -591,8 +634,14 @@ with ablation.arm_config(pe.ARM), ablation._run_length_globals(90, 2000), \
     torch.manual_seed(5)
     run = ablation.Run(pe.ARM, 0, ablation.ARMS[pe.ARM])
     # the policy head is zero at init (a uniform prior: always token 0);
-    # random weights make the argmax depend on the frames (audit r1b M1)
-    torch.nn.init.normal_(run.trainer.prediction.policy_fc.weight, std=0.5)
+    # random weights make the argmax depend on the frames (audit r1b M1),
+    # and the 4-frame tokens biased out carry the census's 60 decisions
+    # past the start jingle (audit r2b M1)
+    fc = run.trainer.prediction.policy_fc
+    torch.nn.init.normal_(fc.weight, std=0.5)
+    with torch.no_grad():
+        for i, t in enumerate(vocab):
+            fc.bias[i] = -20.0 if t[1] == 4 else 0.0
     nets = {{n: getattr(run.trainer, n).state_dict()
             for n in ablation.NET_NAMES}}
     torch.save({{**nets, "training_steps": 0,
@@ -600,15 +649,47 @@ with ablation.arm_config(pe.ARM), ablation._run_length_globals(90, 2000), \
                 "acting_states": {{"representation": nets["representation"],
                                   "prediction": nets["prediction"]}}}}, snap)
 pc.HERE = out
+# (a) a full run without its exact-eval row refuses before anything plays
+pc.GAMES, pc.MAX_DECISIONS, pc.SEQ_EVERY, pc.SMOKE = 30, 0, 10, False
+try:
+    pc.main([str(snap)])
+    print("REFUSAL", json.dumps(None))
+except SystemExit as e:
+    print("REFUSAL", json.dumps(str(e)))
+print("FULLFILE", json.dumps((out / "probe_action_census-run-c-decisions"
+                              ".jsonl").exists()))
+# (b) a smoke census without a row
 pc.GAMES, pc.MAX_DECISIONS, pc.SEQ_EVERY, pc.SMOKE = 1, 60, 30, True
 pc.main([str(snap)])
+shutil.copy(out / "probe_action_census-run-c-smoke-decisions.jsonl",
+            out / "b-decisions.jsonl")
+# (c) the plain game, every token recorded
+tokens = []
+orig = ablation.play_token
+def recorded(env, token, stack, inner=None):
+    tokens.append(int(token))
+    return orig(env, token, stack, inner)
+ablation.play_token = recorded
 with ablation.arm_config(pe.ARM), ablation._run_length_globals(90, 2000), \
         pe.snapshot_tokens(vocab):
     run = ablation.Run(pe.ARM, 0, ablation.ARMS[pe.ARM])
     d = pe.load(run, snap)
     pe.apply_acting_states(run, d)
     plain = pe.play(run, 1)
+ablation.play_token = orig
 print("PLAIN", json.dumps(list(plain)))
+print("TOKENS", json.dumps(tokens))
+# (d) the exact eval's row is the plain game: the main line checks out
+row = {{"iteration": 7, "exact_mean": plain[0], "env": pc.ENV_ID,
+       "games": {{"1": list(plain)}}}}
+rows = out / "probe_exhaustive_eval-run-c-acting.jsonl"
+rows.write_text(json.dumps(row) + "\n")
+pc.MAX_DECISIONS = 3
+pc.main([str(snap)])
+# (e) a newer row that differs: VOID (the last matching row wins)
+row["games"]["1"][0] = plain[0] + 10
+rows.write_text(rows.read_text() + json.dumps(row) + "\n")
+pc.main([str(snap)])
 """
 
 
@@ -624,17 +705,28 @@ def test_a_censused_game_is_the_exact_evals_game(tmp_path):
     r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env,
                        capture_output=True, text=True, timeout=1500)
     assert r.returncode == 0, r.stderr[-3000:]
-    plain = json.loads(next(l for l in r.stdout.splitlines()
-                            if l.startswith("PLAIN "))[6:])
-    summ = json.loads((tmp_path / "probe_action_census-run-c-smoke.jsonl")
-                      .read_text().splitlines()[-1])
-    assert pc.same_game(summ["games"]["1"], plain)         # the same game
-    assert summ["main_line_ok"] is None and summ["void_reasons"] == []
-    decs = [json.loads(l) for l in (tmp_path / "probe_action_census-run-c-"
-                                    "smoke-decisions.jsonl")
+
+    def tagged(tag):
+        return json.loads(next(l for l in r.stdout.splitlines()
+                               if l.startswith(tag + " "))[len(tag) + 1:])
+
+    # (a) the refusal came before anything played
+    assert "no deployed exact-eval row" in tagged("REFUSAL")
+    assert tagged("FULLFILE") is False
+    plain, tokens = tagged("PLAIN"), tagged("TOKENS")
+    assert len(tokens) == plain[3] and len(set(tokens)) > 1
+    runs = [json.loads(l) for l in (tmp_path / "probe_action_census-run-c-"
+                                    "smoke.jsonl").read_text().splitlines()]
+    assert len(runs) == 3
+    # (b) the censused game is the plain game, decision by decision
+    b = runs[0]
+    assert pc.same_game(b["games"]["1"], plain)
+    assert b["main_line_ok"] is None and b["void_reasons"] == []
+    decs = [json.loads(l) for l in (tmp_path / "b-decisions.jsonl")
             .read_text().splitlines()]
     assert len(decs) == min(60, plain[3])
-    assert len({d["token"] for d in decs}) > 1             # not a NOOP agent
+    assert [d["token"] for d in decs] == tokens[:len(decs)]
+    assert any(d["classes_grid"] > 1 for d in decs)        # past the jingle
     assert [("seq" in d) for d in decs] == [d["d"] % 30 == 0 for d in decs]
     for d in decs:
         assert len(d["partition"]) == 36
@@ -642,7 +734,14 @@ def test_a_censused_game_is_the_exact_evals_game(tmp_path):
                     for f in pc.DURATIONS}) == 1
         assert d["classes_vocab"] <= 18 and d["classes_grid"] <= 36
         assert d["strict_grid"] >= d["classes_grid"]
-    for d in decs:
         if "seq" in d:
             k = d["seq"]["frames"]
             assert 1 <= k[0] <= 9 and k[0] <= k[1] <= 81 and k[1] <= k[2] <= 729
+    # (d) with the matching row: the main line checks out
+    assert runs[1]["main_line_ok"] is True and runs[1]["void_reasons"] == []
+    assert not runs[1]["verdict"].startswith("VOID")
+    # (e) with a differing (newer) row: VOID, everywhere
+    e = runs[2]
+    assert e["main_line_ok"] is False and e["verdict"].startswith("VOID")
+    assert e["verdict_1"] == "VOID" and "verdict_if_valid" in e
+    assert "game 1" in e["void_reasons"][0]

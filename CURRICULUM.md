@@ -996,6 +996,47 @@ FIXES r1 (all of them):
       no-control decisions are real for search: the birth search runs on
       those states too, and there merging saves all of it. But they
       should not carry the verdict alone (audit r1a M2).
+AUDIT r2 (fresh eyes, static, on 0e429c6f):
+  - r2a (the probe): nothing above LOW. Every r1 fix is correct, with no
+    regression; the main line still reproduces the exact eval bit for bit.
+    LOW: a mismatch in game 1 shows only after all 30 games. NITs: the
+    first matching reference row wins; the count check is skipped under a
+    census cap; a negative cap slips through; VOID leaves the sub-verdicts
+    live; the thread count is not recorded.
+  - r2b (the tests): two MEDIUMs.
+      - The end-to-end test's 60 censused decisions start at decision 0,
+        and with 4-frame tokens they may all fall inside the start jingle:
+        one token, one class. The FIXES r1 text above ("past the intro")
+        was wrong.
+      - main()'s A3 wiring is untested: the full-run refusal, the VOID
+        override.
+    LOWs: (1b) never separates the vocabulary from the grid; the rounding
+    inside summarize; strict-on-state-only in the token census; the
+    import subprocess dropped CUDA_VISIBLE_DEVICES (a GPU init beside the
+    live run).
+FIXES r2 (all of them):
+  - The probe:
+      - a full run stops at the first game that differs from the exact
+        eval (VOID either way);
+      - the last matching reference row wins;
+      - the count check holds under a census cap (at most the cap);
+      - negative or zero settings are refused;
+      - VOID marks verdict_1 / verdict_1b too and keeps the would-be
+        verdict apart;
+      - the thread count is recorded.
+  - The tests:
+      - The end-to-end test biases the 4-frame tokens out, so its 60
+        censused decisions reach past the jingle; it asserts a
+        multi-class decision.
+      - It records the plain game's every token and checks the census's
+        tokens against them, decision by decision.
+      - It runs main() four ways: the full-run refusal before anything
+        plays; a smoke census without a row; with a matching row
+        (main_line_ok True); with a newer differing row (VOID everywhere).
+      - (1b) with a live decision whose vocabulary sits in one class.
+      - The rounding inside summarize.
+      - A wrap-around emulator for the token census's strict keys.
+      - The import subprocess keeps CUDA_VISIBLE_DEVICES=-1.
 
 ### RESULT -- Test B2: two swaps in 100k env steps at the constant discount, three generations T0-T2 (seed 0), 2026-10-30
 
