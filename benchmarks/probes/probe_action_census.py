@@ -14,14 +14,23 @@ token plays:
     identical (emulator state, frames so far) merged -- such branches have
     identical futures under the same inputs, so the counts are exact.
 Two branches are EQUIVALENT when every raw RGB frame of the window is
-identical (Kai); STRICT: the same serialized emulator state at the window's
-end. Measurement only: no training, and the emulator's branches never feed
-a model (Kai's rule for the E line).
+identical (Kai); STRICT: equivalent AND the same serialized emulator state
+at the window's end (a refinement: it also separates state the screen does
+not show yet). Measurement only: no training, and the emulator's branches
+never feed a model (Kai's rule for the E line).
+
+VALIDITY (A3): every censused game must equal the exact eval's game of the
+same noop start ([return, base steps, terminated, decisions]; the
+snapshot's deployed exact-eval row, looked up BEFORE anything plays: a
+full run refuses without one). Also checked per decision: the hook's prior
+argmax is the agent's token, and the agent's own grid token replays to the
+digest the census gave it (branch-order independence). Any failure makes
+the verdict VOID.
 
 usage: python probe_action_census.py SNAPSHOT.pth
 Writes probe_action_census-<run>.jsonl (the summary: reads (1)-(6)) and
 probe_action_census-<run>-decisions.jsonl (one line per decision, with the
-36 grid tokens' class partition, for E1's scoring) next to itself.
+36 grid tokens' class partitions, for E1's scoring) next to itself.
 CENSUS_GAMES (default 30, the exact eval's noop starts 1..30),
 CENSUS_SEQ_EVERY (default 10), CENSUS_MAX_DECISIONS (smoke runs only: stop
 each game's census after that many decisions; the main line plays on). A
@@ -81,30 +90,32 @@ def play_window(ale, start, inputs, window, noop):
     h = hashlib.blake2b(digest_size=16)
     for t in range(window):
         ale.act(inputs[t] if t < len(inputs) else noop)
-        h.update(ale.getScreenRGB().tobytes())
+        h.update(ale.getScreenRGB())
     return h.digest(), _digest(ale.cloneState().serialize())
 
 
 def token_census(ale, actions, start, grid=GRID, window=WINDOW_TOKENS):
     """Every grid token from `start`, each followed by NOOP to `window`
-    frames: (frame partition, strict partition) over `grid`. Restores
+    frames: (frame partition, strict partition, frame digests) over `grid`.
+    Strict keys are (frames, end state), so strict refines frames. Restores
     `start`."""
     frames, strict = [], []
     for a, f in grid:
         fk, sk = play_window(ale, start, [actions[a]] * f, window, actions[0])
         frames.append(fk)
-        strict.append(sk)
+        strict.append((fk, sk))
     ale.restoreState(start)
-    return partition(frames), partition(strict)
+    return partition(frames), partition(strict), frames
 
 
 def sequence_census(ale, actions, start, depth=SEQ_DEPTH,
                     base=muzero.TOKEN_BASE_FRAMES, window=WINDOW_SEQ):
     """Every sequence of 1..depth base steps over `actions` from `start`,
-    each followed by NOOP to `window` frames: the distinct frame windows
-    and distinct end states per length, ([k_1..k_depth], [strict...]).
-    Breadth-first; a node is (emulator state, frames so far), and nodes
-    equal in both are merged (identical futures). Restores `start`."""
+    each followed by NOOP to `window` frames: per length, the number of
+    distinct frame windows and of distinct (frame window, end state) pairs,
+    ([k_1..k_depth], [strict...]). Breadth-first; a node is (emulator
+    state, frames so far), and nodes equal in both are merged (identical
+    futures under identical inputs). Restores `start`."""
     noop = actions[0]
     level = [(start, hashlib.blake2b(digest_size=16))]
     k_frames, k_strict = [], []
@@ -116,7 +127,7 @@ def sequence_census(ale, actions, start, depth=SEQ_DEPTH,
                 h = hist.copy()
                 for _ in range(base):
                     ale.act(a)
-                    h.update(ale.getScreenRGB().tobytes())
+                    h.update(ale.getScreenRGB())
                 st = ale.cloneState()
                 nxt.setdefault((_digest(st.serialize()), h.digest()), (st, h))
         level = list(nxt.values())
@@ -126,9 +137,9 @@ def sequence_census(ale, actions, start, depth=SEQ_DEPTH,
             h = hist.copy()
             for _ in range(window - length * base):
                 ale.act(noop)
-                h.update(ale.getScreenRGB().tobytes())
+                h.update(ale.getScreenRGB())
             fk.add(h.digest())
-            sk.add(_digest(ale.cloneState().serialize()))
+            sk.add((h.digest(), _digest(ale.cloneState().serialize())))
         k_frames.append(len(fk))
         k_strict.append(len(sk))
     ale.restoreState(start)
@@ -180,8 +191,16 @@ def decision_record(game, index, token, vocab_grid, frame_part, strict_part,
     return rec
 
 
+def verdict(ratio):
+    """The pre-registered rule on the (unrounded) ratio."""
+    return ("E1" if ratio <= 0.5 else
+            "KAI'S CALL (does not pay)" if ratio > 0.75 else
+            "KAI'S CALL (in between)")
+
+
 def summarize(recs, n_vocab):
-    """Reads (1)-(6) over the decision records."""
+    """Reads (1)-(6) over the decision records, and (1b) (A6) over the
+    decisions where some input changes something (classes_grid > 1)."""
     cv = np.array([r["classes_vocab"] for r in recs], dtype=np.float64)
     cg = np.array([r["classes_grid"] for r in recs], dtype=np.float64)
 
@@ -191,28 +210,36 @@ def summarize(recs, n_vocab):
                 "p10": float(np.percentile(x, 10)),
                 "p90": float(np.percentile(x, 90))}
 
+    # (2) the duration read leaves NOOP out: its four tokens are one input
+    # stream (NOOP throughout), equal by construction (audit r1a L2)
+    moving = range(1, 9)
     pairs = {}
     for j, f in enumerate(DURATIONS):
         for k in range(j + 1, len(DURATIONS)):
             g = DURATIONS[k]
             same = [r["partition"][a * len(DURATIONS) + j]
                     == r["partition"][a * len(DURATIONS) + k]
-                    for r in recs for a in range(9)]
+                    for r in recs for a in moving]
             pairs[f"{f}={g}"] = round(float(np.mean(same)), 4)
     seqs = [r["seq"] for r in recs if "seq" in r]
+    ratio = float(cv.mean()) / n_vocab
+    live = cg > 1
     out = {"decisions": len(recs), "tokens_vocab": n_vocab,
            "tokens_grid": len(GRID),
            # (1) PRIMARY: the effective branching factor of the vocabulary
            "classes_vocab": dist(cv),
-           "ratio_vocab": round(float(cv.mean()) / n_vocab, 4),
+           "ratio_vocab": round(ratio, 4),
            "classes_grid": dist(cg),
            "ratio_grid": round(float(cg.mean()) / len(GRID), 4),
+           # (1b) (A6): the decisions where some input matters
+           "live_share": round(float(live.mean()), 4),
            # (2) by duration; a short token + NOOP against a longer one
            "by_duration": {str(f): round(float(np.mean(
                [r["by_duration"][str(f)] for r in recs])), 3)
                for f in DURATIONS},
            "durations_per_action": round(float(np.mean(
-               [x for r in recs for x in r["durations_per_action"]])), 3),
+               [r["durations_per_action"][a] for r in recs
+                for a in moving])), 3),
            "same_class_by_durations": pairs,
            # (4) free decisions
            "free_vocab": round(float(np.mean(cv == 1)), 4),
@@ -222,13 +249,17 @@ def summarize(recs, n_vocab):
            "h_tokens": round(float(np.mean([r["h_tokens"] for r in recs])), 4),
            "h_classes": round(float(np.mean([r["h_classes"] for r in recs])),
                               4),
-           # (6) frames against emulator state
+           # (6) frames against frames + emulator state
            "strict_vocab_mean": round(float(np.mean(
                [r["strict_vocab"] for r in recs])), 3),
            "strict_grid_mean": round(float(np.mean(
                [r["strict_grid"] for r in recs])), 3)}
+    if live.any():
+        ratio_b = float(cv[live].mean()) / n_vocab
+        out["classes_vocab_live"] = dist(cv[live])
+        out["ratio_vocab_live"] = round(ratio_b, 4)
     if seqs:
-        # (3) sequences
+        # (3) sequences; the growth is a ratio of the per-length means
         kf = np.array([s["frames"] for s in seqs], dtype=np.float64)
         ks = np.array([s["strict"] for s in seqs], dtype=np.float64)
         out["seq_decisions"] = len(seqs)
@@ -237,10 +268,16 @@ def summarize(recs, n_vocab):
         out["seq_nominal"] = [9 ** (L + 1) for L in range(kf.shape[1])]
         out["seq_growth"] = [round(float(kf.mean(0)[L] / kf.mean(0)[L - 1]),
                                    3) for L in range(1, kf.shape[1])]
-    r = out["ratio_vocab"]
-    out["verdict"] = ("E1" if r <= 0.5 else
-                      "KAI'S CALL (does not pay)" if r > 0.75 else
-                      "KAI'S CALL (in between)")
+    # A6: the verdict is (1)'s; when (1b) falls on another side of a
+    # threshold, the decision is Kai's
+    v = verdict(ratio)
+    out["verdict_1"] = v
+    if live.any():
+        vb = verdict(ratio_b)
+        out["verdict_1b"] = vb
+        if vb != v:
+            v = f"KAI'S CALL ((1) {v}; (1b) {vb})"
+    out["verdict"] = v
     return out
 
 
@@ -253,24 +290,36 @@ class Census:
         self.run, self.out = run, out
         self.vocab_grid = [GRID.index(tuple(t)) for t in vocab]
         self.game, self.index, self.recs = 0, 0, []
+        self.argmax_mismatches = 0     # the hook's prior against the token
+        self.replay_mismatches = 0     # the chosen token's replayed digest
 
     def decision(self, env, token, stack):
         ale = env.unwrapped.ale
         actions = list(env.unwrapped._action_set)
         start = ale.cloneState()
-        frame_part, strict_part = token_census(ale, actions, start)
+        frame_part, strict_part, digests = token_census(ale, actions, start)
         seq = (sequence_census(ale, actions, start)
                if self.index % SEQ_EVERY == 0 else None)
+        # branch-order independence (audit r1a L4): the agent's own grid
+        # token, replayed after every other branch, gives its census digest
+        chosen = self.vocab_grid[int(token)]
+        a, f = GRID[chosen]
+        again, _ = play_window(ale, start, [actions[a]] * f, WINDOW_TOKENS,
+                               actions[0])
+        self.replay_mismatches += int(again != digests[chosen])
         ale.restoreState(start)
         with torch.no_grad():
             prior, _ = self.run.searcher.network_manager.initial_inference(
                 stack)
         prior = (prior.detach().cpu().numpy() if hasattr(prior, "detach")
                  else np.asarray(prior))
+        prior = np.asarray(prior, dtype=np.float64).reshape(-1)
+        self.argmax_mismatches += int(int(np.argmax(prior)) != int(token))
         rec = decision_record(self.game, self.index, token, self.vocab_grid,
                               frame_part, strict_part, prior, seq)
         self.recs.append(rec)
         self.out.write(json.dumps(rec) + "\n")
+        self.out.flush()
         self.index += 1
 
     @contextlib.contextmanager
@@ -301,32 +350,91 @@ def check_snapshot(vocab, env):
         raise SystemExit(f"tokens outside the 36-token grid: {bad}")
 
 
-def exact_eval_mean(path):
+def exact_eval_row(path):
     """The snapshot's deployed exact-eval row (probe_exhaustive_eval's
-    -acting file next to this probe, or the run tree's), or None. The
-    census's main line must reproduce it: a difference means a branch
-    leaked into the main line, and the census is void."""
+    -acting file next to this probe, or in the run tree's probes folder),
+    or None. `path` is resolved by the caller."""
     run = path.parent.parent.name
     it = int(path.stem[-3:]) if path.stem[-3:].isdigit() else None
-    for d in (HERE, path.parents[3] / "probes"):
+    dirs = [HERE] + ([path.parents[3] / "probes"]
+                     if len(path.parents) > 3 else [])
+    for d in dirs:
         f = d / f"probe_exhaustive_eval-{run}-acting.jsonl"
-        if f.exists():
-            for line in f.read_text().splitlines():
+        if not f.exists():
+            continue
+        for line in f.read_text().splitlines():
+            try:
                 r = json.loads(line)
-                if (r.get("iteration") == it and "max_noop" not in r
-                        and r.get("env") == ENV_ID):
-                    return float(r["exact_mean"])
+            except ValueError:
+                continue
+            if (r.get("iteration") == it and "max_noop" not in r
+                    and r.get("env") == ENV_ID and "games" in r):
+                return r
     return None
+
+
+def same_game(played, ref):
+    """A censused game against the exact eval's game of the same noop start
+    ([return, base steps, terminated, decisions])."""
+    return (len(ref) == len(played) == 4
+            and float(ref[0]) == float(played[0])
+            and int(ref[1]) == int(played[1])
+            and bool(ref[2]) == bool(played[2])
+            and int(ref[3]) == int(played[3]))
+
+
+def validity(games, ref, censused, argmax_mismatches, replay_mismatches):
+    """A3: (ok, reasons). `games` {noop: played tuple}; `ref` the exact-eval
+    row or None (a smoke run without one: ok None, nothing compared);
+    `censused` {noop: decisions censused} (checked against the game's
+    decisions when the census was not cut short)."""
+    reasons = []
+    if ref is not None:
+        for n, g in games.items():
+            r = ref["games"].get(str(n))
+            if r is None or not same_game(g, r):
+                reasons.append(f"game {n} {list(g)} != exact eval {r}")
+    if not MAX_DECISIONS:
+        for n, g in games.items():
+            if censused.get(n) != int(g[3]):
+                reasons.append(f"game {n}: {censused.get(n)} decisions "
+                               f"censused of {int(g[3])}")
+    if argmax_mismatches:
+        reasons.append(f"{argmax_mismatches} decisions whose prior argmax "
+                       f"is not the agent's token")
+    if replay_mismatches:
+        reasons.append(f"{replay_mismatches} replays that differ from their "
+                       f"census digest")
+    if reasons:
+        return False, reasons
+    return (None if ref is None else True), []
+
+
+def decisions_file(run_name, smoke):
+    """The decisions file; a full census is never overwritten."""
+    p = HERE / f"probe_action_census-{run_name}{'-smoke' if smoke else ''}" \
+               f"-decisions.jsonl"
+    if p.exists() and not smoke:
+        raise SystemExit(f"{p} exists: a census is never overwritten (move "
+                         f"it aside first)")
+    return p
 
 
 def main(argv):
     import probe_exhaustive_eval as pe    # sets ablation's env globals
-    path = pathlib.Path(argv[0])
+    if pe.SEARCH_SIMS:
+        raise SystemExit("the census plays the prior argmax: unset "
+                         "PROBE_SEARCH_SIMS")
+    path = pathlib.Path(argv[0]).resolve()
     vocab = pe.snapshot_vocab(path)
     check_snapshot(vocab, pe.ENV)
+    ref = exact_eval_row(path)
+    if ref is None and not SMOKE:
+        raise SystemExit(f"no deployed exact-eval row for {path} (A3: a "
+                         f"full census needs one to check its main line)")
     pbn = pe.snapshot_prefix_bn(path)
     run_name = path.parent.parent.name
-    sfx = "-smoke" if SMOKE else ""
+    dec = decisions_file(run_name, SMOKE)
     with ablation.arm_config(pe.ARM), ablation._run_length_globals(90, 2000), \
             pe.snapshot_tokens(vocab), pe.snapshot_prefix_layout(pbn):
         run = ablation.Run(pe.ARM, 0, ablation.ARMS[pe.ARM])
@@ -334,41 +442,40 @@ def main(argv):
         d = pe.load(run, path)
         pe.apply_acting_states(run, d)
         t0 = time.time()
-        games = {}
-        dec = HERE / f"probe_action_census-{run_name}{sfx}-decisions.jsonl"
-        if dec.exists() and not SMOKE:
-            raise SystemExit(f"{dec} exists: a census is never overwritten "
-                             f"(move it aside first)")
+        games, censused = {}, {}
         with open(dec, "w") as out:
             census = Census(run, vocab, out)
             with census.hooked():
                 for n in range(1, GAMES + 1):
                     census.game, census.index = n, 0
                     games[n] = pe.play(run, n)
+                    censused[n] = census.index
                     print(f"game {n}: return {games[n][0]:.0f}, "
                           f"{games[n][3]} decisions, {len(census.recs)} "
                           f"censused [{time.time() - t0:.0f}s]", flush=True)
+        ok, reasons = validity(games, ref, censused,
+                               census.argmax_mismatches,
+                               census.replay_mismatches)
         rec = {"snapshot": str(path), "run": run_name,
                "iteration": (int(path.stem[-3:]) if path.stem[-3:].isdigit()
                              else None),
-               "env": ENV_ID, "games": GAMES, "seq_every": SEQ_EVERY,
+               "env": ENV_ID, "games": {n: list(g) for n, g in games.items()},
+               "n_games": GAMES, "seq_every": SEQ_EVERY,
                "max_decisions": MAX_DECISIONS or None,
                "window_tokens": WINDOW_TOKENS, "window_seq": WINDOW_SEQ,
                "exact_mean": round(float(np.mean([g[0] for g in
                                                   games.values()])), 3),
+               "exact_eval_mean": None if ref is None else ref["exact_mean"],
                "secs": round(time.time() - t0),
-               **summarize(census.recs, len(vocab))}
-        ref = exact_eval_mean(path)
-        rec["exact_eval_mean"] = ref
-        rec["main_line_ok"] = (None if ref is None or GAMES != 30 else
-                               abs(rec["exact_mean"] - ref) < 1e-6)
-        if rec["main_line_ok"] is False:
-            rec["verdict"] = "VOID (the main line differs from the exact eval)"
-        with open(HERE / f"probe_action_census-{run_name}{sfx}.jsonl",
-                  "a") as f:
+               **summarize(census.recs, len(vocab)),
+               "main_line_ok": ok, "void_reasons": reasons}
+        if ok is False:
+            rec["verdict"] = "VOID (" + "; ".join(reasons)[:300] + ")"
+        with open(HERE / f"probe_action_census-{run_name}"
+                         f"{'-smoke' if SMOKE else ''}.jsonl", "a") as f:
             f.write(json.dumps(rec) + "\n")
         print(json.dumps({k: v for k, v in rec.items()
-                          if k not in ("snapshot",)}), flush=True)
+                          if k not in ("snapshot", "games")}), flush=True)
     print("DONE", flush=True)
 
 

@@ -1,17 +1,20 @@
 """E0, the action-equivalence census (CURRICULUM "Queued experiment
 (pre-registered) -- E0", Kai 2026-10-30). Pins: the census's equivalence
-(identical frames over the common window; strict = the same emulator state
-at its end), the breadth-first sequence counts against brute force, every
-branch restoring the saved state, the reads (1)-(6) and their verdict, the
-hook's restore, the snapshot refusals, the main-line check against the
-exact eval, and -- in a subprocess, on the real game -- that a censused
+(identical frames over the common window; strict = identical frames AND
+the same emulator state at its end), the windows, the breadth-first
+sequence counts against brute force, every branch restoring the saved
+state, the reads (1)-(6) and (1b) and their verdict, one decision end to
+end on a scripted emulator, the hook's restore, the refusals, the validity
+checks (A3), and -- in a subprocess, on the real game -- that a censused
 game is the exact eval's game."""
+import io
 import itertools
 import json
 import os
 import pathlib
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import gymnasium as gym
 import numpy as np
@@ -32,19 +35,29 @@ def test_importing_the_census_changes_nothing_process_wide():
     eval's import would set ablation's env globals)."""
     assert "probe_exhaustive_eval" not in pc.__dict__
     code = ("import os, sys; sys.path[:0] = [{p!r}, {e!r}, {r!r}]; "
+            "import torch; threads = torch.get_num_threads(); "
             "import ablation; before = (ablation.ENV_NAME, ablation.ACTIONS); "
             "import probe_action_census; "
             "assert (ablation.ENV_NAME, ablation.ACTIONS) == before; "
+            "assert torch.get_num_threads() == threads; "
             "assert 'probe_exhaustive_eval' not in sys.modules; "
             "assert os.environ.get('PROBE_ACTING_STATES') is None; "
+            "assert os.environ.get('PROBE_ENV') is None; "
+            "assert os.environ.get('CUDA_VISIBLE_DEVICES') is None; "
             "print('ok')").format(p=str(PROBES), e=str(ROOT / "experiments"),
                                   r=str(ROOT))
     env = {k: v for k, v in os.environ.items()
-           if k not in ("PROBE_ACTING_STATES", "PROBE_ENV")}
-    env["CUDA_VISIBLE_DEVICES"] = "-1"
+           if k not in ("PROBE_ACTING_STATES", "PROBE_ENV",
+                        "CUDA_VISIBLE_DEVICES")}
     r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env,
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0 and "ok" in r.stdout, r.stderr[-2000:]
+
+
+def test_the_pre_registered_windows():
+    assert pc.WINDOW_TOKENS == 32 + 60 and pc.WINDOW_SEQ == 12 + 60
+    assert len(pc.GRID) == 36 and pc.GRID[:4] == ((0, 4), (0, 8), (0, 16),
+                                                  (0, 32))
 
 
 # --------------------------------------------------------------------------
@@ -83,6 +96,14 @@ class _ALE:
         self.pos, self.hidden, self.frame = s.t
 
 
+class _LeakyALE(_ALE):
+    """The screen also shows how many frames were ever emulated -- a
+    branch-order dependence restoreState does not undo."""
+
+    def getScreenRGB(self):
+        return np.array([self.pos, self.acts], dtype=np.int64)
+
+
 ACTIONS = list(range(9))
 SMALL_GRID = tuple((a, f) for a in range(9) for f in (4, 8))
 
@@ -90,8 +111,9 @@ SMALL_GRID = tuple((a, f) for a in range(9) for f in (4, 8))
 def test_tokens_with_the_same_frames_share_a_class_and_hidden_state_is_strict():
     ale = _ALE()
     start = ale.cloneState()
-    frames, strict = pc.token_census(ale, ACTIONS, start, grid=SMALL_GRID,
-                                     window=8 + 3)
+    frames, strict, digests = pc.token_census(ale, ACTIONS, start,
+                                              grid=SMALL_GRID, window=8 + 3)
+    assert ale.cloneState().t == start.t         # restored
     cls = dict(zip(SMALL_GRID, frames))
     # NOOP, action 1 and the hidden action 4 never move: one frame class
     still = {cls[(a, f)] for a in (0, 1, 4) for f in (4, 8)}
@@ -102,25 +124,26 @@ def test_tokens_with_the_same_frames_share_a_class_and_hidden_state_is_strict():
         assert cls[(3, f)] not in {cls[(2, f)]} | still
     assert cls[(2, 4)] != cls[(2, 8)]          # they stop at different places
     assert len(set(frames)) == 5
-    # strict: action 4's counter separates it (4 and 8 bumps), the rest as
-    # the frames
+    # strict refines frames: action 4's counter separates it (4 and 8 bumps)
     s = dict(zip(SMALL_GRID, strict))
     assert s[(4, 4)] != s[(0, 4)] and s[(4, 8)] != s[(4, 4)]
     assert s[(0, 4)] == s[(1, 8)]
     assert len(set(strict)) == 7
-    assert ale.cloneState().t == start.t         # restored
+    assert all(frames[i] == frames[j] for i in range(18) for j in range(18)
+               if strict[i] == strict[j])
+    assert len(digests) == 18 and digests[0] == digests[1]
 
 
 def test_shown_hidden_state_separates_the_frames_too():
     ale = _ALE(reveal=0)
-    frames, strict = pc.token_census(ale, ACTIONS, ale.cloneState(),
-                                     grid=SMALL_GRID, window=11)
+    frames, strict, _ = pc.token_census(ale, ACTIONS, ale.cloneState(),
+                                        grid=SMALL_GRID, window=11)
     assert len(set(frames)) == len(set(strict)) == 7
 
 
 def _brute(ale, start, depth, base, window):
-    """Every sequence played on its own: distinct frame windows and end
-    states per length."""
+    """Every sequence played on its own: distinct frame windows and
+    (frame window, end state) pairs per length."""
     out_f, out_s = [], []
     for length in range(1, depth + 1):
         fk, sk = set(), set()
@@ -128,30 +151,37 @@ def _brute(ale, start, depth, base, window):
             inputs = [a for a in seq for _ in range(base)]
             f, s = pc.play_window(ale, start, inputs, window, ACTIONS[0])
             fk.add(f)
-            sk.add(s)
+            sk.add((f, s))
         out_f.append(len(fk))
         out_s.append(len(sk))
     ale.restoreState(start)
     return out_f, out_s
 
 
-@pytest.mark.parametrize("reveal", [10 ** 9, 3, 0])
+# reveal 9 / 10: the hidden counter shows on the window's last frame / just
+# after it -- a wrong NOOP tail length changes the counts (audit r1b L1)
+@pytest.mark.parametrize("reveal", [10 ** 9, 3, 0, 9, 10])
 def test_the_breadth_first_counts_equal_brute_force(reveal):
     ale = _ALE(reveal=reveal)
     start = ale.cloneState()
     got = pc.sequence_census(ale, ACTIONS, start, depth=3, base=2, window=9)
+    assert ale.cloneState().t == start.t         # restored, before _brute
     assert got == _brute(ale, start, 3, 2, 9)
-    assert ale.cloneState().t == start.t
 
 
-def test_same_end_state_by_different_paths_is_one_strict_class_two_frame_classes():
+def test_one_end_state_by_different_paths_is_two_frame_classes():
+    """(2, 3) and (0, 0) end in the same emulator state through different
+    frames: the end state alone would merge them, so strict keys carry the
+    frames too (audit r1a L3)."""
     ale = _ALE()
-    kf, ks = pc.sequence_census(ale, ACTIONS, ale.cloneState(), depth=2,
-                                base=1, window=4)
-    # (2, 3) and (3, 2) end where (0, 0) does, through different frames
-    assert ks[1] < kf[1]
-    # depth 1: still {0,1,4} / right / left = 3 frame classes; 4 strict
-    assert kf[0] == 3 and ks[0] == 4
+    s = ale.cloneState()
+    f1, e1 = pc.play_window(ale, s, [2, 3], 4, 0)
+    f2, e2 = pc.play_window(ale, s, [0, 0], 4, 0)
+    assert e1 == e2 and f1 != f2
+    kf, ks = pc.sequence_census(ale, ACTIONS, s, depth=2, base=1, window=4)
+    # depth 1: still / right / left; with the hidden counter: 4 strict.
+    # depth 2: the 9 (e1, e2) motion pairs; x the counter's values: 15
+    assert kf == [3, 9] and ks == [4, 15]
 
 
 def test_merged_nodes_are_expanded_once():
@@ -178,18 +208,51 @@ def test_a_decision_record():
     strict = list(range(36))
     vocab = [(0, 4), (1, 4), (2, 4), (3, 4)]
     vg = [pc.GRID.index(t) for t in vocab]
-    prior = [0.5, 0.5, 0.0, 0.0]               # NOOP and UP: one class
-    rec = pc.decision_record(2, 7, 1, vg, part, strict, prior,
+    # mass on (0, 4) and (2, 4): two classes (a prior read through the
+    # wrong grid entries would find one -- audit r1b M3)
+    prior = [0.5, 0.0, 0.5, 0.0]
+    rec = pc.decision_record(2, 7, 2, vg, part, strict, prior,
                              seq=([3, 9, 27], [4, 12, 30]))
     assert rec["classes_vocab"] == 3 and rec["classes_grid"] == 3
     assert rec["strict_vocab"] == 4 and rec["strict_grid"] == 36
     assert rec["by_duration"] == {"4": 3, "8": 3, "16": 3, "32": 3}
     assert rec["durations_per_action"] == [1] * 9
-    assert rec["chosen_class_size"] == 12       # actions 0, 1, 4 x 4
+    assert rec["chosen_class_size"] == 20       # (2, 4): actions 2, 5-8 x 4
     assert rec["h_tokens"] == pytest.approx(np.log(2), abs=1e-5)
-    assert rec["h_classes"] == pytest.approx(0.0, abs=1e-9)
+    assert rec["h_classes"] == pytest.approx(np.log(2), abs=1e-5)
     assert rec["seq"] == {"frames": [3, 9, 27], "strict": [4, 12, 30]}
     assert rec["partition"] == part
+    # the same mass inside one class: no class uncertainty
+    rec = pc.decision_record(2, 7, 1, vg, part, strict, [0.5, 0.5, 0, 0])
+    assert rec["h_classes"] == pytest.approx(0.0, abs=1e-9)
+    assert rec["chosen_class_size"] == 12       # (1, 4): actions 0, 1, 4 x 4
+
+
+def test_the_vocabulary_can_miss_a_grid_class():
+    """(1) counts the agent's tokens' classes, not the grid's (audit r1b
+    M2)."""
+    part = _part([0, 0, 1, 2, 0, 1, 1, 1, 1])
+    vg = [pc.GRID.index(t) for t in [(0, 4), (1, 4), (2, 4), (2, 8)]]
+    rec = pc.decision_record(1, 0, 0, vg, part, part, [1, 0, 0, 0])
+    assert rec["classes_vocab"] == 2 and rec["classes_grid"] == 3
+
+
+def test_the_duration_read_on_a_scripted_game():
+    """The full grid on the scripted emulator: the still actions 0, 1, 4
+    are one class at every duration, the movers four (audit r1b L2); the
+    summary's duration reads leave NOOP out (audit r1a L2)."""
+    ale = _ALE()
+    frames, strict, _ = pc.token_census(ale, ACTIONS, ale.cloneState(),
+                                        window=32 + 3)
+    rec = pc.decision_record(1, 0, 0, list(range(36)), frames, strict,
+                             [1.0] + [0.0] * 35)
+    assert rec["by_duration"] == {"4": 3, "8": 3, "16": 3, "32": 3}
+    assert rec["durations_per_action"] == [1, 1, 4, 4, 1, 4, 4, 4, 4]
+    s = pc.summarize([rec], 36)
+    # actions 1-8: the still 1 and 4 keep a class across durations
+    assert set(s["same_class_by_durations"].values()) == {0.25}
+    assert s["durations_per_action"] == pytest.approx(26 / 8)
+    assert s["classes_grid"]["mean"] == 1 + 4 + 4
 
 
 def _recs_flat(classes):
@@ -217,12 +280,41 @@ def _recs(classes, seq=True):
 
 @pytest.mark.parametrize("classes,verdict", [
     ([9, 9], "E1"),                          # 9 of 18 = 0.5
+    ([13, 14], "KAI'S CALL (in between)"),   # 0.75 exactly
     ([14, 14], "KAI'S CALL (does not pay)"),  # 0.78
     ([12, 12], "KAI'S CALL (in between)")])  # 0.67
 def test_the_verdict_follows_the_primary_ratio(classes, verdict):
     s = pc.summarize(_recs_flat(classes), 18)
-    assert s["verdict"] == verdict
-    assert s["ratio_vocab"] == pytest.approx(classes[0] / 18, abs=1e-4)
+    assert s["verdict"] == s["verdict_1"] == verdict
+    assert s["ratio_vocab"] == pytest.approx(np.mean(classes) / 18, abs=1e-4)
+
+
+def test_the_verdict_uses_the_unrounded_ratio():
+    assert pc.verdict(0.50004) == "KAI'S CALL (in between)"
+    assert pc.verdict(0.5) == "E1" and pc.verdict(0.75) != pc.verdict(0.7501)
+
+
+def test_the_vocabulary_ratio_is_not_the_grids():
+    s = pc.summarize(_recs_flat([20, 20]), 18)
+    assert s["classes_vocab"]["mean"] == 18 and s["classes_grid"]["mean"] == 20
+    assert s["ratio_vocab"] == 1.0 and s["ratio_grid"] == pytest.approx(20 / 36,
+                                                                        abs=1e-4)
+
+
+def test_read_1b_over_the_decisions_where_input_matters():
+    """A6: free decisions (one class) pull (1) toward E1; (1b) leaves them
+    out, and a disagreement is Kai's call."""
+    recs = _recs_flat([1, 1, 12, 12])
+    s = pc.summarize(recs, 18)
+    assert s["live_share"] == 0.5
+    assert s["ratio_vocab"] == pytest.approx(26 / 72, abs=1e-4)   # E1 alone
+    assert s["ratio_vocab_live"] == pytest.approx(12 / 18, abs=1e-4)
+    assert s["verdict_1"] == "E1"
+    assert s["verdict_1b"] == "KAI'S CALL (in between)"
+    assert s["verdict"] == ("KAI'S CALL ((1) E1; (1b) KAI'S CALL "
+                            "(in between))")
+    s = pc.summarize(_recs_flat([1, 1]), 18)          # nothing live
+    assert "verdict_1b" not in s and s["verdict"] == "E1"
 
 
 def test_the_summary_reads():
@@ -246,9 +338,56 @@ def test_the_summary_is_the_same_from_the_decisions_file():
 
 
 # --------------------------------------------------------------------------
-# the hook, the refusals, the main-line check
+# one decision end to end on the scripted emulator
+# --------------------------------------------------------------------------
+def _fake(ale, prior):
+    env = SimpleNamespace(unwrapped=SimpleNamespace(ale=ale,
+                                                    _action_set=ACTIONS))
+    nm = SimpleNamespace(initial_inference=lambda stack: (np.array(prior),
+                                                          None))
+    run = SimpleNamespace(searcher=SimpleNamespace(network_manager=nm))
+    return env, run
+
+
+def test_a_decision_censuses_restores_and_writes(monkeypatch):
+    """Census.decision: the A1 phase (a sequence census at decisions 0, 3,
+    6 under SEQ_EVERY 3), the restore, one line per decision, the checks
+    (audit r1b L3)."""
+    monkeypatch.setattr(pc, "SEQ_EVERY", 3)
+    ale = _ALE()
+    vocab = [(0, 4), (2, 8), (3, 4)]
+    prior = [0.1, 0.7, 0.2]                     # argmax: token 1
+    env, run = _fake(ale, prior)
+    out = io.StringIO()
+    census = pc.Census(run, vocab, out)
+    start = ale.cloneState().t
+    for _ in range(7):
+        census.decision(env, 1, None)
+        assert ale.cloneState().t == start
+    lines = [json.loads(l) for l in out.getvalue().splitlines()]
+    assert [l["d"] for l in lines] == list(range(7))
+    assert [("seq" in l) for l in lines] == [i % 3 == 0 for i in range(7)]
+    assert lines[0]["seq"]["frames"][0] == 3
+    assert census.argmax_mismatches == 0 and census.replay_mismatches == 0
+    # (2, 8): the five right-movers at 8 frames
+    assert lines[0]["classes_vocab"] == 3 and lines[0]["chosen_class_size"] == 5
+    census.decision(env, 2, None)               # token 2 is not the argmax
+    assert census.argmax_mismatches == 1
+
+
+def test_a_branch_order_dependence_is_caught():
+    ale = _LeakyALE()
+    env, run = _fake(ale, [1.0, 0.0])
+    census = pc.Census(run, [(0, 4), (2, 4)], io.StringIO())
+    census.decision(env, 0, None)
+    assert census.replay_mismatches == 1
+
+
+# --------------------------------------------------------------------------
+# the hook, the refusals, the validity checks
 # --------------------------------------------------------------------------
 def test_the_hook_restores_play_token(monkeypatch):
+    monkeypatch.setattr(ablation, "play_token", ablation.play_token)
     orig = ablation.play_token
     census = pc.Census(None, [(0, 4)], None)
     with pytest.raises(RuntimeError):
@@ -300,22 +439,62 @@ def test_the_snapshot_refusals():
     pc.check_snapshot(((0, 4), (8, 32)), ENV_ID)
 
 
-def test_the_exact_eval_row_is_found(tmp_path, monkeypatch):
-    run = tmp_path / "benchmarks" / "results" / "run-t" / "snaps"
-    run.mkdir(parents=True)
-    snap = run / "weights-iter042.pth"
+def test_a_full_census_is_never_overwritten(tmp_path, monkeypatch):
+    monkeypatch.setattr(pc, "HERE", tmp_path)
+    p = pc.decisions_file("run-x", smoke=False)
+    p.write_text("{}\n")
+    with pytest.raises(SystemExit, match="never overwritten"):
+        pc.decisions_file("run-x", smoke=False)
+    assert pc.decisions_file("run-x", smoke=True).name.endswith(
+        "-smoke-decisions.jsonl")
+
+
+def _row_tree(tmp_path, rows):
+    snaps = tmp_path / "benchmarks" / "results" / "run-t" / "snaps"
+    snaps.mkdir(parents=True)
     probes = tmp_path / "benchmarks" / "probes"
     probes.mkdir()
-    rows = [{"iteration": 42, "exact_mean": 5.0, "max_noop": 2,
-             "env": ENV_ID},                           # a smoke row
-            {"iteration": 42, "exact_mean": 6.0, "env": "Pong-v4"},
-            {"iteration": 40, "exact_mean": 7.0, "env": ENV_ID},
-            {"iteration": 42, "exact_mean": 1699.0, "env": ENV_ID}]
     (probes / "probe_exhaustive_eval-run-t-acting.jsonl").write_text(
-        "\n".join(json.dumps(r) for r in rows) + "\n")
+        "\n".join(json.dumps(r) for r in rows) + "\n\n")
+    return snaps
+
+
+def test_the_exact_eval_row_is_found(tmp_path, monkeypatch):
+    games = {"1": [100.0, 700, True, 150]}
+    rows = [{"iteration": 42, "exact_mean": 5.0, "max_noop": 2,
+             "env": ENV_ID, "games": games},              # a smoke row
+            {"iteration": 42, "exact_mean": 6.0, "env": "Pong-v4",
+             "games": games},
+            {"iteration": 40, "exact_mean": 7.0, "env": ENV_ID,
+             "games": games},
+            {"iteration": 42, "exact_mean": 1699.0, "env": ENV_ID,
+             "games": games}]
+    snaps = _row_tree(tmp_path, rows)
     monkeypatch.setattr(pc, "HERE", tmp_path / "elsewhere")
-    assert pc.exact_eval_mean(snap) == 1699.0
-    assert pc.exact_eval_mean(run / "weights-iter041.pth") is None
+    assert pc.exact_eval_row(snaps / "weights-iter042.pth")["exact_mean"] \
+        == 1699.0
+    assert pc.exact_eval_row(snaps / "weights-iter041.pth") is None
+    # a short path has no run tree above it: None, not an IndexError
+    assert pc.exact_eval_row(pathlib.Path("weights-iter042.pth")) is None
+
+
+def test_the_validity_checks(monkeypatch):
+    monkeypatch.setattr(pc, "MAX_DECISIONS", 0)
+    ref = {"games": {"1": [100.0, 700, True, 150], "2": [80.0, 600, True,
+                                                         120]}}
+    games = {1: (100.0, 700, True, 150), 2: (80.0, 600, True, 120)}
+    censused = {1: 150, 2: 120}
+    assert pc.validity(games, ref, censused, 0, 0) == (True, [])
+    assert pc.validity(games, None, censused, 0, 0) == (None, [])
+    ok, why = pc.validity({**games, 2: (80.0, 604, True, 121)}, ref,
+                          {1: 150, 2: 121}, 0, 0)
+    assert ok is False and "game 2" in why[0]
+    ok, why = pc.validity(games, ref, {1: 150, 2: 119}, 0, 0)
+    assert ok is False and "119 decisions censused of 120" in why[0]
+    ok, why = pc.validity(games, ref, censused, 1, 2)
+    assert ok is False and len(why) == 2
+    monkeypatch.setattr(pc, "MAX_DECISIONS", 5)    # a cut census: not counted
+    assert pc.validity(games, ref, {1: 5, 2: 5}, 0, 0) == (True, [])
 
 
 # --------------------------------------------------------------------------
@@ -325,18 +504,33 @@ def test_the_exact_eval_row_is_found(tmp_path, monkeypatch):
 def mspacman():
     env = gym.make(ENV_ID, frameskip=1)
     env.reset(seed=0)
-    for _ in range(300):                       # past the start jingle
-        env.step(0)
     yield env
     env.close()
 
 
-def test_the_real_census_restores_and_repeats(mspacman):
+def _controllable(env, window=20):
+    """Step NOOP until LEFT and RIGHT are not both NOOP's window (past the
+    start jingle); the saved state there."""
+    ale = env.unwrapped.ale
+    actions = list(env.unwrapped._action_set)
+    for _ in range(60):
+        start = ale.cloneState()
+        f, _, _ = pc.token_census(ale, actions, start,
+                                  grid=((0, 4), (3, 8), (2, 8)),
+                                  window=window)
+        if f[1] != f[0] or f[2] != f[0]:
+            return start
+        for _ in range(50):
+            env.step(0)
+    raise AssertionError("no input ever changed the frames")
+
+
+def test_the_real_census_sees_inputs_restores_and_repeats(mspacman):
+    import ale_py
     ale = mspacman.unwrapped.ale
     actions = list(mspacman.unwrapped._action_set)
-    import ale_py
     assert actions[0] == ale_py.Action.NOOP        # the branches' no input
-    start = ale.cloneState()
+    start = _controllable(mspacman)
     before = start.serialize()
     grid = ((0, 4), (0, 8), (3, 8), (3, 8), (2, 4))
     a = pc.token_census(ale, actions, start, grid=grid, window=20)
@@ -351,12 +545,13 @@ def test_the_real_census_restores_and_repeats(mspacman):
 def test_the_game_continues_identically_after_a_census(mspacman):
     ale = mspacman.unwrapped.ale
     actions = list(mspacman.unwrapped._action_set)
-    start = ale.cloneState()
+    start = _controllable(mspacman)
     plan = [3] * 12 + [1] * 12
 
     def obs_after():
         return [mspacman.step(a)[0].tobytes() for a in plan]
 
+    ale.restoreState(start)
     clean = obs_after()
     ale.restoreState(start)
     pc.token_census(ale, actions, start, grid=pc.GRID[:8], window=30)
@@ -367,9 +562,10 @@ def test_the_game_continues_identically_after_a_census(mspacman):
 def test_the_four_noop_tokens_are_always_one_class(mspacman):
     ale = mspacman.unwrapped.ale
     actions = list(mspacman.unwrapped._action_set)
+    _controllable(mspacman)
     for _ in range(3):
         start = ale.cloneState()
-        frames, _ = pc.token_census(ale, actions, start)
+        frames, _, _ = pc.token_census(ale, actions, start)
         assert len({frames[pc.GRID.index((0, f))]
                     for f in pc.DURATIONS}) == 1
         for _ in range(40):
@@ -394,6 +590,9 @@ with ablation.arm_config(pe.ARM), ablation._run_length_globals(90, 2000), \
         pe.snapshot_tokens(vocab):
     torch.manual_seed(5)
     run = ablation.Run(pe.ARM, 0, ablation.ARMS[pe.ARM])
+    # the policy head is zero at init (a uniform prior: always token 0);
+    # random weights make the argmax depend on the frames (audit r1b M1)
+    torch.nn.init.normal_(run.trainer.prediction.policy_fc.weight, std=0.5)
     nets = {{n: getattr(run.trainer, n).state_dict()
             for n in ablation.NET_NAMES}}
     torch.save({{**nets, "training_steps": 0,
@@ -401,7 +600,7 @@ with ablation.arm_config(pe.ARM), ablation._run_length_globals(90, 2000), \
                 "acting_states": {{"representation": nets["representation"],
                                   "prediction": nets["prediction"]}}}}, snap)
 pc.HERE = out
-pc.GAMES, pc.MAX_DECISIONS, pc.SEQ_EVERY, pc.SMOKE = 1, 2, 1, True
+pc.GAMES, pc.MAX_DECISIONS, pc.SEQ_EVERY, pc.SMOKE = 1, 60, 30, True
 pc.main([str(snap)])
 with ablation.arm_config(pe.ARM), ablation._run_length_globals(90, 2000), \
         pe.snapshot_tokens(vocab):
@@ -429,16 +628,21 @@ def test_a_censused_game_is_the_exact_evals_game(tmp_path):
                             if l.startswith("PLAIN "))[6:])
     summ = json.loads((tmp_path / "probe_action_census-run-c-smoke.jsonl")
                       .read_text().splitlines()[-1])
-    assert summ["exact_mean"] == pytest.approx(plain[0])   # the same game
-    assert summ["main_line_ok"] is None                    # a smoke run
+    assert pc.same_game(summ["games"]["1"], plain)         # the same game
+    assert summ["main_line_ok"] is None and summ["void_reasons"] == []
     decs = [json.loads(l) for l in (tmp_path / "probe_action_census-run-c-"
                                     "smoke-decisions.jsonl")
             .read_text().splitlines()]
-    assert len(decs) == 2 and all(len(d["partition"]) == 36 for d in decs)
-    assert all("seq" in d for d in decs)                   # SEQ_EVERY 1
+    assert len(decs) == min(60, plain[3])
+    assert len({d["token"] for d in decs}) > 1             # not a NOOP agent
+    assert [("seq" in d) for d in decs] == [d["d"] % 30 == 0 for d in decs]
     for d in decs:
+        assert len(d["partition"]) == 36
         assert len({d["partition"][pc.GRID.index((0, f))]
                     for f in pc.DURATIONS}) == 1
-        k = d["seq"]["frames"]
-        assert 1 <= k[0] <= 9 and k[0] <= k[1] <= 81 and k[1] <= k[2] <= 729
         assert d["classes_vocab"] <= 18 and d["classes_grid"] <= 36
+        assert d["strict_grid"] >= d["classes_grid"]
+    for d in decs:
+        if "seq" in d:
+            k = d["seq"]["frames"]
+            assert 1 <= k[0] <= 9 and k[0] <= k[1] <= 81 and k[1] <= k[2] <= 729

@@ -938,6 +938,64 @@ BUILT 2026-10-30 (pre-audit): benchmarks/probes/probe_action_census.py,
 tests/test_action_census.py. The probe imports the exact eval's module
 only when it runs as a script, so importing it changes nothing
 process-wide.
+AUDIT r1 (two fresh-eyes auditors, static: host memory stayed below the
+test floor while C trains):
+  - r1a (the probe): nothing HIGH. Two MEDIUMs:
+      - M1: the A3 check looked up its reference row only after the
+        census, and was silently skipped without one.
+      - M2: decisions where no input matters (the start jingle, the death
+        animations) are one class by construction. They pull (1) toward
+        E1.
+    LOWs:
+      - A3 compared only the 30-game mean.
+      - The duration read included NOOP, which is equal by construction.
+      - Strict was keyed on the end state alone, so it was not a
+        refinement of the frames.
+      - Branch determinism rested on full-frame redraws.
+      - No per-line flush.
+  - r1b (the tests): one HIGH: a test that could never pass (the hidden
+    counter offsets the merges exactly, 9 against 9). Three MEDIUMs, all
+    about test strength:
+      - The end-to-end test's fresh net plays NOOP throughout, since the
+        policy head is zero at init.
+      - The vocabulary's classes were never told apart from the grid's.
+      - The prior's alignment with the classes was not pinned.
+    LOWs: the windows, the duration read, Census.decision, the 0.75
+    boundary, the overwrite refusal, the validity logic, and the real
+    emulator's asserts (identical input streams only).
+FIXES r1 (all of them):
+  - A3 runs before anything plays: a full run refuses without its
+    reference row. It compares every game ([return, base steps,
+    terminated, decisions]), not the mean.
+  - Per decision: the census count against the game's decisions; the
+    hook's prior argmax against the agent's token; and the agent's own
+    grid token replayed after all the other branches, against its census
+    digest (branch-order independence). Any failure: VOID.
+  - Strict keys are (frames, end state), a refinement of the frames.
+  - The duration reads leave NOOP out. The verdict uses the unrounded
+    ratio. Each decision line is flushed.
+  - The tests:
+      - exact counts for the different-paths case (frames 3 / 9, strict
+        4 / 15);
+      - a frame-dependent policy in the end-to-end test (the policy head
+        re-drawn), 60 censused decisions past the intro, the whole game
+        tuple compared;
+      - vocabulary-against-grid and misaligned-prior cases;
+      - windows pinned; reveal at the window's last frame and after it;
+      - the duration read on a scripted 36-token census;
+      - a scripted Census.decision (the A1 phase, the restore, the lines,
+        the argmax check) and a branch-order-dependent emulator that the
+        replay check catches;
+      - the 0.75 boundary, the overwrite refusal, the validity logic;
+      - a real-emulator search for a state where LEFT or RIGHT changes
+        the frames.
+  (A6) A secondary read (1b): (1) over the decisions where some input
+      changes the frames (classes_grid > 1), with their share. The
+      verdict is (1)'s, as registered. When (1b) falls on another side of
+      a threshold, the decision is Kai's call, and both are reported. The
+      no-control decisions are real for search: the birth search runs on
+      those states too, and there merging saves all of it. But they
+      should not carry the verdict alone (audit r1a M2).
 
 ### RESULT -- Test B2: two swaps in 100k env steps at the constant discount, three generations T0-T2 (seed 0), 2026-10-30
 
