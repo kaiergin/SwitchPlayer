@@ -1152,6 +1152,28 @@ ACCEPTED r4 (no edit, so no further round):
     The suites (with C's preflight), check_post_testc and the GPU smoke
     run after Test B2, before the launch. A failure there is fixed and
     re-audited before any launch.
+UPDATE (10-29 21:55-21:57, while host memory was free between T0 and
+T1): test_testc, test_supervise_testb, test_pbn and test_harness all
+pass on 61d4197a. check_post_testc prints CHECK OK. Still to run before
+the launch: all 25 suites and the GPU smoke.
+KAI (10-30, on the swap-count controls): "We can hold off on the single
+swap run for now. If B2 holds up as the better algorithm, we'll want to
+run repeat tests for all the swap values (0-4) to make a graph and prove
+that this is an actual improvement. But that can hold off until all of
+the C tests with BBF proposed changes are tested."
+  - The order: the Test C series comes first, starting with C (resets
+    alone) and its twin C0. BBF's other proposed changes follow as their
+    own pre-registered tests. After that, if B2 holds up: the swap-count
+    curve.
+  - The swap-count curve: 0, 1, 2, 3 and 4 swaps in 100k env steps, each
+    at several seeds, plotted as the score against the swap count. Every
+    point uses one recipe at one constant discount. Test B (4 swaps) also
+    changed the discount per generation, so its point is rerun.
+  - C0 (T0's recipe to 100k env steps, no swap) is the 0-swap point's
+    first seed. It is also the 0-swap comparator for B2 (B2's [90k, end]
+    window against C0's), but only as a single-seed read.
+  - C and C0 keep the built order (C first, then C0): no change to the
+    audited supervisor.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
