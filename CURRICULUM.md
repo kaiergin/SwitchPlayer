@@ -1037,6 +1037,30 @@ FIXES r2 (all of them):
       - The rounding inside summarize.
       - A wrap-around emulator for the token census's strict keys.
       - The import subprocess keeps CUDA_VISIBLE_DEVICES=-1.
+  (Correction: "negative or zero settings are refused" means CENSUS_GAMES
+  and CENSUS_SEQ_EVERY below 1 and CENSUS_MAX_DECISIONS below 0;
+  CENSUS_MAX_DECISIONS 0 is the uncapped census.)
+AUDIT r3 (fresh eyes, static, on ac947976): nothing above LOW -- THE AUDIT
+LOOP IS CLOSED. Every r2 fix is correct; no regression; a full run still
+reproduces the exact eval bit for bit; every new or changed test passes by
+hand-trace and catches the mutation it targets.
+ACCEPTED r3 (no edit, so no further round):
+  - The end-to-end variety assert (more than one token over the plain
+    game) rests on a random-init argmax changing with the frames: likely,
+    and deterministic if it fails (a fixture fix, not a probe bug). Its
+    torch.manual_seed(5) is dead (Run.__init__ reseeds).
+  - The full-run fail-fast break and its "stopped after" reason are not
+    exercised by a test (the end-to-end stages are smoke runs). Dropping
+    the break would still VOID.
+  - NITs: CUDA_VISIBLE_DEVICES=-1 passed into the import subprocess
+    hides a leak of that one value; no validity case has a game shorter
+    than the cap; the settings refusal is untested and CENSUS_GAMES above
+    30 is not refused (smoke only); after a fail-fast break the would-be
+    verdict covers only the games played; stage (e) does not assert
+    verdict_1b.
+  - NOT YET RUN: the suite (tests/test_action_census.py, its slow test
+    included) runs in the gap after C0, under the lock, before the census.
+    A failure there is fixed and re-audited before the census runs.
 
 ### RESULT -- Test B2: two swaps in 100k env steps at the constant discount, three generations T0-T2 (seed 0), 2026-10-30
 
