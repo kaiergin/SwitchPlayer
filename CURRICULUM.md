@@ -1445,6 +1445,22 @@ hand-off post_testb2.py and the supervisors t0-t2. t0 runs its preflight
 (the 24 suites in the run tree), then T0. t1 and t2 wait on their
 predecessors. Expected: about 45-50 iterations per generation, about 28-30
 h in all.
+T0 COMPLETE 21:50 10-29 (attempt 1, no deaths; 47 iterations, 94,000
+gradient steps, 33,616 env steps, 7.7 h). Unclipped whole-game means,
+deployed / trainer-BN, by row (env steps): 5 (3,225) 400 / 181; 10
+(6,286) 601 / 614; 15 (9,909) 714 / 701; 20 (13,875) 690 / 1184; 25
+(17,595) 706 / 731; 30 (21,381) 768 / 933; 35 (25,061) 701 / 743; 40
+(28,606) 705 / 739; 45 (32,004) 746 / 754; 47 (33,616) 1062 / 759. The
+0-20k window (rows 5-25): deployed 622, trainer-BN 682 (Test B 503 / 660,
+the current lineage 540 / 524). Rows 30-47 (20-33.6k): deployed 796,
+trainer-BN 786; the 20-40k window closes with T1's first rows. Row 47's
+1062 is one row (the band is +-464). The hand-off's final evals (acting,
+trainer-BN, read (5)) finished 22:00: all 10 rows of each.
+SWAP 1 PREP 22:10: t1's preflight (manifest, quick probe, the 24 suites)
+passed; MASTER T0 = iteration 47 (the deployed mean of its last two rows
+904, g 0.612); PREP done on attempt 1; T1's stop 33,051 env steps (the
+lineage's 66,667 less T0's 33,616). T1 LAUNCHED 22:13 10-29 (attempt 1,
+fresh).
 
 ### RESULT -- Generation 2: DS2 as the master, one distilled student G2 (seed 0), 2026-10-28
 
