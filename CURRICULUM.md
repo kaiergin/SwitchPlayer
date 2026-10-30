@@ -917,6 +917,27 @@ tests. No trainer file changes; the live Test C run tree is untouched.
 Audited like every build, the tests run after C0.
 COST: about 1-3 h of one process (the policy on the GPU, the emulator on
 the CPU), in the gap after C0, before the next BBF test.
+AMENDMENTS (the build, before any run):
+  (A1) The sequence census runs at every 10th decision of each game
+      (decisions 0, 10, 20, ...), not at every decision. Its worst case,
+      when nothing merges, is about 50,000 frames per decision (9 + 81 +
+      729 branches, each continued to 72 frames). At every decision that
+      could take over 12 h. The token census still runs at every decision.
+  (A2) CPU only, as the exact eval (probe_exhaustive_eval's settings).
+  (A3) VALIDITY: the census's main line must reproduce the snapshot's
+      deployed exact-eval row (T2 iteration 42: 1699.0 over noop starts
+      1..30). A difference means a branch leaked into the main line, and
+      the census is VOID. The probe records the check (main_line_ok).
+  (A4) Strict equality compares ALE's full serialized state (CPU, RAM and
+      the rest), not RAM alone.
+  (A5) The sequence census expands breadth-first. A node is the emulator
+      state together with the frames played so far. Nodes equal in both
+      have identical futures under identical inputs and are expanded once.
+      The tests pin the counts against brute force.
+BUILT 2026-10-30 (pre-audit): benchmarks/probes/probe_action_census.py,
+tests/test_action_census.py. The probe imports the exact eval's module
+only when it runs as a script, so importing it changes nothing
+process-wide.
 
 ### RESULT -- Test B2: two swaps in 100k env steps at the constant discount, three generations T0-T2 (seed 0), 2026-10-30
 
