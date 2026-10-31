@@ -1705,6 +1705,25 @@ ROW 65 (44,398 env steps; 12 held ships in all): deployed 1006.7,
 trainer-BN 1133.0. Read (3), cycle 3: the dip against row 60 is +82.0
 deployed and +94.0 trainer-BN, a third reset with no dip. Read (4): every
 net 0 dormant, no weak filter (16% at row 60), erank 68.7.
+ROWS 70-80 AND RESET 4 (10-31 09:57).
+  row  env     deployed  trainer-BN  dormant dyn/proj  all   erank
+  70   48,209   1164.7    1172.3     0/.371            .268  10.6
+  75   52,499   1185.7     985.0     .004/.418         .303  17.9
+  80   56,313   1052.3    1171.3     .004/.461         .334  21.6
+  (representation, prediction and value_prefix 0; no weak filter at any
+  of the three rows.)
+  - Cycle 3 in full (rows 65-80, deployed 1006.7 / 1164.7 / 1185.7 /
+    1052.3): OLS +4.0 deployed per 1k env steps (trainer-BN -2.2), mean
+    1102.3, against cycle 2's 1094.8 and cycle 1's 909.9. Cycle 3 is flat
+    and does not drift down, but the level did not step up at reset 3.
+    The cycle means so far: 910, 1095, 1102.
+  - Read (4): the trunk under 0.5% dormant all cycle, no weak filter, the
+    projector re-collapsed to 46%.
+RESET 4 after iteration 80 (step 160,000, 56,313 env steps), as
+scheduled. At ~3.8k env steps per 5 iterations, reset 5 (after iteration
+100) should fall near 71k env steps, inside the 80k limit. Iteration 120
+should be past 80k (~86k), so it would get none: 5 resets in all, not the
+pre-registration's "about 6".
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
