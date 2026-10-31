@@ -1599,6 +1599,46 @@ quick probe, the 25 suites in the run tree) passed. C LAUNCHED 18:29
 (attempt 1, fresh). n0 waits for C's completion and evals. Expected: about
 140-150 iterations and about 28 h per run. Reset 1 is due after
 iteration 20.
+C ROWS 5-20 AND RESET 1 (10-30 21:27). 8.9-9.6 min per iteration. Rows
+5-20 come before any reset, so they are the C0 recipe on C's seed (no
+twin read yet). Exact evals, 30 games (single rows; the band is +-464):
+  row  env     deployed  trainer-BN
+   5    2,571    473.3     340.7
+  10    5,642    481.3     498.7
+  15    8,633    741.0     544.0
+  20   11,911    872.7     984.0
+  Beside B2's T0 (same recipe; its schedules keyed to its own 33.6k):
+  399.7/181.3, 600.7/614.3, 714.3/701.0, 689.7/1183.7 at 3,225-13,875 env
+  steps.
+RESET 1 after iteration 20 (step 40,000, 11,911 env steps), as scheduled.
+The trainer's line: "representation+dynamics shrunk x0.5 + 0.5 x fresh;
+prediction+value_prefix+projector re-initialized; target reset; warmup
+restarts; the actor holds the pre-reset weights until step 50000". No
+ALERT; the hand-off's row-20 evals ran on the pre-reset learner.
+READ (4) so far: the dormant fraction at <= 0.025 per net (at <= 0.1, all
+within 0.02), the representation's weak first-layer filters, and erank:
+  row  repr  dyn   pred  vprefix  proj  all   conv1 weak  erank
+   5   0     0     .177  0        0     .010  0           18.9
+  10   .298  .219  .260  0        .398  .359  0           17.9
+  15   .269  .207  .260  0        .605  .504  .563        16.0
+  20   .271  .207  .260  0        .644  .532  .531         5.4
+  - Dormancy set in between rows 5 and 10 (2.6k-5.6k env steps) in the
+    representation, dynamics and prediction nets, then stayed flat
+    (21-30%). value_prefix has none.
+  - The projector kept rising (40% to 64%) as its erank fell (18.9 to
+    5.4): the projector collapse seen in every run by iteration ~20 (B2's
+    T0: erank 33.9 at row 10, 13.7 at row 20). The overall fraction is
+    mostly the projector's.
+  - Over half of the first-layer filters fell under 10% of a fresh draw's
+    median norm between rows 10 and 15 (0 to 56%). On Pong, the faithful
+    runs had lost up to half by iteration 85. Under SGD at lr 0.2,
+    momentum 0.9 and coupled weight decay 1e-4, the decay's steady rate is
+    0.2 x 1e-4 / (1 - 0.9) = 2e-4 per step, so a filter the gradients stop
+    supporting falls to about e^-2 = 14% of itself in 10k steps (5
+    iterations). The jump fits filters the gradients abandoned between
+    rows 10 and 15.
+  - Row 25, the hold's end, is the first read on what the reset does to
+    these numbers.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
