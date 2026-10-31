@@ -1664,6 +1664,21 @@ again (0.293 at <= 0.025; erank 13.5, from 46.0), but representation,
 dynamics, prediction and value_prefix are all still 0, and no first-layer
 filter is weak. From scratch, those three nets were 21-30% dormant by row
 10 (20k gradient steps); here, 20k steps after the reset, they are at 0.
+ROWS 35-40 AND RESET 2 (10-31 03:10). ~10 min per iteration.
+  row  env     deployed  trainer-BN  dormant repr/dyn/proj  all   erank
+  35   21,815    725.7     882.3      .002/0/.442           .320  22.5
+  40   25,142    959.0     861.0      .006/.004/.505        .367  24.8
+  (prediction and value_prefix 0, no weak filter, at both rows.)
+  - Cycle 1 in full (rows 25-40, deployed 1037.7 / 917.3 / 725.7 /
+    959.0): read (3)'s OLS rate is -12.9 deployed per 1k env steps
+    (trainer-BN -15.0). The cycle held its post-reset level but did not
+    climb; row 35's 725.7 is the low point (-311.9 from row 25, inside
+    the band). C0's rate over the same rows comes with C0.
+  - Read (4): through the whole cycle the trunk stayed under 1% dormant
+    and no filter went weak. Only the projector re-collapsed (to 51%),
+    with its erank recovering to 22-25 after row 30's 13.5.
+RESET 2 after iteration 40 (step 80,000, 25,142 env steps), as scheduled,
+with the same trainer line; the hold runs to step 90,000 (row 45).
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
