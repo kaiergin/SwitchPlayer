@@ -1639,6 +1639,25 @@ within 0.02), the representation's weak first-layer filters, and erank:
     rows 10 and 15.
   - Row 25, the hold's end, is the first read on what the reset does to
     these numbers.
+PAUSED 22:02 10-30 (Kai asked, 2 h), in iteration 23: supervise_testb.py r0
+and its trainer killed by exact PID; the Ray processes exited with the
+trainer. The hand-off and n0 stayed up (n0's expected "R0 is unfinished
+and nothing drives it" ALERT at 22:18). RESUMED: launch_testc.ps1 rerun at
+00:03 10-31 started only r0; preflight ok; attempt 1 (resume) after
+iteration 22 (12,958 env steps, 44,000 train steps). Iteration 23's
+partial work was lost; reset 1 was not repeated.
+ROW 25 (15,003 env steps; the hold's end, 4 held ships; the evals take
+the learner's weights): deployed 1037.7, trainer-BN 1006.7.
+  - Read (3), cycle 1: the dip, row 25 against row 20, is +165.0 deployed
+    and +22.7 trainer-BN, so there is no dip (single rows, +-464). The
+    recovery is immediate: row 25 is already at or above row 20.
+  - Read (4): every net's dormant fraction is 0 at <= 0.025 (the
+    projector's is 0.0004 at <= 0.1); weak first-layer filters 0; erank
+    46.0 (5.4 at row 20).
+  - Read (6): probe_prefix_bn FIXED at rows 20 and 25 (p1_ratio 0.40 and
+    0.77).
+  - Next: whether the dormancy and the filter loss come back within the
+    cycle (rows 30-40), and reset 2 after iteration 40.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
