@@ -1658,6 +1658,12 @@ the learner's weights): deployed 1037.7, trainer-BN 1006.7.
     0.77).
   - Next: whether the dormancy and the filter loss come back within the
     cycle (rows 30-40), and reset 2 after iteration 40.
+ROW 30 (18,513 env steps): deployed 917.3, trainer-BN 949.7 (row 25:
+1037.7 / 1006.7; single rows, +-464). Read (4): the projector is dormant
+again (0.293 at <= 0.025; erank 13.5, from 46.0), but representation,
+dynamics, prediction and value_prefix are all still 0, and no first-layer
+filter is weak. From scratch, those three nets were 21-30% dormant by row
+10 (20k gradient steps); here, 20k steps after the reset, they are at 0.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
