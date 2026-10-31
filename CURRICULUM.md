@@ -1684,6 +1684,23 @@ trainer-BN 1076.3. Read (3), cycle 2: the dip against row 40 is +208.3
 deployed and +215.3 trainer-BN, so again no dip and an immediate
 recovery. Read (4): dormant 0.0003 overall (prediction 0.005, the rest
 0), no weak filter, erank 53.2.
+ROWS 50-60 AND RESET 3 (10-31 06:32).
+  row  env     deployed  trainer-BN  dormant repr/dyn/pred/proj  all   conv1 weak  erank
+  50   32,343   1172.3    1322.7     .002/0/.005/.357           .259  .031         9.7
+  55   36,069   1115.0     926.7     .008/0/.005/.423           .308  .031        11.5
+  60   40,535    924.7    1039.0     .013/.004/.005/.475        .346  .156        22.9
+  - Cycle 2 in full (rows 45-60, deployed 1167.3 / 1172.3 / 1115.0 /
+    924.7): OLS -21.1 deployed per 1k env steps (trainer-BN -13.4). The
+    cycle's mean, 1094.8 deployed, is 184.9 above cycle 1's 909.9: the
+    level stepped up at reset 2 (row 40 to 45, +208.3), then drifted down
+    within the cycle, as in cycle 1 (-12.9). So far the gains come at the
+    resets, as Test B's came at its swaps. These are single rows, and C0's
+    rates over the same rows decide it.
+  - Read (4): the trunk stayed near clean (representation up to 1.3%),
+    the projector re-collapsed to 47.5%, and, for the first time since a
+    reset, first-layer filters went weak: 3% at rows 50-55, 16% at row 60.
+RESET 3 after iteration 60 (step 120,000, 40,535 env steps), as
+scheduled; the hold runs to row 65.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
