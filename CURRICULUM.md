@@ -1679,6 +1679,11 @@ ROWS 35-40 AND RESET 2 (10-31 03:10). ~10 min per iteration.
     with its erank recovering to 22-25 after row 30's 13.5.
 RESET 2 after iteration 40 (step 80,000, 25,142 env steps), as scheduled,
 with the same trainer line; the hold runs to step 90,000 (row 45).
+ROW 45 (28,986 env steps; 8 held ships in all): deployed 1167.3,
+trainer-BN 1076.3. Read (3), cycle 2: the dip against row 40 is +208.3
+deployed and +215.3 trainer-BN, so again no dip and an immediate
+recovery. Read (4): dormant 0.0003 overall (prediction 0.005, the rest
+0), no weak filter, erank 53.2.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
