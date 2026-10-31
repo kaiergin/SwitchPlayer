@@ -1701,6 +1701,10 @@ ROWS 50-60 AND RESET 3 (10-31 06:32).
     reset, first-layer filters went weak: 3% at rows 50-55, 16% at row 60.
 RESET 3 after iteration 60 (step 120,000, 40,535 env steps), as
 scheduled; the hold runs to row 65.
+ROW 65 (44,398 env steps; 12 held ships in all): deployed 1006.7,
+trainer-BN 1133.0. Read (3), cycle 3: the dip against row 60 is +82.0
+deployed and +94.0 trainer-BN, a third reset with no dip. Read (4): every
+net 0 dormant, no weak filter (16% at row 60), erank 68.7.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
