@@ -1724,6 +1724,10 @@ scheduled. At ~3.8k env steps per 5 iterations, reset 5 (after iteration
 100) should fall near 71k env steps, inside the 80k limit. Iteration 120
 should be past 80k (~86k), so it would get none: 5 resets in all, not the
 pre-registration's "about 6".
+ROW 85 (60,666 env steps; 16 held ships in all): deployed 1206.7,
+trainer-BN 1173.0. Read (3), cycle 4: the dip against row 80 is +154.3
+deployed and +1.7 trainer-BN, a fourth reset with no dip. Read (4): every
+net 0 dormant, no weak filter, erank 33.3.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
