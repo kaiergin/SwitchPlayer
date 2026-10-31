@@ -1728,6 +1728,37 @@ ROW 85 (60,666 env steps; 16 held ships in all): deployed 1206.7,
 trainer-BN 1173.0. Read (3), cycle 4: the dip against row 80 is +154.3
 deployed and +1.7 trainer-BN, a fourth reset with no dip. Read (4): every
 net 0 dormant, no weak filter, erank 33.3.
+PAUSED AGAIN 11:36 10-31 (Kai asked, 2 h), in iteration 89: the r0
+supervisor and its trainer were killed by exact PID; Ray exited with them.
+Kai rebooted at 11:45, which also ended the hand-off and n0's supervisor.
+RESUMED: launch_testc.ps1 at 14:27 restarted all three; preflight ok
+(manifest + quick probe + 25 suites); attempt 1 (resume) at 14:39 after
+iteration 88 (63,110 env steps, 176,000 train steps). Iteration 89's
+partial work was lost. The relaunched supervisor re-logs its old RESET
+lines; that is cosmetic (the scorer does not parse them, and the hand-off
+skips lines it has logged).
+ROWS 90-95 AND RESET 5 (10-31 16:46).
+  row  env     deployed  trainer-BN  dormant repr/dyn/pred/proj  all   erank
+  90   64,420   1051.7    1045.7     0/0/.005/.384              .278  15.3
+  95   68,239   1095.0    1026.3     .002/.004/.010/.419        .305  17.7
+  (value_prefix 0, no weak filter.)
+  - Row 100's exact evals (the pre-reset net) have not run yet. The
+    hand-off starts an interim probe only with >= 6 GB of host commit
+    free, and commit has stayed at 4.7-5.4 GB since about 16:45, so it
+    logs an hourly "probes waiting for memory" ALERT. The trainer is
+    steady at 7.9 GB private (11.5 GB peak); Kai's open applications hold
+    about 3.5 GB. The row waits; the final pass (>= 4 GB, after the
+    trainer exits) runs every missing row anyway.
+  - Read (4) at row 100 (training side): dynamics 1.6% dormant, the
+    projector 44%, representation and prediction 1% or under, and the
+    first weak filters of cycle 4 (9.4%). As in cycles 2 and 3, the trunk
+    stays nearly clean, the projector re-collapses, and weak filters come
+    late in the cycle.
+RESET 5 after iteration 100 (step 200,000, 72,293 env steps), as
+scheduled. It should be the last: iteration 120 falls past 80k env steps.
+Row 105 (76,202 env steps, 20 held ships, the hold's end), training side:
+every net 0 dormant (prediction 0.5%), no weak filter, erank 44.7, 0
+non-finite steps. Its exact evals wait behind row 100's.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
