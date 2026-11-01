@@ -1759,6 +1759,70 @@ scheduled. It should be the last: iteration 120 falls past 80k env steps.
 Row 105 (76,202 env steps, 20 held ships, the hold's end), training side:
 every net 0 dormant (prediction 0.5%), no weak filter, erank 44.7, 0
 non-finite steps. Its exact evals wait behind row 100's.
+C COMPLETE 22:38 10-31: iteration 134, 100,849 env steps, rc=0; 5 resets
+(after iterations 20 / 40 / 60 / 80 / 100), none after iteration 120
+(88,447 env steps, past the 80k limit); 20 held ships. Host commit fell to
+2.4-3.3 GB in dips over its last 4 h (the trainer grew to 10 GB private;
+the supervisor's advisory "memory creep?" ALERT at row 130), so every row
+from 100 on was scored in the final pass (22:38-23:06; 27 rows each, plus
+the 5 read (6) rows). 0 non-finite steps in every row.
+ROWS 100-134 (score_testc.py, 23:06):
+  row  env      deployed  trainer-BN  dormant repr/dyn/pred/proj   conv1 weak  erank
+  100   72,293    983.7    1167.3     .002/.016/.010/.443          .094        15.4
+  105   76,202   1212.0    1076.0     0/0/.005/0                   0           44.7
+  110   79,888   1057.0    1231.7     .002/0/.005/.377             .031        43.8
+  115   83,844   1372.7    1098.7     .002/0/.005/.475             .125        43.2
+  120   88,447   1511.7    1293.0     .004/.020/.005/.557          .094        49.3
+  125   92,607   1317.7    1275.3     .029/.055/.016/.597          .125        38.4
+  130   97,314   1571.7    1245.0     .038/.070/.016/.614          .156        33.3
+  134  100,849   1343.7    1554.0     .044/.094/.021/.625          .125        36.2
+  (value_prefix 0 at every row.)
+C'S READS (C0 is not run yet, so read (1) and C0's halves wait):
+  (1) C's [90k, end] window, rows 125 / 130 / 134 (n = 3): deployed
+      1411.0, trainer-BN 1358.1. Against C0's, when C0 is scored.
+  (2) deployed per 20k window of env steps (n):
+      window              0-20k   20-40k   40-60k   60-80k   80-end
+      C                   754 (6) 1028 (5) 1067 (5) 1101 (6) 1423 (5)
+      Test B2             622     801      1071     1484     1588
+      Test B              503     881      845      1003     1023
+      current lineage     540     896      1107     -        1164 (91-98k)
+  (3) per reset: dip = row 25 of the cycle against row 20; the cycle rate
+      is OLS deployed per 1k env steps over rows 25-40 of the cycle.
+      reset  rows     deployed       dip     trainer-BN dip  cycle rate
+      1      20->25    873 -> 1038   +165     +23            -12.9
+      2      40->45    959 -> 1167   +208    +215            -21.1
+      3      60->65    925 -> 1007    +82     +94             +4.0
+      4      80->85   1052 -> 1207   +154      +2            -16.2
+      5     100->105   984 -> 1212   +228     -91            +30.4
+      Every reset recovered by its first row (row 25 at or above row 20,
+      deployed). Cycle means, deployed: 910 / 1095 / 1102 / 1084 / 1341.
+      The last is rows 105-134, 30 iterations with no further reset.
+  (4) the trunk (representation, dynamics, prediction) was 21-30%
+      dormant at rows 10-20 from scratch. After reset 1 it stayed under
+      2% through every 20-iteration cycle. Only the final 30-iteration
+      stretch climbed past that: dynamics 9.4% and representation 4.4% at
+      row 134. The projector re-collapsed within 5-10 iterations after
+      every reset (to 44-63%). Weak first-layer filters: 53-56% at rows
+      15-20, 0 after each reset, back to 9-16% late in cycles 2, 4 and 5.
+  (5) the prior did not collapse: policy_maxp 0.53-0.77, the search
+      targets' entropy 0.86-1.91.
+  (6) probe_prefix_bn FIXED at rows 20, 25, 100, 105 and 134 (p1_ratio
+      0.40 / 0.77 / 1.11 / 1.04 / 0.53).
+  (7) the largest adjacent deployed drop is -228 (row 130 -> 134); no
+      reset produced a deployed dip (reset 5's trainer-BN -91 is inside
+      the one-row band).
+  Beyond the letter (C alone, one seed, not a verdict):
+  - C rose over its last 17k env steps. Rows 115-134 average 1423.5,
+    against 1084 for cycle 4. The rise began after the last reset, in the
+    only cycle that ran past 20 iterations. C0 is needed to tell "the
+    resets paid off late" from "any run climbs here at 80k+".
+  - C's [90k, end] (1411.0, n 3) against the references, with read (2)'s
+    band rule: Test B's 1015.9 (n 4) +395.1, band +-331.3, above; the
+    current lineage's 1163.8 (n 3) +247.2, band +-354.2, inside; Test
+    B2's T2 1629.5 (n 4) -218.5, band +-331.3, inside.
+  - Against B2 by window: C led at 0-40k (inside the bands), was level at
+    40-60k, fell 383 behind at 60-80k (n 6 against 7, band +-241), and
+    ended 165 behind at 80-end (band +-263).
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
