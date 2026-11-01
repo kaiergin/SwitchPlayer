@@ -1865,6 +1865,25 @@ C0 ROWS 25-40 (04:49 EST 11-01).
     1% in the same rows after reset 1. The projector holds at 61-63%,
     weak filters at 22-25%, erank 27.7-43.2. The prior is steady:
     policy_maxp 0.77-0.80. 0 non-finite steps.
+C0 ROWS 45-60 (08:17 EST 11-01).
+  row  env     C0 deployed  trainer-BN  | C deployed  trainer-BN
+  45   29,856     996.3      1103.3     |   1167.3      1076.3
+  50   33,899     784.7       837.7     |   1172.3      1322.7
+  55   38,167    1251.7       630.3     |   1115.0       926.7
+  60   42,061    1035.3       953.0     |    924.7      1039.0
+  - Read (3), cycle 2 (rows 45-60): C0's rate is +14.8 deployed per 1k
+    env steps (trainer-BN -16.5), against C's -21.1. The means are 1017.0
+    (C0) and 1094.8 (C).
+  - Read (2): 20-40k is closed, C0 1015 (n 5) against C 1028 (n 5),
+    level. 0-20k was 564 against 754. C's lead from its higher start has
+    gone.
+  - Read (4): C0's trunk keeps creeping (representation 13.1%, dynamics
+    10.5%, prediction 25.5% at row 60), against C's 1.3% / 0.4% / 0.5% at
+    its row 60. Weak filters 31% (C 16%), the projector 64%.
+  - Read (5): a one-row drop in the prior's confidence at row 55
+    (policy_maxp 0.43, against 0.72-0.80 at every other row), back to
+    0.72 at row 60. C never went below 0.53.
+  - Read (7): the largest adjacent drop is still -644 (row 35 -> 40).
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
