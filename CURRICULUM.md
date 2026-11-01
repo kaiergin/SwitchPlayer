@@ -1884,6 +1884,16 @@ C0 ROWS 45-60 (08:17 EST 11-01).
     (policy_maxp 0.43, against 0.72-0.80 at every other row), back to
     0.72 at row 60. C never went below 0.53.
   - Read (7): the largest adjacent drop is still -644 (row 35 -> 40).
+C0 MEMORY, 10:00-11:45 EST 11-01: host commit free fell to 0.6-1.0 GB (the
+trainer at 8.6 GB private, Kai's open applications about 7 GB). Windows
+began growing the C: pagefile (16 -> 80 MB). The interim probes waited
+from row 65 on, and the supervisor raised its advisory "memory creep?"
+ALERT at row 65. No allocation failed.
+C0 PAUSED 11:46 EST 11-01 (Kai asked, 2 h), in iteration 78: the n0
+supervisor and its trainer were killed by exact PID; Ray exited with them;
+the GPU is idle. The resume checkpoint is iteration 76's (11:25,
+0.66 GB). The hand-off stays up and scores the settled rows (65-75) with
+the memory freed. Resume: launch_testc.ps1 at about 13:46.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
