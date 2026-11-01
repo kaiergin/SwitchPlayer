@@ -1894,6 +1894,21 @@ supervisor and its trainer were killed by exact PID; Ray exited with them;
 the GPU is idle. The resume checkpoint is iteration 76's (11:25,
 0.66 GB). The hand-off stays up and scores the settled rows (65-75) with
 the memory freed. Resume: launch_testc.ps1 at about 13:46.
+RESUMED: launch_testc.ps1 at 13:47 EST started the two supervisors (r0's
+exited at once, RUN COMPLETE, before any preflight); n0's preflight ok;
+attempt 1 (resume) at 13:58 after iteration 76 (53,842 env steps, 152,000
+train steps). Rows 65-75 were scored during the pause.
+C0 ROWS 65-75:
+  row  env     C0 deployed  trainer-BN  | C deployed  trainer-BN
+  65   45,428    1124.0      1076.7     |   1006.7      1133.0
+  70   49,041    1325.0      1019.0     |   1164.7      1172.3
+  75   52,901    1143.3       942.3     |   1185.7       985.0
+  - Read (2), 40-60k so far: C0 1156.9 (n 4, rows 60-75) against C's
+    1067 (n 5).
+  - Read (4): representation 15.0%, dynamics 12.9%, prediction 26.0%
+    dormant at row 75 (C at row 75: 0 / 0.4% / 0); weak filters 37.5%;
+    the projector 64%; erank 38-43; policy_maxp 0.76-0.78; 0 non-finite
+    steps.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
