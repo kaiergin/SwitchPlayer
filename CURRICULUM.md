@@ -1823,6 +1823,13 @@ C'S READS (C0 is not run yet, so read (1) and C0's halves wait):
   - Against B2 by window: C led at 0-40k (inside the bands), was level at
     40-60k, fell 383 behind at 60-80k (n 6 against 7, band +-241), and
     ended 165 behind at 80-end (band +-263).
+C0 LAUNCHED 23:15 10-31 (supervise_testb.py n0, once C was complete and
+evaluated: "R0 complete and evaluated; n0 s0 may start" at 23:05); preflight
+ok (manifest + quick probe + 25 suites); attempt 1 (fresh). ~10.5 min per
+iteration, so C0 should end about 03:00 11-02.
+C0 ROW 5 (2,625 env steps): deployed 498.7, trainer-BN 305.3 (C's row 5,
+2,571 env steps: 473.3 / 340.7). Read (4): prediction 19.8% dormant, the
+rest 0; no weak filter; erank 11.0; 0 non-finite steps.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
