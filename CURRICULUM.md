@@ -1909,6 +1909,17 @@ C0 ROWS 65-75:
     dormant at row 75 (C at row 75: 0 / 0.4% / 0); weak filters 37.5%;
     the projector 64%; erank 38-43; policy_maxp 0.76-0.78; 0 non-finite
     steps.
+C0 ROW 80 (evaluated 15:01 EST 11-01):
+  row  env     C0 deployed  trainer-BN  | C deployed  trainer-BN
+  80   57,013    1174.7      1021.3     |   1052.3      1171.3
+  - Read (2), 40-60k complete: C0 1160 (n 5, rows 60-80) against C's
+    1067 (n 5): +93, band 274 -> no difference.
+  - Read (3), cycle 3 (rows 65-80): C0 OLS -1.0 per 1k env against C's
+    +4.0. Both flat; C0's rates over C's cycles 1-3 are +32.9 / +14.8 /
+    -1.0.
+  - Read (4) at row 80: representation 15.8%, dynamics 12.5%, prediction
+    26.0% dormant (C at row 80, before reset 4: 0 / 0.4% / 0); weak
+    filters 43.8% (C 0); the projector 64% (C 46%); erank 37.7.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
