@@ -1929,7 +1929,7 @@ C0 ROWS 85-90 (row 90 evaluated 16:46 EST 11-01):
     env against C's -16.2 over rows 85-100. Two rows, inside the
     single-row band; not a rate yet.
   - Read (4) at row 90: representation 16.7%, dynamics 14.8%, prediction
-    26.0% dormant (C at row 90, 2 cycles' worth after reset 4: 0 / 0 /
+    26.0% dormant (C at row 90, 10 iterations after reset 4: 0 / 0 /
     0.5%); weak filters 46.9% (C 0); the projector 64.7% (C 38%);
     erank 37.3 (C 15.3).
 
