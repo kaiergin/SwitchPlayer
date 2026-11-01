@@ -1847,6 +1847,24 @@ so the hand-off log's times repeat 01:00-02:00).
     first-layer filters 25% (C 53%); erank 32.0. The same recipe gave
     two quite different dormancy levels by row 20, so a dormancy gap
     between the runs needs a margin this wide before it counts.
+C0 ROWS 25-40 (04:49 EST 11-01).
+  row  env     C0 deployed  trainer-BN  | C deployed  trainer-BN
+  25   15,875     476.3       776.0     |   1037.7      1006.7
+  30   19,263     899.0       758.7     |    917.3       949.7
+  35   22,933    1343.3       935.3     |    725.7       882.3
+  40   26,250     699.3       731.0     |    959.0       861.0
+  - Read (3), cycle 1 (rows 25-40): C0's OLS rate is +32.9 deployed per
+    1k env steps (trainer-BN +1.6), against C's -12.9. The cycle means
+    are 854.5 (C0) and 909.9 (C). C0's rate rests on noisy single rows:
+    1343.3 at row 35, then 699.3 at row 40. That -644 drop is beyond the
+    one-row band (+-464) and is C0's largest so far (read (7)).
+  - Read (2), 0-20k: C0 564 (n 6) against C 754 (n 6), -190, inside the
+    band (+-250). 20-40k is open.
+  - Read (4): C0's trunk keeps creeping with no reset (representation
+    9.4%, dynamics 6.6%, prediction 25.0% at row 40). C's stayed under
+    1% in the same rows after reset 1. The projector holds at 61-63%,
+    weak filters at 22-25%, erank 27.7-43.2. The prior is steady:
+    policy_maxp 0.77-0.80. 0 non-finite steps.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
