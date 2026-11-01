@@ -1830,6 +1830,23 @@ iteration, so C0 should end about 03:00 11-02.
 C0 ROW 5 (2,625 env steps): deployed 498.7, trainer-BN 305.3 (C's row 5,
 2,571 env steps: 473.3 / 340.7). Read (4): prediction 19.8% dormant, the
 rest 0; no weak filter; erank 11.0; 0 non-finite steps.
+C0 ROWS 10-20 (01:19 EST 11-01; the clocks went back an hour at 02:00 EDT,
+so the hand-off log's times repeat 01:00-02:00).
+  row  env     C0 deployed  trainer-BN  | C deployed  trainer-BN
+  5     2,625     498.7       305.3     |    473.3       340.7
+  10    5,980     449.7       349.7     |    481.3       498.7
+  15    9,105     402.3       328.3     |    741.0       544.0
+  20   12,465     655.3       436.0     |    872.7       984.0
+  - C's first reset falls after iteration 20, so rows 5-20 are the same
+    recipe in both runs, and their gap is run-to-run noise: C0 501.5
+    against C 642.1 deployed (n 4 each, -140.6, band +-306.7, inside).
+    C0 starts 141 lower before any reset, so C's lead at 0-20k (754) is
+    partly C's head start, not the resets.
+  - Read (4), C0 row 20: representation 7.3%, dynamics 4.7%, prediction
+    21.9% dormant (C at row 20: 27% / 21% / 26%); projector 58.6%; weak
+    first-layer filters 25% (C 53%); erank 32.0. The same recipe gave
+    two quite different dormancy levels by row 20, so a dormancy gap
+    between the runs needs a margin this wide before it counts.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
