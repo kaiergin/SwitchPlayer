@@ -1384,6 +1384,7 @@ LAUNCHED 12:35 EST 11-02:
   - Frozen while it runs: the run tree, the AUDITED files in the build
     tree, and Y:\SwitchPlayer-testc-run and Y:\SwitchPlayer-testb2-run
     (the references).
+PAUSED 12:50 EST 11-02 at Kai's request (2 hours), before the first  checkpoint: the supervisor pair and then the trainer pair were killed by  exact PID, the hand-off left running. Resume about 14:50 by rerunning  the launcher. With no checkpoint the run restarts fresh (iter-001.pkl is  truncated on its first write), so about 15 minutes of training are lost.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
