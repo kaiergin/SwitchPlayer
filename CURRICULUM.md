@@ -1392,6 +1392,27 @@ trainer starts fresh: attempt 2) and is preflighting again (about 25 minutes).
 The hand-off (post_testc2.py) ran through the pause. CS2 was open on the GPU
 at the resume (about 6 of 12 GB in use), and the trainer shares the card.
 
+Rows 5-25 (trainer-BN returns from the training log; the exact evals wait
+for memory, as in Test C, so deployed scores come later). C at the same
+row in brackets:
+
+| row | env steps | C2 | C |
+|---|---|---|---|
+| 5 | 2,599 | 500 | 393 |
+| 10 | 5,636 | 291 | 394 |
+| 15 | 8,725 | 728 | 575 |
+| 20 | 11,691 | 696 | 868 |
+| 25 | 14,387 | 751 | 965 |
+
+These are single rows, so no read is possible yet. The first reset fired after
+iteration 20 (gradient step 40,000), as in C. The ramp trace restarts with
+it: iterations 21-25 run n 10, 9, 8, 7, 6 and gamma 0.97 to 0.9856,
+identical to iterations 1-5, and the cycle ends at (5, 0.988054). The
+"in" window holds the first 10,000 steps of each cycle (value loss 0.140
+in cycle 1, 0.131 in cycle 2). Host commit free is about 4.9 GB, so the
+interim probes wait (the hand-off's hourly ALERT, advisory); there are no
+orphans from the 12:50 kill.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
