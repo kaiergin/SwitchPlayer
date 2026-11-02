@@ -1959,6 +1959,24 @@ C0 ROWS 105-115 (row 115 evaluated 21:17 EST 11-01):
     (C 12.5%); the projector 65% (C 48%); erank 39.1 (C 43.2).
   - C0's [90k, end] rows for read (1) should be about 125, 130, 135 and
     the final row (~796 env steps per iteration over rows 100-115).
+C0 ROWS 120-130 (row 130 evaluated 23:25 EST 11-01):
+  row  env     C0 deployed  trainer-BN  | C deployed  trainer-BN
+  120  87,101    1464.0      1241.7     |   1511.7      1293.0
+  125  91,229    1210.7      1232.3     |   1317.7      1275.3
+  130  95,466    1239.3      1250.0     |   1571.7      1245.0
+  - Read (1), PROVISIONAL (C0 has 2 of its ~4 [90k, end] rows): C 1411.0
+    (n 3) against C0 1225.0 (n 2): +186, band 396 -> no difference so
+    far; trainer-BN 1358.1 against 1241.2 (+117).
+  - Read (2), provisional: C0 [90k, end] against Test B 1015.9 +209 (no
+    difference), the current lineage 1163.8 +61 (no difference), T2
+    1629.5 -405 (band 376 -> WORSE). 80k-end so far C0 1300 (n 4)
+    against C's 1423 (n 5).
+  - Read (3), cycle 5 (rows 105-120): C0 +9.7 per 1k env against C's
+    +30.4.
+  - Read (4) at row 130: representation 26.3%, dynamics 23.8%,
+    prediction 28.7% dormant (C 3.8% / 7.0% / 1.6%, 30 iterations after
+    reset 5); weak filters 46.9% (C 15.6%); the projector 66% (C 61%);
+    erank 36.3 (C 33.3).
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
