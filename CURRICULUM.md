@@ -893,6 +893,46 @@ COST: about a day of build and audit around C2's launch. The run: (A)
 about the census's replay time without the branches (well under an hour);
 (B) training a small IDM on CPU, about an hour. Results about 11-03 or
 11-04.
+AMENDMENTS (the build, before any real run):
+  (A1) THE FREQUENCY SPLIT. "Zero in T2's last 20 iterations" leaves one
+      token: only NOOP-4 has no play in T2's own-play log over iterations
+      23-42. The "six zero" were T2's final row alone. Plays there: UP-4
+      1, RIGHT-4 4, DOWNRIGHT-4 4, UPRIGHT-4 5, LEFT-4 8, DOWN-4 15. The
+      split is now the lineage's 1% rule (the vocabulary rule): a token
+      is RARE when it is under 1% of T2's decisions in iterations 23-42,
+      against the rest. Reported, not used for the decision, as before.
+      Counted from the log (3,141 decisions; 1% = 31.4): RARE = NOOP-4,
+      UP-4, RIGHT-4, LEFT-4, DOWN-4, UPRIGHT-4 and DOWNRIGHT-4, all
+      4-frame tokens. Only UPLEFT-4 (7.4%) and DOWNLEFT-4 (3.7%) are not,
+      so (A)'s 4-frame split is 35 rare pairs against 1. Most of what
+      the primary group asks is about tokens T2 seldom plays.
+  (A2) THE SCALE OF tau. tau is the median distance from an online
+      prediction to its target projection. The pairs compare two online
+      predictions. If two tokens truly reach the same next observation,
+      both predictions are trained toward the same target, so their
+      distance can be up to about the sum of the two errors. Read (4)'s tau
+      x 2 covers that case. The decision stays on tau, as registered.
+  (A3) THE DATA AND THE COST. The logs hold 484 / 596 / 962 4-frame
+      decisions (T0 / T1 / T2), so the IDM trains on about 2,040 samples
+      (the 20,000 cap never binds). (B) applies at 506 census decisions,
+      where the chosen token is 4 frames long (UPLEFT-4 386, DOWNLEFT-4
+      98, LEFT-4 12, UP-4 5, RIGHT-4 5). The full run is estimated at
+      about 5 minutes and about 1.3 GB, not an hour.
+  (A4) CONVENTIONS fixed before the run:
+      - F1 = 2tp / (2tp + fp + fn), and 1.0 when that is 0/0;
+      - "beats its floor" is strictly greater;
+      - (B) counts the chosen action in both classes (the version without
+        it is reported only);
+      - game families are the games' returns (8 families);
+      - the IDM's hyperparameters were fixed before any data was seen:
+        Nature-DQN convolutions, fc 256 -> 9, Adam lr 3e-4, batch 64, 10
+        epochs, seed 0, plain cross-entropy;
+      - the held-out set is the last ceil(n / 10) of T2's lives (13), and
+        its accuracy selects nothing.
+BUILT 2026-11-02 (pre-audit): benchmarks/probes/probe_e1_equivalence.py
+and tests/test_e1_equivalence.py (38 passed). A smoke run (2 games, 60
+decisions each, small caps) matched the exact eval in both games
+(main_line_ok); its numbers are not results.
 
 ### Next experiment (pre-registered) -- Test C2: BBF's n-step and discount ramps on top of the resets (Kai, 2026-11-02)
 
