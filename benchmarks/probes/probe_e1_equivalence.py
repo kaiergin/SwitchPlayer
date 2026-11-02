@@ -67,13 +67,23 @@ READS (pre-registered; amendments (A1), (A5), (A6))
 F1 = 2tp / (2tp + fp + fn); when that denominator is 0 (neither the truth
 nor the prediction has a positive pair) F1 = 1.0, the two agree exactly.
 Precision (recall) is None when tp + fp (tp + fn) is 0.
-DECISION (A5), unrounded:
-  - "E2": (A) or (B) has precision >= 0.9 and recall >= 0.5 pooled AND in
-    at least 6 of the 8 game families (a family counts when its own pooled
-    precision and recall meet both bars);
-  - "KAI_CALL_LOW": neither reaches precision >= 0.7 with recall >= 0.2,
-    pooled;
+DECISION (A5 on the LIVE decisions, A7), unrounded. A decision is LIVE
+when its census grid partition (all 36 tokens) has more than one class
+(E0's definition; the dead 18% -- the start jingle, deaths -- make every
+pair equivalent and let a one-bit rule pass when pooled):
+  - "E2": (A) or (B) has precision >= 0.9 and recall >= 0.5 on the live
+    decisions pooled AND in at least 6 of the 8 game families (a family
+    counts when its own live decisions' pooled precision and recall meet
+    both bars);
+  - "KAI_CALL_LOW": neither reaches precision >= 0.7 with recall >= 0.2 on
+    the live decisions pooled;
   - "KAI_CALL_MID" otherwise.
+  The reads over every decision, and the old pooled rule's verdict on
+  them, stay reported outside the decision; so does the REFERENCE: the
+  best state-blind fixed partition of the nine actions on the live
+  decisions (the highest recall at precision >= 0.9, all 21,147
+  partitions), for (A) and for (B). Diagnostics: tau's calibration
+  percentiles per token length.
   A None precision (no predicted merge) or recall (no true merge) fails
   every bar. VOID when the main line is not the census's: the census must
   be valid (its main_line_ok), every game must equal the exact eval's game
@@ -86,11 +96,15 @@ Refuses before anything plays: no full census of the snapshot, a census of
 another snapshot file (accepted, and recorded, when the two hash alike), a
 thread count other than the census's, a full run without the exact eval's
 row, an empty calibration log.
-Writes probe_e1_equivalence-<run>.jsonl (the summary: tau, reads (1)-(4),
-floors, IDM accuracies, verdict, main_line_ok, void_reasons, timings) and
-probe_e1_equivalence-<run>-decisions.jsonl (one line per decision: per group
-the truth and predicted labels and the pair distances, (B)'s fields) next to
-itself. Smoke knobs (any of them non-default writes "-smoke" files):
+Writes, next to itself: probe_e1_equivalence-<run>-meta.jsonl BEFORE the
+replay (tau and its calibration, the rare set and per-slot plays, the
+IDM's record and accuracies: they survive a failed summary write);
+probe_e1_equivalence-<run>-decisions.jsonl (one line per decision: live, per
+group the truth and predicted labels and the pair distances, (B)'s fields);
+probe_e1_equivalence-<run>.jsonl (the summary: tau, reads (1)-(4), the live
+reads, the reference, floors, IDM accuracies, verdict, main_line_ok,
+void_reasons, timings). A full run never overwrites its meta or decisions
+file. Smoke knobs (any of them non-default writes "-smoke" files):
 E1_GAMES (default 30), E1_MAX_DECISIONS (score each game's first N
 decisions; the main line plays on), E1_LOG_LIVES (read only each log's first
 N lives), E1_IDM_EPOCHS (default 10), E1_IDM_CAP (default 20000: the IDM
@@ -108,6 +122,7 @@ if __name__ == "__main__":
 import collections
 import contextlib
 import copy
+import functools
 import itertools
 import json
 import pathlib
@@ -501,22 +516,33 @@ def train_idm(x, y, epochs, seed=IDM_SEED, batch=IDM_BATCH, lr=IDM_LR,
 # the own-play passes
 # --------------------------------------------------------------------------
 def t2_pass(lives, vocab, nets, last_iteration):
-    """T2's log, one pass: the calibration errors (nets None: skipped), the
-    4-frame IDM samples per life, and each slot's plays in the last
-    LATE_ITERS iterations."""
-    errors, per_life = [], []
+    """T2's log, one pass: the calibration errors (nets None: skipped) and
+    each error's token length in frames (A7's diagnostics), the 4-frame IDM
+    samples per life, and each slot's plays in the last LATE_ITERS
+    iterations. Returns (errors, per_life, late, lengths)."""
+    errors, lengths, per_life = [], [], []
     late = np.zeros(len(vocab), dtype=np.int64)
     first_late = int(last_iteration) - LATE_ITERS + 1
     for it, life in lives:
         traj = life["traj"]
         if nets is not None:
             errors.append(life_errors(nets, traj))
+            lengths.append([int(vocab[int(r[1])][1]) for r in traj[:-1]])
         per_life.append(life_idm_samples(traj, vocab))
         if it >= first_late:
             for rec in traj[:-1]:
                 late[int(rec[1])] += 1
     errors = np.concatenate(errors) if errors else np.zeros(0)
-    return errors, per_life, late
+    lengths = (np.concatenate([np.asarray(x, dtype=np.int64) for x in lengths])
+               if lengths else np.zeros(0, dtype=np.int64))
+    return errors, per_life, late, lengths
+
+
+def calibration_by_length(errors, lengths):
+    """(A7) diagnostics: the calibration read per token length (frames)."""
+    errors, lengths = np.asarray(errors), np.asarray(lengths)
+    return {str(f): calibration_read(errors[lengths == f])
+            for f in DURATIONS}
 
 
 def rare_slots(plays, per=RARE_PER):
@@ -573,6 +599,9 @@ class Scorer:
             rec["missing"] = True
         else:
             self.token_mismatches += int(int(truth[0]) != token)
+            # (A7): LIVE when the census's 36-token partition has more than
+            # one class (E0's classes_grid > 1)
+            rec["live"] = len(set(truth[1])) > 1
             dist = cos_distances(token_projections(self.nets, stack,
                                                    len(self.vocab)))
             rec["groups"] = {}
@@ -771,30 +800,150 @@ def summarize(recs, groups, rare, families, held_acc=None):
                         "rest": b_read(recs, keep=lambda b: b["action"]
                                        not in rare_actions)}}},
           "families": {}}
-    fam_e2 = {"A": 0, "B": 0}
-    for fam, games in fams.items():
-        sub = [r for r in recs if r["game"] in games]
-        a, b = group_read(sub, PRIMARY), b_read(sub)
-        m = {"A": meets(a.get("_p"), a.get("_r"), E2_P, E2_R),
-             "B": meets(b.get("_p"), b.get("_r"), E2_P, E2_R)}
-        for k in m:
-            fam_e2[k] += int(m[k])
-        r3["families"][fam] = {"games": games, "a": a, "b": b,
-                               "meets_e2": m}
     r4 = {"a": {k: {g: group_read(recs, g, k) for g in groups}
                 for k in TAU_MULTS if k != "1"},
           "b": {k: b_read(recs, k) for k in B_RATIOS if k != B_RATIO}}
-    pooled = {"A": (r1.get("_p"), r1.get("_r")),
-              "B": (r2.get("_p"), r2.get("_r"))}
-    v, on = verdict({k: (p, r, fam_e2[k]) for k, (p, r) in pooled.items()})
-    decision = {k: {"precision": _round(p), "recall": _round(r),
-                    "pooled_e2": meets(p, r, E2_P, E2_R),
-                    "families_e2": fam_e2[k], "families": len(fams),
-                    "pooled_low_bar": meets(p, r, LOW_P, LOW_R)}
-                for k, (p, r) in pooled.items()}
+    # every decision: reported, outside the decision (A7)
+    _, _, dec_all, v_all, on_all, r3["families"] = decide(recs, fams)
+    # (A7): the decision on the LIVE decisions
+    live = [r for r in recs if r.get("live") is True]
+    a_live, b_live, decision, v, on, fam_live = decide(live, fams)
+    scored = [r for r in recs if "groups" in r]
+    live_rec = {"decisions": len(live),
+                "share": (round(len(live) / len(scored), 4) if scored
+                          else None),
+                "read_1": a_live, "read_2": b_live, "families": fam_live,
+                "reference": reference_partition(live)}
     return {"read_1": _public(r1), "read_2": _public(r2),
             "read_3": _public(r3), "read_4": _public(r4),
+            "live": _public(live_rec),
+            "decision_all_decisions": dec_all,
+            "verdict_all_decisions": v_all,
+            "verdict_on_all_decisions": on_all,
             "decision": decision, "verdict": v, "verdict_on": on}
+
+
+def decide(recs, fams):
+    """A5's decision reads over `recs`: (A)'s and (B)'s pooled reads, the
+    per-candidate block (pooled merge precision / recall, the families --
+    each on its own decisions among `recs` -- meeting the E2 bars, the low
+    bar), the verdict and what it rests on, and the family reads. `fams`
+    {family: [games]}."""
+    a, b = group_read(recs, PRIMARY), b_read(recs)
+    fam_e2, fam_reads = {"A": 0, "B": 0}, {}
+    for fam, games in fams.items():
+        sub = [r for r in recs if r["game"] in games]
+        fa, fb = group_read(sub, PRIMARY), b_read(sub)
+        m = {"A": meets(fa.get("_p"), fa.get("_r"), E2_P, E2_R),
+             "B": meets(fb.get("_p"), fb.get("_r"), E2_P, E2_R)}
+        for k in m:
+            fam_e2[k] += int(m[k])
+        fam_reads[fam] = {"games": games, "a": fa, "b": fb, "meets_e2": m}
+    pooled = {"A": (a.get("_p"), a.get("_r")), "B": (b.get("_p"), b.get("_r"))}
+    v, on = verdict({k: (p, r, fam_e2[k]) for k, (p, r) in pooled.items()})
+    block = {k: {"precision": _round(p), "recall": _round(r),
+                 "pooled_e2": meets(p, r, E2_P, E2_R),
+                 "families_e2": fam_e2[k], "families": len(fams),
+                 "pooled_low_bar": meets(p, r, LOW_P, LOW_R)}
+             for k, (p, r) in pooled.items()}
+    return a, b, block, v, on, fam_reads
+
+
+# --------------------------------------------------------------------------
+# (A7) the reference: the best state-blind fixed partition of the actions
+# --------------------------------------------------------------------------
+ACTION_NAMES = ("NOOP", "UP", "RIGHT", "LEFT", "DOWN", "UPRIGHT", "UPLEFT",
+                "DOWNRIGHT", "DOWNLEFT")
+
+
+def set_partitions(n):
+    """Every partition of n elements as a restricted growth string (block
+    ids by first appearance): Bell(n) of them, 21,147 for n = 9."""
+    out = []
+
+    def rec(cur, blocks):
+        if len(cur) == n:
+            out.append(tuple(cur))
+            return
+        for c in range(blocks + 1):
+            cur.append(c)
+            rec(cur, blocks + 1 if c == blocks else blocks)
+            cur.pop()
+
+    rec([], 0)
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def _partition_table(n=N_ACTIONS):
+    """(every partition (P, n), its same-block indicator per pair (P,
+    pairs)): built once per process."""
+    parts = np.array(set_partitions(n), dtype=np.int64).reshape(-1, n)
+    i, j = (np.array(x, dtype=np.int64) for x in zip(*all_pairs(n)))
+    return parts, (parts[:, i] == parts[:, j]).astype(np.float64)
+
+
+def _best_fixed(tp, fp, true_total, parts):
+    """The partition with the highest recall at precision >= E2_P (on a
+    tie: the higher precision, then the most blocks -- the fewest merges --
+    then the first), its precision and recall; and how many meet both E2
+    bars (pooled). A partition merging nothing has no precision."""
+    tp, fp = np.asarray(tp, dtype=np.float64), np.asarray(fp, dtype=np.float64)
+    merged = tp + fp
+    with np.errstate(invalid="ignore", divide="ignore"):
+        p = np.where(merged > 0, tp / np.where(merged > 0, merged, 1), np.nan)
+    r = tp / true_total if true_total else np.full(len(tp), np.nan)
+    ok = np.nan_to_num(p, nan=-1.0) >= E2_P
+    out = {"partitions": int(len(parts)),
+           "meeting_e2_bars": int((ok & (np.nan_to_num(r, nan=-1.0)
+                                         >= E2_R)).sum())}
+    if not ok.any() or not true_total:
+        return {**out, "partition": None, "precision": None, "recall": None}
+    cand = np.flatnonzero(ok)
+    blocks = parts[cand].max(axis=1) + 1
+    # lexsort: the last key is the primary one
+    best = int(cand[np.lexsort((cand, -blocks, -p[cand], -r[cand]))[0]])
+    labels = [int(x) for x in parts[best]]
+    return {**out, "partition": labels,
+            "blocks": [[ACTION_NAMES[a] for a in range(len(labels))
+                        if labels[a] == blk] for blk in sorted(set(labels))],
+            "precision": round(float(p[best]), 4),
+            "recall": round(float(r[best]), 4)}
+
+
+def reference_partition(recs):
+    """(A7) reported, never decided on: over `recs` (the live decisions),
+    the best STATE-BLIND rule -- one fixed partition of the nine actions,
+    whatever the state -- as the highest recall at precision >= E2_P. (A):
+    its 4-frame pair reads; (B): its class of the chosen action, over the
+    members other than it (A5's (B) read)."""
+    parts, same = _partition_table()
+    pairs = all_pairs(N_ACTIONS)
+    index = {pr: k for k, pr in enumerate(pairs)}
+    ta, n_a = np.zeros(len(pairs)), 0
+    tb, fb, true_b, n_b = np.zeros(len(pairs)), np.zeros(len(pairs)), 0, 0
+    for r in recs:
+        if "groups" in r:
+            t = r["groups"][PRIMARY]["truth"]
+            ta += [float(t[i] == t[j]) for i, j in pairs]
+            n_a += 1
+        if "b" in r:
+            a = int(r["b"]["action"])
+            cls = set(r["b"]["truth_class"]) - {a}
+            true_b += len(cls)
+            n_b += 1
+            for x in range(N_ACTIONS):
+                if x != a:
+                    k = index[(min(a, x), max(a, x))]
+                    if x in cls:
+                        tb[k] += 1
+                    else:
+                        fb[k] += 1
+    out = {"decisions": {"A": n_a, "B": n_b}}
+    out["A"] = _best_fixed(same @ ta, same @ (n_a - ta), float(ta.sum()),
+                           parts)
+    out["B"] = _best_fixed(same @ tb, same @ fb, float(true_b), parts)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -923,14 +1072,16 @@ def lineage(path, vocab, iteration):
 
 
 def out_files(run_name, smoke):
-    """(summary, decisions); a full run's decisions are never
-    overwritten."""
+    """(summary, decisions, meta); a full run's decisions and meta are never
+    overwritten (the summary is appended to, as the census's)."""
     tag = f"probe_e1_equivalence-{run_name}{'-smoke' if smoke else ''}"
     dec = HERE / f"{tag}-decisions.jsonl"
-    if dec.exists() and not smoke:
-        raise SystemExit(f"{dec} exists: a full E1 is never overwritten "
-                         f"(move it aside first)")
-    return HERE / f"{tag}.jsonl", dec
+    meta = HERE / f"{tag}-meta.jsonl"
+    for p in (dec, meta):
+        if p.exists() and not smoke:
+            raise SystemExit(f"{p} exists: a full E1 is never overwritten "
+                             f"(move it aside first)")
+    return HERE / f"{tag}.jsonl", dec, meta
 
 
 def check_knobs(games, max_decisions, log_lives, epochs, cap):
@@ -1064,7 +1215,7 @@ def main(argv):
                               torch.get_num_threads())
     logs = lineage(path, vocab, iteration)
     pbn = pe.snapshot_prefix_bn(path)
-    summary_file, dec = out_files(run_name, SMOKE)
+    summary_file, dec, meta_file = out_files(run_name, SMOKE)
     secs = {}
     with ablation.arm_config(pe.ARM), ablation._run_length_globals(90, 2000), \
             pe.snapshot_tokens(vocab), pe.snapshot_prefix_layout(pbn):
@@ -1076,10 +1227,11 @@ def main(argv):
         # 1. own play: tau, the IDM's set, the play frequencies
         t0 = time.time()
         t2 = logs[0]
-        errors, t2_lives, late = t2_pass(
+        errors, t2_lives, late, lengths = t2_pass(
             iter_own_play(t2["folder"], t2["last"], LOG_LIVES), t2["vocab"],
             nets, t2["last"])
         tau = calibrate_tau(errors)
+        rare = rare_slots(late)
         hold = held_out_count(len(t2_lives))
         held = [s for life in t2_lives[len(t2_lives) - hold:] for s in life]
         pool = Reservoir(IDM_CAP, IDM_SEED)
@@ -1138,6 +1290,28 @@ def main(argv):
               f"{held_acc if held_acc is None else round(held_acc, 4)} "
               f"[{secs['idm']}s]", flush=True)
         del x, y, hx, hy
+        calibration = {**calibration_read(errors),
+                       "by_length": calibration_by_length(errors, lengths)}
+        frequency = {"iterations": [t2["last"] - LATE_ITERS + 1, t2["last"]],
+                     "slot_plays": late.tolist(),
+                     "decisions": int(late.sum()),
+                     "rare_under": 1 / RARE_PER,
+                     "rare_slots": rare,
+                     "rare_tokens": [list(vocab[s]) for s in rare]}
+        # (N1) the own-play results before anything replays: they survive
+        # a failed summary write
+        meta = {"snapshot": str(path), "run": run_name,
+                "iteration": iteration, "smoke": SMOKE,
+                "knobs": {"games": GAMES,
+                          "max_decisions": MAX_DECISIONS or None,
+                          "log_lives": LOG_LIVES or None,
+                          "idm_epochs": IDM_EPOCHS, "idm_cap": IDM_CAP},
+                "tau": tau, "calibration": calibration,
+                "raw_rep_differs_from_acting": raw_differs,
+                "frequency": frequency, "idm": idm_rec,
+                "secs": dict(secs), "memory": mem_own_play}
+        with open(meta_file, "w") as f:
+            f.write(json.dumps(meta) + "\n")
         # 2. the census's main line, replayed and scored
         t0 = time.time()
         games, scored = {}, {}
@@ -1164,7 +1338,6 @@ def main(argv):
                                scorer.argmax_mismatches, scorer.missing,
                                census.get("main_line_ok"),
                                n_games=None if SMOKE else GAMES)
-        rare = rare_slots(late)
         families = {n: int(round(g[0])) for n, g in games.items()}
         reads = summarize(scorer.recs, groups, rare, families, held_acc)
         secs["total"] = round(time.time() - t_start)
@@ -1187,16 +1360,11 @@ def main(argv):
                           # census's path and the shared sha256
                           "snapshot_note": snapshot_note},
                "groups": groups,
-               "tau": tau, "calibration": calibration_read(errors),
+               "tau": tau, "calibration": calibration,
                "raw_rep_differs_from_acting": raw_differs,
-               "frequency": {"iterations": [t2["last"] - LATE_ITERS + 1,
-                                            t2["last"]],
-                             "slot_plays": late.tolist(),
-                             "decisions": int(late.sum()),
-                             "rare_under": 1 / RARE_PER,
-                             "rare_slots": rare,
-                             "rare_tokens": [list(vocab[s]) for s in rare]},
+               "frequency": frequency,
                "idm": idm_rec,
+               "meta_file": meta_file.name,
                **reads,
                "main_line_ok": ok, "void_reasons": reasons,
                "secs": secs, "threads": torch.get_num_threads(),
@@ -1207,7 +1375,9 @@ def main(argv):
             f.write(json.dumps(rec) + "\n")
         print(json.dumps({k: v for k, v in rec.items()
                           if k not in ("snapshot", "games", "idm",
-                                       "read_3", "read_4")}), flush=True)
+                                       "read_3", "read_4", "live",
+                                       "calibration")}), flush=True)
+        print("LIVE " + json.dumps(rec["live"]["reference"]), flush=True)
     print("DONE", flush=True)
 
 

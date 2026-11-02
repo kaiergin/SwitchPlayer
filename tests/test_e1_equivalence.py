@@ -304,16 +304,17 @@ def test_the_idm_input_and_a_lifes_samples():
     assert e1.life_idm_samples(traj[:1], T2_VOCAB) == []
 
 
-def _write_log(folder, lives_per_it, seed=0):
+def _write_log(folder, lives_per_it, seed=0, vocab=T2_VOCAB):
     """An OwnPlayLog with `lives_per_it[i]` simulated lives at iteration
-    i + 1; returns the lives in order."""
+    i + 1 (slots of `vocab`); returns the lives in order."""
     log = ablation.OwnPlayLog(folder)
     rng = np.random.default_rng(seed)
     out = []
     for it, n in enumerate(lives_per_it, start=1):
         for k in range(n):
-            slots = [int(s) for s in rng.integers(0, 18, size=3 + k)]
-            traj, _ = _life(T2_VOCAB, slots, rng)
+            slots = [int(s) for s in rng.integers(0, len(vocab),
+                                                  size=3 + k)]
+            traj, _ = _life(vocab, slots, rng)
             inner = [[] for _ in slots]
             log.write(it, traj, {"inner": inner, "real_done": k == n - 1,
                                  "temperature": 0.5}, True, 10, 100 * it)
@@ -412,11 +413,14 @@ def test_t2s_pass_calibrates_samples_and_counts(tmp_path):
     nets = _tiny_nets()
     folder = tmp_path / "own-play-t2"
     written = _write_log(folder, [1, 2, 1, 2], seed=3)
-    errors, per_life, late = e1.t2_pass(e1.iter_own_play(folder, 4),
-                                        T2_VOCAB, nets, last_iteration=4)
+    errors, per_life, late, lengths = e1.t2_pass(
+        e1.iter_own_play(folder, 4), T2_VOCAB, nets, last_iteration=4)
     hand = np.concatenate([e1.life_errors(nets, t) for _, t in written])
     assert errors == pytest.approx(hand) and len(errors) == sum(
         len(t) - 1 for _, t in written)
+    # (A7) each error's token length
+    assert lengths.tolist() == [T2_VOCAB[r[1]][1] for _, t in written
+                                for r in t[:-1]]
     assert len(per_life) == 6
     assert [len(s) for s in per_life] == [len(e1.life_idm_samples(
         t, T2_VOCAB)) for _, t in written]
@@ -429,8 +433,9 @@ def test_t2s_pass_calibrates_samples_and_counts(tmp_path):
     old = e1.LATE_ITERS
     try:
         e1.LATE_ITERS = 2
-        _, _, late2 = e1.t2_pass(e1.iter_own_play(folder, 4), T2_VOCAB,
-                                 None, last_iteration=4)
+        _, _, late2, no_lengths = e1.t2_pass(e1.iter_own_play(folder, 4),
+                                             T2_VOCAB, None, last_iteration=4)
+        assert no_lengths.shape == (0,)           # no calibration, no lengths
     finally:
         e1.LATE_ITERS = old
     want2 = np.zeros(18, dtype=np.int64)
@@ -441,6 +446,18 @@ def test_t2s_pass_calibrates_samples_and_counts(tmp_path):
     assert late2.tolist() == want2.tolist() and want2.sum() < want.sum()
     tau = float(np.median(errors))
     assert e1.calibration_read(errors)["p50"] == pytest.approx(tau, abs=1e-6)
+    by = e1.calibration_by_length(errors, lengths)
+    assert set(by) == {"4", "8", "16", "32"}
+    assert sum(v["decisions"] for v in by.values()) == len(errors)
+
+
+def test_the_calibration_by_token_length():
+    by = e1.calibration_by_length([0.1, 0.2, 0.3, 0.4], [4, 4, 8, 32])
+    assert by["4"]["decisions"] == 2 and by["4"]["p50"] == pytest.approx(0.15)
+    assert by["8"]["p50"] == pytest.approx(0.3) and by["16"] == {
+        "decisions": 0}
+    assert by["32"]["decisions"] == 1 and set(by["32"]) == {
+        "decisions", "mean", "p10", "p25", "p50", "p75", "p90"}
 
 
 def test_the_token_projections_and_their_classes():
@@ -588,8 +605,14 @@ def test_a_scored_decision():
     assert sc.token_mismatches == 1
     sc.decision(3, traj[0][0], traj[1][0])           # (1, 4): no census line
     assert sc.missing == 1 and sc.recs[-1]["missing"] is True
-    assert "groups" not in sc.recs[-1]
+    assert "groups" not in sc.recs[-1] and "live" not in sc.recs[-1]
     assert [r["d"] for r in sc.recs] == [0, 1, 2, 3, 4]
+    # (A7) live: the census's 36-token partition has more than one class
+    assert [r.get("live") for r in sc.recs] == [True] * 4 + [None]
+    sc.truth[(1, 5)] = (3, [0] * 36)                  # a dead decision
+    sc.decision(3, traj[0][0], traj[1][0])
+    assert sc.recs[-1]["live"] is False
+    assert sc.recs[-1]["groups"]["4"]["truth"] == [0] * 9
 
 
 class _FixedIDM(torch.nn.Module):
@@ -674,8 +697,8 @@ def test_the_hook_scores_the_next_stack_and_restores(monkeypatch):
 # --------------------------------------------------------------------------
 # the reads on hand-made records
 # --------------------------------------------------------------------------
-def _rec(game, d, four_truth, four_pred, b=None):
-    rec = {"game": game, "d": d, "token": 0, "groups": {
+def _rec(game, d, four_truth, four_pred, b=None, live=True):
+    rec = {"game": game, "d": d, "token": 0, "live": live, "groups": {
         "4": {"truth": four_truth, "dist": [0.0] * 36,
               "pred": {"0.5": list(range(9)), "1": four_pred,
                        "2": [0] * 9}},
@@ -749,6 +772,17 @@ def test_the_reads_by_hand():
         "B": {"precision": 1.0, "recall": 0.5, "pooled_e2": True,
               "families_e2": 1, "families": 2, "pooled_low_bar": True}}
     assert s["verdict"] == "KAI_CALL_MID" and s["verdict_on"] == ["A", "B"]
+    # (A7): both scored records are live, so the live decision is the
+    # all-decision one; the reference merges the 4-frame pairs no truth
+    # ever split
+    assert s["live"]["decisions"] == 2 and s["live"]["share"] == 1.0
+    assert s["decision_all_decisions"] == s["decision"]
+    assert s["verdict_all_decisions"] == s["verdict"]
+    assert s["live"]["read_1"]["tp"] == 32
+    assert s["live"]["families"]["1700"]["meets_e2"] == {"A": True, "B": True}
+    ref = s["live"]["reference"]
+    assert ref["decisions"] == {"A": 2, "B": 1}
+    assert ref["A"]["partitions"] == 21147
     text = json.dumps(s)                    # the summary line is JSON
     assert '"_p"' not in text and '"_r"' not in text        # internals
     # (3): (A)'s frequency split, rare = slot 0 alone (position 0 of the
@@ -851,6 +885,66 @@ def test_the_reads_with_nothing_scored():
     assert s["verdict"] == "KAI_CALL_LOW" and s["verdict_on"] == []
     assert s["decision"]["A"]["precision"] is None
     assert s["decision"]["B"]["families"] == 0
+    assert s["live"]["decisions"] == 0 and s["live"]["share"] is None
+    assert s["live"]["reference"]["A"]["partition"] is None
+
+
+def test_the_decision_reads_the_live_decisions_only():
+    """(A7) A model that merges nothing on a live decision and everything
+    on a dead one passes pooled over every decision (P 1.0, R 36/52) but
+    has no merge at all on the live ones: LOW. The all-decision reads stay
+    reported."""
+    split = [0, 0, 0, 0, 1, 1, 1, 1, 1]
+    recs = [_rec(1, 0, split, list(range(9))),
+            _rec(1, 1, [0] * 9, [0] * 9, live=False),
+            {"game": 1, "d": 2, "token": 0, "missing": True}]
+    s = e1.summarize(recs, T2_GROUPS, [], {1: 1700})
+    dec_all = s["decision_all_decisions"]["A"]
+    assert (dec_all["precision"], dec_all["recall"]) == (1.0,
+                                                        round(36 / 52, 4))
+    assert dec_all["pooled_e2"] is True and dec_all["families_e2"] == 1
+    assert s["verdict_all_decisions"] == "KAI_CALL_MID"
+    assert s["decision"]["A"]["precision"] is None
+    assert s["decision"]["A"]["recall"] == 0.0
+    assert s["verdict"] == "KAI_CALL_LOW" and s["verdict_on"] == []
+    assert s["live"]["decisions"] == 1 and s["live"]["share"] == 0.5
+    assert s["read_1"]["tp"] == 36                  # every decision, reported
+    # a record without the flag is not live
+    s2 = e1.summarize([{k: v for k, v in recs[0].items() if k != "live"}],
+                      T2_GROUPS, [], {1: 1700})
+    assert s2["live"]["decisions"] == 0
+
+
+def test_the_set_partitions():
+    bell = [1, 1, 2, 5, 15, 52, 203, 877, 4140, 21147]
+    for n, want in enumerate(bell):
+        parts = e1.set_partitions(n)
+        assert len(parts) == want and len(set(parts)) == want
+        for p in parts:      # restricted growth: block ids by first use
+            assert all(p[i] <= max(p[:i], default=-1) + 1 for i in range(n))
+    parts, same = e1._partition_table()
+    assert parts.shape == (21147, 9) and same.shape == (21147, 36)
+    assert same[0].sum() == 36 and same[-1].sum() == 0   # one block; none
+
+
+def test_the_reference_partition_by_hand():
+    """Truth: NOOP and LEFT always together, nothing else. The best fixed
+    partition merges exactly them, at precision and recall 1; (B) likewise
+    for a chosen NOOP."""
+    truth = [0, 1, 2, 0, 3, 4, 5, 6, 7]
+    q = [0.5] + [0.0625] * 8
+    recs = [_rec(1, d, truth, truth, _b(0, q, [0, 3]) if d < 2 else None)
+            for d in range(4)]
+    ref = e1.reference_partition(recs)
+    assert ref["decisions"] == {"A": 4, "B": 2}
+    for k in ("A", "B"):
+        assert ref[k]["partition"] == truth
+        assert ref[k]["blocks"][0] == ["NOOP", "LEFT"]
+        assert (ref[k]["precision"], ref[k]["recall"]) == (1.0, 1.0)
+        assert ref[k]["meeting_e2_bars"] >= 1
+    # nothing truly equivalent: no recall to report
+    ref = e1.reference_partition([_rec(1, 0, list(range(9)), list(range(9)))])
+    assert ref["A"]["partition"] is None and ref["A"]["meeting_e2_bars"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -934,21 +1028,259 @@ def test_the_lineage_refuses_a_broken_chain(tmp_path):
 
 def test_a_full_e1_is_never_overwritten(tmp_path, monkeypatch):
     monkeypatch.setattr(e1, "HERE", tmp_path)
-    summary, dec = e1.out_files("run-x", smoke=False)
+    summary, dec, meta = e1.out_files("run-x", smoke=False)
     assert summary.name == "probe_e1_equivalence-run-x.jsonl"
     assert dec.name == "probe_e1_equivalence-run-x-decisions.jsonl"
-    dec.write_text("{}\n")
-    with pytest.raises(SystemExit, match="never overwritten"):
-        e1.out_files("run-x", smoke=False)
-    s, d = e1.out_files("run-x", smoke=True)
+    assert meta.name == "probe_e1_equivalence-run-x-meta.jsonl"
+    for p in (dec, meta):
+        p.write_text("{}\n")
+        with pytest.raises(SystemExit, match="never overwritten"):
+            e1.out_files("run-x", smoke=False)
+        p.unlink()
+    s, d, m = e1.out_files("run-x", smoke=True)
     assert s.name == "probe_e1_equivalence-run-x-smoke.jsonl"
     assert d.name == "probe_e1_equivalence-run-x-smoke-decisions.jsonl"
+    assert m.name == "probe_e1_equivalence-run-x-smoke-meta.jsonl"
 
 
 # --------------------------------------------------------------------------
 # (A5) on E0's census truth: no trivial rule can reach E2
 # --------------------------------------------------------------------------
 CENSUS_RUN = "mspacman-two-t2-s0-2026-10-29"
+REAL_SNAP = pathlib.Path(
+    r"Y:\SwitchPlayer-testb2-run\benchmarks\results"
+    r"\mspacman-two-t2-s0-2026-10-29\snapshots-mspacmannoframeskip-skip4-"
+    r"effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-"
+    r"two-t2-seed0\weights-iter042.pth")
+
+
+def _census_or_skip():
+    summary, dec = e1.census_files(CENSUS_RUN)
+    if not (summary.exists() and dec.exists()):
+        pytest.skip("E0's census is not in this tree")
+    census = e1.census_row(summary, CENSUS_RUN, 42)
+    truth, per_game = e1.read_truth(dec)
+    return census, truth, per_game
+
+
+def test_a_dead_aware_rule_passes_the_old_pool_but_not_a7():
+    """(A7, audit r2) 'all one class on a dead decision, else {NOOP, LEFT,
+    UL, DL} {UP} {RIGHT, UR, DR} {DOWN}' -- one bit of state -- reads E2
+    pooled over every decision (P 0.907, R 0.569, 7 families) but only
+    0.825 / 0.390 on the live ones: Kai's call (mid) under A7. No
+    state-blind partition meets the E2 bars on the live decisions (the
+    best (A) recall at P >= 0.9 is 0.333)."""
+    census, truth, _ = _census_or_skip()
+    families = {int(n): int(round(g[0])) for n, g in census["games"].items()}
+    four = [e1.GRID.index(T2_VOCAB[s]) for s in T2_GROUPS["4"]]
+    fixed = e1.canonical([0, 1, 2, 0, 3, 2, 0, 2, 0])
+    recs = []
+    for (game, d), (token, part) in sorted(truth.items()):
+        t = e1.restrict(part, four)
+        live = len(set(part)) > 1
+        pred = fixed if live else [0] * 9
+        rec = {"game": game, "d": d, "token": token, "live": live,
+               "groups": {"4": {"truth": t,
+                                "pred": {k: pred for k in e1.TAU_MULTS}}}}
+        if token in T2_GROUPS["4"]:
+            a = T2_GROUPS["4"].index(token)
+            cls = [x for x in range(9) if pred[x] == pred[a]]
+            rec["b"] = {"action": a, "q": [float(x == a) for x in range(9)],
+                        "argmax": a,
+                        "truth_class": [x for x in range(9) if t[x] == t[a]],
+                        "pred_class": {k: cls for k in e1.B_RATIOS}}
+        recs.append(rec)
+    s = e1.summarize(recs, {"4": T2_GROUPS["4"]}, [0, 1, 2, 3, 6, 8, 12],
+                     families)
+    da = s["decision_all_decisions"]["A"]
+    assert da["precision"] == pytest.approx(0.9071, abs=1e-4)
+    assert da["recall"] == pytest.approx(0.5692, abs=1e-4)
+    assert da["families_e2"] == 7
+    assert s["verdict_all_decisions"] == "E2"
+    assert s["verdict_on_all_decisions"] == ["A"]
+    dl, bl = s["decision"]["A"], s["decision"]["B"]
+    assert dl["precision"] == pytest.approx(0.8252, abs=1e-4)
+    assert dl["recall"] == pytest.approx(0.3896, abs=1e-4)
+    assert bl["precision"] == pytest.approx(0.8151, abs=1e-4)
+    assert bl["recall"] == pytest.approx(0.4983, abs=1e-4)
+    assert not dl["pooled_e2"] and not bl["pooled_e2"]
+    assert s["verdict"] == "KAI_CALL_MID" and s["verdict_on"] == ["A", "B"]
+    live = s["live"]
+    assert live["decisions"] == 3798 and live["read_2"]["decisions"] == 411
+    assert live["share"] == pytest.approx(3798 / 4636, abs=1e-4)
+    ref = live["reference"]
+    assert ref["decisions"] == {"A": 3798, "B": 411}
+    assert ref["A"]["meeting_e2_bars"] == 0 and ref["B"]["meeting_e2_bars"] == 0
+    assert ref["A"]["precision"] >= 0.9
+    assert ref["A"]["recall"] == pytest.approx(0.3328, abs=1e-4)
+    assert ref["B"]["recall"] is None or ref["B"]["recall"] < e1.E2_R
+
+
+def test_the_real_census_eval_row_and_snapshot():
+    """The real files: the full census's row, the deployed exact-eval row it
+    was checked against, and the census's snapshot is the T2 argument."""
+    census, truth, per_game = _census_or_skip()
+    if not REAL_SNAP.exists():
+        pytest.skip("T2's snapshot is not on this machine")
+    assert census["main_line_ok"] is True and census["decisions"] == 4636
+    assert census["threads"] == 2 and len(truth) == 4636
+    assert e1.same_snapshot(census["snapshot"], REAL_SNAP) is None
+    ref = e1.pc.exact_eval_row(REAL_SNAP)
+    assert ref is not None and ref["exact_mean"] == 1699.0
+    assert len(ref["games"]) == 30
+    for n, g in census["games"].items():
+        assert e1.pc.same_game(g, ref["games"][n])
+        assert per_game[int(n)] == g[3]
+    assert e1.preflight(REAL_SNAP, census, truth, ref, False, 2) is None
+    with pytest.raises(SystemExit, match="torch threads"):
+        e1.preflight(REAL_SNAP, census, truth, ref, False, 4)
+
+
+# --------------------------------------------------------------------------
+# main()'s wiring on fakes (no emulator, no real snapshot)
+# --------------------------------------------------------------------------
+def _fake_tree(tmp_path):
+    """A run tree: the two preps, T0 / T1 / T2 logs (2 / 2 / 3 iterations)
+    and a T2 snapshot path at iteration 3."""
+    results = tmp_path / "tree" / "benchmarks" / "results"
+    t1_vocab = ((0, 4), (0, 16)) + tuple((a, 4) for a in range(1, 9))
+    preps = {e1.PREPS[0]: {"master_vocab": [list(t) for t in e1.GRID],
+                           "vocab": [list(t) for t in t1_vocab],
+                           "log_dir": "benchmarks/results/run-t0/"
+                                      "own-play-a-t0-seed0",
+                           "log_iterations": 2},
+             e1.PREPS[1]: {"master_vocab": [list(t) for t in t1_vocab],
+                           "vocab": [list(t) for t in T2_VOCAB],
+                           "log_dir": "benchmarks/results/run-t1/"
+                                      "own-play-a-t1-seed0",
+                           "log_iterations": 2}}
+    for name, j in preps.items():
+        (results / name).mkdir(parents=True)
+        (results / name / "vocab.json").write_text(json.dumps(j))
+    _write_log(results / "run-t0" / "own-play-a-t0-seed0", [2, 2], 11,
+               e1.GRID)
+    _write_log(results / "run-t1" / "own-play-a-t1-seed0", [2, 2], 12,
+               t1_vocab)
+    _write_log(results / "run-t2" / "own-play-a-t2-seed0", [3, 3, 4], 13)
+    snap = results / "run-t2" / "snapshots-a-t2-seed0" / "weights-iter003.pth"
+    snap.parent.mkdir(parents=True)
+    snap.write_bytes(b"weights")
+    return snap
+
+
+def test_main_end_to_end_on_fakes(tmp_path, monkeypatch):
+    """main() with a fake probe_exhaustive_eval, Run, play_token and
+    exact-eval row over a fake run tree and census: the meta line before
+    the replay, the decisions (live flags), a valid summary; a second full
+    run refuses; a differing exact-eval row makes a smoke VOID."""
+    import contextlib
+    import types
+    snap = _fake_tree(tmp_path)
+    probes = tmp_path / "probes"
+    probes.mkdir()
+    monkeypatch.setattr(e1, "HERE", probes)
+    tokens = [11, 9, 14, 5, 11, 3]                 # 4, 16, 4, 32, 4, 4 frames
+    parts = [[0] * 36] + [_part([0, 0, 1, 1, 1, 2, 1, 1, 1], {(3, 32): k})
+                          for k in range(5)]
+    (probes / "probe_action_census-run-t2-decisions.jsonl").write_text(
+        "".join(json.dumps({"game": 1, "d": d, "token": t,
+                            "partition": p}) + "\n"
+                for d, (t, p) in enumerate(zip(tokens, parts))))
+    row = {"run": "run-t2", "iteration": 3, "n_games": 30,
+           "max_decisions": None, "env": e1.ENV_ID, "main_line_ok": True,
+           "decisions": 6, "threads": torch.get_num_threads(),
+           "snapshot": str(snap)}
+    (probes / "probe_action_census-run-t2.jsonl").write_text(
+        json.dumps(row) + "\n")
+    ref = {"games": {"1": [100.0, 40, True, 6]}, "exact_mean": 100.0}
+    monkeypatch.setattr(e1.pc, "exact_eval_row", lambda p: ref)
+    # the fake run: tiny nets; the prior's argmax is the token played
+    nets0, pred = _tiny_nets(), _tiny_pred()
+    playing = {}
+    nm = SimpleNamespace(initial_inference=lambda stack: (
+        _prior(playing["token"]), 0.0))
+
+    def set_train_mode(training):
+        for net in (nets0.rep, pred, nets0.dyn, nets0.proj):
+            net.train(training)
+    run = SimpleNamespace(
+        trainer=SimpleNamespace(representation=nets0.rep, prediction=pred,
+                                dynamics=nets0.dyn, projector=nets0.proj),
+        searcher=SimpleNamespace(network_manager=nm),
+        set_train_mode=set_train_mode)
+    d = {"acting_states": {"representation": _bn_shifted(
+        nets0.rep.state_dict(), 0.3)}}
+
+    def play(run_, n):
+        rng = np.random.default_rng(n)
+        stack = muzero.initial_frame_stack(_frame(rng))
+        for t in tokens:
+            playing["token"] = t
+            out = ablation.play_token(None, t, stack)
+            stack = muzero.push_frame(out[4], muzero.preprocess_frame(
+                out[0], muzero.IMAGE_RESHAPE))
+        return 100.0, 40, True, len(tokens)
+
+    def fake_play_token(env, token, stack, inner=None):
+        obs = np.full((210, 160, 3), (13 * token) % 256, dtype=np.uint8)
+        return obs, 0.0, False, False, stack, 1
+
+    pe = types.ModuleType("probe_exhaustive_eval")
+    pe.SEARCH_SIMS, pe.ACTING, pe.ENV, pe.ARM = 0, True, e1.ENV_ID, "fake-arm"
+    pe.snapshot_vocab = lambda p: T2_VOCAB
+    pe.snapshot_prefix_bn = lambda p: False
+    pe.snapshot_tokens = lambda v: contextlib.nullcontext()
+    pe.snapshot_prefix_layout = lambda b: contextlib.nullcontext()
+    pe.load = lambda run_, p: d
+    pe.apply_acting_states = _apply_acting
+    pe.play = play
+    monkeypatch.setitem(sys.modules, "probe_exhaustive_eval", pe)
+    monkeypatch.setattr(ablation, "arm_config",
+                        lambda arm: contextlib.nullcontext())
+    monkeypatch.setattr(ablation, "_run_length_globals",
+                        lambda i, s: contextlib.nullcontext())
+    monkeypatch.setitem(ablation.ARMS, "fake-arm", {})
+    monkeypatch.setattr(ablation, "Run", lambda arm, seed, spec: run)
+    monkeypatch.setattr(ablation, "play_token", fake_play_token)
+    for k, v in (("GAMES", 1), ("MAX_DECISIONS", 0), ("LOG_LIVES", 0),
+                 ("IDM_EPOCHS", 1), ("SMOKE", False)):
+        monkeypatch.setattr(e1, k, v)
+    e1.main([str(snap)])
+    assert ablation.play_token is fake_play_token        # the hook let go
+    tag = probes / "probe_e1_equivalence-run-t2"
+    meta = [json.loads(l) for l in
+            pathlib.Path(f"{tag}-meta.jsonl").read_text().splitlines()]
+    decs = [json.loads(l) for l in
+            pathlib.Path(f"{tag}-decisions.jsonl").read_text().splitlines()]
+    summ = [json.loads(l) for l in
+            pathlib.Path(f"{tag}.jsonl").read_text().splitlines()]
+    assert len(meta) == len(summ) == 1 and len(decs) == 6
+    m, s = meta[0], summ[0]
+    assert m["tau"] == s["tau"] and m["idm"] == s["idm"]
+    assert m["calibration"]["decisions"] == sum(
+        v["decisions"] for v in m["calibration"]["by_length"].values())
+    assert m["frequency"]["rare_slots"] == s["frequency"]["rare_slots"]
+    assert m["idm"]["lives"] == {"T2": 10, "T0": 4, "T1": 4}
+    assert m["idm"]["held_lives"] == 1
+    assert [x["d"] for x in decs] == list(range(6))
+    assert [x["live"] for x in decs] == [False] + [True] * 5
+    assert ["b" in x for x in decs] == [True, False, True, False, True, True]
+    assert s["main_line_ok"] is True and s["void_reasons"] == []
+    assert s["live"]["decisions"] == 5 and s["read_1"]["decisions"] == 6
+    assert s["verdict"] in ("E2", "KAI_CALL_MID", "KAI_CALL_LOW")
+    assert s["raw_rep_differs_from_acting"] is True
+    assert s["census"]["snapshot_note"] is None and s["meta_file"] == \
+        "probe_e1_equivalence-run-t2-meta.jsonl"
+    # a second full run refuses before anything plays
+    with pytest.raises(SystemExit, match="never overwritten"):
+        e1.main([str(snap)])
+    # a smoke against a differing exact-eval row: VOID
+    ref["games"]["1"] = [101.0, 40, True, 6]
+    monkeypatch.setattr(e1, "SMOKE", True)
+    e1.main([str(snap)])
+    v = json.loads(pathlib.Path(f"{tag}-smoke.jsonl").read_text())
+    assert v["main_line_ok"] is False and v["verdict"].startswith("VOID")
+    assert "game 1" in v["void_reasons"][0] and "verdict_if_valid" in v
 
 
 def test_no_trivial_rule_reaches_e2_on_the_census_truth():
