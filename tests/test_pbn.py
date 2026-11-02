@@ -52,6 +52,9 @@ TWO_ARMS = tuple("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
 # Test C's two runs (2026-10-29): the fix inherited
 TESTC_ARMS = tuple("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
                    f"mspacman-tokens-{v}" for v in ("long-n0", "reset-r0"))
+# Test C2's run (2026-11-02): C plus the ramps, the fix inherited
+TESTC2_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
+              "mspacman-tokens-ramp-a0")
 ENV_ID = "MsPacmanNoFrameskip-v4"
 CPU = torch.device("cpu")
 C, HW = muzero.LATENT_CHANNELS, muzero.LATENT_HW
@@ -208,14 +211,14 @@ def test_off_head_ignores_its_step_argument():
 
 def test_off_arms_build_the_pre_pb_head():
     """Every arm but PB and the arms built on it after its result (Test 2's
-    students, generation 2's, Test B's, Test B2's, Test C's) leaves the flag
-    off: the factory's head, the harness's nets and the target model carry
-    no step buffers."""
+    students, generation 2's, Test B's, Test B2's, Test C's, Test C2's)
+    leaves the flag off: the factory's head, the harness's nets and the
+    target model carry no step buffers."""
     assert muzero.PREFIX_BN_PER_STEP is False
     on = {name for name, spec in ablation.ARMS.items()
           if spec.get("PREFIX_BN_PER_STEP")}
     assert on == {PB_ARM, *GEN1_ARMS, GEN2_ARM, *FAST_ARMS, *TWO_ARMS,
-                  *TESTC_ARMS}, on
+                  *TESTC_ARMS, TESTC2_ARM}, on
     for name in on:
         assert ablation.ARMS[name]["PREFIX_BN_PER_STEP"] is True, name
     with ablation.arm_config(TK_ARM) as spec:

@@ -185,8 +185,16 @@ def test_every_reset_knob_is_off_by_default():
     assert muzero.RESET_HOLD_STEPS == 0
     assert muzero.DORMANT_DIAGNOSTIC is False
     assert muzero.LR_WARMUP_ORIGIN == 0
-    # no other arm carries a reset knob or the plasticity read
+    # no other arm carries a reset knob or the plasticity read -- but Test
+    # C2's, which is exactly C plus the RAMP_* knobs (tests/test_testc2.py)
+    c2 = PREFIX + "tokens-ramp-a0"
     for name, spec in ablation.ARMS.items():
+        if name == c2:
+            assert ({k: v for k, v in spec.items()
+                     if not k.startswith("RAMP_") and k != "_doc"}
+                    == {k: v for k, v in ablation.ARMS[C].items()
+                        if k != "_doc"}), name
+            continue
         if name not in (C0, C):
             assert not any(k.startswith("RESET_") for k in spec), name
             assert not spec.get("DORMANT_DIAGNOSTIC"), name

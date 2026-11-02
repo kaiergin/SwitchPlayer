@@ -1340,6 +1340,39 @@ ARMS[RESET_ARM + "-r0"] = {
             "Run as TK.",
 }
 
+# Test C2 (Kai, 2026-11-02; pre-registered in CURRICULUM "Test C2: BBF's
+# n-step and discount ramps on top of the resets"): C ("-reset-r0", every
+# reset knob unchanged) plus BBF's two ramps, restarted at every reset and
+# keyed on the gradient steps since it (since the start before the first),
+# over 10,000 of them (5 iterations of 2,000, the hold's window): n from 10
+# to C's TD_STEPS 5, gamma from 0.97 to C's DISCOUNT 0.997^4 per base step,
+# BBF's shapes. The end values are C's (only the start values are BBF's).
+# The control is C itself, the run of 10-30 to 11-01. The variant suffix is
+# the chain supervisor's (lineage "a").
+RAMP_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-ramp")
+ARMS[RAMP_ARM + "-a0"] = {
+    **ARMS[RESET_ARM + "-r0"],
+    "RAMP_STEPS": 10000,
+    "RAMP_N_START": 10,
+    "RAMP_GAMMA_START": 0.97,
+    "RAMP_N_END": 5,
+    "RAMP_GAMMA_END": 0.997 ** 4,
+    "_doc": "Test C2: Test C's C (...-tokens-reset-r0, every reset knob "
+            "unchanged) plus BBF's n-step and discount ramps, keyed on the "
+            "gradient steps since the last reset (since the start before the "
+            "first), over 10,000 of them (5 iterations): n = round(10 x "
+            "0.5^f) (half to even), 10 -> 5 base steps, and 1 - gamma = "
+            "0.03^(1-f) x (1 - 0.997^4)^f, 0.97 -> 0.98805 per base step, "
+            "f = min(steps since the reset / 10,000, 1); the end values, C's "
+            "TD_STEPS and DISCOUNT, hold to the next reset and after the "
+            "last. Every reader of the horizon and the discount takes the "
+            "current values (the batch-time value targets with "
+            "EfficientZero's age shrink on top, the birth search, the "
+            "refresh, the PER priorities, the row diagnostics); the actors "
+            "read neither. Run as TK.",
+}
+
 # PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
 # BatchNorm statistics on the token arm", after Step 0 (iii)): TK with the
 # value-prefix head's BatchNorms keeping one set of running statistics per
@@ -1639,6 +1672,20 @@ def warmup_origin():
         muzero.LR_WARMUP_ORIGIN = saved
 
 
+@contextlib.contextmanager
+def ramp_globals():
+    """Test C2: a ramp run's muzero.apply_ramps moves muzero.TD_STEPS and
+    muzero.DISCOUNT; both are saved on entry (inside arm_config: the arm's
+    static values) and restored after, an exception included, so no ramped
+    value outlives its run (every other run: restored to what it never
+    changed)."""
+    saved = (muzero.TD_STEPS, muzero.DISCOUNT)
+    try:
+        yield
+    finally:
+        muzero.TD_STEPS, muzero.DISCOUNT = saved
+
+
 def env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations,
                   snapshot_weights):
     """Test B's arms, checked at startup (before any --overwrite deletion):
@@ -1751,6 +1798,78 @@ def reset_gate(spec, use_ray, cpu_actor, ray_workers, train_steps,
             raise SystemExit(f"{name} {f!r} must lie in (0, 1]")
 
 
+# Test C2: muzero's RAMP_* defaults (RAMP_STEPS 0: off)
+RAMP_OFF = {"RAMP_STEPS": 0, "RAMP_N_START": 10, "RAMP_GAMMA_START": 0.97,
+            "RAMP_N_END": None, "RAMP_GAMMA_END": None}
+
+
+def ramp_gate(spec):
+    """Test C2's ramps, checked at startup (after reset_gate, before any
+    --overwrite deletion):
+      - RAMP_STEPS, a positive step count no longer than a reset period,
+        runs on a reset run (RESET_EVERY_STEPS: C's shape, which reset_gate
+        restricts to the pipelined --ray --cpu-actor loop from scratch);
+      - every gradient step goes through train_block in run_one's iteration
+        loop (after_train_step applies the ramp): no ASYNC_LOOP (its own
+        loop), no student (its offline phase), no TRAIN_PREFETCH (a batch
+        assembled ahead of its step would take an earlier step's values);
+      - the ramped targets are the paper builder's TD value targets
+        (PAPER_TARGETS, VALUE_TARGET_MODE "td");
+      - n runs between ints >= 1, falling; gamma between floats in (0, 1),
+        rising;
+      - the end values ARE the arm's TD_STEPS and DISCOUNT, exactly: the
+        spec carries both (so arm_config restores them too) and the module
+        holds them (the searches assert their discount is DISCOUNT, and
+        past the window the run is C's).
+    Without RAMP_STEPS no other RAMP_* knob may leave its default."""
+    every = muzero.RAMP_STEPS
+    if not every:
+        if any(getattr(muzero, k) != v for k, v in RAMP_OFF.items()):
+            raise SystemExit("the RAMP_* knobs need RAMP_STEPS")
+        return
+    resets = muzero.RESET_EVERY_STEPS
+    if (isinstance(every, bool) or not isinstance(every, int) or every <= 0
+            or (resets and every > resets)):
+        raise SystemExit(f"RAMP_STEPS {every!r} must be a positive "
+                         f"gradient-step count, at most RESET_EVERY_STEPS")
+    if not resets:
+        raise SystemExit("RAMP_STEPS restarts at every reset: it needs "
+                         "RESET_EVERY_STEPS (Test C's run shape)")
+    if muzero.ASYNC_LOOP or spec.get("_student"):
+        raise SystemExit("RAMP_STEPS needs every gradient step in run_one's "
+                         "iteration loop: no ASYNC_LOOP, no student's "
+                         "offline phase")
+    if muzero.TRAIN_PREFETCH:
+        raise SystemExit("RAMP_STEPS moves n and gamma every step: no "
+                         "TRAIN_PREFETCH (it assembles batches ahead of "
+                         "their step)")
+    if not muzero.PAPER_TARGETS or muzero.VALUE_TARGET_MODE != "td":
+        raise SystemExit("RAMP_STEPS ramps the paper builder's TD value "
+                         "targets: it needs PAPER_TARGETS and "
+                         "VALUE_TARGET_MODE 'td'")
+    n0, n1 = muzero.RAMP_N_START, muzero.RAMP_N_END
+    for name, n in (("RAMP_N_START", n0), ("RAMP_N_END", n1)):
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise SystemExit(f"{name} {n!r} must be an int >= 1")
+    g0, g1 = muzero.RAMP_GAMMA_START, muzero.RAMP_GAMMA_END
+    for name, g in (("RAMP_GAMMA_START", g0), ("RAMP_GAMMA_END", g1)):
+        if not isinstance(g, float) or not 0 < g < 1:
+            raise SystemExit(f"{name} {g!r} must be a float in (0, 1)")
+    if n0 < n1 or g0 > g1:
+        raise SystemExit(f"the ramps run from the long horizon at the low "
+                         f"discount to the end values: RAMP_N_START {n0} >= "
+                         f"RAMP_N_END {n1}, RAMP_GAMMA_START {g0} <= "
+                         f"RAMP_GAMMA_END {g1}")
+    if ("TD_STEPS" not in spec or "DISCOUNT" not in spec
+            or n1 != spec["TD_STEPS"] or g1 != spec["DISCOUNT"]
+            or n1 != muzero.TD_STEPS or g1 != muzero.DISCOUNT):
+        raise SystemExit(f"the ramps end on the arm's own TD_STEPS and "
+                         f"DISCOUNT: RAMP_N_END {n1!r} / RAMP_GAMMA_END "
+                         f"{g1!r} against {spec.get('TD_STEPS')!r} / "
+                         f"{spec.get('DISCOUNT')!r} (the module: "
+                         f"{muzero.TD_STEPS!r} / {muzero.DISCOUNT!r})")
+
+
 def own_play_dir(arm, seed):
     """Test B: the run's OwnPlayLog folder, beside its other files."""
     return RESULTS / f"own-play{TAG}-{arm}-seed{seed}"
@@ -1860,6 +1979,9 @@ def train_block(run, n_steps, pipeline=None, init_name=None,
                         run.trainer.training_steps)
                     apply_warmstart_consistency(
                         consistency_base, run.trainer.training_steps)
+                # Test C2: the ramp's values at this step, before its batch
+                # is built (and the iteration's first step logged)
+                ramp_step(run, it, first=(done == 0 and remaining == n_steps))
                 asyncio.run(run.trainer.train_step(next_batch()))
                 run.trainer.training_steps += 1
                 after_train_step(run)
@@ -2737,6 +2859,11 @@ class Run:
         self.reset_log = []
         self.hold = None
         self.held_ships = []
+        # Test C2 (RAMP_STEPS): [iteration, steps since the last reset, n,
+        # gamma] at the first gradient step of each iteration since the last
+        # row (ramp_step); emitted and restarted by evaluate_diagnostics,
+        # checkpointed
+        self.ramp_trace = []
 
     def set_train_mode(self, training):
         for net in (self.trainer.representation, self.trainer.dynamics,
@@ -3955,6 +4082,24 @@ class Run:
             errs["resets"] = len(self.reset_log)
             errs["held_ships"] = len(getattr(self, "held_ships", None)
                                      or [])
+        if muzero.RAMP_STEPS:
+            # Test C2: the ramp at the row -- TD_STEPS and DISCOUNT as every
+            # reader sees them, and the gradient steps since the last reset
+            # (a row written before its iteration's reset counts from the
+            # previous one) -- and ramp_trace, [iteration, steps since the
+            # last reset, n, gamma] at the first gradient step of each
+            # iteration since the previous row: rows fall every 5
+            # iterations and a ramp spans 5, so the row alone would only
+            # ever show the end values. The trace is checkpointed (a resume
+            # keeps the row's window) and restarts here.
+            trace = getattr(self, "ramp_trace", None) or []
+            errs["ramp"] = {
+                "n": int(muzero.TD_STEPS),
+                "gamma": float(muzero.DISCOUNT),
+                "cycle_steps": int(self.trainer.training_steps
+                                   - muzero.LR_WARMUP_ORIGIN)}
+            errs["ramp_trace"] = [list(e) for e in trace]
+            self.ramp_trace = []
         if muzero.DORMANT_DIAGNOSTIC:
             # Test C's plasticity read (both runs)
             errs.update(self.dormant_stats())
@@ -4250,6 +4395,13 @@ def save_run_checkpoint(run, path, meta):
                            "hold": _cpu_state(run.hold),
                            "held_ships": list(getattr(run, "held_ships",
                                                       []))}
+    if muzero.RAMP_STEPS:
+        # Test C2: the next row's ramp trace so far (checkpoints fall
+        # between rows); the values themselves follow from the step count
+        # and the reset log. Only then, so every other arm's head is
+        # unchanged
+        state["ramp"] = {"trace": [list(e) for e in
+                                   getattr(run, "ramp_trace", None) or []]}
     state["rng"] = {
         "np": np.random.get_state(),
         "py": random.getstate(),
@@ -4347,6 +4499,11 @@ def load_run_checkpoint(run, path, expect):
         run.held_ships = list(state["resets"].get("held_ships", []))
         muzero.LR_WARMUP_ORIGIN = (run.reset_log[-1]["training_steps"]
                                    if run.reset_log else 0)
+    if "ramp" in state:
+        run.ramp_trace = [list(e) for e in state["ramp"]["trace"]]
+    # Test C2: the ramp's values at the restored step and reset origin (a
+    # no-op without RAMP_STEPS)
+    muzero.apply_ramps(run.trainer.training_steps)
     np.random.set_state(state["rng"]["np"])
     random.setstate(state["rng"]["py"])
     torch.set_rng_state(state["rng"]["torch"])
@@ -4754,7 +4911,8 @@ def bbf_reset(run, pipeline, it):
         keeps the copied layers');
       - the lagged target model, both buffers, becomes the reset online
         nets (our version of BBF's reset_target: A7), synced at this step;
-      - the lr warmup restarts here (muzero.LR_WARMUP_ORIGIN);
+      - the lr warmup restarts here (muzero.LR_WARMUP_ORIGIN), and with it
+        Test C2's ramps (muzero.apply_ramps);
       - the actor keeps the pre-reset acting states (the pipeline's last
         ship) until RESET_HOLD_STEPS gradient steps later (run.hold), while
         the in-flight game's birth search and every later target use the
@@ -4794,6 +4952,10 @@ def bbf_reset(run, pipeline, it):
     if hasattr(tr, "invalidate_bootstrap_cache"):
         tr.invalidate_bootstrap_cache()
     muzero.LR_WARMUP_ORIGIN = steps
+    # Test C2: the ramps restart here too (n RAMP_N_START, gamma
+    # RAMP_GAMMA_START for the next step's batch, the in-flight game's birth
+    # search, ...); a no-op without RAMP_STEPS
+    muzero.apply_ramps(steps)
     if pipeline is not None:
         # every cache keyed on the step count now holds pre-reset weights
         pipeline._states_cache = (None, None)
@@ -4824,14 +4986,46 @@ def bbf_reset(run, pipeline, it):
              if run.hold else ""), flush=True)
 
 
+def ramp_step(run, it, first):
+    """Test C2, at the top of every gradient step of train_block, before its
+    batch is built: TD_STEPS and DISCOUNT must be the ramp's values at this
+    step (training_steps - LR_WARMUP_ORIGIN) -- a site that moved the step
+    count or the reset origin without muzero.apply_ramps fails here, loudly,
+    instead of training on stale values -- and the first step of iteration
+    `it` (`first`) is logged for its row: [it, the steps since the last
+    reset, n, gamma] in run.ramp_trace. Nothing while RAMP_STEPS is 0
+    (every other arm)."""
+    if not muzero.RAMP_STEPS:
+        return
+    steps = run.trainer.training_steps
+    cycle = steps - muzero.LR_WARMUP_ORIGIN
+    want = muzero.ramp_values(cycle)
+    have = (muzero.TD_STEPS, muzero.DISCOUNT)
+    if have != want:
+        raise RuntimeError(
+            f"the ramp's values at step {steps} (reset origin "
+            f"{muzero.LR_WARMUP_ORIGIN}) are {want}, but TD_STEPS / DISCOUNT "
+            f"are {have}: something moved the step count or the origin "
+            f"without muzero.apply_ramps")
+    if first and it is not None:
+        trace = getattr(run, "ramp_trace", None)
+        if trace is None:
+            trace = run.ramp_trace = []
+        trace.append([int(it), int(cycle), int(want[0]), float(want[1])])
+
+
 def after_train_step(run):
     """Per-gradient-step hook, called by every training loop right after the
-    step counter advances. Today: ReDo on its redo_due() schedule, plus the
+    step counter advances. Today: Test C2's ramp (muzero.apply_ramps at the
+    new step: the next step's batch takes its values; a no-op while
+    RAMP_STEPS is 0), then ReDo on its redo_due() schedule, plus the
     step diagnostics that make ReDo's effect attributable (row-mean loss
     and pre-clip grad norm; mean grad norm over the 20 steps before vs after
     each pass -- round-2 design audit). Touches nothing on `run` while ReDo
     is off, so every other arm is unchanged and test stubs need no new
     surface."""
+    if muzero.RAMP_STEPS:
+        muzero.apply_ramps(run.trainer.training_steps)
     if not (muzero.REDO_EVERY or muzero.STEP_DIAGNOSTICS):
         return
     last = getattr(run.trainer, "_last_step", None)
@@ -5538,7 +5732,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
     # Test B: an env-stopped generation's planned run (the schedules' scale
     # and the 4.3 decay) is its nominal length, not the --iterations cap
     planned = ARMS[arm].get("_nominal_iterations") or iterations
-    with arm_config(arm) as spec, _run_length_globals(planned, train_steps), \
+    with arm_config(arm) as spec, ramp_globals(), \
+            _run_length_globals(planned, train_steps), \
             token_actions(), env_schedule(stop_env_steps), warmup_origin():
         if use_ray:
             ray_scope_gate(spec)
@@ -5556,6 +5751,13 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
                       snapshot_weights)
         reset_gate(spec, use_ray, cpu_actor, ray_workers, train_steps,
                    init_weights)
+        ramp_gate(spec)
+        if muzero.RAMP_STEPS:
+            print(f"  [{arm} s{seed}] RAMP: n {muzero.RAMP_N_START} -> "
+                  f"{muzero.RAMP_N_END}, gamma {muzero.RAMP_GAMMA_START} -> "
+                  f"{muzero.RAMP_GAMMA_END!r} (BBF's shapes) over the "
+                  f"{muzero.RAMP_STEPS} gradient steps after each reset (and "
+                  f"the start); the end values after", flush=True)
         if spec.get("_student") and init_weights:
             raise SystemExit("a curriculum P3 student starts from scratch or "
                              "from its distillation set, not --init-weights")
@@ -5806,6 +6008,14 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
             except BaseException:
                 run.env.close()
                 raise
+        # Test C2: the ramp's values at the run's step and reset origin --
+        # step 0 at origin 0 from scratch (warmup_origin), a resume's
+        # restored pair (load_run_checkpoint applied them too) -- before
+        # anything reads TD_STEPS or DISCOUNT (the first collect's birth
+        # search); after_train_step and bbf_reset keep them current from
+        # here. Every other arm: nothing (not even a read of the run).
+        if muzero.RAMP_STEPS:
+            muzero.apply_ramps(run.trainer.training_steps)
         def write_row(row_it, metrics, train_steps_at, env_steps_at,
                       elapsed_at=None):
             eff_skip = (FRAMESKIP or 4) if muzero.USE_ATARI_WRAPPERS else FRAMESKIP

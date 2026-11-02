@@ -1334,6 +1334,28 @@ RESET_HOLD_STEPS = 0
 # sample from a dedicated generator and logs the dormant fractions per net,
 # plus the representation's first-layer filter norms.
 DORMANT_DIAGNOSTIC = False
+# Test C2 (Kai, 2026-11-02; CURRICULUM "Test C2: BBF's n-step and discount
+# ramps on top of the resets"): BBF's two schedules that restart at every
+# reset (Schwarzer et al. 2023; the released bbf/agents/spr_agent.py and
+# bbf/configs/BBF.gin, cycle_steps 10,000), keyed on the gradient steps
+# since the last reset (since the run's start before the first):
+# training_steps - LR_WARMUP_ORIGIN. Over RAMP_STEPS of them the n-step
+# horizon falls geometrically from RAMP_N_START to RAMP_N_END (BBF:
+# exponential_decay_scheduler(cycle_steps, 0, 1, update_horizon /
+# max_update_horizon) x max_update_horizon, then int(onp.round(.)), half to
+# even) and 1 - gamma from 1 - RAMP_GAMMA_START to 1 - RAMP_GAMMA_END
+# (exponential_decay_scheduler(cycle_steps, 0, min_gamma, gamma,
+# reverse=True): log(1 - gamma) linear in the cycle's fraction, clipped to
+# [0, 1]); then both hold their end values, which are the arm's own
+# TD_STEPS and DISCOUNT (ablation.ramp_gate). apply_ramps sets TD_STEPS and
+# DISCOUNT themselves, so every reader -- the batch-time value targets, the
+# birth search, the refresh, the PER priorities, the row diagnostics -- sees
+# the current values. 0 = off.
+RAMP_STEPS = 0
+RAMP_N_START = 10
+RAMP_GAMMA_START = 0.97
+RAMP_N_END = None
+RAMP_GAMMA_END = None
 
 
 def decay_optimizer_lr(optimizers, factor):
@@ -1371,6 +1393,41 @@ def apply_lr_warmup(optimizers, training_steps):
     for opt in optimizers:
         for group in opt.param_groups:
             group["lr"] = lr
+
+
+def ramp_values(cycle_steps):
+    """Test C2: (n, gamma) at `cycle_steps` gradient steps since the last
+    reset, computed as BBF's exponential_decay_scheduler does (numpy
+    float64): bonus = clip((RAMP_STEPS - x) / RAMP_STEPS, 0, 1), value =
+    exp(bonus * (start - end) + end) between the logs of its initial and
+    final values. n: initial 1, final RAMP_N_END / RAMP_N_START, times
+    RAMP_N_START, rounded as onp.round (half to even). gamma: reverse=True,
+    the scheduler runs on 1 - gamma. From RAMP_STEPS on (bonus 0) it returns
+    RAMP_N_END and RAMP_GAMMA_END themselves: the exp / log round trip need
+    not give back the arm's DISCOUNT bit for bit, and the searches assert
+    their discount is DISCOUNT. gamma is a Python float, as DISCOUNT."""
+    period = RAMP_STEPS
+    bonus = np.clip((period - cycle_steps) / period, 0.0, 1.0)
+    if bonus <= 0.0:
+        return int(RAMP_N_END), float(RAMP_GAMMA_END)
+    start, end = np.log(1.0), np.log(RAMP_N_END / RAMP_N_START)
+    n = int(np.round(np.exp(bonus * (start - end) + end) * RAMP_N_START))
+    start, end = np.log(1 - RAMP_GAMMA_START), np.log(1 - RAMP_GAMMA_END)
+    gamma = float(1 - np.exp(bonus * (start - end) + end))
+    return n, gamma
+
+
+def apply_ramps(training_steps):
+    """Test C2: set TD_STEPS and DISCOUNT to ramp_values at the cycle's step
+    (training_steps - LR_WARMUP_ORIGIN: the gradient steps since the last
+    reset, or since the start). A no-op while RAMP_STEPS is 0 (every other
+    arm, bit for bit). The harness calls it wherever the step count or the
+    reset origin changes: at a run's start or resume, after every gradient
+    step (ablation.after_train_step) and at a reset (ablation.bbf_reset)."""
+    global TD_STEPS, DISCOUNT
+    if not RAMP_STEPS:
+        return
+    TD_STEPS, DISCOUNT = ramp_values(training_steps - LR_WARMUP_ORIGIN)
 
 LOG_DIR = "logs"
 
