@@ -1813,6 +1813,9 @@ def ramp_gate(spec):
         loop (after_train_step applies the ramp): no ASYNC_LOOP (its own
         loop), no student (its offline phase), no TRAIN_PREFETCH (a batch
         assembled ahead of its step would take an earlier step's values);
+      - policy-only acting: no USE_SEARCH_ACTING (audit r1 LOW-1: an
+        actor's own search runs in its process at the static spec
+        DISCOUNT, which the ramp never reaches);
       - the ramped targets are the paper builder's TD value targets
         (PAPER_TARGETS, VALUE_TARGET_MODE "td");
       - n runs between ints >= 1, falling; gamma between floats in (0, 1),
@@ -1843,6 +1846,10 @@ def ramp_gate(spec):
         raise SystemExit("RAMP_STEPS moves n and gamma every step: no "
                          "TRAIN_PREFETCH (it assembles batches ahead of "
                          "their step)")
+    if muzero.USE_SEARCH_ACTING:
+        raise SystemExit("RAMP_STEPS needs policy-only acting: an actor's "
+                         "own search (USE_SEARCH_ACTING) runs at its static "
+                         "spec DISCOUNT, which the ramp never reaches")
     if not muzero.PAPER_TARGETS or muzero.VALUE_TARGET_MODE != "td":
         raise SystemExit("RAMP_STEPS ramps the paper builder's TD value "
                          "targets: it needs PAPER_TARGETS and "
@@ -2862,8 +2869,11 @@ class Run:
         # Test C2 (RAMP_STEPS): [iteration, steps since the last reset, n,
         # gamma] at the first gradient step of each iteration since the last
         # row (ramp_step); emitted and restarted by evaluate_diagnostics,
-        # checkpointed
+        # checkpointed. ramp_windows: the steps since the last row in and
+        # out of the ramp, with their value loss and target sums
+        # (note_ramp_window; None until the first), likewise
         self.ramp_trace = []
+        self.ramp_windows = None
 
     def set_train_mode(self, training):
         for net in (self.trainer.representation, self.trainer.dynamics,
@@ -4100,6 +4110,22 @@ class Run:
                                    - muzero.LR_WARMUP_ORIGIN)}
             errs["ramp_trace"] = [list(e) for e in trace]
             self.ramp_trace = []
+            # ... and ramp_windows (audit r1 LOW-2: the row's own value
+            # diagnostics fall where the ramp has ended): over the gradient
+            # steps since the previous row, "in" the ramp (steps since the
+            # reset < RAMP_STEPS) and "out", the steps, the steps scored and
+            # their mean value loss (nats) and mean position-0 value target
+            # (the batch's scalar z); None where none was scored.
+            # Checkpointed like the trace; restarts here.
+            wins = getattr(self, "ramp_windows", None) or ramp_windows_empty()
+            errs["ramp_windows"] = {
+                k: {"steps": w["steps"], "scored": w["scored"],
+                    "value_loss": (round(w["value_loss"] / w["scored"], 6)
+                                   if w["scored"] else None),
+                    "target_mean": (round(w["target_mean"] / w["scored"], 6)
+                                    if w["scored"] else None)}
+                for k, w in wins.items()}
+            self.ramp_windows = ramp_windows_empty()
         if muzero.DORMANT_DIAGNOSTIC:
             # Test C's plasticity read (both runs)
             errs.update(self.dormant_stats())
@@ -4396,12 +4422,16 @@ def save_run_checkpoint(run, path, meta):
                            "held_ships": list(getattr(run, "held_ships",
                                                       []))}
     if muzero.RAMP_STEPS:
-        # Test C2: the next row's ramp trace so far (checkpoints fall
-        # between rows); the values themselves follow from the step count
-        # and the reset log. Only then, so every other arm's head is
+        # Test C2: the next row's ramp trace and ramp windows so far
+        # (checkpoints fall between rows: a resume neither drops nor
+        # double-counts a step); the values themselves follow from the step
+        # count and the reset log. Only then, so every other arm's head is
         # unchanged
-        state["ramp"] = {"trace": [list(e) for e in
-                                   getattr(run, "ramp_trace", None) or []]}
+        state["ramp"] = {
+            "trace": [list(e) for e in getattr(run, "ramp_trace", None)
+                      or []],
+            "windows": copy.deepcopy(getattr(run, "ramp_windows", None)
+                                     or ramp_windows_empty())}
     state["rng"] = {
         "np": np.random.get_state(),
         "py": random.getstate(),
@@ -4501,6 +4531,8 @@ def load_run_checkpoint(run, path, expect):
                                    if run.reset_log else 0)
     if "ramp" in state:
         run.ramp_trace = [list(e) for e in state["ramp"]["trace"]]
+        run.ramp_windows = copy.deepcopy(state["ramp"].get("windows")
+                                         or ramp_windows_empty())
     # Test C2: the ramp's values at the restored step and reset origin (a
     # no-op without RAMP_STEPS)
     muzero.apply_ramps(run.trainer.training_steps)
@@ -5014,17 +5046,53 @@ def ramp_step(run, it, first):
         trace.append([int(it), int(cycle), int(want[0]), float(want[1])])
 
 
+def ramp_windows_empty():
+    """Test C2's per-row ramp windows (read (4), audit r1 LOW-2), as sums:
+    "in" the gradient steps whose steps since the last reset are below
+    RAMP_STEPS, "out" the rest; per window the steps, the steps scored (a
+    finite value loss and target mean), and their sums."""
+    return {k: {"steps": 0, "scored": 0, "value_loss": 0.0,
+                "target_mean": 0.0} for k in ("in", "out")}
+
+
+def note_ramp_window(run):
+    """Test C2: the gradient step just taken (training_steps - 1, before
+    after_train_step re-applies the ramp; the origin cannot move between
+    the two) joins run.ramp_windows' "in" while its steps since the last
+    reset are below RAMP_STEPS, else "out", scored with the trainer's
+    (value loss, position-0 value target mean) for it
+    (TrainingHelper._note_ramp_step), which is consumed here so no step is
+    scored twice; a step without one, or with a non-finite one, is counted
+    but not scored. Emitted and restarted per row (evaluate_diagnostics'
+    "ramp_windows"), checkpointed."""
+    cycle = run.trainer.training_steps - 1 - muzero.LR_WARMUP_ORIGIN
+    wins = getattr(run, "ramp_windows", None)
+    if wins is None:
+        wins = run.ramp_windows = ramp_windows_empty()
+    w = wins["in" if cycle < muzero.RAMP_STEPS else "out"]
+    w["steps"] += 1
+    last = getattr(run.trainer, "_ramp_last", None)
+    run.trainer._ramp_last = None
+    if (last is not None and np.isfinite(last[0])
+            and np.isfinite(last[1])):
+        w["scored"] += 1
+        w["value_loss"] += float(last[0])
+        w["target_mean"] += float(last[1])
+
+
 def after_train_step(run):
     """Per-gradient-step hook, called by every training loop right after the
-    step counter advances. Today: Test C2's ramp (muzero.apply_ramps at the
-    new step: the next step's batch takes its values; a no-op while
-    RAMP_STEPS is 0), then ReDo on its redo_due() schedule, plus the
+    step counter advances. Today: Test C2's ramp (the step just taken into
+    its ramp window, then muzero.apply_ramps at the new step: the next
+    step's batch takes its values; nothing while RAMP_STEPS is 0), then
+    ReDo on its redo_due() schedule, plus the
     step diagnostics that make ReDo's effect attributable (row-mean loss
     and pre-clip grad norm; mean grad norm over the 20 steps before vs after
     each pass -- round-2 design audit). Touches nothing on `run` while ReDo
-    is off, so every other arm is unchanged and test stubs need no new
-    surface."""
+    and the ramp are off, so every other arm is unchanged and test stubs
+    need no new surface."""
     if muzero.RAMP_STEPS:
+        note_ramp_window(run)
         muzero.apply_ramps(run.trainer.training_steps)
     if not (muzero.REDO_EVERY or muzero.STEP_DIAGNOSTICS):
         return

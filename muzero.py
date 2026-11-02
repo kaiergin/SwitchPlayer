@@ -2966,6 +2966,10 @@ class TrainingHelper:
             transform=USE_H_TRANSFORM)
         value_ce_0 = -torch.sum(converted_target_values[:, 0, :] * F.log_softmax(value_logits, dim=1), dim=1)
         value_loss_0 = wmean(value_ce_0)
+        # Test C2's ramp windows (RAMP_STEPS only): each position's value
+        # loss, detached, averaged on the device below and read after this
+        # step's own sync (_note_ramp_step); None for every other arm.
+        ramp_vterms = [value_loss_0.detach()] if RAMP_STEPS else None
         step0_loss = (POLICY_LOSS_WEIGHT * policy_loss_0
                       + VALUE_LOSS_WEIGHT * value_loss_0)
         if EFFZERO_LOSS_SCALING:
@@ -3028,6 +3032,8 @@ class TrainingHelper:
                                              policy_mask[:, i], weights=is_weights)
             value_ce = -torch.sum(converted_target_values[:, i, :] * F.log_softmax(value_logits, dim=1), dim=1)
             value_loss = wmean(value_ce)
+            if ramp_vterms is not None:
+                ramp_vterms.append(value_loss.detach())
 
             step_loss = (REWARD_LOSS_WEIGHT * reward_loss
                          + PREFIX_LOSS_WEIGHT * prefix_loss
@@ -3049,6 +3055,11 @@ class TrainingHelper:
             # 0.5^k deliberately: it is what EfficientZero's code does.)
             if not EFFZERO_LOSS_SCALING:
                 latent = scale_gradient(latent, LATENT_GRADIENT_SCALE)
+
+        # Test C2: queued before the backward, so this step's existing syncs
+        # (the PER writeback, total_loss.item()) leave it computed
+        ramp_vmean = (torch.stack(ramp_vterms).mean()
+                      if ramp_vterms is not None else None)
 
         # Backpropagate the total loss.
         total_loss.backward()
@@ -3076,6 +3087,7 @@ class TrainingHelper:
                         self.proj_optimizer):
                 opt.zero_grad()
             self._last_step = (total_loss.item(), grad_norm)
+            self._note_ramp_step(ramp_vmean, batch)
             return self._last_step[0]
 
         # Step the optimizers.
@@ -3098,7 +3110,26 @@ class TrainingHelper:
         # (loss, pre-clip grad norm TENSOR) for harness diagnostics; the norm
         # stays on-device so arms that never read it pay no sync.
         self._last_step = (total_loss.item(), grad_norm)
+        self._note_ramp_step(ramp_vmean, batch)
         return self._last_step[0]
+
+    def _note_ramp_step(self, vmean, batch):
+        """Test C2 (RAMP_STEPS; ablation.note_ramp_window reads it after the
+        step): self._ramp_last = (the step's value loss -- the IS-weighted
+        value cross-entropy of each unroll position, as the loss computes
+        it, averaged over the K + 1 positions, in nats, before
+        VALUE_LOSS_WEIGHT and the 1/K scaling -- and the mean of the
+        batch's scalar value targets at unroll position 0: the paper
+        builder's z, sums of stored clipped rewards plus the discounted
+        bootstrap, before h() and the categorical encoding). Called after
+        the step's total_loss.item(), so the device is idle: one scalar
+        copy and a CPU mean over the batch, no new wait. Nothing for any
+        other arm (vmean None)."""
+        if vmean is None:
+            return
+        self._ramp_last = (
+            float(vmean),
+            float(np.mean(np.asarray(batch["target_value"])[:, 0])))
 
     async def training_process(self):
         try:

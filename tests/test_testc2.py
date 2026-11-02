@@ -6,9 +6,12 @@ the RAMP_* knobs), ramp_values against BBF's own scheduler (re-implemented
 here from the released bbf/agents/spr_agent.py) and the pre-registration's
 table, apply_ramps, the gate, every site that moves the step count or the
 reset origin (the run's start, every gradient step, a reset, a checkpoint's
-resume), the batch each step trains on, the restore after a run and the
-row fields. CPU only."""
+resume), the batch each step trains on, the learner's other readers (the
+birth search, the insertion and refresh priorities, the refresh's search),
+the restore after a run, the row fields and the per-row ramp windows (read
+(4)'s value loss and targets in and out of the ramp). CPU only."""
 import contextlib
+import copy
 import inspect
 import json
 import pathlib
@@ -236,7 +239,7 @@ def test_apply_ramps_sets_the_globals_from_the_origin(ramp_on):
 # --------------------------------------------------------------------------
 # the gate
 # --------------------------------------------------------------------------
-def test_c2_passes_its_gates_at_the_launch_recipe(in_arm):
+def test_c2_passes_the_reset_ramp_env_stop_eager_sve_and_birth_gates(in_arm):
     spec = in_arm(C2)
     ablation.reset_gate(spec, True, True, 0, 2000, None)
     ablation.ramp_gate(spec)
@@ -264,6 +267,11 @@ GATE_CASES = [
     ({"ASYNC_LOOP": True}, {}, "no ASYNC_LOOP"),
     ({}, {"_student": "distill"}, "student's offline phase"),
     ({"TRAIN_PREFETCH": True}, {}, "TRAIN_PREFETCH"),
+    # audit r1 LOW-1: an actor's own search would run at the static DISCOUNT
+    # (reset_gate allows it under SEARCH_ACT_BIRTH_TARGETS; this does not)
+    ({"USE_SEARCH_ACTING": True}, {}, "policy-only acting"),
+    ({"USE_SEARCH_ACTING": True, "SEARCH_ACT_BIRTH_TARGETS": True}, {},
+     "policy-only acting"),
     ({"PAPER_TARGETS": False}, {}, "PAPER_TARGETS"),
     ({"VALUE_TARGET_MODE": "mixed"}, {}, "VALUE_TARGET_MODE 'td'"),
     ({"RAMP_N_START": 0}, {}, "RAMP_N_START 0 must be an int"),
@@ -341,7 +349,10 @@ def test_every_site_that_moves_the_step_count_or_the_origin_applies_it():
     resume, and the two training loops (each calls after_train_step right
     after its increment: tests/test_prioract.py); the origin at
     warmup_origin's start (0) and restore, a resume and a reset. A new site
-    fails this count."""
+    fails this count. (Outside ablation.py: distill.load_master sets a
+    trainer's count from a master snapshot, in the distillation prep's own
+    process only -- never in a run_one, and C2 refuses students; muzero's
+    legacy Ray TrainingHelper loop is not the harness's.)"""
     src = inspect.getsource(ablation)
     assert len(re.findall(r"trainer\.training_steps \+= 1", src)) == 2
     assert len(re.findall(r"trainer\.training_steps = (?!=)", src)) == 2
@@ -474,7 +485,8 @@ def test_other_arms_train_on_their_static_values(in_arm):
     ablation.train_block(run, 50, it=21)
     assert all(n is td and g is d for _, n, g in run.trainer.batches)
     assert muzero.TD_STEPS is td and muzero.DISCOUNT is d
-    assert not hasattr(run, "ramp_trace")
+    assert not hasattr(run, "ramp_trace") and not hasattr(run, "ramp_windows")
+    assert not hasattr(run.trainer, "_ramp_last")
 
 
 # --------------------------------------------------------------------------
@@ -620,9 +632,16 @@ def test_a_resume_continues_the_ramp_exactly(ramp_on, monkeypatch, tmp_path,
     assert want == muzero.ramp_values(cycle)
     a.ramp_trace = [[it, c, *muzero.ramp_values(c)]
                     for it, c in ((21, 0), (22, 2000), (23, 4000))]
+    # the row's ramp windows so far (audit r1 LOW-2)
+    a.ramp_windows = {
+        "in": {"steps": 6000, "scored": 5999, "value_loss": 12.5,
+               "target_mean": 3.25},
+        "out": {"steps": 2000, "scored": 2000, "value_loss": 4.0,
+                "target_mean": -1.5}}
     path = tmp_path / "resume.ckpt"
     ablation.save_run_checkpoint(a, path, {**META, "training_steps": steps})
-    assert ablation._read_checkpoint(path)["ramp"] == {"trace": a.ramp_trace}
+    assert ablation._read_checkpoint(path)["ramp"] == {
+        "trace": a.ramp_trace, "windows": a.ramp_windows}
     # a fresh process: the arm's static values, the origin 0
     muzero.LR_WARMUP_ORIGIN = 0
     muzero.TD_STEPS, muzero.DISCOUNT = 5, G_END
@@ -632,11 +651,18 @@ def test_a_resume_continues_the_ramp_exactly(ramp_on, monkeypatch, tmp_path,
     assert muzero.LR_WARMUP_ORIGIN == origin
     assert values() == want
     assert b.ramp_trace == a.ramp_trace and b.ramp_trace is not a.ramp_trace
-    # and on, step by step, as the uninterrupted run
+    assert (b.ramp_windows == a.ramp_windows
+            and b.ramp_windows["in"] is not a.ramp_windows["in"])
+    # and on, step by step, as the uninterrupted run: the windows count
+    # each step once, on top of the restored ones (no trainer score here)
     for s in range(steps + 1, steps + 3001):
         b.trainer.training_steps = s
         ablation.after_train_step(b)
         assert values() == muzero.ramp_values(s - origin), s
+    n_in = sum(1 for i in range(steps, steps + 3000) if i - origin < 10000)
+    assert b.ramp_windows == {
+        "in": {**a.ramp_windows["in"], "steps": 6000 + n_in},
+        "out": {**a.ramp_windows["out"], "steps": 2000 + 3000 - n_in}}
 
 
 def test_no_other_arms_checkpoint_changes(monkeypatch, tmp_path,
@@ -650,7 +676,7 @@ def test_no_other_arms_checkpoint_changes(monkeypatch, tmp_path,
     b = mk()
     ablation.load_run_checkpoint(b, path, EXPECT)
     assert muzero.TD_STEPS is td and muzero.DISCOUNT is d
-    assert not hasattr(b, "ramp_trace")
+    assert not hasattr(b, "ramp_trace") and not hasattr(b, "ramp_windows")
 
 
 # --------------------------------------------------------------------------
@@ -724,3 +750,180 @@ def test_the_controls_rows_carry_no_ramp_fields(in_arm):
         spec = in_arm(arm)
         row = make_run(spec, arm=arm).evaluate_diagnostics()
         assert "ramp" not in row and "ramp_trace" not in row, arm
+        assert "ramp_windows" not in row, arm
+
+
+# --------------------------------------------------------------------------
+# the ramp windows (audit r1 LOW-2): read (4)'s value loss and targets in
+# and out of the ramp, since rows fall where it has ended
+# --------------------------------------------------------------------------
+class ScoringTrainer(FakeTrainer):
+    """A FakeTrainer whose step leaves (value loss, target mean) as
+    TrainingHelper._note_ramp_step does -- functions of the step, NaN at
+    49,500 (counted, not scored)."""
+
+    async def train_step(self, batch):
+        s = self.training_steps
+        self._ramp_last = (float("nan") if s == 49500 else 1.0 + s / 1e5,
+                           s / 1e4)
+        return await super().train_step(batch)
+
+
+def test_the_ramp_windows_split_each_step_in_and_out(in_arm):
+    """Iteration 20 (origin 0: out), the reset, iterations 21-26: the
+    10,000 steps after it in, the rest out; each step scored once, with
+    its own record; a block straddling the window's end splits there."""
+    in_arm(C2)
+    run = SimpleNamespace(trainer=ScoringTrainer(38000), replay=[])
+    muzero.apply_ramps(38000)
+    ablation.train_block(run, 2000, it=20)
+    muzero.LR_WARMUP_ORIGIN = 40000            # the reset after iteration 20
+    muzero.apply_ramps(40000)
+    for it in range(21, 27):
+        ablation.train_block(run, 2000, it=it)
+    w = run.ramp_windows
+    ins = [s for s in range(40000, 50000) if s != 49500]
+    outs = list(range(38000, 40000)) + list(range(50000, 52000))
+    assert (w["in"]["steps"], w["in"]["scored"]) == (10000, 9999)
+    assert (w["out"]["steps"], w["out"]["scored"]) == (4000, 4000)
+    for key, steps in (("in", ins), ("out", outs)):
+        assert w[key]["value_loss"] == pytest.approx(
+            sum(1.0 + s / 1e5 for s in steps), rel=1e-12, abs=0)
+        assert w[key]["target_mean"] == pytest.approx(
+            sum(s / 1e4 for s in steps), rel=1e-12, abs=0)
+    assert run.trainer._ramp_last is None      # consumed
+    run = SimpleNamespace(trainer=ScoringTrainer(49990), replay=[])
+    muzero.apply_ramps(49990)
+    ablation.train_block(run, 20, it=25)
+    assert run.ramp_windows["in"]["steps"] == 10
+    assert run.ramp_windows["out"]["steps"] == 10
+
+
+def test_a_ramp_runs_rows_carry_the_ramp_windows(in_arm):
+    spec = in_arm(C2)
+    run = make_run(spec, arm=C2, steps=50000)
+    muzero.LR_WARMUP_ORIGIN = 40000
+    muzero.apply_ramps(50000)
+    run.ramp_windows = {
+        "in": {"steps": 10000, "scored": 9999, "value_loss": 9999 * 2.5,
+               "target_mean": 9999 * -0.25},
+        "out": {"steps": 0, "scored": 0, "value_loss": 0.0,
+                "target_mean": 0.0}}
+    row = run.evaluate_diagnostics()
+    assert row["ramp_windows"] == {
+        "in": {"steps": 10000, "scored": 9999, "value_loss": 2.5,
+               "target_mean": -0.25},
+        "out": {"steps": 0, "scored": 0, "value_loss": None,
+                "target_mean": None}}
+    assert json.loads(json.dumps(row["ramp_windows"])) == row["ramp_windows"]
+    assert run.ramp_windows == ablation.ramp_windows_empty()   # restarts
+    row = run.evaluate_diagnostics()
+    assert row["ramp_windows"] == {
+        k: {"steps": 0, "scored": 0, "value_loss": None, "target_mean": None}
+        for k in ("in", "out")}
+
+
+def test_train_step_scores_the_window_only_under_the_ramp(in_arm,
+                                                          monkeypatch):
+    """The trainer's record: the step's value loss (finite, positive) and
+    the batch's mean position-0 value target, exactly. Recording it changes
+    nothing in the step -- the same loss and weights with RAMP_STEPS off --
+    and nothing is recorded off."""
+    import asyncio
+    spec = in_arm(C2)
+    run = make_run(spec, arm=C2, steps=42000)
+    tr = run.trainer
+    muzero.LR_WARMUP_ORIGIN = 40000
+    muzero.apply_ramps(42000)
+    traj = _token_traj(np.random.default_rng(5), 30, born=42000)
+    np.random.seed(1)
+    batch = tr.prepare_batch_paper([traj], 8, muzero.UNROLL_STEPS,
+                                   ablation.ACTIONS)
+    tr_off, batch_off = copy.deepcopy(tr), copy.deepcopy(batch)
+    torch.manual_seed(7)
+    loss = asyncio.run(tr.train_step(batch))
+    vloss, tmean = tr._ramp_last
+    assert np.isfinite(vloss) and vloss > 0
+    assert tmean == float(np.mean(np.asarray(batch["target_value"])[:, 0]))
+    monkeypatch.setattr(muzero, "RAMP_STEPS", 0)
+    torch.manual_seed(7)
+    assert asyncio.run(tr_off.train_step(batch_off)) == loss
+    assert not hasattr(tr_off, "_ramp_last")
+    for n in ablation.NET_NAMES:
+        a, b = getattr(tr, n).state_dict(), getattr(tr_off, n).state_dict()
+        assert all(torch.equal(a[k], b[k]) for k in a), n
+
+
+# --------------------------------------------------------------------------
+# the learner's other readers (audit r1 LOW-3)
+# --------------------------------------------------------------------------
+def test_the_learners_readers_take_the_ramp(in_arm, monkeypatch):
+    """Two iterations after a reset at 40,000 (n 9, gamma at 2,000), the
+    real readers on the real (CPU) engines, spied on: the birth search
+    (Run.reanalyse -> _birth_search under BIRTH_SEARCH) searches at the
+    ramped gamma and the insertion priorities take paper_value_target(9,
+    gamma); the refresh (refresh_targets_vtree) searches at it and its
+    priorities (_apply_refresh) take paper_value_target(9 - 2, gamma) under
+    the age shrink (age 2,500 at 1,000 per step) -- never C's 5 / 0.997^4."""
+    import muzero_vtree
+    spec = in_arm(C2)
+    assert muzero.BIRTH_SEARCH and not muzero.USE_SEARCH_ACTING
+    assert muzero.REFRESH_VTREE
+    monkeypatch.setattr(muzero, "ACT_SEARCH_SIMS", 4)
+    monkeypatch.setattr(muzero, "OFFPOLICY_DECAY_STEPS", 1000)
+    run = make_run(spec, arm=C2, steps=42000)
+    muzero.LR_WARMUP_ORIGIN = 40000
+    muzero.apply_ramps(42000)
+    n, g = muzero.ramp_values(2000)
+    assert (n, values()) == (9, (9, g)) and g != G_END
+    seen = {"search": [], "pvt": []}
+    real_search = muzero_vtree.VectorizedPUCT.search
+    real_trajs = muzero_vtree.VectorizedCommunalPUCT.search_trajectories
+    real_pvt = muzero.paper_value_target
+
+    def search(self, *a, **k):
+        seen["search"].append(("search", k.get("discount")))
+        return real_search(self, *a, **k)
+
+    def search_trajectories(self, *a, **k):
+        seen["search"].append(("trajectories", k.get("discount")))
+        return real_trajs(self, *a, **k)
+
+    def pvt(traj, idx, horizon, discount):
+        seen["pvt"].append((horizon, discount))
+        return real_pvt(traj, idx, horizon, discount)
+
+    monkeypatch.setattr(muzero_vtree.VectorizedPUCT, "search", search)
+    monkeypatch.setattr(muzero_vtree.VectorizedCommunalPUCT,
+                        "search_trajectories", search_trajectories)
+    monkeypatch.setattr(muzero, "paper_value_target", pvt)
+    # the birth search and the insertion priorities: a policy-only game
+    # (3-field records, raw per-base-step reward tuples under REWARD_GROWTH)
+    rng = np.random.default_rng(1)
+    A = len(muzero.TOKEN_VOCAB)
+    game = [(rng.integers(0, 255, (12, *muzero.IMAGE_RESHAPE),
+                          dtype=np.uint8), int(rng.integers(0, A)),
+             tuple(float(x) for x in rng.choice([0.0, 10.0], size=k)))
+            for k in (0, 2, 1, 3, 2, 1, 2)]
+    out = run.reanalyse(game, terminated=True, born_step=42000)
+    assert seen["search"] and all(d == g for _, d in seen["search"])
+    assert seen["pvt"] == [(9, g)] * len(out)
+    differs = 0
+    for i, t in enumerate(out):
+        z = real_pvt(out, i, 9, g)
+        assert t["priority"] == abs(t["root_value"] - z) + muzero.PER_EPS
+        differs += abs(z - real_pvt(out, i, 5, G_END)) > 1e-9
+    assert differs > 0
+    # the refresh: its search and its priorities, under the age shrink
+    for t in out:
+        t["born_step"] = 42000 - 2500
+    run.replay = [out]
+    seen["search"].clear()
+    seen["pvt"].clear()
+    run.refresh_targets_vtree(1)
+    assert seen["search"] and all(d == g for _, d in seen["search"])
+    assert seen["pvt"] == [(7, g)] * len(out)
+    for i, t in enumerate(out):
+        assert t["refreshed_step"] == 42000
+        z = real_pvt(out, i, 7, g)
+        assert t["priority"] == abs(t["root_value"] - z) + muzero.PER_EPS
