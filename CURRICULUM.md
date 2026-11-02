@@ -1386,6 +1386,12 @@ LAUNCHED 12:35 EST 11-02:
     (the references).
 PAUSED 12:50 EST 11-02 at Kai's request (2 hours), before the first  checkpoint: the supervisor pair and then the trainer pair were killed by  exact PID, the hand-off left running. Resume about 14:50 by rerunning  the launcher. With no checkpoint the run restarts fresh (iter-001.pkl is  truncated on its first write), so about 15 minutes of training are lost.
 
+RESUMED 14:50 EST 11-02 (the 2 hours were up; Kai did not ask for longer) by
+rerunning the launcher. The supervisor logged RESUMING (no checkpoint, so the
+trainer starts fresh: attempt 2) and is preflighting again (about 25 minutes).
+The hand-off (post_testc2.py) ran through the pause. CS2 was open on the GPU
+at the resume (about 6 of 12 GB in use), and the trainer shares the card.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
