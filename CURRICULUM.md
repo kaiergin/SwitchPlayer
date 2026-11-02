@@ -789,6 +789,150 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test C2: BBF's n-step and discount ramps on top of the resets (Kai, 2026-11-02)
+
+DECISION: Kai 2026-11-02, after Test C read NO DIFFERENT. Asked which
+test runs next: "Ramps bundle only" (Test D waits). E1 is built and run
+alongside it ("You can do them at the same time").
+Background:
+  - Test C: C's resets reached 1411.0 at [90k, end] against C0's 1262.4
+    (NO DIFFERENT, band 331.3). They kept the trunk plastic (C0 went
+    25-29% dormant, C stayed under 2% within cycles) without a score gain.
+    C's only gain came in its last cycle, which was 30 iterations long.
+  - BBF pairs its resets with two schedules that restart at every reset:
+    the n-step horizon falls from 10 to 3 and the discount rises from
+    0.97 to 0.997 over the 10k gradient steps after it. The reading: just
+    after a reset the fresh heads bootstrap badly, so the targets lean on
+    real rewards (a long n) over a short horizon (a low gamma), then hand
+    over to the long-horizon, low-bias setting as the network recovers.
+QUESTION: on top of C's resets, do BBF's n-step and discount ramps reach a
+higher deployed score at 100k env steps than the resets alone?
+BBF'S RAMPS (verified 11-02 against the released bbf/agents/spr_agent.py
+and bbf/configs/BBF.gin):
+  - Both are keyed on cycle_grad_steps, the gradient steps since the last
+    reset (0 at the start of training; zeroed in reset_weights).
+    cycle_steps = 10,000.
+  - n: exponential_decay_scheduler(cycle_steps, 0, 1, update_horizon /
+    max_update_horizon), times max_update_horizon, then int(onp.round(.)).
+    With update_horizon 3 and max_update_horizon 10, n falls geometrically
+    from 10 to 3.
+  - gamma: exponential_decay_scheduler(cycle_steps, 0, min_gamma, gamma,
+    reverse=True). 1 - gamma falls geometrically from 1 - 0.97 to
+    1 - 0.997: log(1 - gamma) moves linearly over the cycle.
+  - Both are passed to the replay sampler on every batch, so every target
+    uses the current values. BBF's discount is per agent step at frameskip
+    4, which is our base step.
+THE RUN (seed 0; one run; every env step counted):
+  C2 is C (Test C's "-reset-r0", every reset knob unchanged) plus the two
+  ramps. The control is C itself, the run of 10-30 to 11-01. No new
+  control is run.
+  THE RAMPS, keyed on the gradient steps since the last reset (since the
+  start before the first), over 10,000 gradient steps (5 iterations of
+  2,000, the same window as the actor hold), BBF's shapes:
+    - n(f) = round(10 x 0.5^f), f = min(steps since reset / 10,000, 1),
+      rounded as onp.round (half to even): 10 -> 5 in base steps;
+    - 1 - gamma(f) = 0.03^(1-f) x (1 - 0.997^4)^f: 0.97 -> 0.98805 per
+      base step;
+    - f by iteration of the cycle: 0, 0.2, 0.4, 0.6, 0.8, 1 at +0 ... +5;
+      n 10, 9, 8, 7, 6, 5 and gamma 0.970, 0.975, 0.979, 0.983, 0.986,
+      0.988.
+  THE END VALUES ARE C'S, not BBF's (n 5 with EfficientZero's age shrink,
+    gamma 0.98805), and only the start values are BBF's (n 10, gamma
+    0.97 per base step). This is my choice, open to Kai's change before
+    launch. BBF's own end values (n 3, gamma 0.997) would add two more
+    changes to the ramps: a horizon four times longer (333 base steps
+    against 84) and a shorter n. One comparison could not separate those
+    three changes, and 0.98805 is the discount behind every positive token
+    result so far (Test B2's note).
+  WHERE THEY APPLY: every reader of the discount and the horizon. All run
+    in the learner process (mapped 11-02):
+    - the batch-time value targets (the frame horizon of n base steps;
+      every token edge discounted by gamma ** (frames / 4));
+    - the birth search and the refresh (the search's edge discounts);
+    - the insertion and refresh PER priorities;
+    - the row diagnostics.
+    EfficientZero's age shrink applies on top: the horizon is clip(n -
+    age // OFFPOLICY_DECAY_STEPS, 1, n). The actors play the prior and
+    read neither value. The value prefix is undiscounted, so it is
+    unchanged.
+  After the last reset (after iteration 100) the ramp completes by
+  iteration 105, and the end values hold to the run's end.
+READS. EXACT eval as before (whole games, 30 noop starts, prior argmax,
+PROBE_ENV MsPacmanNoFrameskip-v4); DEPLOYED primary, trainer-BN secondary.
+Rows every 5 iterations, plus the final.
+  (1) PRIMARY at 100k: C2's deployed rows in [90k, C2's end] against C's
+      (1411.0, n 3). The band is 2 x 216.9 x sqrt(1/n_C2 + 1/n_C):
+      BETTER / NO DIFFERENT / WORSE. Trainer-BN likewise (C 1358.1).
+  (2) descriptive: the deployed mean per 20k window of cumulative env
+      steps, beside C, C0 and Test B2. C2's [90k, end] window against C0
+      (1262.4, n 4) and T2 (1629.5, n 4), with the same band rule.
+  (3) per reset, as in Test C:
+      - the dip: row 25 of the cycle against row 20;
+      - the recovery: the first row at or above row 20;
+      - the cycle's rate: OLS deployed per 1k env steps over the cycle's
+        rows 25-40, against C's over the same rows;
+      - the start: rows 5-20 (the first cycle, before any reset) against
+        C's, the only stretch where the ramps differ from C without a
+        reset.
+  (4) mechanism:
+      - the ramp's n and gamma at every row (logged), checked against the
+        schedule;
+      - the value loss and the value targets' mean by row, against C's;
+      - the plasticity read as in Test C (dormant fractions, first-layer
+        filters, erank).
+  (5) the prior: policy_maxp and the search targets' entropy by row.
+  (6) probe_prefix_bn FIXED at C2's final row.
+  (7) stability: the largest adjacent deployed drop. The reset dips are
+      reported separately, in (3).
+DECISION AFTER:
+  - (1) BETTER: BBF's ramps with the resets help in our stack. Kai's call
+    among: resets and ramps inside the swap lineage (B2 plus BBF); Test
+    D; BBF's own end values.
+  - (1) NO DIFFERENT: the ramps do not pay at this resolution either.
+    The BBF bundle stays out of the base, and Test D is next unless Kai
+    decides otherwise.
+  - (1) WORSE: the ramps hurt. Reads (3) and (4) say why: the dips, the
+    value loss in the ramp windows. Test D is next unless Kai decides
+    otherwise.
+CAVEAT:
+  - The control is C, a run from before this build. The ramp knobs
+    default to off, and the tests pin C's path unchanged, but C2 and C do
+    not share an async timing: same seed, different trajectories. The
+    band is the within-run row noise, not the seed noise.
+  - One seed.
+  - The end values are C's, not BBF's (above).
+  - The birth search runs at collect time, partway into the next
+    iteration, so it takes the ramp's values at collect time, not at
+    request time. BBF's sampler also runs two batches ahead.
+  - The replay keeps targets stored under earlier values: the birth and
+    refresh search policies and root values, and the PER priorities. As
+    in Test C's A1, they stay until the refresh re-searches them or they
+    are evicted. The value targets themselves are recomputed at batch time
+    with the current n and gamma, as in BBF.
+BUILD (before launch; audited like every build):
+  - muzero.py: the RAMP_* knobs (all off by default): the window
+    (10,000), the start values (10, 0.97) and the end values (the arm's
+    TD_STEPS and DISCOUNT); ramp_values(steps since reset); a helper
+    that sets TD_STEPS and DISCOUNT from it.
+  - experiments/ablation.py:
+    - the arm C2 (C plus the RAMP_* knobs);
+    - a gate (the end values equal the arm's TD_STEPS and DISCOUNT; the
+      run shape C's);
+    - the values set wherever the step count or the reset origin changes:
+      at the run's start, after every gradient step, at a reset, and at a
+      checkpoint's resume, so every reader sees the current values;
+    - the rows' "ramp" (n, gamma, steps since reset).
+  - benchmarks/supervisors/supervise_testb.py: C2's lineage (one run,
+    alone); quick() pins the ramp knobs; a per-row check of the logged
+    ramp against the schedule.
+  - Tests; a scorer (C2 against C, C0 and T2); a hand-off; a launcher; a
+    smoke (a tiny ramp run with resets, killed mid-ramp and resumed: the
+    ramp's values continue exactly); a manifest and a fresh run tree.
+COST: the build and its audit loop today, then about 28 h for the run
+(Test C's C took 27-28 h): results about 11-04. E1 is pre-registered,
+built and audited while C2 trains, and run on CPU under the lock when
+memory allows.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
