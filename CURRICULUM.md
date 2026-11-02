@@ -929,8 +929,42 @@ AMENDMENTS (the build, before any real run):
         epochs, seed 0, plain cross-entropy;
       - the held-out set is the last ceil(n / 10) of T2's lives (13), and
         its accuracy selects nothing.
+  (A5) THE DECISION METRIC (audit r1, before any real run). On the census
+      truth, the trivial rule "all one class" already scores pair F1 0.761
+      on the 4-frame group: most of its pairs ARE equivalent (2.09 classes
+      among 9). "All nine actions" scores 0.837 for (B). So the registered
+      rule could call E2 on a margin of 0.001 over the floor, and its
+      "< 0.5" branch could never fire. These floors come from the census
+      truth alone; no full-run output of either model exists. The smoke's
+      120 decisions gave (A) F1 0.74; I saw it, and it is not a result.
+      The decision now reads MERGE PRECISION and MERGE RECALL, which are
+      what E2 needs. A false merge hides a real choice from search; a
+      missed one only spends simulations.
+      - (A): precision is the share of the pooled pairs predicted
+        equivalent that are truly equivalent; recall is the share of truly
+        equivalent pairs that are predicted.
+      - (B), over the predicted class's members other than the chosen
+        action: precision is the share truly in the chosen action's class;
+        recall is the share of the true class's other members that are
+        predicted. The chosen action's own presence in its predicted class
+        is reported (chosen_in_pred), not scored. This replaces A4's
+        "counts the chosen action in both classes".
+      - E2: precision >= 0.9 and recall >= 0.5 for (A) or for (B), pooled
+        and in at least 6 of the 8 game families.
+      - Kai's call (low): neither candidate reaches precision >= 0.7 with
+        recall >= 0.2, pooled.
+      - Kai's call (mid): otherwise.
+      Neither trivial rule can pass. All one class has precision 0.61 on
+      (A); all nine has 0.68 on (B); all distinct has recall 0. F1 and
+      the floors stay reported.
+  (A6) (B)'S RARE SPLIT. As written it is degenerate: every chosen
+      action's class contains a rare action, so all 506 decisions fall on
+      the rare side. It now splits the predicted and true members by
+      whether the member action is rare, which tests the IDM-follows-
+      the-behaviour-policy trap directly. It also reports by the chosen
+      action's rarity (22 decisions against 484).
 BUILT 2026-11-02 (pre-audit): benchmarks/probes/probe_e1_equivalence.py
-and tests/test_e1_equivalence.py (38 passed). A smoke run (2 games, 60
+and tests/test_e1_equivalence.py (40 passed). A smoke run (2 games, 60
 decisions each, small caps) matched the exact eval in both games
 (main_line_ok); its numbers are not results.
 
@@ -1077,6 +1111,29 @@ COST: the build and its audit loop today, then about 28 h for the run
 (Test C's C took 27-28 h): results about 11-04. E1 is pre-registered,
 built and audited while C2 trains, and run on CPU under the lock when
 memory allows.
+BUILT 2026-11-02, the trainer core (71a28e99, pre-audit):
+  - muzero.py: RAMP_* (off by default); ramp_values, BBF's scheduler
+    with exact end values; apply_ramps.
+  - experiments/ablation.py: the arm ...-tokens-ramp-a0; ramp_gate;
+    apply_ramps after every step-count or reset-origin change; ramp_step,
+    a per-step check that fails loudly on a stale value; the rows' "ramp"
+    and "ramp_trace" (one entry per iteration, checkpointed);
+    ramp_globals, which restores both globals after a run.
+  - Tests: tests/test_testc2.py (66). 24 suites passed.
+  - The first step at each n: 10 at 0, 9 at 741, 8 at 2,345, 7 at
+    4,151, 6 at 6,215, 5 at 8,625.
+AUDIT r1 A (the trainer core, fresh eyes, static): nothing above LOW.
+  - LOW-1: ramp_gate does not refuse search acting, whose actors would
+    keep the static discount. C2 acts from the prior, so there is no live
+    impact.
+  - LOW-2: rows fall where the ramp has ended (cycle steps that are
+    multiples of 10,000), so read (4)'s row value loss never sees a ramp
+    window.
+  - LOW-3: the real readers (the birth search, the refresh, the
+    priorities) are not exercised under a ramp in the tests.
+  - NITs: a test name overclaims its gate coverage; the token payoff in
+    rows 5, 25, ... 105 is computed at ramped values (diagnostic only);
+    the tripwire counts mutation sites in ablation.py only.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
