@@ -789,6 +789,160 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Test C: BBF-style resets in one 100k run against the no-reset twin C0 (seed 0), 2026-11-02
+
+(Pre-registration: "Next experiment (pre-registered) -- Test C", below
+Test B2's RESULT; the interim notes for both runs are there.)
+RUNS (from the run worktree Y:\SwitchPlayer-testc-run, detached at
+d682fa5e, manifest from the audited 2a51e527):
+  - C (r0) launched 18:29 10-30 and was complete at 22:38 10-31: iteration
+    134, 100,849 env steps, 268,000 train steps. Its last evals landed at
+    23:06. There were 5 resets, after iterations 20 / 40 / 60 / 80 / 100,
+    and 20 held ships. It was paused twice at Kai's request (22:02 10-30
+    for 2 h; 11:36 10-31, with a reboot, resumed 14:39).
+  - C0 (n0) launched 23:15 10-31 and was complete at 00:32 11-02 (final
+    evals included): iteration 136, 100,173 env steps, 272,000 train
+    steps. It was paused once at Kai's request (11:46-13:58 EST 11-01).
+  - Each pause resumed from the last checkpoint in the same attempt, and
+    no reset was repeated or skipped.
+  - Both supervisor.err files are empty. Every row had 0 non-finite
+    steps, and no exact-eval game was capped (27 / 28 rows, both evals).
+  - Host commit dipped in both runs: C to 2.4-3.3 GB over its last 4 h,
+    C0 to 0.6-1.0 GB on the morning of 11-01. Only the advisory "memory
+    creep?" ALERTs fired, and no allocation failed. Delayed rows were
+    scored later from their snapshots.
+EXACT eval (whole games, 30 noop starts, prior argmax). Every score is
+unclipped. DEPLOYED is primary; trainer-BN is secondary. env = thousands
+of env steps.
+       row     5    10    15    20    25    30    35    40    45    50
+  C    env   2.6   5.6   8.6  11.9  15.0  18.5  21.8  25.1  29.0  32.3
+       dep   473   481   741   873  1038   917   726   959  1167  1172
+       tBN   341   499   544   984  1007   950   882   861  1076  1323
+  C0   env   2.6   6.0   9.1  12.5  15.9  19.3  22.9  26.3  29.9  33.9
+       dep   499   450   402   655   476   899  1343   699   996   785
+       tBN   305   350   328   436   776   759   935   731  1103   838
+       row    55    60    65    70    75    80    85    90    95   100
+  C    env  36.1  40.5  44.4  48.2  52.5  56.3  60.7  64.4  68.2  72.3
+       dep  1115   925  1007  1165  1186  1052  1207  1052  1095   984
+       tBN   927  1039  1133  1172   985  1171  1173  1046  1026  1167
+  C0   env  38.2  42.1  45.4  49.0  52.9  57.0  60.6  64.7  67.6  71.4
+       dep  1252  1035  1124  1325  1143  1175  1349  1168  1125  1363
+       tBN   630   953  1077  1019   942  1021  1315  1500  1223  1153
+       row   105   110   115   120   125   130  135   final
+  C    env  76.2  79.9  83.8  88.4  92.6  97.3    -   100.8 (134)
+       dep  1212  1057  1373  1512  1318  1572    -    1344
+       tBN  1076  1232  1099  1293  1275  1245    -    1554
+  C0   env  75.7  79.7  83.3  87.1  91.2  95.5  99.4  100.2 (136)
+       dep  1294  1441  1287  1464  1211  1239  1317   1283
+       tBN  1582  1420  1291  1242  1232  1250  1403   1096
+  C and C0 ran at similar paces, within about 2k env steps of each other
+  at every row.
+READ (1) PRIMARY at 100k: C's rows in [90k, end] are 125 / 130 / 134 (n =
+  3): 1411.0 deployed. C0's are 125 / 130 / 135 / 136 (n = 4): 1262.4.
+  C - C0 = +148.6, band +-331.3 -> NO DIFFERENT. Trainer-BN: 1358.1
+  against 1245.3, +112.8 -> NO DIFFERENT.
+READ (2) per 20k window of env steps (n), deployed:
+      window              0-20k    20-40k    40-60k    60-80k    80-end
+      C                   754 (6)  1028 (5)  1067 (5)  1101 (6)  1423 (5)
+      C0                  564 (6)  1015 (5)  1160 (5)  1290 (6)  1300 (6)
+      C - C0              +190       +13       -93      -189      +123
+      band (+-)            250       274       274       250       263
+      Test B2             622       801      1071      1484      1588
+      Test B              503       881       845      1003      1023
+      current lineage     540       896      1107        -       1164
+  No window differs between C and C0. About half of C's 0-20k lead comes
+  from rows 5-20, which precede the first reset and are the same recipe
+  in both runs (C 642.1 against C0 501.5, n 4 each, inside the band); the
+  rest from rows 25-30 (C 1038 / 917 against C0 476 / 899).
+  C0's [90k, end] (1262.4, n 4) against the references:
+  - Test B's 1015.9 (n 4): +246.5, band +-306.7 -> NO DIFFERENT.
+  - The current lineage's 1163.8 (n 3): +98.6, band +-331.3 -> NO
+    DIFFERENT.
+  - Test B2's T2 1629.5 (n 4): -367.1, band +-306.7 -> WORSE.
+  - Trainer-BN: +89.7 / -14.6 / -359.9 against the same three.
+  C's own [90k, end] against T2 was -218.5 (band +-331.3, inside).
+READ (3) per reset (C). The dip is row 25 of the cycle against row 20.
+  The rate is OLS deployed per 1k env steps over the cycle's rows 25-40.
+  C0's rate and mean are over the same rows.
+      reset  rows      C dip (dep / tBN)  C rate  C0 rate  C mean  C0 mean
+      1      20->25    +165 /  +23         -12.9    +32.9     910      855
+      2      40->45    +208 / +215         -21.1    +14.8    1095     1017
+      3      60->65     +82 /  +94          +4.0     -1.0    1102     1192
+      4      80->85    +154 /   +2         -16.2     -0.3    1084     1251
+      5     100->105   +228 /  -91         +30.4     +9.7    1341     1317
+  (Reset 5's means are over rows 105-134 / 105-136, since no reset
+  followed.) Every reset "dipped" upward: row 25 of each cycle was at or
+  above row 20, so each recovered at once. In cycles 1-4, C's rates were
+  flat or falling while C0's were positive or flat. Only cycle 5, the one
+  cycle that ran 30 iterations past its reset, rose faster in C.
+READ (4) plasticity. Dormant fraction (<= 0.025), by net, representation
+  / dynamics / prediction:
+      row    C0                    C
+      20     7.3 /  4.7 / 21.9%    27 / 21 / 26%  (before reset 1)
+      40     9.4 /  6.6 / 25.0%    0.6 / 0.4 / 0%
+      60    13.1 / 10.5 / 25.5%    1.3 / 0.4 / 0.5%
+      80    15.8 / 12.5 / 26.0%    0 / 0.4 / 0%
+      100   18.1 / 16.4 / 26.6%    0.2 / 1.6 / 1.0%
+      120   23.3 / 21.1 / 27.6%    0.4 / 2.0 / 0.5%
+      final 26.5 / 24.6 / 29.2%    4.4 / 9.4 / 2.1%
+  (The <= 0.1 fractions are within 2 points of these. value_prefix is 0
+  in every row of both runs.)
+  - C0's trunk dormancy rose steadily through the whole run, with no
+    plateau. C's was cleared by each reset and stayed under 2% within
+    every 20-iteration cycle. It climbed only over the final
+    30-iteration stretch.
+  - Weak first-layer filters: C0 25% at row 20, 47% from row 90 to the
+    end. C: 53-56% at rows 15-20, 0 after each reset, 9-16% late in
+    cycles.
+  - The projector: C0 59-66%. C re-collapsed to 44-63% within 5-10
+    iterations of every reset.
+  - erank: C0 27.5-43.2 after row 20. C 5.4-68.7, swinging with the
+    resets.
+  - So the resets did what they are for. They kept the trunk's units
+    alive, and C0's units died steadily without them. That did not show
+    up as a score difference at 100k.
+READ (5) the prior: policy_maxp C0 0.62-0.80 except row 55 (0.43, back to
+  0.72 at row 60); C 0.53-0.77. The search targets' entropy: C0 0.45-1.60,
+  with its lows late (0.59 / 0.45 / 0.52 at rows 115 / 130 / 135; 1.30 at
+  the final row); C 0.86-1.91. Neither prior collapsed.
+READ (6) mechanism: probe_prefix_bn FIXED at C0's final row (p1_ratio
+  0.54) and at C's rows 20 / 25 / 100 / 105 / 134 (0.40 / 0.77 / 1.11 /
+  1.04 / 0.53).
+READ (7) stability: the largest adjacent deployed drop is -644 for C0 (row
+  35 -> 40, after a single high row 35 of 1343; outside the one-row band
+  +-464) and -228 for C (row 130 -> 134). C0's later rows never dropped
+  by more than 253 (row 120 -> 125).
+PRE-REGISTERED DECISION: (1) NO DIFFERENT -> resets alone do not pay at
+  this resolution (one seed, n 3 against 4). Next is Kai's call between:
+  - the ramps bundle: BBF's n-step and discount ramps, on top of the
+    resets;
+  - Test D: a smart swap trigger, rate-based and game-agnostic (the rate
+    falling below a fraction of the generation's own peak, or the
+    marginal-value rule; see "LATER (Kai 2026-10-27)" at the end of
+    Test B's pre-registration notes).
+  E0 (the action-equivalence census) runs first, in the gap, as Kai
+  decided 10-30.
+Beyond the letter (one seed, within-run bands, so "consistent with"):
+  - Resets bought plasticity, not score. C's trunk stayed alive and C0's
+    trunk lost a quarter of its units, but C0 matched C in every window
+    (inside the bands) and was ahead at 40-80k. At this budget, with this
+    replay ratio (~2.7 gradient steps per env step), dormancy at this
+    level did not limit learning.
+  - Where C did gain: the last stretch. After its final reset C rose
+    +30.4 per 1k env steps, against C0's +9.7 over the same rows, and its
+    80-end window is +123 above C0's (inside the band). One reading is
+    that resets help once a cycle runs long enough to use the fresh
+    capacity; 20-iteration cycles were flat. One seed cannot separate
+    that from noise.
+  - C0 is the first 0-swap seed of the swap-count curve. A single long
+    run at T0's recipe reached 1262 at [90k, end], level with Test B
+    (4 swaps) and the current lineage, and 367 below B2's T2 (2 swaps;
+    outside the band). The clip also differs (C0 keeps the sign clip;
+    T2 played at clip 17.4), and the vocabulary (36 tokens against 18),
+    so this is not yet the swap count alone.
+  - Decision speed: frames per decision in the in-run evals, C0
+    18.9-26.9 and C 21.8-30.2. Both keep 36 tokens throughout.
+
 ### Queued experiment (pre-registered) -- E0: an action-equivalence census on the agent's own play (Kai, 2026-10-30)
 
 DECISION: Kai, 2026-10-30. He asked whether an inverse dynamics model on
@@ -1977,6 +2131,11 @@ C0 ROWS 120-130 (row 130 evaluated 23:25 EST 11-01):
     prediction 28.7% dormant (C 3.8% / 7.0% / 1.6%, 30 iterations after
     reset 5); weak filters 46.9% (C 15.6%); the projector 66% (C 61%);
     erank 36.3 (C 33.3).
+C0 COMPLETE 00:32 EST 11-02 (iteration 136, 100,173 env steps, rc=0; the
+hand-off's final evals and read (6) landed at 00:32, "all done"). Rows 135
+and 136: deployed 1317.0 / 1282.7, trainer-BN 1402.7 / 1096.3. Final read
+(1): C 1411.0 (n 3) against C0 1262.4 (n 4), +148.6, band 331.3 -> NO
+DIFFERENT. The full reads are in "RESULT -- Test C" above.
 
 ### RESULT -- Test B: a fast lineage from scratch, five generations F0-F4 in 100k env steps (seed 0), 2026-10-29
 
