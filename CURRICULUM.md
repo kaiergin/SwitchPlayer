@@ -986,6 +986,33 @@ AMENDMENTS (the build, before any real run):
       - A meta line (tau, the rare set, the IDM's record) is written
         before the replay, so they survive a failed summary write.
       - A short smoke of the fixed probe runs before the full run.
+  (A8) SAFETY AT JUNCTIONS (audit r3, before any real run). A lookup keyed
+      only on the PREVIOUS token (Pac-Man's heading, which the stack
+      shows) reaches E2 under A7. It was fitted on the census truth with
+      each family left out:
+      - (A) live: P 0.911, R 0.547, 7 of 8 families;
+      - (B) live: P 0.923, R 0.544, 6 of 8 families.
+      Its partitions are joystick logic: NOOP continues the heading, and
+      the diagonals act like it. Its false merges sit at junctions:
+      - corridor decisions (at most 2 true classes among the group): P
+        0.987;
+      - junction decisions (3 or more): P 0.729, and 90% of all its false
+        merges fall there.
+      Junctions are where a merged search would hide a real choice. So E2
+      now ALSO needs merge precision >= 0.9 on the live JUNCTION decisions,
+      pooled. A junction is a decision whose census partition, restricted
+      to the nine 4-frame tokens, has 3 or more classes. The same
+      definition holds for (B), at its decision.
+      Also reported, not decided on:
+      - the probe's precision and recall split into corridor and junction;
+      - the keyed reference beside the state-blind one, fitted on the
+        census truth with each family left out: per previous token for
+        (A), per chosen action x previous token for (B);
+      - reads (3) and (4) on the live decisions too.
+      A model that only knows the heading would now read MID, not E2.
+      This is the third change to the decision rule (A5, A7, A8). All
+      three came from audits of the census truth and of rules fitted to it;
+      no model's full-run output exists.
 BUILT 2026-11-02 (pre-audit): benchmarks/probes/probe_e1_equivalence.py
 and tests/test_e1_equivalence.py (40 passed). A smoke run (2 games, 60
 decisions each, small caps) matched the exact eval in both games
