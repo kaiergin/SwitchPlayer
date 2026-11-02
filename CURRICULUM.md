@@ -1222,6 +1222,33 @@ AMENDMENTS (before launch):
       - C2's ramp_windows (in against out, per cycle) are descriptive and
         C2-internal: "in" is always the 10,000 steps after a reset, so it
         mixes the reset's recovery with the ramp.
+      - (audit r2b) step_loss_mean is not checkpointed. After a resume, a
+        row covers only the iterations since the resume. C's row 25 holds
+        iterations 23-25 only (C resumed after iteration 22), so it misses
+        the first 4,000 steps after reset 1. A1 is read over the rows
+        intact in BOTH runs, and the excluded rows are listed.
+CHAIN FIXES r1 (63a5a9b3): ramp_alert checks the ramp_windows against the
+  schedule (in and out steps, every step scored, finite means). A running
+  smoke now counts as a trainer. The smoke asserts the windows, the
+  checkpoint state at both kills, and its commit (the AUDITED files
+  clean). The PAUSE procedure lists the preflight's pytest and the quick
+  probe.
+SMOKE OK at 63a5a9b3 (11:28-11:56, the 57 AUDITED files clean):
+  - final iteration 26; resets after 4, 8, 12, with the cutoff biting at
+    16;
+  - the trace's n by iteration 10, 8, 6, 5 after every reset;
+  - the windows by row: 50/30 at rows 4-16, 0/80 at 20 and 24, 0/40 at
+    26, every step scored;
+  - the checkpoint state exact at both kills (mid-ramp, and at a reset's
+    own checkpoint).
+AUDIT r2 B (the chain at 63a5a9b3, fresh eyes): everything that launches,
+  guards, pauses, resumes or alerts is clean. One MEDIUM, in the scorer's
+  A1 read (above). LOW-1: prelaunch must tie the launch to the smoked
+  commit. NITs: a stale smoke docstring; a race in the watcher; the
+  procedures to be given as cmd commands; a possible false ALERT if a kill
+  lands between the final row and the completion marker (a few seconds;
+  documented, not changed). The fixes are scratchpad-only, so the smoked
+  commit stays the launch commit.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
