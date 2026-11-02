@@ -1370,6 +1370,20 @@ AUDIT r3 B (the changed scripts, fresh eyes): nothing above LOW. The
 ALL 26 SUITES passed in the build tree at c6dc8ac6, 12:12-12:30 EST 11-02,
   one at a time under the lock. The AUDITED files are identical to the
   smoked 63a5a9b3.
+LAUNCHED 12:35 EST 11-02:
+  - The manifest is 541a19ee (written at cbfd9af5).
+  - The run worktree Y:\SwitchPlayer-testc2-run is detached at 541a19ee.
+  - The in-tree prelaunch printed PRELAUNCH OK: the smoke's commit with
+    identical AUDITED files, the arm's knobs and gates, and the schedule
+    against the table.
+  - launch_testc2.ps1 started the hand-off post_testc2.py and the
+    supervisor a0 (run mspacman-ramp-a0-s0-2026-11-02). The supervisor
+    preflights (the 26 suites) before training.
+  - The end values stay C's (n 5, gamma 0.98805); Kai raised no change
+    before launch.
+  - Frozen while it runs: the run tree, the AUDITED files in the build
+    tree, and Y:\SwitchPlayer-testc-run and Y:\SwitchPlayer-testb2-run
+    (the references).
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
