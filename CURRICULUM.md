@@ -789,6 +789,94 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
+
+(Pre-registration: "Queued experiment (pre-registered) -- E0", below
+Test C's RESULT; the build, the audits and the launch are there.)
+RUN:
+  - 00:39-01:35 EST 11-02 (3,392 s), CPU (2 threads), under the lock.
+  - From the curriculum tree. probe_action_census.py,
+    test_action_census.py, probe_exhaustive_eval.py, ablation.py and
+    muzero.py are unchanged since the audited ac947976.
+  - On Test B2's T2 iteration-42 snapshot (18 tokens): 30 games, 4,636
+    decisions, every one censused; the sequence census ran at 478 of
+    them (every 10th).
+VALIDITY (A3): main_line_ok TRUE.
+  - All 30 games equal the exact eval's games ([return, base steps,
+    terminated, decisions]), and the mean is 1699.0, as in the eval.
+  - There were no prior-argmax mismatches and no replay mismatches, and
+    no void reasons.
+  - Games 1-9 are near-repeats in a cycle of four (1700 / 1880 / 1580 /
+    1690, each noop start shifting a game by one base step). Games 10-30
+    differ more (790 to 2170). Decisions across games are therefore
+    correlated; the census counts every decision once.
+READ (1) PRIMARY, the effective branching factor. Frame-equivalence
+  classes per decision:
+      tokens               mean   median  p10  p90   ratio to nominal
+      T2's 18 (vocab)      3.28     3      1    5    0.182
+      the 36-token grid    3.56     4      1    6    0.099
+  - The distribution over T2's 18 tokens, as decisions per class count:
+    1: 842, 2: 323, 3: 1,367, 4: 1,181, 5: 652, 6: 254, 7: 17. No
+    decision had more than 7 classes (8 for the grid).
+  - (1b) (A6), over the 81.9% of decisions where some input changes the
+    frames: 3.79 classes (median 4, p10 3, p90 5), ratio 0.210.
+  - Both are far below one half -> E1 (the verdict and verdict_1b agree).
+READ (2) by duration. Classes among the 9 actions at each duration: 2.09
+  (4 frames), 2.27 (8), 2.67 (16), 3.50 (32). Each moving action (NOOP
+  left out) gives 1.32 classes over its 4 durations on average. How often
+  the shorter token, with no input after it, equals the longer one:
+      4=8 95.5%   4=16 86.5%   4=32 70.1%   8=16 91.0%   8=32 73.6%
+      16=32 81.9%
+  So the duration choice is mostly redundant here. In Ms. Pac-Man no
+  input continues the current motion, so a short press and a long one
+  usually play out the same.
+READ (3) sequences of 1-3 base steps (4 frames each), distinct outcomes:
+  k_1 = 2.08 of 9, k_2 = 4.53 of 81, k_3 = 10.18 of 729. That is a
+  per-step growth of 2.18 / 2.25: about two real choices per 4-frame
+  step, against 9 nominal.
+READ (4) free decisions:
+  - 18.2% of decisions had every token equivalent (T2's vocabulary;
+    18.1% for the grid): the choice changed nothing.
+  - 25.1% had at most two classes.
+  - Over the grid, the agent's chosen token shared its outcome with 19.1
+    of the 36 tokens on average.
+READ (5) the prior's split: the entropy of T2's prior over its 18 tokens
+  averages 1.556 nats. The same mass summed over the frame classes
+  averages 0.564 nats. The gap of 0.99 nats, 64% of the prior's entropy,
+  is spread over tokens that play out identically. That blur is what a
+  merged search would remove.
+READ (6) frames against emulator state: none. At all 4,636 decisions the
+  strict classes (frames and the end-of-window emulator state) equal the
+  frame classes, for T2's vocabulary and for the grid, and so do the
+  sequence counts. No hidden state (a buffered input, a random byte)
+  separated frame-identical branches within the 92- and 72-frame windows.
+PRE-REGISTERED DECISION: (1) at most half the nominal size (0.18 for
+  T2's 18; 0.21 on the live decisions) -> grouping can at least double
+  what search spends per distinct choice. Next is E1: can a learned
+  model, trained on the agent's own play alone, recover these classes?
+  Then E2. E1 is designed but not pre-registered. It is pre-registered on
+  its own before any build, and the emulator only scores it (Kai's
+  rule).
+Beyond the letter (one snapshot, one game):
+  - The ratio is far below the threshold, not near it. About 3-4
+    outcomes per decision against 18 tokens means the 50-simulation birth
+    search spreads its visits over roughly five tokens per real choice.
+  - The collapse is in direction and in duration. Duration is measured
+    (read (2)) and fits Ms. Pac-Man's controls, where no input continues
+    the motion. For direction, only about 2 of the 9 actions differ at 4
+    frames. The likely cause, not measured here, is that a diagonal or a
+    press into a wall plays as a cardinal move or as no input. If the
+    classes come from the controls and the maze, they may be learnable
+    from state alone. Whether anything like them holds in Tetris, where
+    holding an input repeats it, is open.
+  - Equivalence here is over a 1-s window after the token; a longer
+    window could split some classes (no read covers that).
+  - The decisions file (probe_action_census-mspacman-two-t2-s0-2026-10-29
+    -decisions.jsonl, 4,636 lines with the 36 tokens' partitions) is
+    committed for E1's scoring.
+  - Test B2's run tree (Y:\SwitchPlayer-testb2-run) is no longer needed
+    by any queued read; it stays until Kai says otherwise.
+
 ### RESULT -- Test C: BBF-style resets in one 100k run against the no-reset twin C0 (seed 0), 2026-11-02
 
 (Pre-registration: "Next experiment (pre-registered) -- Test C", below
