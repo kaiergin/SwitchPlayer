@@ -789,6 +789,111 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- E1: can a model trained on the agent's own play recover E0's outcome classes? (Kai, 2026-11-02)
+
+DECISION: Kai 2026-11-02. E1 runs alongside Test C2 ("You can do them at
+the same time"): CPU only, under the lock, while C2 trains. E0 read E1:
+T2's 18 tokens give 3.28 frame classes per decision (ratio 0.18).
+QUESTION: at the decisions of T2's own exact-eval play, does a model
+trained only on the agent's own play group T2's tokens the way the
+emulator census does? Kai's rule holds throughout: the emulator's
+branches only score the models and never train them.
+SCOPE: tokens of the SAME length. A model of one decision compares
+outcomes at the token's end. Tokens of different lengths end at
+different times, and the census merges them only through the NOOP tail of
+its 92-frame window (a common horizon). That needs a multi-step rollout
+through the NOOP token, which T2 barely plays (below). So cross-length
+pairs are left for later.
+  - PRIMARY GROUP: T2's nine 4-frame tokens, one per action. The census
+    gives 2.09 classes among them per decision (E0 read (2)).
+  - SECONDARY: the 32-frame group (5 tokens) and the 16-frame group (3
+    tokens).
+  - TRUTH: E0's partition at each of the 4,636 decisions, restricted to
+    the group (the decisions jsonl; GRID indices of T2's slots [0, 4, 8,
+    12, 14, 15, 16, 19, 20, 22, 23, 24, 28, 31, 32, 33, 34, 35]).
+THE STATES: the census main line replayed exactly: the same snapshot,
+contexts, acting BN states and thread count, and every decision's token
+checked against the jsonl's. The replay is deterministic (main_line_ok).
+The 30 games fall into about 8 near-duplicate families, so the decisions
+are correlated; the reads are also given per family.
+CANDIDATES:
+  (A) FORWARD, no new training: T2 iteration 42's own dynamics model and
+      consistency head, trained by the trainer on T2's own play.
+      - For each token i of the group at state s: z_i = the online
+        projection with prediction of g(h(s), i). h uses the trainer's
+        BN statistics, as the birth search and the consistency loss do.
+        This is the space the consistency loss trains to match the next
+        observation's target projection.
+      - Two tokens are predicted equivalent when 1 - cos(z_i, z_j) <= tau.
+        The classes are the connected components.
+      - tau is noise-scaled from own play only: the median one-step
+        consistency error of T2 iteration 42 over T2's own-play log,
+        1 - cos(online projection of g(h(s_t), a_t), target projection of
+        h(s_t+1)), over every logged decision.
+  (B) INVERSE, a new model trained on own play only: an IDM q(action |
+      s_t, s_t+1) over the 9 actions.
+      - It is a small conv net trained on the 4-frame decisions of the
+        lineage's own-play logs (T0, T1 and T2; Test B2's run tree). The
+        label is the decision's action.
+      - The stacks are the logged network inputs; the inner frames are
+        not needed for 4-frame tokens.
+      - Held-out: the last 10% of T2's lives, for the training read only.
+      - At a census decision whose chosen token is 4 frames long, the
+        predicted class of the chosen action is {a : q(a | s, s') >= 0.1
+        x max_b q(b | s, s')}, where s' is the main line's next stack.
+        Ratio-based, so it carries to other games.
+      - (B) is scored on the chosen action's class only. That is all an
+        IDM sees: the transition that happened.
+  KNOWN TRAP (E0's pre-registration): "equivalent" against "never tried
+  here". T2's final row played six of its 18 tokens zero times, all six
+  of them 4-frame tokens (NOOP, UP, LEFT, DOWN, UPRIGHT and DOWNRIGHT at 4
+  frames); 4-frame tokens were 15% of its play there (tok_counts,
+  tok_duration_play_share). The dynamics embeddings of rarely played tokens are barely
+  trained, and an IDM's posterior follows the behaviour policy (q is
+  proportional to pi(a | s) x p(s' | s, a); the log keeps no pi). (B)
+  trains on T0's and T1's logs too, which played more of the grid. The
+  reads split by how often each token was played.
+READS:
+  (1) PRIMARY, (A) on the 4-frame group: pair-counting precision, recall
+      and F1 over the 36 token pairs per decision, pooled over the 4,636
+      decisions, against the census truth. The floor is the better of the
+      two trivial rules (all one class; all distinct). Also reported: the
+      mean predicted class count against 2.09.
+  (2) (B) on the chosen 4-frame actions: the precision and recall of the
+      predicted class's members against the census class; the same floor
+      rules; the IDM's held-out accuracy.
+  (3) secondary: (A) on the 32- and 16-frame groups; (A) and (B) split by
+      token play frequency (zero in T2's last 20 iterations against the
+      rest); per game family.
+  (4) robustness: (A) at tau x 0.5 and tau x 2, and (B) at 0.05 and 0.2,
+      reported, not used for the decision.
+DECISION AFTER (on the better F1 of (1) and (2), each only where it beats
+its floor):
+  - F1 >= 0.8: a model trained on own play recovers same-length outcome
+    classes. Next: E2 (merged search) with that model, pre-registered on
+    its own, and the cross-length question.
+  - F1 < 0.5, or neither beats its floor: own play at this volume does
+    not recover them. Kai's call among: more diverse own play
+    (exploration aimed at untried tokens), identical latents as the
+    criterion, or stopping the line.
+  - In between: Kai's call.
+CAVEAT: one agent, one game, one snapshot. The scoring states are greedy
+play by the final weights, while the logs are sampled play over 42
+iterations of changing weights, so there is a distribution shift. The
+census truth is frames over 92 frames: two tokens identical at their end
+but different later (a buffered input) count as different. E0 found no
+hidden state (strict = frames everywhere).
+BUILD: a new probe (benchmarks/probes/probe_e1_equivalence.py) and its
+tests. It reuses the census's setup and hook pattern and
+probe_exhaustive_eval's loaders. No trainer file changes; the live C2 run
+tree is untouched. Audited like every build; the tests and the probe run
+on CPU under the lock, one process at a time, only with at least 8 GB
+free commit.
+COST: about a day of build and audit around C2's launch. The run: (A)
+about the census's replay time without the branches (well under an hour);
+(B) training a small IDM on CPU, about an hour. Results about 11-03 or
+11-04.
+
 ### Next experiment (pre-registered) -- Test C2: BBF's n-step and discount ramps on top of the resets (Kai, 2026-11-02)
 
 DECISION: Kai 2026-11-02, after Test C read NO DIFFERENT. Asked which
