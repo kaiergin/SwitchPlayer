@@ -1215,6 +1215,14 @@ ACCEPTED r3 (no edit, so no further round):
   - NOT YET RUN: the suite (tests/test_action_census.py, its slow test
     included) runs in the gap after C0, under the lock, before the census.
     A failure there is fixed and re-audited before the census runs.
+RUN 11-02 (the gap after C0; no other python alive, host commit ~24 GB
+free):
+  - SUITE 00:37-00:38 EST: tests/test_action_census.py, all 38 tests
+    including the slow one, passed (CPU, under the lock, 62 s).
+  - CENSUS launched about 00:40 EST from the curriculum tree at 7dfba61c,
+    CPU, under the lock: probe_action_census.py on Test B2's T2 iteration
+    42 snapshot (Y:\SwitchPlayer-testb2-run). The A3 reference row was
+    found before anything played: deployed 1699.0 over 30 games.
 
 ### RESULT -- Test B2: two swaps in 100k env steps at the constant discount, three generations T0-T2 (seed 0), 2026-10-30
 
