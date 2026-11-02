@@ -1157,6 +1157,44 @@ AUDIT r1 A (the trainer core, fresh eyes, static): nothing above LOW.
   - NITs: a test name overclaims its gate coverage; the token payoff in
     rows 5, 25, ... 105 is computed at ramped values (diagnostic only);
     the tripwire counts mutation sites in ablation.py only.
+FIXES r1 (9f817c06):
+  - ramp_gate refuses search acting;
+  - the rows' "ramp_windows" ({in, out}: steps, scored steps, the value
+    cross-entropy in nats, the mean value target z at position 0; per
+    gradient step, checkpointed, each step scored once);
+  - a test that spies on the real readers under a ramp (the birth search,
+    the insertion and refresh priorities, the refresh search);
+  - NITs.
+CHAIN BUILT (39be296e, pre-audit): supervise_testb.py's lineage "a" (a0);
+  quick() pins the ramp knobs (on for "a", off for the others);
+  ramp_alert checks each row's ramp and its per-iteration trace against
+  the schedule and the reset log. Scratchpad: post_testc2.py,
+  launch_testc2.ps1, prelaunch_testc2.py, score_testc2.py,
+  smoke_testc2.py. SMOKE OK on 71a28e99, killed twice (mid-ramp, and at
+  a reset's own checkpoint): the trace was exact. The smoke is re-run on
+  the final code before launch.
+AUDIT r2 A (the trainer core at 9f817c06, fresh eyes, static): nothing
+  above LOW. This closes the core's loop: the core is frozen from here.
+  - LOW-1 (read (4) has no C counterpart) is amendment A1 below.
+  - LOW-2: ramp_gate alone would accept the out-of-process refresh
+    (REFRESH_OFFLOAD, --ray-workers), but reset_gate refuses both and
+    always runs first. Documented here, not changed.
+  - NITs: a skipped non-finite step can still be scored in ramp_windows
+    (diagnostic only); a docstring's reason for the exact end values; a
+    reset row's cycle_steps reads 40,000 (pre-reset, as intended).
+  - Test gaps: noted, none blocking. The GPU smoke covers run_one end to
+    end.
+AMENDMENTS (before launch):
+  (A1) READ (4) AGAINST C. C's rows have no ramp_windows. Their value
+      panel always falls where any ramp would have ended, and their
+      step_loss_mean is the total loss. So:
+      - against C: C2's step_loss_mean on the rows that end a ramp window
+        (rows 5, 25, 45, 65, 85, 105) against C's on the same rows. Both
+        include the post-reset recovery, so the difference is the ramps'
+        effect on the total loss;
+      - C2's ramp_windows (in against out, per cycle) are descriptive and
+        C2-internal: "in" is always the 10,000 steps after a reset, so it
+        mixes the reset's recovery with the ramp.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
