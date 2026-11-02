@@ -1013,6 +1013,31 @@ AMENDMENTS (the build, before any real run):
       This is the third change to the decision rule (A5, A7, A8). All
       three came from audits of the census truth and of rules fitted to it;
       no model's full-run output exists.
+      The numbers above are audit r3's tuned fit. The probe's own keyed
+      reference (per key, the partition with the highest training recall
+      at training precision >= 0.9) gives:
+      - (A): P 0.902, R 0.547, 5 families, junction P 0.722;
+      - (B): P 0.923, R 0.544, 6 families, junction P 0.605.
+      Under A7 alone it reads E2 on (B); under A8 it reads MID.
+      CONVENTION (audit r4): a candidate with no predicted merge at any
+      live junction has no junction precision (None), and None fails the
+      junction bar, as the probe implements it. This is the conservative
+      reading: E2 must show safe merges at junctions, not only avoid them.
+      With 1,182 (A) and 112 (B) live junctions it is unlikely to matter.
+      In a VOID summary only "verdict" is VOIDed; the reported verdicts
+      (A7's, all decisions) keep their values and are not to be read.
+AUDIT LOOP (E1):
+  - r1: two MEDIUMs, giving A5 and the (B) scoring.
+  - r2: one MEDIUM, giving A7.
+  - r3: one HIGH in the decision rule, giving A8.
+  - r4 (fresh eyes on 967da7c7): nothing above LOW.
+  - Job 2 of r4 tried 16 keyed rules (the previous token, previous two
+    tokens, chosen token, game phase, life and position in life, and
+    crossings of them), fitted left-one-family-out, in-sample, and with a
+    Lagrangian. None reaches E2 under A8. Even overfitted, no two-feature
+    key reaches R >= 0.5 in 6 families once junction P >= 0.9 is required.
+    The loop is CLOSED at 967da7c7: 62 tests passed, and the smoke ran
+    valid.
 BUILT 2026-11-02 (pre-audit): benchmarks/probes/probe_e1_equivalence.py
 and tests/test_e1_equivalence.py (40 passed). A smoke run (2 games, 60
 decisions each, small caps) matched the exact eval in both games
