@@ -23,6 +23,12 @@ T0-T2 of ~33,333 env steps at the constant discount 0.997^4, the prep's
 rule "keep": its constants, stops, command, paths, quick probe and
 set_intact's rule check; Test B's own constants come back unchanged.
 
+Test C2 (Kai, 2026-11-02; the last section): the lineage "a" (a0, C plus
+BBF's ramps, one run alone): its names, command and quick probe (the ramp
+knobs pinned; every other lineage's pinned off), the standard-library
+ramp_values against muzero.ramp_values, ramp_alert row by row (off the
+schedule, malformed, across a resume) and the reset checks as r0's.
+
 No test reads LIVE state (the distillation step's audit r5 HIGH): the `sup`
 fixture points REPO (every run folder, probe jsonl, prep and snapshot of
 the five runs) into tmp, the manifest away and the process table at an
@@ -502,16 +508,19 @@ def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g2sup):
         assert (ROOT / rel).exists(), rel
     assert len(set(sup.AUDITED)) == len(sup.AUDITED)
     assert set(sup.SUITES) <= set(sup.AUDITED)
-    assert len(set(sup.SUITES)) == len(sup.SUITES) == 25
-    # every suite supervise_gen2.py ran, after this supervisor's, Test B's
-    # and Test C's (first: -x stops on them before the slow suites)
-    assert sup.SUITES[:3] == ["tests/test_supervise_testb.py",
-                              "tests/test_testb.py", "tests/test_testc.py"]
-    assert sup.SUITES[3:] == g2sup.SUITES
+    assert len(set(sup.SUITES)) == len(sup.SUITES) == 26
+    # every suite supervise_gen2.py ran, after this supervisor's, Test B's,
+    # Test C's and Test C2's (first: -x stops on them before the slow
+    # suites)
+    assert sup.SUITES[:4] == ["tests/test_supervise_testb.py",
+                              "tests/test_testb.py", "tests/test_testc.py",
+                              "tests/test_testc2.py"]
+    assert sup.SUITES[4:] == g2sup.SUITES
     assert set(g2sup.AUDITED) <= set(sup.AUDITED)
     assert set(sup.AUDITED) - set(g2sup.AUDITED) == {
         "tests/test_supervise_testb.py", "tests/test_testb.py",
-        "tests/test_testc.py", "benchmarks/supervisors/supervise_testb.py"}
+        "tests/test_testc.py", "tests/test_testc2.py",
+        "benchmarks/supervisors/supervise_testb.py"}
     assert [r for r in sup.AUDITED if not r.endswith(".py")] == [
         "pytest.ini", "benchmarks/probes/step0_prefix_bn/states.npz"]
     for rel in ("experiments/ablation.py", "experiments/distill.py",
@@ -615,11 +624,14 @@ def test_supervisor_refuses_bad_arguments(sup, monkeypatch, capsys):
                  ["t01", "0"], ["t1", "0", "1"],
                  # Test C's: one run each, seed 0
                  ["r1", "0"], ["n1", "0"], ["r0", "1"], ["n0", "1"],
-                 ["R0", "0"], ["r", "0"], ["n", "0"]):
+                 ["R0", "0"], ["r", "0"], ["n", "0"],
+                 # Test C2's: one run, seed 0
+                 ["a1", "0"], ["a0", "1"], ["A0", "0"], ["a", "0"],
+                 ["a01", "0"], ["a0", "0", "1"]):
         assert sup.main(argv) == 2, argv
     out = capsys.readouterr().out
     assert ("usage: supervise_testb.py <variant: ['f0', 'f1', 'f2', 'f3', "
-            "'f4', 't0', 't1', 't2', 'r0', 'n0']> <seed: [0]>") in out
+            "'f4', 't0', 't1', 't2', 'r0', 'n0', 'a0']> <seed: [0]>") in out
 
 
 def test_no_generation_2_leftovers(real_sup):
@@ -2270,7 +2282,7 @@ def test_f0_runs_preflight_then_each_launch_guarded_without_a_prep(
     assert sup.main(["f0", "0"]) == 1                 # 5 quick deaths
     out = capsys.readouterr().out
     assert "CRASH LOOP" in out
-    assert ("preflight ok (manifest + quick probe + 25 suites); starting f0 "
+    assert ("preflight ok (manifest + quick probe + 26 suites); starting f0 "
             f"s0 ({F[0]}, --stop-env-steps 20000, at most 60 iterations)") \
         in out
     # no wait, no prep, no prep integrity: f0 has none
@@ -2823,7 +2835,7 @@ LINEAGE_NAMES = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES",
 
 def test_test_b2s_lineage_and_test_bs_unchanged(real_sup):
     sup = real_sup
-    assert set(sup.LINEAGES) == {"f", "t", "r", "n"}
+    assert set(sup.LINEAGES) == {"f", "t", "r", "n", "a"}
     assert sup.TOTAL_ENV_STEPS == 100000
     loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
     assert loaded["LINEAGE"] == "f"         # the module loads as Test B's
@@ -3367,3 +3379,495 @@ def test_reset_lines_are_echoed_as_the_log_grows(sup, tmp_path, capsys):
         sup.configure(letter)
         sup.ResetLines(v, 0).emit(str(log))
     assert capsys.readouterr().out == ""
+
+
+# --------------------------------------------------------------------------
+# Test C2 (Kai, 2026-11-02): a0 (C plus BBF's n-step and discount ramps),
+# one run alone
+# --------------------------------------------------------------------------
+RAMP = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+        "tokens-ramp")
+C2_DATE = "2026-11-02"
+RAMP_KNOBS = {"RAMP_STEPS": 10000, "RAMP_N_START": 10,
+              "RAMP_GAMMA_START": 0.97, "RAMP_N_END": 5,
+              "RAMP_GAMMA_END": 0.997 ** 4}
+# the pre-registration's schedule: steps since the reset, n, gamma (3
+# places)
+RAMP_TABLE = [(0, 10, 0.970), (2000, 9, 0.975), (4000, 8, 0.979),
+              (6000, 7, 0.983), (8000, 6, 0.986), (10000, 5, 0.988)]
+
+
+@pytest.fixture
+def asup(sup):
+    """`sup` bound to Test C2's lineage, as main() binds it for a0."""
+    sup.configure("a")
+    return sup
+
+
+@pytest.fixture
+def ramp_knobs(monkeypatch):
+    """C2's ramp knobs on muzero (restored after), so muzero.ramp_values
+    -- the trainer's own schedule -- builds the expected rows."""
+    for k, v in RAMP_KNOBS.items():
+        monkeypatch.setattr(muzero, k, v)
+
+
+def test_test_c2s_lineage(real_sup):
+    sup = real_sup
+    loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
+    sup.configure("a")
+    assert (sup.LINEAGE, sup.GENERATIONS) == ("a", 1)
+    assert sup.VARIANTS == {"a0": RAMP + "-a0"}
+    assert sup.RUNS == {"a0": "mspacman-ramp-a0"}
+    assert sup.NAMES == {"a0": "A0"}
+    assert sup.SEEDS == {0: C2_DATE} and sup.PREP_PREFIX is None
+    assert (sup.ITERATIONS, sup.NOMINAL_ITERATIONS) == (300, 150)
+    assert sup.DISCOUNTS == {"a0": KEPT} and sup.DISCOUNT_RULE == "keep"
+    assert sup.target("a0") == 100000
+    # alone: no "after" run, no master, no prep
+    assert "after" not in sup.LINEAGES["a"]
+    assert sup.upstream("a0") is None and sup.master_of("a0") is None
+    assert not sup.is_student("a0") and sup.predecessor("a0", 0) is None
+    assert sup.run_name("a0", 0) == f"mspacman-ramp-a0-s0-{C2_DATE}"
+    assert sup.paths("a0", 0)[0] == (
+        f"benchmarks/results/mspacman-ramp-a0-s0-{C2_DATE}")
+    assert ablation.RAMP_ARM == sup.RAMP_ARM == RAMP
+    spec = ablation.ARMS[RAMP + "-a0"]
+    assert spec["_env_stop"] is True and spec["OWN_PLAY_LOG"] is True
+    assert spec["_nominal_iterations"] == 150
+    assert spec["DISCOUNT"] == KEPT and "_student" not in spec
+    assert spec["DORMANT_DIAGNOSTIC"] is True
+    # C's resets unchanged, plus the ramps: quick() pins both
+    assert sup.LINEAGES["a"]["resets"] is sup.RESET_KNOBS
+    assert {k: spec[k] for k in sup.RESET_KNOBS} == sup.RESET_KNOBS
+    assert sup.LINEAGES["a"]["ramps"] is sup.RAMP_KNOBS
+    assert sup.RAMP_KNOBS == RAMP_KNOBS
+    assert {k: spec[k] for k in RAMP_KNOBS} == RAMP_KNOBS
+    # the end values are the arm's own TD_STEPS and DISCOUNT
+    assert (spec["TD_STEPS"], spec["DISCOUNT"]) == (5, 0.997 ** 4)
+    # every other lineage: no ramps (RAMP_OFF: muzero's defaults, the
+    # trainer's own off set), none in its arms
+    assert sup.RAMP_OFF == ablation.RAMP_OFF == {
+        k: getattr(muzero, k) for k in ablation.RAMP_OFF}
+    for letter, lin in sup.LINEAGES.items():
+        if letter != "a":
+            assert "ramps" not in lin, letter
+            for k in range(lin["generations"]):
+                arm = ablation.ARMS[f"{lin['arm']}-{letter}{k}"]
+                assert not any(x.startswith("RAMP_") for x in arm), letter
+    # the tolerance sits far below one step of the ramp (~1e-6 in gamma)
+    assert sup.RAMP_GAMMA_TOL == 1e-12
+    # Test B's, Test B2's and Test C's names and numbers come back
+    sup.configure("f")
+    assert {k: getattr(sup, k) for k in LINEAGE_NAMES} == loaded
+    sup.configure("r")
+    assert sup.VARIANTS == {"r0": RESET + "-r0"} and sup.SEEDS == {0: C_DATE}
+    sup.configure("n")
+    assert sup.upstream("n0") == "r0"
+
+
+def test_c2s_stop_and_command_are_cs_recipe(asup):
+    """a0's command is r0's (Test C's C) with the arm moved, its stop its
+    own 100,000."""
+    sup = asup
+    rsup = _load(SUPERVISORS / "supervise_testb.py", "supervise_testb_r")
+    rsup.configure("r")
+    assert sup.stop_env_steps("a0", 0) == 100000
+    want = [x.replace(RESET + "-r0", RAMP + "-a0")
+            for x in rsup.command("r0", 0, 100000)]
+    c = sup.command("a0", 0)
+    assert c == want and c != rsup.command("r0", 0, 100000)
+    assert c[c.index("--arms") + 1] == RAMP + "-a0"
+    for flag, val in (("--iterations", "300"), ("--train-steps", "2000"),
+                      ("--eval-every", "5"), ("--checkpoint-every", "2"),
+                      ("--stop-env-steps", "100000"), ("--seed", "0")):
+        assert c[c.index(flag) + 1] == val, flag
+    assert "--token-vocab" not in c and "--distill-set" not in c
+
+
+def test_main_starts_a0_at_once_and_alone(sup, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(sup, "other_supervisors", lambda v: [])
+    monkeypatch.setattr(sup, "settle_stop",
+                        lambda v, s: calls.append(("stop", v)) or None)
+    monkeypatch.setattr(sup, "wait_external",
+                        lambda v, s: calls.append(("wait", v)) or "ready")
+    assert sup.main(["a0", "0"]) == 1          # (the stub stop: None)
+    assert ("a0 s0 starts the lineage: no predecessor to wait for"
+            in capsys.readouterr().out)
+    assert calls == [("stop", "a0")] and sup.LINEAGE == "a"
+    monkeypatch.setattr(sup, "run_done", lambda v, s: True)
+    assert sup.main(["a0", "0"]) == 0
+    assert "RUN COMPLETE a0 s0" in capsys.readouterr().out
+
+
+def test_c2s_quick_probe_pins_the_ramps_and_every_other_lineage_off(sup):
+    """a0's probe pins the five ramp knobs (and C's reset knobs and
+    plasticity read), every other lineage's pins RAMP_OFF; each break of
+    one alone fails its probe, the controls pass."""
+    probes, arms = {}, {"a": RAMP + "-a0", "r": RESET + "-r0",
+                        "n": LONG + "-n0", "f": F[0], "t": T[0]}
+    for letter in arms:
+        sup.configure(letter)
+        probes[letter] = sup.quick(letter + "0", 0)
+    for k, v in RAMP_KNOBS.items():
+        assert f"assert spec.get({k!r}, muzero.{k}) == {v!r}; " in probes["a"]
+    for letter in "rnft":
+        q = probes[letter]
+        for k, v in sup.RAMP_OFF.items():
+            assert f"assert spec.get({k!r}, muzero.{k}) == {v!r}; " in q
+        assert "hasattr(ablation, 'ramp_gate')" not in q
+    assert "hasattr(ablation, 'ramp_gate')" in probes["a"]
+    assert "RESET_" not in probes["f"] and "RESET_" not in probes["t"]
+    a, a0 = "ablation.ARMS", RAMP + "-a0"
+    breaks = [("a", f"{a}[{a0!r}]['RAMP_STEPS'] = 20000"),
+              ("a", f"{a}[{a0!r}]['RAMP_N_START'] = 3"),
+              ("a", f"{a}[{a0!r}]['RAMP_GAMMA_START'] = 0.9"),
+              ("a", f"{a}[{a0!r}]['RAMP_N_END'] = 3"),
+              ("a", f"del {a}[{a0!r}]['RAMP_GAMMA_END']"),
+              ("a", f"{a}[{a0!r}]['TD_STEPS'] = 3"),
+              ("a", f"{a}[{a0!r}]['DISCOUNT'] = 0.97"),
+              ("a", f"{a}[{a0!r}]['RESET_EVERY_STEPS'] = 20000"),
+              ("a", f"{a}[{a0!r}]['RESET_HOLD_STEPS'] = 0"),
+              ("a", f"{a}[{a0!r}]['DORMANT_DIAGNOSTIC'] = False"),
+              ("a", f"{a}[{a0!r}]['_nominal_iterations'] = 50")]
+    for letter in "rnft":
+        breaks += [(letter, f"{a}[{arms[letter]!r}]['RAMP_STEPS'] = 10000"),
+                   (letter, f"{a}[{arms[letter]!r}]['RAMP_GAMMA_END'] = "
+                            f"{0.997 ** 4!r}")]
+    broken = []
+    for letter, prelude in breaks:
+        anchor = f"spec = ablation.ARMS[{arms[letter]!r}]; "
+        assert probes[letter].count(anchor) == 1
+        broken.append(probes[letter].replace(anchor, prelude + "; " + anchor))
+    got = _py_each(broken + list(probes.values()))
+    for code, g in zip(broken, got):
+        assert g.startswith("AssertionError"), (code[-300:], g)
+    assert got[len(broken):] == ["ok"] * len(probes)        # the controls
+    # a module default switched on, or the trainer's off set changed: each
+    # in its own child (EACH restores no ramp flag)
+    head = "import muzero, ablation, muzero_vtree, distill; "
+    flips = []
+    for letter, flip in (("a", "muzero.RAMP_STEPS = 10000; "),
+                         ("f", "muzero.RAMP_N_END = 5; "),
+                         ("t", "ablation.RAMP_OFF = {}; ")):
+        flipped = probes[letter].replace(head, head + flip)
+        assert flipped != probes[letter]
+        flips.append(flipped)
+    for g in [_py_each([f])[0] for f in flips]:
+        assert g.startswith("AssertionError"), g
+
+
+def test_the_stdlib_ramp_values_is_muzeros(real_sup, monkeypatch):
+    """The supervisor's ramp_values (the standard library) against the
+    trainer's muzero.ramp_values at every step of the window and past it,
+    at the run's knobs and at the smoke's (a 50-step window): n and the end
+    values exactly, gamma within a last-bit difference -- far inside
+    RAMP_GAMMA_TOL, which sits far below one step's change; and the
+    pre-registered table."""
+    sup = real_sup
+    worst, step_min = 0.0, 1.0
+    for knobs, xs in ((RAMP_KNOBS, list(range(10002)) + [10 ** 5]),
+                      ({**RAMP_KNOBS, "RAMP_STEPS": 50}, range(120))):
+        for k, v in knobs.items():
+            monkeypatch.setattr(muzero, k, v)
+        last = None
+        for x in xs:
+            want, got = muzero.ramp_values(x), sup.ramp_values(x, knobs)
+            assert type(got[0]) is int and type(got[1]) is float, x
+            assert got[0] == want[0], x
+            worst = max(worst, abs(got[1] - want[1]))
+            if x >= knobs["RAMP_STEPS"]:
+                assert got == want == (5, 0.997 ** 4), x
+            elif last is not None and knobs is RAMP_KNOBS:
+                step_min = min(step_min, got[1] - last)
+            last = got[1]
+    assert worst <= 1e-15 < sup.RAMP_GAMMA_TOL
+    assert step_min > 1e-7 > 1000 * sup.RAMP_GAMMA_TOL
+    for steps, n, gamma in RAMP_TABLE:
+        got = sup.ramp_values(steps, RAMP_KNOBS)
+        assert got[0] == n and round(got[1], 3) == gamma, steps
+    # onp.round's half to even is Python's round on a float
+    assert round(8.5) == 8 and round(9.5) == 10
+    assert "round(math.exp(" in inspect.getsource(sup.ramp_values)
+
+
+def _c2_rows(final=134, cut=100, env_per_it=670):
+    """A ramp run's rows as the trainer writes them -- the module's ramp
+    knobs (the `ramp_knobs` fixture) through muzero.ramp_values, the
+    trainer's own schedule: one every 5 iterations and the final one, each
+    with its ramp at the row (before the row's reset) and the trace since
+    the previous row (at each iteration's first step); a reset after every
+    20th iteration up to `cut` (the rows' env steps keep it on the
+    schedule: <= 80,000 through `cut`). JSON round-tripped."""
+    rows, origin, trace = [], 0, []
+    for i in range(1, final + 1):
+        c = (i - 1) * 2000 - origin
+        trace.append([i, c, *muzero.ramp_values(c)])
+        if i % 5 == 0 or i == final:
+            c = i * 2000 - origin
+            n, g = muzero.ramp_values(c)
+            rows.append(json.loads(json.dumps({
+                "iteration": i, "env_steps": env_per_it * i,
+                "ramp": {"n": n, "gamma": g, "cycle_steps": c},
+                "ramp_trace": trace})))
+            trace = []
+        if i % 20 == 0 and i <= cut and i != final:
+            origin = i * 2000
+    return rows
+
+
+def _checked(sup, rows):
+    """Each row through ramp_alert against the rows before it, as Rows
+    feeds it; the alerts by iteration (None: on schedule)."""
+    envs, out = {}, {}
+    for r in rows:
+        out[r["iteration"]] = sup.ramp_alert(r, dict(envs))
+        envs[r["iteration"]] = r["env_steps"]
+    return out
+
+
+def test_the_ramp_is_checked_row_by_row(asup, ramp_knobs):
+    """A whole run on the schedule passes every row: the first cycle from
+    the start, a restart after each reset (rows 20, 40, ..., 100), the end
+    values past the cutoff (row 120's env steps > 80,000: no reset)."""
+    sup = asup
+    rows = _c2_rows()
+    by = {r["iteration"]: r for r in rows}
+    # the generator is the pre-registration's: n 10 -> 5 over 5 iterations
+    for i in (5, 25, 45, 105):
+        assert [e[2] for e in by[i]["ramp_trace"]] == [10, 9, 8, 7, 6], i
+        assert by[i]["ramp"] == {"n": 5, "gamma": 0.997 ** 4,
+                                 "cycle_steps": 10000}, i
+    assert by[20]["ramp"]["cycle_steps"] == 40000     # before its reset
+    assert by[125]["env_steps"] > 80000 >= by[100]["env_steps"]
+    assert [e[1] for e in by[125]["ramp_trace"]] == list(
+        range(40000, 50000, 2000))                    # no reset after 120
+    assert [e[0] for e in by[134]["ramp_trace"]] == list(range(131, 135))
+    assert set(_checked(sup, rows).values()) == {None}
+
+
+def _alert(sup, rows, it, edit):
+    """ramp_alert on row `it` after `edit` (a function of the row), the
+    rows before it as context."""
+    import copy
+    envs = {r["iteration"]: r["env_steps"] for r in rows
+            if r["iteration"] < it}
+    row = copy.deepcopy(next(r for r in rows if r["iteration"] == it))
+    edit(row)
+    return sup.ramp_alert(row, envs)
+
+
+def test_the_ramp_alerts_off_its_schedule(asup, ramp_knobs):
+    sup = asup
+    rows = _c2_rows()
+    g22 = muzero.ramp_values(2000)[1]
+
+    def entry(i, k, v):
+        def edit(r):
+            next(e for e in r["ramp_trace"] if e[0] == i)[k] = v
+        return edit
+
+    # a trace entry's n or gamma off the schedule
+    msg = _alert(sup, rows, 25, entry(22, 2, 10))
+    assert msg.startswith(f"ramp_trace iteration 22: n 10 gamma {g22!r} at "
+                          f"2000 steps since the reset, the schedule's n 9 "
+                          f"gamma 0.97"), msg
+    assert ";" not in msg                       # nothing else is off
+    assert "iteration 23: n 8 gamma" in _alert(
+        sup, rows, 25, entry(23, 3, muzero.ramp_values(4000)[1] + 1e-6))
+    # ... gamma within the tolerance is on it
+    assert _alert(sup, rows, 25, entry(23, 3, muzero.ramp_values(4000)[1]
+                                       + 1e-14)) is None
+    # a step count off (an iteration's first step after the reset is 0)
+    assert "iteration 21: 2000 steps since the reset, the schedule's 0" in (
+        _alert(sup, rows, 25, entry(21, 1, 2000)))
+    # the ramp NOT restarted at the reset after 20: the trace and the row
+    # still count from the start
+    def no_restart(r):
+        for e in r["ramp_trace"]:
+            e[1:] = [(e[0] - 1) * 2000, 5, 0.997 ** 4]
+        r["ramp"]["cycle_steps"] = 50000
+
+    msg = _alert(sup, rows, 25, no_restart)
+    assert msg.startswith("the row's ramp: 50000 steps since the reset, the "
+                          "schedule's 10000; ramp_trace iteration 21: 40000 "
+                          "steps since the reset, the schedule's 0"), msg
+    assert "(+2 more)" in msg
+    # the row's own ramp: n, gamma, the steps
+    for key, val in (("n", 6), ("gamma", 0.98), ("cycle_steps", 8000)):
+        def edit(r, key=key, val=val):
+            r["ramp"][key] = val
+        assert _alert(sup, rows, 25, edit).startswith("the row's ramp: "), key
+    # a gap, a repeat, a lost window (a resume that kept no entries), a
+    # foreign one
+    for edit, its in ((lambda r: r["ramp_trace"].pop(2), [21, 22, 24, 25]),
+                      (lambda r: r["ramp_trace"].insert(
+                          2, list(r["ramp_trace"][1])), [21, 22, 22, 23, 24,
+                                                         25]),
+                      (lambda r: r["ramp_trace"].__delitem__(slice(0, 3)),
+                       [24, 25]),
+                      (lambda r: r.__setitem__("ramp_trace", []), [])):
+        msg = _alert(sup, rows, 25, edit)
+        assert msg.startswith(f"ramp_trace iterations {its!r}, the "
+                              f"iterations since the previous row 21..25 "
+                              f"once each"), msg
+    # past the cutoff (no reset after 120): a restart at 121 is off it
+    def restart(r):
+        for e in r["ramp_trace"]:
+            e[1:] = [(e[0] - 121) * 2000, *muzero.ramp_values(
+                (e[0] - 121) * 2000)]
+
+    assert "iteration 121: 0 steps since the reset, the schedule's 40000" in (
+        _alert(sup, rows, 125, restart))
+    # ... and a reset the schedule wants (row 120 at <= 80,000) that the
+    # ramp missed
+    envs = {r["iteration"]: r["env_steps"] for r in rows
+            if r["iteration"] < 125}
+    envs[120] = 80000
+    assert "the schedule's 10000" in sup.ramp_alert(
+        next(r for r in rows if r["iteration"] == 125), envs)
+
+
+def test_a_malformed_ramp_is_an_alert_never_an_exception(asup, ramp_knobs):
+    sup = asup
+    rows = _c2_rows(final=30)
+    for edit in (lambda r: r.pop("ramp"), lambda r: r.pop("ramp_trace"),
+                 lambda r: r.__setitem__("ramp", [5, 0.98, 10000]),
+                 lambda r: r.__setitem__("ramp", None),
+                 lambda r: r.__setitem__("ramp_trace", "x"),
+                 lambda r: r["ramp_trace"].append("x"),
+                 lambda r: r["ramp_trace"].append([26, 0, 10]),
+                 lambda r: r["ramp_trace"][0].__setitem__(3, None),
+                 lambda r: r["ramp_trace"][0].__setitem__(3, "0.97"),
+                 lambda r: r["ramp_trace"][0].__setitem__(3, float("nan")),
+                 lambda r: r["ramp_trace"][0].__setitem__(2, True),
+                 lambda r: r["ramp_trace"][0].__setitem__(2, 10.0),
+                 lambda r: r["ramp_trace"][0].__setitem__(1, 0.0),
+                 lambda r: r["ramp_trace"][0].__setitem__(0, "21"),
+                 lambda r: r["ramp"].__setitem__("n", "5"),
+                 lambda r: r["ramp"].__setitem__("cycle_steps", None),
+                 lambda r: r["ramp"].pop("gamma")):
+        msg = _alert(sup, rows, 25, edit)
+        assert isinstance(msg, str) and msg, msg
+    # rows that are not in-run rows are not checked
+    for it in (0, None, True, "25"):
+        assert sup.ramp_alert({"iteration": it}, {}) is None
+
+
+def test_a_resumes_rows_check_against_the_rows_before_them(asup,
+                                                            ramp_knobs):
+    """A kill between row 25 and its checkpoint: the resumed run re-writes
+    row 25 (its trace from the checkpoint at 24 plus 25). The stale row 25
+    is among the earlier rows, so only the rows before 25 count."""
+    sup = asup
+    rows = _c2_rows(final=40)
+    envs = {r["iteration"]: r["env_steps"] for r in rows
+            if r["iteration"] <= 25}
+    r25 = next(r for r in rows if r["iteration"] == 25)
+    assert sup.ramp_alert(r25, envs) is None
+    envs[25] = r25["env_steps"] + 300           # the stale copy's
+    assert sup.ramp_alert(r25, envs) is None
+    # a stale reset row: the re-written row 20's env steps decide
+    envs[20] = 80001
+    assert "the schedule's 50000" in sup.ramp_alert(r25, envs)
+
+
+def test_the_ramp_check_is_c2s_alone(sup, ramp_knobs):
+    """Every other lineage: a row without a ramp is not checked, a row WITH
+    one is an ALERT (its arm is not its lineage's); a0 needs one."""
+    row = _c2_rows(final=5)[0]
+    for letter in "rnft":
+        sup.configure(letter)
+        assert sup.ramp_alert(_row(25, 16500, resets=1), {20: 1}) is None
+        assert sup.ramp_alert(row, {}) == (
+            f"a ramp in the row, but lineage {letter!r} has no ramps")
+    sup.configure("a")
+    assert sup.ramp_alert(row, {}) is None
+    assert sup.ramp_alert(_row(5, 3000), {}) == (
+        "the row's ramp is None; ramp_trace is not a list of [iteration, "
+        "steps since the reset, n, gamma] entries")
+
+
+def test_a0s_resets_are_checked_as_r0s(sup):
+    """The reset schedule's checks apply to a0 exactly as to r0: the rows
+    (reset_alert), the trainer's RESET lines (reset_line_alert,
+    ResetLines)."""
+    seq = [(5, 3000, 0, 0), (20, 13000, 0, 0), (22, 14000, 1, 2),
+           (25, 16500, 1, 4), (40, 26000, 1, 4), (45, 29500, 2, 8),
+           (120, 80000, 5, 20), (125, 83400, 6, 24), (125, 83400, 5, 20),
+           (143, 100500, 6, 24), (25, 16500, 0, 4), (25, 16500, True, 4),
+           (25, 16500, 1, 0)]
+    lines = [(1, 20, 40000, 13000), (4, 80, 160000, 80000),
+             (1, 21, 42000, 13700), (2, 40, 80001, 26000),
+             (6, 120, 240000, 80001)]
+    got = {}
+    for letter in ("r", "a"):
+        sup.configure(letter)
+        envs = {5: 3000, 20: 13000, 40: 26000, 60: 40000, 80: 53000,
+                100: 66000, 120: 80000}
+        got[letter] = (
+            [sup.reset_alert(_row(it, env, resets=n, held_ships=h),
+                             {j: e for j, e in envs.items() if j < it})
+             for it, env, n, h in seq],
+            [sup.reset_line_alert(*x) for x in lines])
+    assert got["a"] == got["r"]
+    rows, ls = got["a"]
+    # on the schedule (row 120 at 80,000 env steps: its reset counts), off
+    # it: a 6th reset missing at 125, none at 25, a bool, no held ship
+    assert [x is None for x in rows] == [True] * 8 + [False, True, False,
+                                                      False, False]
+    assert ls[:2] == [None, None] and all(ls[2:])
+
+
+def test_a0s_reset_lines_are_echoed_as_r0s(asup, tmp_path, capsys):
+    sup = asup
+    log = tmp_path / "supv2_1.log"
+    log.write_text("  [arm s0] RESET 1 after iter 20 (step 40000, 13000 env "
+                   "steps): ..." + NL + "  [arm s0] RESET 2 after iter 41 "
+                   "(step 82000, 27000 env steps): ..." + NL)
+    sup.ResetLines("a0", 0).emit(str(log))
+    out = capsys.readouterr().out
+    assert out.startswith("RESET a0 s0 1 after iter 20 (step 40000, 13000 "
+                          "env steps)" + NL)
+    assert ("ALERT: a0 s0: RESET 2 after iteration 41 (step 82000, 27000 "
+            "env steps)") in out
+
+
+def test_ramp_rows_print_and_alert(asup, ramp_knobs, monkeypatch, tmp_path,
+                                   capsys):
+    sup = asup
+    monkeypatch.setattr(sup, "run_ceiling", lambda v: 1.0)
+    plastic = {"dormant_025_all": 0.0, "dormant_10_all": 0.0003,
+               "conv1_weak_frac": 0.0, "reward_ceiling": 1.0}
+    rows = _c2_rows(final=30)
+    for r in rows:
+        n = r["iteration"] // 21
+        r.update(plastic, resets=n, held_ships=4 * n)
+    jsonl = tmp_path / "a.jsonl"
+    jsonl.write_text("".join(json.dumps(r) + NL for r in rows[:4]))
+    stream = sup.Rows(str(jsonl), "a0", 0)
+    stream.prime()                     # a supervisor restart: rows 5-20
+    with open(jsonl, "a") as f:
+        f.write(json.dumps(rows[4]) + NL)
+    stream.emit()
+    out = capsys.readouterr().out
+    assert ("| resets 1  held ships 4  dormant 0.0 / 0.0003  conv1 weak 0.0 "
+            "| ramp n 5  gamma 0.98805  cycle 10000  trace n 10/9/8/7/6 | "
+            "elapsed") in out, out
+    assert "ALERT" not in out
+    bad = dict(rows[5])
+    bad["ramp_trace"] = bad["ramp_trace"][1:]          # iteration 26 lost
+    with open(jsonl, "a") as f:
+        f.write(json.dumps(bad) + NL)
+    stream.emit()
+    out = capsys.readouterr().out
+    assert "trace n 5/5/5/5 |" in out
+    assert ("ALERT: a0 s0 row 30: ramp_trace iterations [27, 28, 29, 30], "
+            "the iterations since the previous row 26..30 once each") in out
+    # Test C's rows print as before: no ramp
+    sup.configure("r")
+    r = _row(5, 3000, resets=0, held_ships=0, **plastic)
+    assert sup.ramp_text(r) == ""
+    assert sup.ramp_text({"ramp_trace": [[1, 0, 10, 0.97], "x"]}) == (
+        " | ramp n None  gamma None  cycle None  trace n 10/?")

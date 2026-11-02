@@ -63,6 +63,23 @@ launch_testb.ps1 / post_testb.py as "two" / "r0, n0" / "N0" / "R0 (n0's
 a master or a row 0. Each r0 row's "resets" and "held_ships" are checked
 against the schedule (reset_alert: an ALERT when off it).
 
+TEST C2 (Kai, 2026-11-02; CURRICULUM.md "Next experiment (pre-registered)
+-- Test C2: BBF's n-step and discount ramps on top of the resets"): one
+one-run lineage, a0 (...-tokens-ramp-a0: C plus BBF's n-step and discount
+ramps, restarted at every reset), from scratch to 100,000 env steps
+(--iterations 300 around a planned 150), ALONE: no "after", no prep, no
+master (its control is C itself, Test C's r0, already run). From its own
+run worktree (launch_testc2.ps1, hand-off post_testc2.py):
+
+    python benchmarks/supervisors/supervise_testb.py a0 0
+
+For Test C2 read the text below as for Test C, with "one" / "a0" / "A0" /
+launch_testc2.ps1 / post_testc2.py. Each a0 row's "resets" and
+"held_ships" are checked as r0's (reset_alert; its RESET lines as r0's,
+ResetLines), and its "ramp" and "ramp_trace" against the schedule
+(ramp_alert: an ALERT when off it); the EVAL lines print the ramp beside
+the plasticity read.
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
 round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
@@ -194,6 +211,21 @@ RESET_KNOBS = {"RESET_EVERY_STEPS": 40000, "RESET_UNTIL_ENV_STEPS": 80000,
                                      "projector"),
                "RESET_SHRINK_FACTOR": 0.5, "RESET_PERTURB_FACTOR": 0.5,
                "RESET_HOLD_STEPS": 10000}
+RAMP_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-ramp")
+# Test C2's ramp knobs (CURRICULUM "Test C2"): the ramp run's arm pins them
+# (its lineage's "ramps": quick() asserts them); every other lineage's probe
+# pins RAMP_OFF (muzero's defaults: RAMP_STEPS 0 is off). ramp_alert checks
+# each logged n and step count exactly and each gamma within RAMP_GAMMA_TOL
+# of ramp_values' (this module's standard-library copy of
+# muzero.ramp_values: the C library's exp / log and numpy's may differ in
+# the last bit; one step of the ramp moves gamma by ~1e-6).
+RAMP_KNOBS = {"RAMP_STEPS": 10000, "RAMP_N_START": 10,
+              "RAMP_GAMMA_START": 0.97, "RAMP_N_END": 5,
+              "RAMP_GAMMA_END": 0.997 ** 4}
+RAMP_OFF = {"RAMP_STEPS": 0, "RAMP_N_START": 10, "RAMP_GAMMA_START": 0.97,
+            "RAMP_N_END": None, "RAMP_GAMMA_END": None}
+RAMP_GAMMA_TOL = 1e-12
 # The lineages, keyed by a variant's letter: Test B's "f" (F0-F4, ~20,000
 # env steps each, the discount ladder) and Test B2's "t" (Kai 2026-10-29:
 # T0-T2, ~33,333 each, the token arms' constant 0.997^4 per base step).
@@ -205,7 +237,9 @@ RESET_KNOBS = {"RESET_EVERY_STEPS": 40000, "RESET_UNTIL_ENV_STEPS": 80000,
 # (Kai 2026-10-29): two one-run lineages to 100,000 env steps, "r" (C:
 # BBF-style resets) and "n" (C0: the no-reset control), which starts only
 # "after" r0 is complete and evaluated; "resets" the reset knobs quick()
-# pins.
+# pins. Test C2 (Kai 2026-11-02): "a" (C2: C plus BBF's ramps), one run
+# alone; "ramps" the ramp knobs quick() pins (every other lineage: RAMP_OFF)
+# and ramp_alert checks.
 LINEAGES = {
     "f": {"arm": FAST_ARM, "run": "mspacman-fast", "prep": "fast-prep",
           "generations": 5, "iterations": 60, "nominal": 30,
@@ -224,6 +258,10 @@ LINEAGES = {
           "discounts": (0.997 ** 4,), "rule": "keep",
           "date": "2026-10-30", "resets": {"RESET_EVERY_STEPS": 0},
           "after": "r0"},
+    "a": {"arm": RAMP_ARM, "run": "mspacman-ramp", "prep": None,
+          "generations": 1, "iterations": 300, "nominal": 150,
+          "discounts": (0.997 ** 4,), "rule": "keep",
+          "date": "2026-11-02", "resets": RESET_KNOBS, "ramps": RAMP_KNOBS},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
@@ -326,10 +364,10 @@ PREP_CHECKS = ("the value support (", "past the reward supports",
                # Test B2's discount rule (audit r3 NIT-1): an unknown rule,
                # a kept discount past the cap
                "_discount_rule ", "past the cap")
-# Every suite supervise_gen2.py ran, plus this supervisor's, Test B's and
-# Test C's.
+# Every suite supervise_gen2.py ran, plus this supervisor's, Test B's, Test
+# C's and Test C2's.
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
-          "tests/test_testc.py",
+          "tests/test_testc.py", "tests/test_testc2.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",
           "tests/test_supervise_gen1.py", "tests/test_gen1.py",
           "tests/test_pbn.py",
@@ -573,8 +611,9 @@ def quick(variant, seed):
     (distill.master_checks: its spec against this tree's arm, its final
     step after its offline steps; Generation 2's audit r1 A-L1 / B-L2: an
     edit to the master's arm fails here, not as three failed preps).
-    SystemExit while F{k-1} has no final row (master_final): the preflight
-    reports it."""
+    Test C: the lineage's "resets" knobs. Test C2: the lineage's "ramps"
+    knobs, every other lineage's RAMP_OFF. SystemExit while F{k-1} has no
+    final row (master_final): the preflight reports it."""
     arm = VARIANTS[variant]
     code = ("import sys; sys.path[:0] = ['.', 'experiments']; "
             "import muzero, ablation, muzero_vtree, distill; "
@@ -613,6 +652,23 @@ def quick(variant, seed):
                  "hasattr(ablation, 'warmup_origin'); "
                  + "".join(f"assert spec.get({k!r}, muzero.{k}) == {v!r}; "
                            for k, v in resets.items()))
+    # Test C2: the ramp knobs -- the ramp lineage's pinned, every other
+    # lineage's off (RAMP_OFF, muzero's defaults, the trainer's own off
+    # set) -- and the module defaults off
+    ramps = LINEAGES[LINEAGE].get("ramps")
+    code += (f"assert {{k: getattr(muzero, k) for k in {tuple(RAMP_OFF)!r}}}"
+             f" == {RAMP_OFF!r}; "
+             f"assert ablation.RAMP_OFF == {RAMP_OFF!r}; "
+             + "".join(f"assert spec.get({k!r}, muzero.{k}) == {v!r}; "
+                       for k, v in (ramps or RAMP_OFF).items()))
+    if ramps:
+        # ... and the ramp's build, its end values the arm's own
+        code += ("assert hasattr(muzero, 'ramp_values') and "
+                 "hasattr(muzero, 'apply_ramps') and "
+                 "hasattr(ablation, 'ramp_gate') and "
+                 "hasattr(ablation, 'ramp_step'); "
+                 "assert spec['RAMP_N_END'] == spec['TD_STEPS'] and "
+                 "spec['RAMP_GAMMA_END'] == spec['DISCOUNT']; ")
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "
@@ -1427,16 +1483,18 @@ def commit_free_gb():
 
 class Rows:
     """Stream new jsonl rows as EVAL lines (the run's in-run eval, the
-    clip fields, the prior's sharpness and the token diagnostics), checked
-    against this run's constant ceiling (run_ceiling: F0's sign clip, a
-    student's prep's -- read once it is there)."""
+    clip fields, the prior's sharpness and the token diagnostics; Test C's
+    resets and plasticity read; Test C2's ramp), checked against this run's
+    constant ceiling (run_ceiling: F0's sign clip, a student's prep's --
+    read once it is there), Test C's reset schedule (reset_alert) and Test
+    C2's ramp schedule (ramp_alert)."""
 
     def __init__(self, jsonl, variant, seed):
         self.jsonl, self.variant, self.seed = jsonl, variant, seed
         self.seen, self.last = set(), None
         self.ceiling = None
         # Test C: {iteration: env_steps} of the rows so far (the reset
-        # schedule's check, reset_alert)
+        # schedule's check, reset_alert; Test C2's ramp_alert)
         self.envs = {}
 
     def _note(self, line):
@@ -1505,19 +1563,23 @@ class Rows:
                            r.get("conv1_weak_frac")))
             print("EVAL %s s%d iter %s  train %s  env %s  return %s  H(pi) %s "
                   " maxp %s  erank %s  freshH %s%s | ceiling %s  kept %s  "
-                  "max %s%s%s | elapsed %s s, %s min/iter" % (
+                  "max %s%s%s%s | elapsed %s s, %s min/iter" % (
                       self.variant, self.seed, r.get("iteration"),
                       r.get("train_steps"), r.get("env_steps"),
                       r.get("return_mean"), r.get("policy_entropy"),
                       r.get("policy_maxp"), r.get("proj_erank"),
                       r.get("fresh_target_entropy"), pre,
                       r.get("reward_ceiling"), r.get("reward_kept"),
-                      r.get("reward_max"), tok, plastic, el, per),
+                      r.get("reward_max"), tok, plastic, ramp_text(r), el,
+                      per),
                   flush=True)
             alerts = row_alerts(r, per, self.ceiling)
             reset = reset_alert(r, prior)
             if reset:
                 alerts.append(reset)
+            ramp = ramp_alert(r, prior)
+            if ramp:
+                alerts.append(ramp)
             for alert in alerts:
                 print(f"ALERT: {self.variant} s{self.seed} row "
                       f"{r.get('iteration')}: {alert}", flush=True)
@@ -1624,6 +1686,149 @@ def reset_alert(r, envs):
         out.append(f"held_ships {ships!r}, the schedule's {want_ships} ("
                    f"{held} held weight ships after each reset)")
     return "; ".join(out) or None
+
+
+def ramp_values(cycle_steps, knobs):
+    """Test C2: (n, gamma) of the ramp `knobs` (a lineage's "ramps") at
+    `cycle_steps` gradient steps since the last reset (since the start
+    before the first): muzero.ramp_values -- BBF's
+    exponential_decay_scheduler -- in the standard library, the same
+    operations in the same order. bonus = clip((RAMP_STEPS - x) /
+    RAMP_STEPS, 0, 1); n = round(exp(bonus x (log 1 - e) + e) x
+    RAMP_N_START), e = log(RAMP_N_END / RAMP_N_START), half to even
+    (Python's round on a float, as onp.round); 1 - gamma = exp(bonus x (s -
+    e') + e') between s = log(1 - RAMP_GAMMA_START) and e' = log(1 -
+    RAMP_GAMMA_END); from RAMP_STEPS on (bonus 0) the end values
+    themselves. A test pins it against muzero.ramp_values at every step of
+    the window (n exactly, gamma within RAMP_GAMMA_TOL)."""
+    period = knobs["RAMP_STEPS"]
+    bonus = min(max((period - cycle_steps) / period, 0.0), 1.0)
+    if bonus <= 0.0:
+        return int(knobs["RAMP_N_END"]), float(knobs["RAMP_GAMMA_END"])
+    start = math.log(1.0)
+    end = math.log(knobs["RAMP_N_END"] / knobs["RAMP_N_START"])
+    n = round(math.exp(bonus * (start - end) + end) * knobs["RAMP_N_START"])
+    start = math.log(1 - knobs["RAMP_GAMMA_START"])
+    end = math.log(1 - knobs["RAMP_GAMMA_END"])
+    return n, 1 - math.exp(bonus * (start - end) + end)
+
+
+def ramp_resets(envs, it):
+    """Test C2: the iterations j < `it` after which the lineage's reset
+    schedule resets (reset_alert's rule: the rows' iterations that are
+    multiples of the cycle with env steps at most RESET_UNTIL_ENV_STEPS),
+    sorted. `envs`: {iteration: env_steps} of the run's rows."""
+    knobs = LINEAGES[LINEAGE].get("resets") or {}
+    every = knobs.get("RESET_EVERY_STEPS")
+    if not every:
+        return []
+    cycle, until = every // TRAIN_STEPS, knobs["RESET_UNTIL_ENV_STEPS"]
+    return sorted(j for j, e in envs.items()
+                  if type(j) is int and j % cycle == 0 and 0 < j < it
+                  and type(e) is int and e <= until)
+
+
+def ramp_mismatch(cycle, n, gamma, want_cycle, knobs):
+    """What is off in one logged ramp point -- its steps since the reset
+    `cycle`, its `n` and `gamma` -- against the schedule at `want_cycle`
+    steps: '' when nothing (n and the steps exactly, gamma within
+    RAMP_GAMMA_TOL)."""
+    if type(cycle) is not int or cycle != want_cycle:
+        return (f"{cycle!r} steps since the reset, the schedule's "
+                f"{want_cycle}")
+    wn, wg = ramp_values(want_cycle, knobs)
+    if (type(n) is not int or n != wn or type(gamma) is not float
+            or not math.isfinite(gamma) or abs(gamma - wg) > RAMP_GAMMA_TOL):
+        return (f"n {n!r} gamma {gamma!r} at {cycle} steps since the reset, "
+                f"the schedule's n {wn} gamma {wg!r}")
+    return ""
+
+
+def ramp_alert(r, envs):
+    """Test C2 (a lineage whose "ramps" ramp): the row's "ramp" and
+    "ramp_trace" against the schedule (ramp_values at the lineage's ramp
+    knobs; the resets as reset_alert counts them, ramp_resets). `envs`:
+    {iteration: env_steps} of the run's earlier rows -- a row re-written
+    after a resume finds its own stale copy there, so only the rows BEFORE
+    it count.
+      - THE ROW (written before its own iteration's reset): "cycle_steps"
+        = (row - L) x TRAIN_STEPS, L the last reset before the row (0
+        before the first), and n / gamma the schedule's there.
+      - THE TRACE: one entry [i, cycle, n, gamma] per iteration i since the
+        previous row (P < i <= row, P = 0 before the first), in order, no
+        gap and no repeat (the checkpoint keeps the entries since the last
+        row: a resume neither loses nor replays one), each taken at i's
+        first gradient step: cycle = (i - 1 - L_i) x TRAIN_STEPS, L_i the
+        last reset before i -- 0 right after a reset: the ramp restarts --
+        and n / gamma the schedule's there.
+    A lineage without ramps ALERTs only on a row that carries one anyway
+    (the arm is not its lineage's). None, or the ALERT's text (never an
+    exception: malformed fields are ALERTs)."""
+    knobs = LINEAGES[LINEAGE].get("ramps") or {}
+    it = r.get("iteration")
+    if type(it) is not int or it < 1:
+        return None
+    if not knobs.get("RAMP_STEPS"):
+        if "ramp" in r or "ramp_trace" in r:
+            return f"a ramp in the row, but lineage {LINEAGE!r} has no ramps"
+        return None
+    resets = ramp_resets(envs, it)
+
+    def cycle_at(i, first):
+        # the steps since the last reset before iteration i: at its first
+        # gradient step (`first`), else at its end
+        last = max((j for j in resets if j < i), default=0)
+        return (i - last - (1 if first else 0)) * TRAIN_STEPS
+
+    out = []
+    ramp = r.get("ramp")
+    if not isinstance(ramp, dict):
+        out.append(f"the row's ramp is {ramp!r}")
+    else:
+        bad = ramp_mismatch(ramp.get("cycle_steps"), ramp.get("n"),
+                            ramp.get("gamma"), cycle_at(it, False), knobs)
+        if bad:
+            out.append(f"the row's ramp: {bad}")
+    trace = r.get("ramp_trace")
+    prev = max((j for j in envs if type(j) is int and 0 < j < it), default=0)
+    if not isinstance(trace, list) or not all(
+            isinstance(e, list) and len(e) == 4 for e in trace):
+        out.append("ramp_trace is not a list of [iteration, steps since the "
+                   "reset, n, gamma] entries")
+        return "; ".join(out)
+    its = [e[0] for e in trace]
+    if its != list(range(prev + 1, it + 1)):
+        out.append(f"ramp_trace iterations {its[:12]!r}"
+                   + (" ..." if len(its) > 12 else "")
+                   + f", the iterations since the previous row {prev + 1}.."
+                   f"{it} once each (a resume lost or replayed entries?)")
+    bad = []
+    for i, cycle, n, gamma in trace:
+        if type(i) is int:
+            m = ramp_mismatch(cycle, n, gamma, cycle_at(i, True), knobs)
+            if m:
+                bad.append(f"iteration {i}: {m}")
+    if bad:
+        out.append("ramp_trace " + "; ".join(bad[:3])
+                   + (f" (+{len(bad) - 3} more)" if len(bad) > 3 else ""))
+    return "; ".join(out) or None
+
+
+def ramp_text(r):
+    """Test C2: the EVAL line's ramp -- the row's n, gamma and steps since
+    the reset, and the trace's n per iteration since the previous row ('?'
+    for a malformed entry) -- or '' for a row without one."""
+    if "ramp" not in r and "ramp_trace" not in r:
+        return ""
+    ramp, trace = r.get("ramp"), r.get("ramp_trace")
+    ramp = ramp if isinstance(ramp, dict) else {}
+    g = ramp.get("gamma")
+    if isinstance(trace, list):
+        trace = "/".join(str(e[2]) if isinstance(e, list) and len(e) == 4
+                         else "?" for e in trace)
+    return " | ramp n %s  gamma %s  cycle %s  trace n %s" % (
+        ramp.get("n"), "%.5f" % g if type(g) is float else g,
+        ramp.get("cycle_steps"), trace)
 
 
 def row_alerts(r, per, ceiling):
@@ -1779,7 +1984,8 @@ def main(argv):
     if "--write-manifest" in argv:
         return write_manifest()
     if argv and argv[0][:1] in LINEAGES:
-        # the variant's lineage: Test B's f0-f4 or Test B2's t0-t2
+        # the variant's lineage: Test B's f0-f4, Test B2's t0-t2, Test C's
+        # r0 / n0 or Test C2's a0
         configure(argv[0][:1])
     if (len(argv) != 2 or argv[0] not in VARIANTS
             or not argv[1].isdigit() or int(argv[1]) not in SEEDS):
