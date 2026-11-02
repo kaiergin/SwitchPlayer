@@ -166,23 +166,54 @@ def test_the_bars():
     assert not e1.meets(1.0, None, 0.0, 0.0)              # no true merge
 
 
+NONE = (None, None, 0, None)
+
+
 @pytest.mark.parametrize("cands,want", [
-    # pooled and in 6 of 8 families
-    ({"A": (0.9, 0.5, 6), "B": (None, None, 0)}, ("E2", ["A"])),
-    ({"A": (0.95, 0.9, 8), "B": (0.91, 0.6, 7)}, ("E2", ["A", "B"])),
-    ({"A": (0.5, 0.1, 0), "B": (0.92, 0.55, 6)}, ("E2", ["B"])),
+    # pooled, in 6 of 8 families, junction precision 0.9 (inclusive)
+    ({"A": (0.9, 0.5, 6, 0.9), "B": NONE}, ("E2", ["A"])),
+    ({"A": (0.95, 0.9, 8, 0.95), "B": (0.91, 0.6, 7, 1.0)},
+     ("E2", ["A", "B"])),
+    ({"A": (0.5, 0.1, 0, 1.0), "B": (0.92, 0.55, 6, 0.9)}, ("E2", ["B"])),
     # pooled E2 but 5 families: Kai's call (mid)
-    ({"A": (0.95, 0.9, 5), "B": (None, None, 0)}, ("KAI_CALL_MID", ["A"])),
+    ({"A": (0.95, 0.9, 5, 1.0), "B": NONE}, ("KAI_CALL_MID", ["A"])),
     # families do not rescue a pooled miss
-    ({"A": (0.8999, 0.9, 8), "B": (None, None, 0)}, ("KAI_CALL_MID", ["A"])),
-    ({"A": (0.95, 0.4999, 8), "B": (None, None, 0)}, ("KAI_CALL_MID", ["A"])),
-    # the low bars, inclusive
-    ({"A": (0.7, 0.2, 0), "B": (0.1, 0.9, 0)}, ("KAI_CALL_MID", ["A"])),
-    ({"A": (0.6999, 0.9, 0), "B": (0.99, 0.1999, 8)}, ("KAI_CALL_LOW", [])),
+    ({"A": (0.8999, 0.9, 8, 1.0), "B": NONE}, ("KAI_CALL_MID", ["A"])),
+    ({"A": (0.95, 0.4999, 8, 1.0), "B": NONE}, ("KAI_CALL_MID", ["A"])),
+    # (A8): the junction bar, for the same candidate
+    ({"A": (0.95, 0.9, 8, 0.8999), "B": NONE}, ("KAI_CALL_MID", ["A"])),
+    ({"A": (0.95, 0.9, 8, None), "B": NONE}, ("KAI_CALL_MID", ["A"])),
+    ({"A": (0.95, 0.9, 8, 0.5), "B": (0.95, 0.9, 4, 1.0)},
+     ("KAI_CALL_MID", ["A", "B"])),
+    # the low bars, inclusive, untouched by the junction bar
+    ({"A": (0.7, 0.2, 0, None), "B": (0.1, 0.9, 0, 1.0)},
+     ("KAI_CALL_MID", ["A"])),
+    ({"A": (0.6999, 0.9, 0, 1.0), "B": (0.99, 0.1999, 8, 1.0)},
+     ("KAI_CALL_LOW", [])),
     # a None precision (no predicted merge) fails every bar
-    ({"A": (None, 0.0, 8), "B": (None, None, 8)}, ("KAI_CALL_LOW", []))])
+    ({"A": (None, 0.0, 8, 1.0), "B": (None, None, 8, 1.0)},
+     ("KAI_CALL_LOW", []))])
 def test_the_verdict_boundaries(cands, want):
     assert e1.verdict(cands) == want
+
+
+def test_the_junction_bar_is_a8s_alone():
+    """Without the junction bar (A7's rule, reported) the junction
+    precision is ignored."""
+    cands = {"A": (0.95, 0.9, 8, 0.5), "B": NONE}
+    assert e1.verdict(cands) == ("KAI_CALL_MID", ["A"])
+    assert e1.verdict(cands, junction_bar=False) == ("E2", ["A"])
+    assert (e1.JUNCTION_CLASSES, e1.JUNCTION_P) == (3, 0.9)
+    assert not e1.is_junction([0] * 9)
+    assert not e1.is_junction([0, 1, 0, 1, 1, 0, 0, 0, 1])
+    assert e1.is_junction([0, 1, 2, 0, 0, 0, 0, 0, 0])
+
+
+def test_the_previous_tokens():
+    truth = {(1, 0): (5, None), (1, 1): (9, None), (1, 2): (11, None),
+             (2, 0): (3, None), (2, 1): (4, None)}
+    assert e1.previous_tokens(truth) == {(1, 0): None, (1, 1): 5, (1, 2): 9,
+                                         (2, 0): None, (2, 1): 3}
 
 
 # --------------------------------------------------------------------------
@@ -609,10 +640,16 @@ def test_a_scored_decision():
     assert [r["d"] for r in sc.recs] == [0, 1, 2, 3, 4]
     # (A7) live: the census's 36-token partition has more than one class
     assert [r.get("live") for r in sc.recs] == [True] * 4 + [None]
+    # (A8) a junction: 3 classes among the nine 4-frame tokens
+    assert [r.get("junction") for r in sc.recs] == [True] * 4 + [None]
     sc.truth[(1, 5)] = (3, [0] * 36)                  # a dead decision
     sc.decision(3, traj[0][0], traj[1][0])
-    assert sc.recs[-1]["live"] is False
-    assert sc.recs[-1]["groups"]["4"]["truth"] == [0] * 9
+    assert sc.recs[-1]["live"] is False and sc.recs[-1]["junction"] is False
+    # live but a corridor: two 4-frame classes, the 32-frame ones differ
+    sc.truth[(1, 6)] = (3, _part([0, 0, 1, 1, 1, 1, 1, 1, 1], {(3, 32): 7}))
+    sc.decision(3, traj[0][0], traj[1][0])
+    assert sc.recs[-1]["live"] is True and sc.recs[-1]["junction"] is False
+    assert sc.recs[-2]["groups"]["4"]["truth"] == [0] * 9      # the dead one
 
 
 class _FixedIDM(torch.nn.Module):
@@ -698,7 +735,8 @@ def test_the_hook_scores_the_next_stack_and_restores(monkeypatch):
 # the reads on hand-made records
 # --------------------------------------------------------------------------
 def _rec(game, d, four_truth, four_pred, b=None, live=True):
-    rec = {"game": game, "d": d, "token": 0, "live": live, "groups": {
+    rec = {"game": game, "d": d, "token": 0, "live": live,
+           "junction": e1.is_junction(four_truth), "groups": {
         "4": {"truth": four_truth, "dist": [0.0] * 36,
               "pred": {"0.5": list(range(9)), "1": four_pred,
                        "2": [0] * 9}},
@@ -766,12 +804,27 @@ def test_the_reads_by_hand():
     fam = s["read_3"]["families"]
     assert fam["1700"]["meets_e2"] == {"A": True, "B": True}
     assert fam["1880"]["meets_e2"] == {"A": False, "B": False}
+    # no junction among them (2 and 1 classes): no junction precision, so
+    # the junction bar fails too (A8)
     assert s["decision"] == {
         "A": {"precision": 1.0, "recall": round(32 / 52, 4), "pooled_e2": True,
-              "families_e2": 1, "families": 2, "pooled_low_bar": True},
+              "families_e2": 1, "families": 2, "junction_precision": None,
+              "junction_bar": False, "pooled_low_bar": True},
         "B": {"precision": 1.0, "recall": 0.5, "pooled_e2": True,
-              "families_e2": 1, "families": 2, "pooled_low_bar": True}}
+              "families_e2": 1, "families": 2, "junction_precision": None,
+              "junction_bar": False, "pooled_low_bar": True}}
     assert s["verdict"] == "KAI_CALL_MID" and s["verdict_on"] == ["A", "B"]
+    assert s["verdict_a7"] == "KAI_CALL_MID"       # 1 family of 2 anyway
+    assert s["live"]["junction_decisions"] == 0
+    assert s["live"]["junction"]["A"] == {"decisions": 0,
+                                          "pairs_per_decision": 0}
+    assert s["live"]["corridor"]["A"]["tp"] == 32
+    assert s["live"]["corridor"]["B"]["decisions"] == 1
+    # LOW-1: reads (3) and (4) on the live decisions too
+    assert s["live"]["read_3"]["frequency"]["a"]["4"]["rare"]["tp"] == 7
+    assert set(s["live"]["read_3"]["families"]) == {"1700", "1880"}
+    assert s["live"]["read_4"]["a"]["2"]["4"]["tp"] == 52
+    assert s["live"]["read_2"]["including_chosen"]["tp"] == 3
     # (A7): both scored records are live, so the live decision is the
     # all-decision one; the reference merges the 4-frame pairs no truth
     # ever split
@@ -913,6 +966,37 @@ def test_the_decision_reads_the_live_decisions_only():
     s2 = e1.summarize([{k: v for k, v in recs[0].items() if k != "live"}],
                       T2_GROUPS, [], {1: 1700})
     assert s2["live"]["decisions"] == 0
+
+
+def test_decide_with_a_family_without_live_decisions():
+    """decide(): a family whose games have no live decision has no read and
+    fails the bars (it still counts among the families); the junction read
+    pools the junction decisions alone: an all-one guess at a junction
+    keeps pooled precision >= 0.9 (ten perfect corridors around it) but
+    fails A8's junction bar."""
+    junction = [0, 1, 2, 0, 0, 0, 0, 0, 0]          # 3 classes; 21 true pairs
+    split = [0, 0, 0, 0, 1, 1, 1, 1, 1]             # a corridor; 16 true pairs
+    recs = ([_rec(1, 0, junction, [0] * 9)]
+            + [_rec(1, d, split, split) for d in range(1, 11)]
+            + [_rec(2, 0, [0] * 9, [0] * 9, live=False)])
+    live = [r for r in recs if r["live"]]
+    fams = e1.family_games({1: 1700, 2: 1880})
+    out = e1.decide(live, fams)
+    assert out["families"]["1880"]["a"] == {"decisions": 0,
+                                            "pairs_per_decision": 0}
+    assert out["families"]["1880"]["meets_e2"] == {"A": False, "B": False}
+    a = out["block"]["A"]
+    assert (a["families"], a["families_e2"]) == (2, 1)
+    assert a["precision"] == round((160 + 21) / (160 + 36), 4)
+    assert a["recall"] == 1.0 and a["pooled_e2"] is True
+    assert a["junction_precision"] == round(21 / 36, 4)
+    assert a["junction_bar"] is False
+    assert out["junction"]["A"]["decisions"] == 1
+    assert out["corridor"]["A"]["decisions"] == 10
+    assert out["corridor"]["A"]["precision"] == 1.0
+    # one family of two: MID with or without the junction bar here
+    assert out["verdict"] == out["verdict_no_junction_bar"] == "KAI_CALL_MID"
+    assert out["verdict_on"] == ["A"]
 
 
 def test_the_set_partitions():
@@ -1116,6 +1200,38 @@ def test_a_dead_aware_rule_passes_the_old_pool_but_not_a7():
     assert ref["B"]["recall"] is None or ref["B"]["recall"] < e1.E2_R
 
 
+def test_the_keyed_reference_reads_e2_under_a7_but_not_a8():
+    """(A8, audit r3) The heading rule: a lookup keyed on the previous
+    token, fitted on the census truth leaving each family out. Under A7's
+    bars alone it reads E2 (on (B): P 0.923, R 0.544, 6 families -- audit
+    r3's alias sets); its junction precision is 0.72 for (A) and 0.60 for
+    (B), so under A8 it reads Kai's call (mid). Its corridors are clean."""
+    census, truth, _ = _census_or_skip()
+    families = {int(n): int(round(g[0])) for n, g in census["games"].items()}
+    k = e1.keyed_reference(truth, families, T2_VOCAB)
+    assert k["decisions"] == {"A": 3798, "B": 411}
+    assert (k["verdict_a7"], k["verdict_on_a7"]) == ("E2", ["B"])
+    assert (k["verdict_a8"], k["verdict_on_a8"]) == ("KAI_CALL_MID",
+                                                     ["A", "B"])
+    a, b = k["A"], k["B"]
+    assert a["precision"] == pytest.approx(0.9022, abs=1e-4)
+    assert a["recall"] == pytest.approx(0.5466, abs=1e-4)
+    assert a["families_e2"] == 5 and a["junction_bar"] is False
+    assert a["junction_precision"] == pytest.approx(0.7221, abs=1e-4)
+    assert (b["precision"], b["recall"], b["families_e2"]) == (0.9231, 0.5441,
+                                                               6)
+    assert b["junction_precision"] == pytest.approx(0.6045, abs=1e-4)
+    assert k["junction"]["A"]["decisions"] == 1182
+    assert k["corridor"]["A"]["decisions"] == 2616
+    assert k["corridor"]["A"]["precision"] > 0.97
+    assert k["corridor"]["B"]["precision"] > 0.99
+    # joystick logic, shown fitted on every family: after RIGHT-4 (slot 2)
+    # the right diagonals go with RIGHT
+    assert ["RIGHT", "UPRIGHT", "DOWNRIGHT"] in \
+        k["partitions_fitted_on_all"]["2"]
+    json.dumps(k)                                   # the summary carries it
+
+
 def test_the_real_census_eval_row_and_snapshot():
     """The real files: the full census's row, the deployed exact-eval row it
     was checked against, and the census's snapshot is the T2 argument."""
@@ -1157,25 +1273,28 @@ def _fake_tree(tmp_path):
     for name, j in preps.items():
         (results / name).mkdir(parents=True)
         (results / name / "vocab.json").write_text(json.dumps(j))
-    _write_log(results / "run-t0" / "own-play-a-t0-seed0", [2, 2], 11,
-               e1.GRID)
-    _write_log(results / "run-t1" / "own-play-a-t1-seed0", [2, 2], 12,
-               t1_vocab)
-    _write_log(results / "run-t2" / "own-play-a-t2-seed0", [3, 3, 4], 13)
+    logs = {"T0": (_write_log(results / "run-t0" / "own-play-a-t0-seed0",
+                              [2, 2], 11, e1.GRID), e1.GRID),
+            "T1": (_write_log(results / "run-t1" / "own-play-a-t1-seed0",
+                              [2, 2], 12, t1_vocab), t1_vocab),
+            "T2": (_write_log(results / "run-t2" / "own-play-a-t2-seed0",
+                              [3, 3, 4], 13), T2_VOCAB)}
     snap = results / "run-t2" / "snapshots-a-t2-seed0" / "weights-iter003.pth"
     snap.parent.mkdir(parents=True)
     snap.write_bytes(b"weights")
-    return snap
+    return snap, logs
 
 
 def test_main_end_to_end_on_fakes(tmp_path, monkeypatch):
     """main() with a fake probe_exhaustive_eval, Run, play_token and
     exact-eval row over a fake run tree and census: the meta line before
-    the replay, the decisions (live flags), a valid summary; a second full
-    run refuses; a differing exact-eval row makes a smoke VOID."""
+    the replay (its 4-frame decision and label counts, the keyed
+    reference), the decisions (live and junction flags), a valid summary;
+    a second full run refuses; a full run whose first game differs from
+    the exact eval stops there (MISMATCH -> break) and is VOID."""
     import contextlib
     import types
-    snap = _fake_tree(tmp_path)
+    snap, logs = _fake_tree(tmp_path)
     probes = tmp_path / "probes"
     probes.mkdir()
     monkeypatch.setattr(e1, "HERE", probes)
@@ -1189,7 +1308,7 @@ def test_main_end_to_end_on_fakes(tmp_path, monkeypatch):
     row = {"run": "run-t2", "iteration": 3, "n_games": 30,
            "max_decisions": None, "env": e1.ENV_ID, "main_line_ok": True,
            "decisions": 6, "threads": torch.get_num_threads(),
-           "snapshot": str(snap)}
+           "snapshot": str(snap), "games": {"1": [100.0, 40, True, 6]}}
     (probes / "probe_action_census-run-t2.jsonl").write_text(
         json.dumps(row) + "\n")
     ref = {"games": {"1": [100.0, 40, True, 6]}, "exact_mean": 100.0}
@@ -1262,25 +1381,55 @@ def test_main_end_to_end_on_fakes(tmp_path, monkeypatch):
     assert m["frequency"]["rare_slots"] == s["frequency"]["rare_slots"]
     assert m["idm"]["lives"] == {"T2": 10, "T0": 4, "T1": 4}
     assert m["idm"]["held_lives"] == 1
+    # the 4-frame decisions and their labels, from the logs as written
+    samples = {k: [y for _, t in written
+                   for _, y in e1.life_idm_samples(t, vocab)]
+               for k, (written, vocab) in logs.items()}
+    assert m["idm"]["four_frame_decisions"] == {k: len(v)
+                                                for k, v in samples.items()}
+    held = [y for _, t in logs["T2"][0][-1:]
+            for _, y in e1.life_idm_samples(t, T2_VOCAB)]
+    assert m["idm"]["label_counts_held"] == np.bincount(
+        held, minlength=9).tolist()
+    assert (np.array(m["idm"]["label_counts_train"])
+            + m["idm"]["label_counts_held"]).tolist() == np.bincount(
+        sum(samples.values(), []), minlength=9).tolist()
+    assert m["idm"]["train"] + m["idm"]["held"] == sum(
+        len(v) for v in samples.values())
+    assert m["reference_keyed"] == s["live"]["reference_keyed"]
+    assert m["reference_keyed"]["decisions"] == {"A": 5, "B": 3}
     assert [x["d"] for x in decs] == list(range(6))
     assert [x["live"] for x in decs] == [False] + [True] * 5
+    assert [x["junction"] for x in decs] == [False] + [True] * 5
     assert ["b" in x for x in decs] == [True, False, True, False, True, True]
     assert s["main_line_ok"] is True and s["void_reasons"] == []
     assert s["live"]["decisions"] == 5 and s["read_1"]["decisions"] == 6
+    assert s["live"]["junction_decisions"] == 5
     assert s["verdict"] in ("E2", "KAI_CALL_MID", "KAI_CALL_LOW")
+    assert s["verdict_a7"] in ("E2", "KAI_CALL_MID", "KAI_CALL_LOW")
     assert s["raw_rep_differs_from_acting"] is True
     assert s["census"]["snapshot_note"] is None and s["meta_file"] == \
         "probe_e1_equivalence-run-t2-meta.jsonl"
     # a second full run refuses before anything plays
     with pytest.raises(SystemExit, match="never overwritten"):
         e1.main([str(snap)])
-    # a smoke against a differing exact-eval row: VOID
+    # a full two-game run whose first game differs from the exact eval:
+    # MISMATCH -> break -> VOID, stopped after one game
+    for suffix in ("-meta.jsonl", "-decisions.jsonl", ".jsonl"):
+        pathlib.Path(f"{tag}{suffix}").unlink()
     ref["games"]["1"] = [101.0, 40, True, 6]
-    monkeypatch.setattr(e1, "SMOKE", True)
+    monkeypatch.setattr(e1, "GAMES", 2)
+    played = []
+    monkeypatch.setattr(pe, "play", lambda run_, n: played.append(n)
+                        or play(run_, n))
     e1.main([str(snap)])
-    v = json.loads(pathlib.Path(f"{tag}-smoke.jsonl").read_text())
+    assert played == [1]                              # game 2 never played
+    v = json.loads(pathlib.Path(f"{tag}.jsonl").read_text())
     assert v["main_line_ok"] is False and v["verdict"].startswith("VOID")
-    assert "game 1" in v["void_reasons"][0] and "verdict_if_valid" in v
+    assert "verdict_if_valid" in v and v["games"] == {"1": [100.0, 40, True,
+                                                            6]}
+    assert v["void_reasons"][0] == "stopped after 1 of 2 games"
+    assert v["void_reasons"][1].startswith("game 1 ")
 
 
 def test_no_trivial_rule_reaches_e2_on_the_census_truth():
@@ -1329,18 +1478,19 @@ def test_no_trivial_rule_reaches_e2_on_the_census_truth():
 
     for ra in ("one", "distinct"):
         for rb in ("one", "distinct"):
+            # junction precision 1.0: the most lenient (A8 aside)
             cands = {"A": (ta[ra]["precision"], ta[ra]["recall"],
                            families_meeting(lambda s: e1.group_read(s, "4"),
-                                            ra)),
+                                            ra), 1.0),
                      "B": (tb[rb]["precision"], tb[rb]["recall"],
-                           families_meeting(e1.b_read, rb))}
+                           families_meeting(e1.b_read, rb), 1.0)}
             assert e1.verdict(cands) == ("KAI_CALL_LOW", []), (ra, rb)
     # the perfect predictions given above: E2, in all 8 families
     fam_a = sum(int(e1.meets(r["precision"], r["recall"], e1.E2_P, e1.E2_R))
                 for r in (e1.group_read([x for x in recs if x["game"] in g],
                                         "4") for g in by_fam.values()))
     assert (a["precision"], a["recall"], fam_a) == (1.0, 1.0, 8)
-    assert e1.verdict({"A": (1.0, 1.0, fam_a)}) == ("E2", ["A"])
+    assert e1.verdict({"A": (1.0, 1.0, fam_a, 1.0)}) == ("E2", ["A"])
 
 
 # --------------------------------------------------------------------------

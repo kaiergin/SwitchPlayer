@@ -34,7 +34,8 @@ CANDIDATES
       chosen action is {a : q(a | s, s') >= 0.1 x max_b q(b | s, s')}, s'
       the main line's next stack.
 
-READS (pre-registered; amendments (A1), (A5), (A6))
+READS (pre-registered; amendments (A1), (A5), (A6), (A7), (A8); every read
+is reported over every decision and over the live decisions)
   (1) PRIMARY, (A) on the 4-frame group: MERGE precision (the share of the
       pooled pairs predicted equivalent that are truly equivalent) and
       MERGE recall (the share of the truly equivalent pairs predicted),
@@ -74,16 +75,22 @@ pair equivalent and let a one-bit rule pass when pooled):
   - "E2": (A) or (B) has precision >= 0.9 and recall >= 0.5 on the live
     decisions pooled AND in at least 6 of the 8 game families (a family
     counts when its own live decisions' pooled precision and recall meet
-    both bars);
+    both bars) AND (A8) merge precision >= 0.9 on the live JUNCTION
+    decisions, pooled (the same candidate; a JUNCTION has >= 3 census
+    classes among the nine 4-frame tokens, for (B) at its decision; a None
+    precision fails);
   - "KAI_CALL_LOW": neither reaches precision >= 0.7 with recall >= 0.2 on
     the live decisions pooled;
   - "KAI_CALL_MID" otherwise.
   The reads over every decision, and the old pooled rule's verdict on
-  them, stay reported outside the decision; so does the REFERENCE: the
-  best state-blind fixed partition of the nine actions on the live
-  decisions (the highest recall at precision >= 0.9, all 21,147
-  partitions), for (A) and for (B). Diagnostics: tau's calibration
-  percentiles per token length.
+  them, stay reported outside the decision, as do A7's verdict (without
+  the junction bar) and the corridor / junction splits of precision and
+  recall; so do two REFERENCES on the live decisions: the best
+  state-blind fixed partition of the nine actions (the highest recall at
+  precision >= 0.9, all 21,147 partitions), and the KEYED one -- per
+  previous token (A), per chosen action x previous token (B), fitted on
+  the census truth leaving each family out -- with the verdict it would
+  get. Diagnostics: tau's calibration percentiles per token length.
   A None precision (no predicted merge) or recall (no true merge) fails
   every bar. VOID when the main line is not the census's: the census must
   be valid (its main_line_ok), every game must equal the exact eval's game
@@ -155,6 +162,10 @@ B_RATIO = "0.1"
 E2_P, E2_R = 0.9, 0.5                        # E2, pooled and per family
 E2_FAMILIES = 6                              # ... in >= 6 of the 8 families
 LOW_P, LOW_R = 0.7, 0.2                      # below both candidates: LOW
+# (A8): a JUNCTION has >= 3 census classes among the nine 4-frame tokens;
+# E2 also needs merge precision >= JUNCTION_P on the live junctions, pooled
+JUNCTION_CLASSES = 3
+JUNCTION_P = 0.9
 LATE_ITERS = 20                              # the frequency split's window
 RARE_PER = 100                               # (A1): rare = under 1 in 100
 HELD_DIV = 10                                # T2's last 10% of lives (ceil)
@@ -275,17 +286,27 @@ def meets(precision, recall, p_bar, r_bar):
                 and precision >= p_bar and recall >= r_bar)
 
 
-def verdict(cands):
-    """(A5) on the unrounded reads. `cands` {name: (pooled precision,
-    pooled recall, families whose own pooled precision / recall meet the
-    E2 bars)}. Returns (verdict, the candidates it rests on): "E2" when one
-    meets E2_P / E2_R pooled and in >= E2_FAMILIES families; "KAI_CALL_LOW"
-    when none meets LOW_P / LOW_R pooled; "KAI_CALL_MID" otherwise."""
-    e2 = sorted(n for n, (p, r, fams) in cands.items()
-                if meets(p, r, E2_P, E2_R) and fams >= E2_FAMILIES)
+def is_junction(four_labels):
+    """(A8): the nine 4-frame tokens' census labels have >= 3 classes."""
+    return len(set(four_labels)) >= JUNCTION_CLASSES
+
+
+def verdict(cands, junction_bar=True):
+    """(A5, A7, A8) on the unrounded reads. `cands` {name: (pooled
+    precision, pooled recall, families whose own pooled precision / recall
+    meet the E2 bars, pooled merge precision on the junctions)}. Returns
+    (verdict, the candidates it rests on): "E2" when one meets E2_P / E2_R
+    pooled, in >= E2_FAMILIES families AND (A8) has junction precision >=
+    JUNCTION_P (None fails); "KAI_CALL_LOW" when none meets LOW_P / LOW_R
+    pooled; "KAI_CALL_MID" otherwise. junction_bar=False: A7's rule, before
+    A8 (reported only)."""
+    e2 = sorted(n for n, (p, r, fams, jp) in cands.items()
+                if meets(p, r, E2_P, E2_R) and fams >= E2_FAMILIES
+                and (not junction_bar
+                     or (jp is not None and jp >= JUNCTION_P)))
     if e2:
         return "E2", e2
-    mid = sorted(n for n, (p, r, _) in cands.items()
+    mid = sorted(n for n, (p, r, _, _) in cands.items()
                  if meets(p, r, LOW_P, LOW_R))
     if mid:
         return "KAI_CALL_MID", mid
@@ -612,6 +633,9 @@ class Scorer:
                              for a, b in all_pairs(len(slots))],
                     "pred": {k: group_prediction(dist, slots, self.tau * m)
                              for k, m in TAU_MULTS.items()}}
+            # (A8): a JUNCTION when the census partition restricted to the
+            # nine 4-frame tokens has >= JUNCTION_CLASSES classes
+            rec["junction"] = is_junction(rec["groups"][PRIMARY]["truth"])
             if token in self.four_pos:
                 rec["b"] = self.inverse(token, stack, nxt,
                                         rec["groups"][PRIMARY]["truth"])
@@ -770,16 +794,60 @@ def summarize(recs, groups, rare, families, held_acc=None):
     records (also from the decisions file read back); `rare` the rare
     slots (A1)."""
     rare = set(int(s) for s in rare)
+    fams = family_games(families)
+    rare_pos = {g: {p for p, s in enumerate(slots) if s in rare}
+                for g, slots in groups.items()}
     r1 = group_read(recs, PRIMARY)
     r2 = b_read(recs)
     r2["idm_held_acc"] = held_acc
     r2["including_chosen"] = b_read(recs, include_chosen=True)
-    rare_pos = {g: {p for p, s in enumerate(slots) if s in rare}
-                for g, slots in groups.items()}
-    rare_actions = rare_pos[PRIMARY]          # 4-frame positions = actions
+    r3, r4 = reads_3_4(recs, groups, rare, rare_pos)
+    # every decision: reported, outside the decision (A5's pooled rule)
+    every = decide(recs, fams)
+    r3["families"] = every["families"]
+    # (A7, A8): the decision on the LIVE decisions
+    live = [r for r in recs if r.get("live") is True]
+    lv = decide(live, fams)
+    l2 = dict(lv["b"])
+    l2["including_chosen"] = b_read(live, include_chosen=True)
+    l3, l4 = reads_3_4(live, groups, rare, rare_pos)       # LOW-1
+    l3["families"] = lv["families"]
+    scored = [r for r in recs if "groups" in r]
+    live_rec = {"decisions": len(live),
+                "share": (round(len(live) / len(scored), 4) if scored
+                          else None),
+                "junction_decisions": sum(1 for r in live
+                                          if r.get("junction") is True),
+                "read_1": lv["a"], "read_2": l2, "read_3": l3, "read_4": l4,
+                "families": lv["families"],
+                # (A8): precision and recall at junctions and corridors
+                "junction": lv["junction"], "corridor": lv["corridor"],
+                "reference": reference_partition(live)}
+    return {"read_1": _public(r1), "read_2": _public(r2),
+            "read_3": _public(r3), "read_4": _public(r4),
+            "live": _public(live_rec),
+            "decision_all_decisions": every["block"],
+            "verdict_all_decisions": every["verdict_no_junction_bar"],
+            "verdict_on_all_decisions": every["verdict_on_no_junction_bar"],
+            "verdict_a7": lv["verdict_no_junction_bar"],
+            "verdict_on_a7": lv["verdict_on_no_junction_bar"],
+            "decision": lv["block"], "verdict": lv["verdict"],
+            "verdict_on": lv["verdict_on"]}
+
+
+def family_games(families):
+    """{family (str): [games]} from {game: family}."""
     fams = {}
     for n, fam in sorted(families.items()):
         fams.setdefault(str(fam), []).append(int(n))
+    return fams
+
+
+def reads_3_4(recs, groups, rare, rare_pos):
+    """Reads (3) -- the other groups, (A1)'s and (A6)'s frequency splits
+    (the families are added by the caller) -- and (4), the robustness
+    reads, over `recs`."""
+    rare_actions = rare_pos[PRIMARY]          # 4-frame positions = actions
     r3 = {"groups": {g: group_read(recs, g) for g in groups if g != PRIMARY},
           "frequency": {
               "rare_slots": sorted(rare),
@@ -803,32 +871,15 @@ def summarize(recs, groups, rare, families, held_acc=None):
     r4 = {"a": {k: {g: group_read(recs, g, k) for g in groups}
                 for k in TAU_MULTS if k != "1"},
           "b": {k: b_read(recs, k) for k in B_RATIOS if k != B_RATIO}}
-    # every decision: reported, outside the decision (A7)
-    _, _, dec_all, v_all, on_all, r3["families"] = decide(recs, fams)
-    # (A7): the decision on the LIVE decisions
-    live = [r for r in recs if r.get("live") is True]
-    a_live, b_live, decision, v, on, fam_live = decide(live, fams)
-    scored = [r for r in recs if "groups" in r]
-    live_rec = {"decisions": len(live),
-                "share": (round(len(live) / len(scored), 4) if scored
-                          else None),
-                "read_1": a_live, "read_2": b_live, "families": fam_live,
-                "reference": reference_partition(live)}
-    return {"read_1": _public(r1), "read_2": _public(r2),
-            "read_3": _public(r3), "read_4": _public(r4),
-            "live": _public(live_rec),
-            "decision_all_decisions": dec_all,
-            "verdict_all_decisions": v_all,
-            "verdict_on_all_decisions": on_all,
-            "decision": decision, "verdict": v, "verdict_on": on}
+    return r3, r4
 
 
 def decide(recs, fams):
-    """A5's decision reads over `recs`: (A)'s and (B)'s pooled reads, the
-    per-candidate block (pooled merge precision / recall, the families --
-    each on its own decisions among `recs` -- meeting the E2 bars, the low
-    bar), the verdict and what it rests on, and the family reads. `fams`
-    {family: [games]}."""
+    """The decision reads over `recs` (A5, A7, A8): (A)'s and (B)'s pooled
+    reads; the families -- each on its own decisions among `recs` (none:
+    it fails) -- meeting the E2 bars; the reads on the JUNCTION decisions
+    and the corridors (the others); the per-candidate block; the verdict
+    with A8's junction bar and without it. `fams` {family: [games]}."""
     a, b = group_read(recs, PRIMARY), b_read(recs)
     fam_e2, fam_reads = {"A": 0, "B": 0}, {}
     for fam, games in fams.items():
@@ -839,14 +890,27 @@ def decide(recs, fams):
         for k in m:
             fam_e2[k] += int(m[k])
         fam_reads[fam] = {"games": games, "a": fa, "b": fb, "meets_e2": m}
+    junc = [r for r in recs if r.get("junction") is True]
+    corr = [r for r in recs if r.get("junction") is False]
+    jr = {"A": group_read(junc, PRIMARY), "B": b_read(junc)}
+    cr = {"A": group_read(corr, PRIMARY), "B": b_read(corr)}
     pooled = {"A": (a.get("_p"), a.get("_r")), "B": (b.get("_p"), b.get("_r"))}
-    v, on = verdict({k: (p, r, fam_e2[k]) for k, (p, r) in pooled.items()})
+    jp = {k: jr[k].get("_p") for k in jr}
+    cands = {k: (p, r, fam_e2[k], jp[k]) for k, (p, r) in pooled.items()}
+    v, on = verdict(cands)
+    v7, on7 = verdict(cands, junction_bar=False)
     block = {k: {"precision": _round(p), "recall": _round(r),
                  "pooled_e2": meets(p, r, E2_P, E2_R),
                  "families_e2": fam_e2[k], "families": len(fams),
+                 "junction_precision": _round(jp[k]),
+                 "junction_bar": bool(jp[k] is not None
+                                      and jp[k] >= JUNCTION_P),
                  "pooled_low_bar": meets(p, r, LOW_P, LOW_R)}
              for k, (p, r) in pooled.items()}
-    return a, b, block, v, on, fam_reads
+    return {"a": a, "b": b, "block": block, "families": fam_reads,
+            "junction": jr, "corridor": cr,
+            "verdict": v, "verdict_on": on,
+            "verdict_no_junction_bar": v7, "verdict_on_no_junction_bar": on7}
 
 
 # --------------------------------------------------------------------------
@@ -904,11 +968,15 @@ def _best_fixed(tp, fp, true_total, parts):
     # lexsort: the last key is the primary one
     best = int(cand[np.lexsort((cand, -blocks, -p[cand], -r[cand]))[0]])
     labels = [int(x) for x in parts[best]]
-    return {**out, "partition": labels,
-            "blocks": [[ACTION_NAMES[a] for a in range(len(labels))
-                        if labels[a] == blk] for blk in sorted(set(labels))],
+    return {**out, "partition": labels, "blocks": blocks_of(labels),
             "precision": round(float(p[best]), 4),
             "recall": round(float(r[best]), 4)}
+
+
+def blocks_of(labels):
+    """A partition's blocks by action name."""
+    return [[ACTION_NAMES[a] for a in range(len(labels)) if labels[a] == blk]
+            for blk in sorted(set(labels))]
 
 
 def reference_partition(recs):
@@ -944,6 +1012,113 @@ def reference_partition(recs):
                            parts)
     out["B"] = _best_fixed(same @ tb, same @ fb, float(true_b), parts)
     return out
+
+
+def previous_tokens(truth):
+    """{(game, d): the token of decision (game, d - 1), or None ("none") at
+    d = 0} over the census truth {(game, d): (token, partition)}."""
+    return {(g, d): (truth[(g, d - 1)][0] if (g, d - 1) in truth else None)
+            for g, d in truth}
+
+
+def _fit_partition(T, n, parts, same):
+    """(A)'s keyed fit for one key: over every partition, the highest
+    training recall at training precision >= E2_P (_best_fixed's ties);
+    all distinct when none qualifies."""
+    best = _best_fixed(same @ T, same @ (n - T), float(T.sum()), parts)
+    return (best["partition"] if best["partition"] is not None
+            else list(range(N_ACTIONS)))
+
+
+def keyed_reference(truth, families, vocab):
+    """(A8) reported, never decided on: a lookup keyed on the PREVIOUS token
+    (Pac-Man's heading, which the stack shows), fitted on the census truth
+    of the LIVE decisions with each family left out (fit on the other
+    families, score the held-out one):
+      (A) per previous token, the partition of the nine actions with the
+          highest training recall at training precision >= E2_P over all
+          21,147 (ties as _best_fixed; all distinct when none qualifies,
+          and for a token never seen in training);
+      (B) per (chosen action, previous token), the other members x whose
+          training precision t / (t + f) >= E2_P (audit r3's alias sets).
+    Scored by decide() as a model would be: its live reads, its families,
+    its junction precision, the verdict it would get under A8 (and A7's,
+    without the junction bar). `truth` {(game, d): (token, partition)};
+    `families` {game: family}; `vocab` T2's."""
+    four_slots = token_groups(vocab)[PRIMARY]
+    four_grid = [GRID.index(tuple(int(v) for v in vocab[s]))
+                 for s in four_slots]
+    parts, same = _partition_table()
+    pairs = all_pairs(N_ACTIONS)
+    prev = previous_tokens(truth)
+    rows = []
+    for g, d in sorted(truth):
+        token, part = truth[(g, d)]
+        if len(set(part)) <= 1:
+            continue                                   # live decisions only
+        t = restrict(part, four_grid)
+        a = four_slots.index(token) if token in four_slots else None
+        rows.append({"game": g, "d": d, "token": int(token),
+                     "fam": str(families[g]), "key": prev[(g, d)], "t": t,
+                     "eq": np.array([float(t[i] == t[j]) for i, j in pairs]),
+                     "a": a,
+                     "cls": (None if a is None else
+                             {x for x in range(N_ACTIONS) if t[x] == t[a]})})
+
+    def fit(train):
+        by = {}
+        for r in train:
+            v = by.setdefault(r["key"], [np.zeros(len(pairs)), 0])
+            v[0] += r["eq"]
+            v[1] += 1
+        part_for = {k: _fit_partition(T, n, parts, same)
+                    for k, (T, n) in by.items()}
+        tc, fc = collections.Counter(), collections.Counter()
+        for r in train:
+            if r["a"] is None:
+                continue
+            for x in range(N_ACTIONS):
+                if x != r["a"]:
+                    (tc if x in r["cls"] else fc)[(r["key"], r["a"], x)] += 1
+        alias = {i for i in set(tc) | set(fc)
+                 if tc[i] / (tc[i] + fc[i]) >= E2_P}
+        return part_for, alias
+
+    fams = family_games(families)
+    recs = []
+    for hold in fams:
+        part_for, alias = fit([r for r in rows if r["fam"] != hold])
+        for r in rows:
+            if r["fam"] != hold:
+                continue
+            pred = part_for.get(r["key"], list(range(N_ACTIONS)))
+            rec = {"game": r["game"], "d": r["d"], "token": r["token"],
+                   "live": True, "junction": is_junction(r["t"]),
+                   "groups": {PRIMARY: {"truth": r["t"],
+                                        "pred": {"1": pred}}}}
+            if r["a"] is not None:
+                a = r["a"]
+                others = [x for x in range(N_ACTIONS)
+                          if x != a and (r["key"], a, x) in alias]
+                rec["b"] = {"action": a, "argmax": a,
+                            "truth_class": sorted(r["cls"]),
+                            "pred_class": {B_RATIO: sorted([a] + others)}}
+            recs.append(rec)
+    out = decide(recs, fams)
+    shown, _ = fit(rows)              # for reading only: fitted on all
+    return {"decisions": {"A": len(recs),
+                          "B": sum(1 for r in recs if "b" in r)},
+            "A": out["block"]["A"], "B": out["block"]["B"],
+            "junction": _public(out["junction"]),
+            "corridor": _public(out["corridor"]),
+            "verdict_a8": out["verdict"], "verdict_on_a8": out["verdict_on"],
+            "verdict_a7": out["verdict_no_junction_bar"],
+            "verdict_on_a7": out["verdict_on_no_junction_bar"],
+            "partitions_fitted_on_all": {
+                ("none" if k is None else str(k)): blocks_of(v)
+                for k, v in sorted(shown.items(),
+                                   key=lambda kv: -1 if kv[0] is None
+                                   else kv[0])}}
 
 
 # --------------------------------------------------------------------------
@@ -1290,6 +1465,16 @@ def main(argv):
               f"{held_acc if held_acc is None else round(held_acc, 4)} "
               f"[{secs['idm']}s]", flush=True)
         del x, y, hx, hy
+        # (A8) the keyed reference: the census truth alone (all its games,
+        # whatever this run replays), fitted leaving each family out
+        t0 = time.time()
+        keyed = keyed_reference(
+            truth, {int(n): int(round(g[0]))
+                    for n, g in census["games"].items()}, vocab)
+        secs["keyed_reference"] = round(time.time() - t0)
+        print(f"keyed reference: (A) {keyed['A']}, (B) {keyed['B']}, "
+              f"verdict under A8 {keyed['verdict_a8']} "
+              f"[{secs['keyed_reference']}s]", flush=True)
         calibration = {**calibration_read(errors),
                        "by_length": calibration_by_length(errors, lengths)}
         frequency = {"iterations": [t2["last"] - LATE_ITERS + 1, t2["last"]],
@@ -1309,6 +1494,7 @@ def main(argv):
                 "tau": tau, "calibration": calibration,
                 "raw_rep_differs_from_acting": raw_differs,
                 "frequency": frequency, "idm": idm_rec,
+                "reference_keyed": keyed,
                 "secs": dict(secs), "memory": mem_own_play}
         with open(meta_file, "w") as f:
             f.write(json.dumps(meta) + "\n")
@@ -1340,6 +1526,7 @@ def main(argv):
                                n_games=None if SMOKE else GAMES)
         families = {n: int(round(g[0])) for n, g in games.items()}
         reads = summarize(scorer.recs, groups, rare, families, held_acc)
+        reads["live"]["reference_keyed"] = keyed       # reported (A8)
         secs["total"] = round(time.time() - t_start)
         rec = {"snapshot": str(path), "run": run_name,
                "iteration": iteration, "env": ENV_ID, "smoke": SMOKE,
@@ -1377,7 +1564,8 @@ def main(argv):
                           if k not in ("snapshot", "games", "idm",
                                        "read_3", "read_4", "live",
                                        "calibration")}), flush=True)
-        print("LIVE " + json.dumps(rec["live"]["reference"]), flush=True)
+        print("LIVE " + json.dumps({k: rec["live"][k] for k in (
+            "decisions", "junction_decisions", "reference")}), flush=True)
     print("DONE", flush=True)
 
 
