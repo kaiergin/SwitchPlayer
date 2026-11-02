@@ -26,8 +26,10 @@ set_intact's rule check; Test B's own constants come back unchanged.
 Test C2 (Kai, 2026-11-02; the last section): the lineage "a" (a0, C plus
 BBF's ramps, one run alone): its names, command and quick probe (the ramp
 knobs pinned; every other lineage's pinned off), the standard-library
-ramp_values against muzero.ramp_values, ramp_alert row by row (off the
-schedule, malformed, across a resume) and the reset checks as r0's.
+ramp_values against muzero.ramp_values, ramp_alert row by row (the ramp,
+its trace and its windows: off the schedule, malformed, across a resume,
+through Rows.emit with a rewritten row), the reset checks as r0's, and the
+smokes counted as trainers.
 
 No test reads LIVE state (the distillation step's audit r5 HIGH): the `sup`
 fixture points REPO (every run folder, probe jsonl, prep and snapshot of
@@ -3596,24 +3598,47 @@ def _c2_rows(final=134, cut=100, env_per_it=670):
     """A ramp run's rows as the trainer writes them -- the module's ramp
     knobs (the `ramp_knobs` fixture) through muzero.ramp_values, the
     trainer's own schedule: one every 5 iterations and the final one, each
-    with its ramp at the row (before the row's reset) and the trace since
-    the previous row (at each iteration's first step); a reset after every
-    20th iteration up to `cut` (the rows' env steps keep it on the
-    schedule: <= 80,000 through `cut`). JSON round-tripped."""
+    with its ramp at the row (before the row's reset), the trace since the
+    previous row (at each iteration's first step) and the ramp windows
+    since it (each gradient step as ablation.note_ramp_window counts it:
+    "in" while its steps since the reset are below RAMP_STEPS; every step
+    scored, made-up finite means); a reset after every 20th iteration up
+    to `cut` (the rows' env steps keep it on the schedule: <= 80,000
+    through `cut`). JSON round-tripped."""
     rows, origin, trace = [], 0, []
+    wins = {"in": 0, "out": 0}
     for i in range(1, final + 1):
         c = (i - 1) * 2000 - origin
         trace.append([i, c, *muzero.ramp_values(c)])
+        for s in range((i - 1) * 2000, i * 2000):
+            wins["in" if s - origin < muzero.RAMP_STEPS else "out"] += 1
         if i % 5 == 0 or i == final:
             c = i * 2000 - origin
             n, g = muzero.ramp_values(c)
             rows.append(json.loads(json.dumps({
                 "iteration": i, "env_steps": env_per_it * i,
                 "ramp": {"n": n, "gamma": g, "cycle_steps": c},
-                "ramp_trace": trace})))
-            trace = []
+                "ramp_trace": trace,
+                "ramp_windows": {k: {
+                    "steps": m, "scored": m,
+                    "value_loss": 1.234567 if m else None,
+                    "target_mean": 4.5 if m else None}
+                    for k, m in wins.items()}})))
+            trace, wins = [], {"in": 0, "out": 0}
         if i % 20 == 0 and i <= cut and i != final:
             origin = i * 2000
+    return rows
+
+
+def _stream_rows(final):
+    """_c2_rows with the fields Rows' other checks read (the ceiling, the
+    resets and held ships on the schedule, the plasticity read)."""
+    rows = _c2_rows(final=final)
+    for r in rows:
+        n = min(5, (r["iteration"] - 1) // 20)
+        r.update({"dormant_025_all": 0.0, "dormant_10_all": 0.0003,
+                  "conv1_weak_frac": 0.0, "reward_ceiling": 1.0},
+                 resets=n, held_ships=4 * n)
     return rows
 
 
@@ -3644,6 +3669,13 @@ def test_the_ramp_is_checked_row_by_row(asup, ramp_knobs):
     assert [e[1] for e in by[125]["ramp_trace"]] == list(
         range(40000, 50000, 2000))                    # no reset after 120
     assert [e[0] for e in by[134]["ramp_trace"]] == list(range(131, 135))
+    # the windows: the ramp's 10,000 steps at the rows that end one, none
+    # anywhere else (the final row: 4 iterations, all out)
+    for i, r in by.items():
+        want = ((10000, 0) if i in (5, 25, 45, 65, 85, 105) else
+                (0, 8000) if i == 134 else (0, 10000))
+        w = r["ramp_windows"]
+        assert (w["in"]["steps"], w["out"]["steps"]) == want, i
     assert set(_checked(sup, rows).values()) == {None}
 
 
@@ -3747,7 +3779,21 @@ def test_a_malformed_ramp_is_an_alert_never_an_exception(asup, ramp_knobs):
                  lambda r: r["ramp_trace"][0].__setitem__(0, "21"),
                  lambda r: r["ramp"].__setitem__("n", "5"),
                  lambda r: r["ramp"].__setitem__("cycle_steps", None),
-                 lambda r: r["ramp"].pop("gamma")):
+                 lambda r: r["ramp"].pop("gamma"),
+                 # the windows (audit r1b L1)
+                 lambda r: r.pop("ramp_windows"),
+                 lambda r: r.__setitem__("ramp_windows", [1, 2]),
+                 lambda r: r["ramp_windows"].pop("out"),
+                 lambda r: r["ramp_windows"].__setitem__("in", None),
+                 lambda r: r["ramp_windows"]["in"].pop("steps"),
+                 lambda r: r["ramp_windows"]["in"].__setitem__("steps",
+                                                               10000.0),
+                 lambda r: r["ramp_windows"]["in"].__setitem__("scored",
+                                                               True),
+                 lambda r: r["ramp_windows"]["in"].__setitem__(
+                     "value_loss", "1.2"),
+                 lambda r: r["ramp_windows"]["in"].__setitem__(
+                     "target_mean", float("inf"))):
         msg = _alert(sup, rows, 25, edit)
         assert isinstance(msg, str) and msg, msg
     # rows that are not in-run rows are not checked
@@ -3786,7 +3832,12 @@ def test_the_ramp_check_is_c2s_alone(sup, ramp_knobs):
     assert sup.ramp_alert(row, {}) is None
     assert sup.ramp_alert(_row(5, 3000), {}) == (
         "the row's ramp is None; ramp_trace is not a list of [iteration, "
-        "steps since the reset, n, gamma] entries")
+        "steps since the reset, n, gamma] entries; ramp_windows None is not "
+        "an in / out pair of windows")
+    # the windows alone in another lineage's row: an ALERT too
+    sup.configure("r")
+    assert "has no ramps" in sup.ramp_alert(
+        _row(5, 3000, ramp_windows=row["ramp_windows"]), {})
 
 
 def test_a0s_resets_are_checked_as_r0s(sup):
@@ -3853,8 +3904,8 @@ def test_ramp_rows_print_and_alert(asup, ramp_knobs, monkeypatch, tmp_path,
     stream.emit()
     out = capsys.readouterr().out
     assert ("| resets 1  held ships 4  dormant 0.0 / 0.0003  conv1 weak 0.0 "
-            "| ramp n 5  gamma 0.98805  cycle 10000  trace n 10/9/8/7/6 | "
-            "elapsed") in out, out
+            "| ramp n 5  gamma 0.98805  cycle 10000  trace n 10/9/8/7/6  "
+            "in/out 10000/0 | elapsed") in out, out
     assert "ALERT" not in out
     bad = dict(rows[5])
     bad["ramp_trace"] = bad["ramp_trace"][1:]          # iteration 26 lost
@@ -3862,7 +3913,7 @@ def test_ramp_rows_print_and_alert(asup, ramp_knobs, monkeypatch, tmp_path,
         f.write(json.dumps(bad) + NL)
     stream.emit()
     out = capsys.readouterr().out
-    assert "trace n 5/5/5/5 |" in out
+    assert "trace n 5/5/5/5  in/out 0/10000 |" in out
     assert ("ALERT: a0 s0 row 30: ramp_trace iterations [27, 28, 29, 30], "
             "the iterations since the previous row 26..30 once each") in out
     # Test C's rows print as before: no ramp
@@ -3870,4 +3921,181 @@ def test_ramp_rows_print_and_alert(asup, ramp_knobs, monkeypatch, tmp_path,
     r = _row(5, 3000, resets=0, held_ships=0, **plastic)
     assert sup.ramp_text(r) == ""
     assert sup.ramp_text({"ramp_trace": [[1, 0, 10, 0.97], "x"]}) == (
-        " | ramp n None  gamma None  cycle None  trace n 10/?")
+        " | ramp n None  gamma None  cycle None  trace n 10/?  in/out ?/?")
+
+
+def test_the_ramp_windows_are_checked(asup, ramp_knobs):
+    """Audit r1b L1: each row's ramp windows against the steps since the
+    previous row -- in the ramp while the steps since the reset are below
+    10,000, out after -- every step scored, finite means (None where none
+    was scored)."""
+    sup = asup
+    rows = _c2_rows()
+
+    def win(k, **change):
+        def edit(r):
+            r["ramp_windows"][k].update(change)
+        return edit
+
+    # on schedule: row 25 (in 10,000 / out 0), row 30 (0 / 10,000)
+    assert _alert(sup, rows, 25, lambda r: None) is None
+    assert _alert(sup, rows, 30, lambda r: None) is None
+    # the steps off: a window that lost or double-counted steps (a resume
+    # that did not restore the checkpoint's windows, or replayed them)
+    assert _alert(sup, rows, 25, win("in", steps=2000, scored=2000)) == (
+        "ramp_windows in 2000 steps, the schedule's 10000")
+    assert _alert(sup, rows, 25, win("in", steps=12000, scored=12000)) == (
+        "ramp_windows in 12000 steps, the schedule's 10000")
+    # steps in the wrong window (the ramp not restarted at the reset)
+    msg = _alert(sup, rows, 25, lambda r: r.__setitem__("ramp_windows", {
+        "in": {"steps": 0, "scored": 0, "value_loss": None,
+               "target_mean": None},
+        "out": {"steps": 10000, "scored": 10000, "value_loss": 1.0,
+                "target_mean": 2.0}}))
+    assert msg == ("ramp_windows in 0 steps, the schedule's 10000; out 10000 "
+                   "steps, the schedule's 0"), msg
+    # steps not scored (non-finite value losses), non-finite or missing
+    # means, a mean without a scored step
+    assert _alert(sup, rows, 25, win("in", scored=9990)) == (
+        "ramp_windows in 9990 of 10000 steps scored (a non-finite value loss "
+        "or target?)")
+    assert _alert(sup, rows, 25, win("in", value_loss=float("nan"))) == (
+        "ramp_windows in value_loss nan over 10000 scored steps")
+    assert _alert(sup, rows, 25, win("in", target_mean=None)) == (
+        "ramp_windows in target_mean None over 10000 scored steps")
+    assert _alert(sup, rows, 30, win("in", value_loss=0.5)) == (
+        "ramp_windows in value_loss 0.5 with no step scored")
+    # the final row: 4 iterations past the cutoff, all out
+    assert _alert(sup, rows, 134, lambda r: None) is None
+    assert "out 10000 steps, the schedule's 8000" in _alert(
+        sup, rows, 134, win("out", steps=10000, scored=10000))
+    # the smoke's shape: 20 steps per iteration, a 50-step ramp, a reset
+    # every 4 iterations, rows every 4 -> 50 in / 30 out per cycle row
+    # (the cutoff at 8,000: row 16's reset falls past it)
+    smoke = dict(sup.LINEAGES["a"])
+    sup.LINEAGES["a"] = {**smoke, "ramps": {**smoke["ramps"],
+                                            "RAMP_STEPS": 50},
+                         "resets": {**smoke["resets"],
+                                    "RESET_EVERY_STEPS": 80,
+                                    "RESET_UNTIL_ENV_STEPS": 8000}}
+    sup.TRAIN_STEPS = 20
+    try:
+        for it, envs, want in ((4, {}, (50, 30)), (8, {4: 2000}, (50, 30)),
+                               (20, {12: 7000, 16: 9000}, (0, 80)),
+                               (23, {12: 7000, 16: 9000, 20: 11000},
+                                (0, 60))):
+            wins = {k: {"steps": n, "scored": n,
+                        "value_loss": 1.0 if n else None,
+                        "target_mean": 1.0 if n else None}
+                    for k, n in zip(("in", "out"), want)}
+            got = sup.ramp_alert({"iteration": it, "ramp_windows": wins},
+                                 envs)
+            assert "ramp_windows" not in got, (it, got)
+            wins["in"]["steps"] += 20
+            assert "ramp_windows in" in sup.ramp_alert(
+                {"iteration": it, "ramp_windows": wins}, envs), it
+    finally:
+        sup.LINEAGES["a"], sup.TRAIN_STEPS = smoke, 2000
+
+
+def test_a_rewritten_row_streams_without_an_alert(asup, ramp_knobs,
+                                                  monkeypatch, tmp_path,
+                                                  capsys):
+    """Audit r1b L1, through Rows.emit: a kill between row 25 and its
+    checkpoint, then the resume. The supervisor primed rows 5-20, streamed
+    the killed timeline's row 25, then the resumed run pruned it and wrote
+    its own row 25 (its trace and windows from the checkpoint at 24 plus
+    iteration 25), then row 30: no ALERT -- the stale copy is no "previous
+    row" for the rewrite."""
+    sup = asup
+    monkeypatch.setattr(sup, "run_ceiling", lambda v: 1.0)
+    rows = _stream_rows(30)
+    by = {r["iteration"]: r for r in rows}
+    jsonl = tmp_path / "a.jsonl"
+    head = "".join(json.dumps(by[i]) + NL for i in (5, 10, 15, 20))
+    jsonl.write_text(head)
+    stream = sup.Rows(str(jsonl), "a0", 0)
+    stream.prime()
+    stale = dict(by[25], env_steps=by[25]["env_steps"] + 300)
+    with open(jsonl, "a") as f:
+        f.write(json.dumps(stale) + NL)
+    stream.emit()
+    jsonl.write_text(head + json.dumps(by[25]) + NL)   # pruned, rewritten
+    stream.emit()
+    with open(jsonl, "a") as f:
+        f.write(json.dumps(by[30]) + NL)
+    stream.emit()
+    out = capsys.readouterr().out
+    assert out.count("EVAL a0 s0 iter 25 ") == 2, out
+    assert "EVAL a0 s0 iter 30 " in out and "in/out 0/10000" in out
+    assert "ALERT" not in out, out
+    # ... and a rewrite that lost the checkpoint's windows (only iteration
+    # 25's 2,000 steps) is an ALERT
+    lost = dict(by[25], ramp_windows={
+        "in": {"steps": 2000, "scored": 2000, "value_loss": 1.0,
+               "target_mean": 1.0},
+        "out": {"steps": 0, "scored": 0, "value_loss": None,
+                "target_mean": None}})
+    jsonl.write_text(head + json.dumps(lost) + NL)
+    stream.emit()
+    assert ("ALERT: a0 s0 row 25: ramp_windows in 2000 steps, the schedule's "
+            "10000") in capsys.readouterr().out
+
+
+def test_rows_with_a_rewritten_row_in_the_file(asup, ramp_knobs,
+                                               monkeypatch, tmp_path,
+                                               capsys):
+    """Audit r1b L1: a file holding a stale row 25 AND its rewrite (unpruned)
+    streams without an ALERT, and so does a supervisor restarted (primed)
+    after the stale row, before the rewrite replaced it."""
+    sup = asup
+    monkeypatch.setattr(sup, "run_ceiling", lambda v: 1.0)
+    rows = _stream_rows(30)
+    by = {r["iteration"]: r for r in rows}
+    stale = dict(by[25], env_steps=by[25]["env_steps"] + 300)
+    head = "".join(json.dumps(by[i]) + NL for i in (5, 10, 15, 20))
+    jsonl = tmp_path / "a.jsonl"
+    jsonl.write_text(head + json.dumps(stale) + NL + json.dumps(by[25]) + NL
+                     + json.dumps(by[30]) + NL)
+    sup.Rows(str(jsonl), "a0", 0).emit()
+    out = capsys.readouterr().out
+    assert out.count("EVAL a0 s0 iter 25 ") == 2 and "ALERT" not in out, out
+    jsonl.write_text(head + json.dumps(stale) + NL)
+    stream = sup.Rows(str(jsonl), "a0", 0)
+    stream.prime()                     # restarted after the stale row
+    jsonl.write_text(head + json.dumps(by[25]) + NL + json.dumps(by[30])
+                     + NL)
+    stream.emit()
+    out = capsys.readouterr().out
+    assert "EVAL a0 s0 iter 25 " in out and "EVAL a0 s0 iter 30 " in out
+    assert "ALERT" not in out, out
+
+
+def test_a_smoke_counts_as_a_trainer(sup, monkeypatch, capsys):
+    """Audit r1b L4: the Test C / C2 smokes (their parents and their
+    "child" trainers) hold the GPU without an ablation.py on the command
+    line: live_trainers counts them, so a supervisor started by hand beside
+    one waits."""
+    assert sup.SMOKE_SCRIPTS == ("smoke_testc.py", "smoke_testc2.py")
+    procs = [
+        (1, ["py", "-u", "C:" + chr(92) + "sp" + chr(92) + "smoke_testc2.py",
+             "C:/sp/smoke_testc2_r2"]),
+        (2, ["py", "-u", "C:/sp/smoke_testc2.py", "child", "C:/sp/a0",
+             "resume1"]),
+        (3, ["py", "smoke_testc.py", "kill", "out"]),
+        (4, ["py", "smoke_testc2.py.bak"]),
+        (5, ["py", "tests/test_smoke_testc2.py"]),
+        (6, ["py", "benchmarks/supervisors/supervise_testb.py", "a0", "0"]),
+        (7, ["py", "post_testc2.py", "Y:/run"])]
+    _procs(monkeypatch, sup, procs)
+    assert sup.live_trainers() == [1, 2, 3]
+    assert [p for p, c in procs if sup.is_trainer(c)] == [1, 2, 3]
+
+    def effect(n):
+        if n == 2:
+            _procs(monkeypatch, sup, procs[3:])
+
+    monkeypatch.setattr(sup.time, "sleep", _bounded(effect))
+    sup.wait_no_trainer()
+    assert ("ALERT: an ablation.py or distill.py trainer is already running "
+            "(pids [1, 2, 3])") in capsys.readouterr().out

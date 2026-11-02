@@ -76,9 +76,10 @@ run worktree (launch_testc2.ps1, hand-off post_testc2.py):
 For Test C2 read the text below as for Test C, with "one" / "a0" / "A0" /
 launch_testc2.ps1 / post_testc2.py. Each a0 row's "resets" and
 "held_ships" are checked as r0's (reset_alert; its RESET lines as r0's,
-ResetLines), and its "ramp" and "ramp_trace" against the schedule
-(ramp_alert: an ALERT when off it); the EVAL lines print the ramp beside
-the plasticity read.
+ResetLines), and its "ramp", "ramp_trace" and "ramp_windows" against the
+schedule (ramp_alert: an ALERT when off it); the EVAL lines print the ramp
+beside the plasticity read. A Test C / C2 smoke counts as a trainer
+(SMOKE_SCRIPTS).
 
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
@@ -1391,6 +1392,10 @@ def _names(cmd):
 TRAINER_SCRIPTS = ("ablation.py", "distill.py")
 TRAINER_MODULES = ("ablation", "distill", "experiments.ablation",
                    "experiments.distill")
+# Test C2 audit r1b L4: the pre-launch GPU smokes train in-process or as
+# "smoke_testc*.py child" (no ablation.py on the command line): a supervisor
+# started by hand beside one waits it out like any trainer
+SMOKE_SCRIPTS = ("smoke_testc.py", "smoke_testc2.py")
 
 
 def is_trainer(cmd):
@@ -1398,9 +1403,11 @@ def is_trainer(cmd):
     script path from any directory (`experiments/ablation.py`, or
     `ablation.py` run from experiments/) or as a module (`-m ablation`,
     `-m experiments.distill`; supervise_gen0.py's, CURRICULUM Test 1 audit
-    r1 B-L4). A test file (test_distill.py) is not one."""
+    r1 B-L4) -- or a Test C / C2 smoke (SMOKE_SCRIPTS: its parent or its
+    trainer children). A test file (test_distill.py) is not one."""
     for i, c in enumerate(cmd):
-        if os.path.basename(c.replace(chr(92), "/")) in TRAINER_SCRIPTS:
+        if os.path.basename(c.replace(chr(92), "/")) in (TRAINER_SCRIPTS
+                                                         + SMOKE_SCRIPTS):
             return True
         if c == "-m" and cmd[i + 1:i + 2] and cmd[i + 1] in TRAINER_MODULES:
             return True
@@ -1409,9 +1416,10 @@ def is_trainer(cmd):
 
 def live_trainers():
     """PIDs of ANY python running ablation.py or distill.py (any tree, arm
-    or seed; is_trainer): an orphan of an earlier supervisor (the child is
-    detached and survives a supervisor kill), a prep (an orphaned one
-    keeps the GPU and writes the prep's files), another experiment's run
+    or seed; is_trainer; a smoke too): an orphan of an earlier supervisor
+    (the child is detached and survives a supervisor kill), a prep (an
+    orphaned one keeps the GPU and writes the prep's files), another
+    experiment's run
     (a manual start beside Generation 2: the launcher waits for its
     completion), a duplicate launch. Python processes only: an editor or a
     git command naming the file is not a trainer. A python whose command
@@ -1744,6 +1752,38 @@ def ramp_mismatch(cycle, n, gamma, want_cycle, knobs):
     return ""
 
 
+def ramp_windows_mismatch(wins, want):
+    """Test C2 (audit r1b L1): what is off in a row's "ramp_windows" --
+    {"in": w, "out": w}, w = {steps, scored, value_loss, target_mean} --
+    against `want` = (the schedule's in steps, its out steps): '' when
+    nothing. Each window's steps must be the schedule's, every step scored
+    (scored < steps: a non-finite value loss or target), and its two means
+    finite floats over the scored steps (None when none was)."""
+    if not isinstance(wins, dict) or not all(
+            isinstance(wins.get(k), dict) for k in ("in", "out")):
+        return f"{wins!r} is not an in / out pair of windows"
+    out = []
+    for k, n in zip(("in", "out"), want):
+        w = wins[k]
+        steps, scored = w.get("steps"), w.get("scored")
+        if type(steps) is not int or type(scored) is not int:
+            out.append(f"{k} steps {steps!r} scored {scored!r}")
+            continue
+        if steps != n:
+            out.append(f"{k} {steps} steps, the schedule's {n}")
+        if scored != steps:
+            out.append(f"{k} {scored} of {steps} steps scored (a non-finite "
+                       f"value loss or target?)")
+        for m in ("value_loss", "target_mean"):
+            v = w.get(m)
+            if scored > 0 and (type(v) is not float
+                               or not math.isfinite(v)):
+                out.append(f"{k} {m} {v!r} over {scored} scored steps")
+            elif scored <= 0 and v is not None:
+                out.append(f"{k} {m} {v!r} with no step scored")
+    return "; ".join(out)
+
+
 def ramp_alert(r, envs):
     """Test C2 (a lineage whose "ramps" ramp): the row's "ramp" and
     "ramp_trace" against the schedule (ramp_values at the lineage's ramp
@@ -1761,6 +1801,13 @@ def ramp_alert(r, envs):
         first gradient step: cycle = (i - 1 - L_i) x TRAIN_STEPS, L_i the
         last reset before i -- 0 right after a reset: the ramp restarts --
         and n / gamma the schedule's there.
+      - THE WINDOWS (audit r1b L1): "ramp_windows" counts the gradient
+        steps of those iterations "in" the ramp (steps since the reset
+        below RAMP_STEPS) and "out": in = the sum over P < i <= row of
+        min(TRAIN_STEPS, max(0, RAMP_STEPS - cycle_i)), out = (row - P) x
+        TRAIN_STEPS - in; every step scored, finite means
+        (ramp_windows_mismatch). The registered run: in 10,000 / out 0 at
+        rows 5, 25, 45, 65, 85 and 105, in 0 at every other row.
     A lineage without ramps ALERTs only on a row that carries one anyway
     (the arm is not its lineage's). None, or the ALERT's text (never an
     exception: malformed fields are ALERTs)."""
@@ -1769,7 +1816,7 @@ def ramp_alert(r, envs):
     if type(it) is not int or it < 1:
         return None
     if not knobs.get("RAMP_STEPS"):
-        if "ramp" in r or "ramp_trace" in r:
+        if "ramp" in r or "ramp_trace" in r or "ramp_windows" in r:
             return f"a ramp in the row, but lineage {LINEAGE!r} has no ramps"
         return None
     resets = ramp_resets(envs, it)
@@ -1795,30 +1842,40 @@ def ramp_alert(r, envs):
             isinstance(e, list) and len(e) == 4 for e in trace):
         out.append("ramp_trace is not a list of [iteration, steps since the "
                    "reset, n, gamma] entries")
-        return "; ".join(out)
-    its = [e[0] for e in trace]
-    if its != list(range(prev + 1, it + 1)):
-        out.append(f"ramp_trace iterations {its[:12]!r}"
-                   + (" ..." if len(its) > 12 else "")
-                   + f", the iterations since the previous row {prev + 1}.."
-                   f"{it} once each (a resume lost or replayed entries?)")
-    bad = []
-    for i, cycle, n, gamma in trace:
-        if type(i) is int:
-            m = ramp_mismatch(cycle, n, gamma, cycle_at(i, True), knobs)
-            if m:
-                bad.append(f"iteration {i}: {m}")
+    else:
+        its = [e[0] for e in trace]
+        if its != list(range(prev + 1, it + 1)):
+            out.append(f"ramp_trace iterations {its[:12]!r}"
+                       + (" ..." if len(its) > 12 else "")
+                       + f", the iterations since the previous row "
+                       f"{prev + 1}..{it} once each (a resume lost or "
+                       f"replayed entries?)")
+        bad = []
+        for i, cycle, n, gamma in trace:
+            if type(i) is int:
+                m = ramp_mismatch(cycle, n, gamma, cycle_at(i, True), knobs)
+                if m:
+                    bad.append(f"iteration {i}: {m}")
+        if bad:
+            out.append("ramp_trace " + "; ".join(bad[:3])
+                       + (f" (+{len(bad) - 3} more)" if len(bad) > 3
+                          else ""))
+    want_in = sum(min(TRAIN_STEPS, max(0, knobs["RAMP_STEPS"]
+                                       - cycle_at(i, True)))
+                  for i in range(prev + 1, it + 1))
+    bad = ramp_windows_mismatch(r.get("ramp_windows"), (
+        want_in, (it - prev) * TRAIN_STEPS - want_in))
     if bad:
-        out.append("ramp_trace " + "; ".join(bad[:3])
-                   + (f" (+{len(bad) - 3} more)" if len(bad) > 3 else ""))
+        out.append(f"ramp_windows {bad}")
     return "; ".join(out) or None
 
 
 def ramp_text(r):
     """Test C2: the EVAL line's ramp -- the row's n, gamma and steps since
-    the reset, and the trace's n per iteration since the previous row ('?'
-    for a malformed entry) -- or '' for a row without one."""
-    if "ramp" not in r and "ramp_trace" not in r:
+    the reset, the trace's n per iteration since the previous row ('?' for
+    a malformed entry) and the ramp windows' in / out steps -- or '' for a
+    row without one."""
+    if "ramp" not in r and "ramp_trace" not in r and "ramp_windows" not in r:
         return ""
     ramp, trace = r.get("ramp"), r.get("ramp_trace")
     ramp = ramp if isinstance(ramp, dict) else {}
@@ -1826,9 +1883,13 @@ def ramp_text(r):
     if isinstance(trace, list):
         trace = "/".join(str(e[2]) if isinstance(e, list) and len(e) == 4
                          else "?" for e in trace)
-    return " | ramp n %s  gamma %s  cycle %s  trace n %s" % (
+    wins = r.get("ramp_windows")
+    wins = wins if isinstance(wins, dict) else {}
+    steps = ["?" if not isinstance(wins.get(k), dict)
+             else wins[k].get("steps") for k in ("in", "out")]
+    return " | ramp n %s  gamma %s  cycle %s  trace n %s  in/out %s/%s" % (
         ramp.get("n"), "%.5f" % g if type(g) is float else g,
-        ramp.get("cycle_steps"), trace)
+        ramp.get("cycle_steps"), trace, *steps)
 
 
 def row_alerts(r, per, ceiling):
