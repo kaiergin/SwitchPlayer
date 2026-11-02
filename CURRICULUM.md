@@ -963,6 +963,29 @@ AMENDMENTS (the build, before any real run):
       whether the member action is rare, which tests the IDM-follows-
       the-behaviour-policy trap directly. It also reports by the chosen
       action's rarity (22 decisions against 484).
+  (A7) THE DECISION ON LIVE DECISIONS (audit r2, before any real run).
+      18.1% of the census decisions are dead: all 36 tokens give
+      identical frames (the start jingle, the death animations). Every
+      pair there is equivalent, and they carry 29% of (A)'s true pairs.
+      Pooling them lets a rule with one bit of state reach E2. That rule
+      is all one class when dead, and one fixed grouping of the nine
+      actions otherwise. On the census truth it gives pooled precision
+      0.907 and recall 0.569, but live only 0.825 and 0.390.
+      On live decisions alone, no fixed partition reaches E2. The best
+      recall at precision >= 0.9 is 0.33 for (A) and 0.03 for (B). This is
+      E0's (1b) effect again.
+      - A decision is LIVE when its census grid partition has more than
+        one class (E0's definition).
+      - The A5 bars now apply to the live decisions: pooled, and in at
+        least 6 of the 8 families. The low bar does too.
+      - The all-decision reads stay reported.
+      - Also reported as a reference: the best state-blind partition's
+        live precision and recall, the best fixed grouping at precision
+        >= 0.9.
+      - Diagnostics: tau's calibration percentiles per token length.
+      - A meta line (tau, the rare set, the IDM's record) is written
+        before the replay, so they survive a failed summary write.
+      - A short smoke of the fixed probe runs before the full run.
 BUILT 2026-11-02 (pre-audit): benchmarks/probes/probe_e1_equivalence.py
 and tests/test_e1_equivalence.py (40 passed). A smoke run (2 games, 60
 decisions each, small caps) matched the exact eval in both games
