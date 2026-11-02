@@ -789,6 +789,76 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- E1: a model trained on T2's own play does NOT recover E0's outcome classes (seed 0), 2026-11-02
+
+(Pre-registration: "Next experiment (pre-registered) -- E1", directly
+below, with its amendments A1-A8 and the audit loop, closed at r4.)
+RUN:
+  - 12:02-12:04 EST 11-02 (157 s), CPU (2 threads), under the lock.
+  - The probe is unchanged since the audited 967da7c7.
+  - Output: benchmarks/probes/probe_e1_equivalence-mspacman-two-t2-s0-
+    2026-10-29.jsonl (summary), -meta.jsonl and -decisions.jsonl.
+VALIDITY: main_line_ok. All 30 games MATCH the exact eval (mean 1699.0),
+  with every token and argmax equal to the census's. 4,636 decisions
+  scored; 3,798 live, of which 1,182 are junctions.
+INPUTS:
+  - tau = 0.0260: the median one-step consistency error over T2's 6,548
+    logged decisions. By token length (4 / 8 / 16 / 32 frames): 0.027 /
+    0.032 / 0.024 / 0.029.
+  - IDM: 1,970 training samples and 72 held out. Labels by action 0-8:
+    13 / 59 / 85 / 97 / 161 / 190 / 568 / 52 / 745 (UPLEFT and DOWNLEFT
+    dominate).
+  - Accuracy: train 0.61, held out 0.875. 49 of the 72 held-out samples
+    are UPLEFT, so the held-out accuracy is mostly the majority class.
+VERDICT: KAI_CALL_LOW. Neither candidate reaches precision 0.7 with
+  recall 0.2 on the live decisions. A7's rule and the all-decision rule
+  also read LOW.
+  READS on live decisions, by precision / recall (junction precision):
+      reading                           P       R     junction P
+      (A) forward, tau                0.536   0.816   0.306
+      (A) all one class (trivial)     0.530   1       0.301
+      (A) tau x 0.5                   0.539   0.556     -
+      (A) tau x 2                     0.531   0.955     -
+      (B) IDM, 0.1 x max              0.434   0.161   0.221
+      (B) all nine (trivial)          0.611   1       0.239
+      (B) 0.05 / 0.2 x max      0.550 / 0.486   0.447 / 0.052   -
+      state-blind reference (A)       0.906   0.333     -
+      keyed (heading) reference (A)   0.902   0.547   0.722
+      keyed (heading) reference (B)   0.923   0.544   0.605
+  - (A) predicts 1.90 classes per decision against the truth's 2.33.
+    Its precision equals the all-one rule's at every tau. Over the
+    9 x 4-frame tokens, the forward model's predicted next latents carry
+    essentially no information about which tokens are equivalent.
+  - (B) is below its trivial floor on precision. It puts the chosen
+    action in its own predicted class 91% of the time, but the other
+    members it adds are mostly wrong.
+  - The secondary groups are no better. The 16-frame group: P 0.42
+    against the trivial 0.38. The 32-frame group: 0.27 against 0.23.
+  - By rarity (A1): the one non-rare pair (UPLEFT-4 with DOWNLEFT-4) has
+    P 0.868, against the trivial 0.861. The 35 pairs with a rare token
+    have P 0.530, against the trivial 0.520. Neither split beats
+    chance by much.
+BEYOND THE LETTER:
+  - The information is in the game, not in the models. A fixed rule
+    keyed on Pac-Man's heading, fitted on the census truth, reaches P
+    0.90 / R 0.55. Neither model, trained only on T2's own play, gets
+    near it.
+  - The likely cause is E0's known trap at full strength. In T2's last
+    20 iterations, 2 of its 9 four-frame actions make 90% of its 4-frame
+    plays (UPLEFT-4 232 and DOWNLEFT-4 115, of 384).
+    Its dynamics embeddings for the other seven are barely trained, and
+    the IDM's labels follow the policy. Own play at this volume is not
+    diverse enough to learn what the untried inputs do.
+  - The forward test asks a model trained to predict VALUE-relevant
+    latents (MuZero's consistency loss on its own trajectories) to
+    separate outcomes it never needed to separate. A near-uniform
+    distance structure is what that predicts.
+DECISION (pre-registered, LOW): Kai's call among:
+  - more diverse own play (exploration aimed at untried tokens, so the
+    models see their effects), then E1 again;
+  - identical latents as the criterion, Kai's later plan;
+  - stopping the line.
+
 ### Next experiment (pre-registered) -- E1: can a model trained on the agent's own play recover E0's outcome classes? (Kai, 2026-11-02)
 
 DECISION: Kai 2026-11-02. E1 runs alongside Test C2 ("You can do them at
