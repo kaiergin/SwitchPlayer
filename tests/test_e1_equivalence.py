@@ -2,14 +2,20 @@
 (CURRICULUM "Next experiment (pre-registered) -- E1", Kai 2026-11-02).
 Pins: the partitions' restriction and components, pair counting and its
 pooled precision / recall / F1 (the 0/0 conventions), the trivial-rule
-floors, (B)'s ratio class and member counts, the verdict's boundaries and
-VOID, the token groups, the own-play reader against ablation.read_own_play,
+floors, (B)'s ratio class and member counts, the verdict's boundaries
+(A5: merge precision / recall, pooled and per family) and VOID, that no
+trivial rule reaches E2 on E0's census truth, (A6)'s rarity splits, a
+confidently wrong IDM, (A)'s raw-vs-acting nets, the preflight refusals
+(threads, the census's snapshot), A4's fixed IDM settings, the token
+groups, the own-play reader against ablation.read_own_play,
 the IDM's input (the 4-frame shift) on a simulated life, the reservoir and
 the held-out split, (A)'s consistency errors and token projections on tiny
 random nets against a hand computation, the IDM's training determinism (and
 the process RNG left alone), one scored decision, the hook's next stack, the
 reads on hand-made records, the census / lineage / output files, and -- in
 a subprocess -- that importing the probe changes nothing process-wide."""
+import copy
+import inspect
 import io
 import json
 import os
@@ -53,12 +59,14 @@ def test_importing_the_probe_changes_nothing_process_wide():
             "assert 'probe_exhaustive_eval' not in sys.modules; "
             "assert os.environ.get('PROBE_ACTING_STATES') is None; "
             "assert os.environ.get('PROBE_ENV') is None; "
-            "assert os.environ.get('CUDA_VISIBLE_DEVICES') == '-1'; "
+            "assert os.environ.get('CUDA_VISIBLE_DEVICES') == '-7'; "
             "print('ok')").format(p=str(PROBES), e=str(ROOT / "experiments"),
                                   r=str(ROOT))
     env = {k: v for k, v in os.environ.items()
            if k not in ("PROBE_ACTING_STATES", "PROBE_ENV")}
-    env["CUDA_VISIBLE_DEVICES"] = "-1"        # never the live run's GPU
+    # a sentinel the script mode would overwrite with "-1" (an invalid id:
+    # still no GPU, never the live run's)
+    env["CUDA_VISIBLE_DEVICES"] = "-7"
     r = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env,
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0 and "ok" in r.stdout, r.stderr[-2000:]
@@ -69,7 +77,8 @@ def test_the_pre_registered_constants():
     assert e1.TAU_MULTS == {"0.5": 0.5, "1": 1.0, "2": 2.0}
     assert e1.B_RATIOS == {"0.05": 0.05, "0.1": 0.1, "0.2": 0.2}
     assert e1.B_RATIO == "0.1" and e1.PRIMARY == "4"
-    assert (e1.E2_AT, e1.LOW_BELOW) == (0.8, 0.5)
+    assert (e1.E2_P, e1.E2_R, e1.E2_FAMILIES) == (0.9, 0.5, 6)     # (A5)
+    assert (e1.LOW_P, e1.LOW_R) == (0.7, 0.2)
     assert e1.LATE_ITERS == 20 and e1.HELD_DIV == 10
     assert not e1.SMOKE or any(k.startswith("E1_") for k in os.environ)
 
@@ -148,21 +157,32 @@ def test_the_ratio_class_and_the_member_counts():
     assert e1.membership_counts([4], [4]) == (1, 0, 0)
 
 
-@pytest.mark.parametrize("args,want", [
-    ((0.8, 0.3, None, None), ("E2", 0.8)),
-    ((0.7999, 0.3, None, None), ("KAI_CALL_MID", 0.7999)),
-    ((0.5, 0.3, None, None), ("KAI_CALL_MID", 0.5)),
-    ((0.4999, 0.3, None, None), ("KAI_CALL_LOW", 0.4999)),
-    # (1) does not beat its floor: (2)'s F1 decides though (1)'s is higher
-    ((0.9, 0.95, 0.6, 0.5), ("KAI_CALL_MID", 0.6)),
-    # equal to the floor is not beating it
-    ((0.9, 0.9, 0.85, 0.85), ("KAI_CALL_LOW", None)),
-    ((None, None, None, None), ("KAI_CALL_LOW", None)),
-    ((0.55, 0.2, 0.81, 0.7), ("E2", 0.81)),
-    ((0.85, 0.2, 0.3, 0.1), ("E2", 0.85)),
-    ((0.3, 0.2, 0.45, 0.1), ("KAI_CALL_LOW", 0.45))])
-def test_the_verdict_boundaries(args, want):
-    assert e1.verdict(*args) == want
+def test_the_bars():
+    assert e1.meets(0.9, 0.5, 0.9, 0.5)                   # inclusive
+    assert type(e1.meets(np.float64(0.95), np.float64(0.6), 0.9, 0.5)) is bool
+    assert not e1.meets(0.8999, 0.5, 0.9, 0.5)
+    assert not e1.meets(0.9, 0.4999, 0.9, 0.5)
+    assert not e1.meets(None, 1.0, 0.0, 0.0)              # no predicted merge
+    assert not e1.meets(1.0, None, 0.0, 0.0)              # no true merge
+
+
+@pytest.mark.parametrize("cands,want", [
+    # pooled and in 6 of 8 families
+    ({"A": (0.9, 0.5, 6), "B": (None, None, 0)}, ("E2", ["A"])),
+    ({"A": (0.95, 0.9, 8), "B": (0.91, 0.6, 7)}, ("E2", ["A", "B"])),
+    ({"A": (0.5, 0.1, 0), "B": (0.92, 0.55, 6)}, ("E2", ["B"])),
+    # pooled E2 but 5 families: Kai's call (mid)
+    ({"A": (0.95, 0.9, 5), "B": (None, None, 0)}, ("KAI_CALL_MID", ["A"])),
+    # families do not rescue a pooled miss
+    ({"A": (0.8999, 0.9, 8), "B": (None, None, 0)}, ("KAI_CALL_MID", ["A"])),
+    ({"A": (0.95, 0.4999, 8), "B": (None, None, 0)}, ("KAI_CALL_MID", ["A"])),
+    # the low bars, inclusive
+    ({"A": (0.7, 0.2, 0), "B": (0.1, 0.9, 0)}, ("KAI_CALL_MID", ["A"])),
+    ({"A": (0.6999, 0.9, 0), "B": (0.99, 0.1999, 8)}, ("KAI_CALL_LOW", [])),
+    # a None precision (no predicted merge) fails every bar
+    ({"A": (None, 0.0, 8), "B": (None, None, 8)}, ("KAI_CALL_LOW", []))])
+def test_the_verdict_boundaries(cands, want):
+    assert e1.verdict(cands) == want
 
 
 # --------------------------------------------------------------------------
@@ -547,7 +567,10 @@ def test_a_scored_decision():
     assert b["truth_class"] == [2, 3, 4, 6, 7, 8]
     q = e1.idm_probs(idm, e1.idm_input(stack, nxt)[None])[0]
     assert b["q"] == pytest.approx(q, abs=1e-6)
+    assert b["argmax"] == int(np.argmax(q))         # the unrounded q's
     assert b["pred_class"]["0.1"] == e1.predicted_class(q, 0.1)
+    assert b["chosen_in_pred"] == {k: 6 in v for k, v in
+                                   b["pred_class"].items()}
     assert sc.token_mismatches == sc.argmax_mismatches == sc.missing == 0
     # a 16-frame token: no (B); the prior's argmax is not the token
     sc.run = _fake_run(_prior(4))
@@ -567,6 +590,44 @@ def test_a_scored_decision():
     assert sc.missing == 1 and sc.recs[-1]["missing"] is True
     assert "groups" not in sc.recs[-1]
     assert [r["d"] for r in sc.recs] == [0, 1, 2, 3, 4]
+
+
+class _FixedIDM(torch.nn.Module):
+    """An IDM whose posterior is `q` whatever it sees."""
+
+    def __init__(self, q):
+        super().__init__()
+        self.logits = torch.log(torch.tensor(q, dtype=torch.float32))
+
+    def forward(self, x):
+        return self.logits.expand(x.shape[0], -1)
+
+
+def test_a_confidently_wrong_idm():
+    """(audit r1 M1) The IDM is sure of an action outside the chosen
+    action's class: the chosen action is not in its predicted class
+    (chosen_in_pred False, not scored), its one predicted member is a
+    false merge, and the true class's other members are all missed."""
+    nets = _tiny_nets()
+    rng = np.random.default_rng(8)
+    traj, _ = _life(T2_VOCAB, [11], rng)
+    part = _part([0, 0, 1, 1, 1, 2, 1, 1, 1])
+    q = [0.97] + [0.03 / 8] * 8                     # sure of NOOP
+    sc = e1.Scorer(_fake_run(_prior(11)), nets, T2_VOCAB, {(1, 0): (11, part)},
+                   0.05, _FixedIDM(q), None)
+    sc.game = 1
+    sc.decision(11, traj[0][0], traj[1][0])
+    b = sc.recs[0]["b"]
+    assert b["action"] == 6 and b["truth_class"] == [2, 3, 4, 6, 7, 8]
+    assert b["argmax"] == 0 and b["pred_class"]["0.1"] == [0]
+    assert b["chosen_in_pred"] == {"0.05": False, "0.1": False, "0.2": False}
+    r2 = e1.summarize(sc.recs, T2_GROUPS, [], {1: 1700})["read_2"]
+    assert (r2["tp"], r2["fp"], r2["fn"]) == (0, 1, 5)
+    assert r2["precision"] == 0.0 and r2["recall"] == 0.0
+    assert r2["chosen_in_pred"] == 0.0
+    assert r2["top1"] == 0.0 and r2["top1_in_class"] == 0.0
+    inc = r2["including_chosen"]                    # A4's read: one more miss
+    assert (inc["tp"], inc["fp"], inc["fn"]) == (0, 1, 6)
 
 
 def test_the_hook_scores_the_next_stack_and_restores(monkeypatch):
@@ -629,9 +690,10 @@ def _rec(game, d, four_truth, four_pred, b=None):
 
 
 def _b(action, q, truth_class):
-    return {"action": action, "q": q, "truth_class": truth_class,
-            "pred_class": {k: e1.predicted_class(q, r)
-                           for k, r in e1.B_RATIOS.items()}}
+    pred = {k: e1.predicted_class(q, r) for k, r in e1.B_RATIOS.items()}
+    return {"action": action, "q": q, "argmax": int(np.argmax(q)),
+            "truth_class": truth_class, "pred_class": pred,
+            "chosen_in_pred": {k: action in v for k, v in pred.items()}}
 
 
 def _records():
@@ -651,25 +713,45 @@ def test_the_reads_by_hand():
     assert r1["decisions"] == 2 and r1["pairs_per_decision"] == 36
     assert r1["precision"] == 1.0 and r1["recall"] == round(32 / 52, 4)
     assert r1["f1"] == round(64 / 84, 4)
-    assert r1["floor_rules"] == {"one": round(104 / 124, 4), "distinct": 0.0}
+    # the trivial rules, reported (A5): all one = 52 true of 72 merged pairs
+    assert r1["trivial"] == {
+        "one": {"precision": round(52 / 72, 4), "recall": 1.0,
+                "f1": round(104 / 124, 4)},
+        "distinct": {"precision": None, "recall": 0.0, "f1": 0.0}}
     assert r1["floor"] == round(104 / 124, 4) and r1["beats_floor"] is False
     assert r1["classes_pred_mean"] == 2.0 and r1["classes_truth_mean"] == 1.5
+    # (2) over the members other than the chosen action 4: predicted {5, 6}
+    # against the true {5, 6, 7, 8}
     r2 = s["read_2"]
-    assert r2["decisions"] == 1 and (r2["tp"], r2["fp"], r2["fn"]) == (3, 0, 2)
-    assert r2["f1"] == 0.75 and r2["recall"] == 0.6
-    assert r2["floor_rules"] == {"one": round(10 / 14, 4),
-                                 "distinct": round(2 / 6, 4)}
-    assert r2["beats_floor"] is True and r2["idm_held_acc"] == 0.5
+    assert r2["decisions"] == 1 and (r2["tp"], r2["fp"], r2["fn"]) == (2, 0, 2)
+    assert r2["precision"] == 1.0 and r2["recall"] == 0.5
+    assert r2["f1"] == round(4 / 6, 4)
+    assert r2["trivial"] == {                       # all nine; the chosen alone
+        "one": {"precision": 0.5, "recall": 1.0, "f1": round(8 / 12, 4)},
+        "distinct": {"precision": None, "recall": 0.0, "f1": 0.0}}
+    assert r2["floor"] == round(8 / 12, 4) and r2["idm_held_acc"] == 0.5
+    assert r2["chosen_in_pred"] == 1.0
     assert r2["top1"] == 1.0 and r2["top1_in_class"] == 1.0
     assert r2["pred_class_mean"] == 3.0 and r2["truth_class_mean"] == 5.0
-    ex = r2["excluding_chosen"]
-    assert (ex["tp"], ex["fp"], ex["fn"]) == (2, 0, 2)
-    assert ex["floor_rules"] == {"one": round(8 / 12, 4), "distinct": 0.0}
-    # (1) under its floor; (2) beats its own: (2)'s 0.75 decides
-    assert s["verdict"] == "KAI_CALL_MID" and s["verdict_f1"] == 0.75
-    text = json.dumps(s)
-    assert '"_f1"' not in text and '"_floor"' not in text   # internals
-    # (3): the frequency split, rare = slot 0 alone (position 0 of the
+    inc = r2["including_chosen"]                    # A4's read, reported
+    assert (inc["tp"], inc["fp"], inc["fn"]) == (3, 0, 2)
+    assert inc["trivial"]["one"]["precision"] == round(5 / 9, 4)
+    assert inc["trivial"]["distinct"] == {"precision": 1.0, "recall": 0.2,
+                                          "f1": round(2 / 6, 4)}
+    # (A5): both pass pooled (recall 0.5 inclusive) but each meets the E2
+    # bars in one family of two (1880: (A) recall 16/36; no (B) decision)
+    fam = s["read_3"]["families"]
+    assert fam["1700"]["meets_e2"] == {"A": True, "B": True}
+    assert fam["1880"]["meets_e2"] == {"A": False, "B": False}
+    assert s["decision"] == {
+        "A": {"precision": 1.0, "recall": round(32 / 52, 4), "pooled_e2": True,
+              "families_e2": 1, "families": 2, "pooled_low_bar": True},
+        "B": {"precision": 1.0, "recall": 0.5, "pooled_e2": True,
+              "families_e2": 1, "families": 2, "pooled_low_bar": True}}
+    assert s["verdict"] == "KAI_CALL_MID" and s["verdict_on"] == ["A", "B"]
+    text = json.dumps(s)                    # the summary line is JSON
+    assert '"_p"' not in text and '"_r"' not in text        # internals
+    # (3): (A)'s frequency split, rare = slot 0 alone (position 0 of the
     # 4-frame group)
     fa = s["read_3"]["frequency"]["a"]["4"]
     assert fa["rare"]["pairs_per_decision"] == 8
@@ -677,34 +759,47 @@ def test_the_reads_by_hand():
     assert (fa["rest"]["tp"], fa["rest"]["fn"]) == (25, 16)
     assert s["read_3"]["frequency"]["a"]["16"]["rare"] == {
         "decisions": 2, "pairs_per_decision": 0}
-    fb = s["read_3"]["frequency"]["b"]
-    assert fb["rare"] == {"decisions": 0} and fb["rest"]["decisions"] == 1
     assert s["read_3"]["frequency"]["rare_slots"] == [0]
+    # (A6): no member is rare (NOOP); the chosen action 4 is not rare
+    fb = s["read_3"]["frequency"]["b"]
+    mr = fb["members"]["rare"]
+    assert (mr["tp"], mr["fp"], mr["fn"]) == (0, 0, 0)
+    assert mr["precision"] is None and mr["recall"] is None
+    mo = fb["members"]["rest"]
+    assert (mo["tp"], mo["fp"], mo["fn"]) == (2, 0, 2)
+    assert fb["chosen"]["rare"] == {"decisions": 0}
+    assert fb["chosen"]["rest"]["decisions"] == 1
     # (3): the other groups, the families
     g16 = s["read_3"]["groups"]["16"]
     assert (g16["tp"], g16["fp"], g16["fn"]) == (2, 0, 0) and g16["f1"] == 1.0
     g32 = s["read_3"]["groups"]["32"]
     assert (g32["tp"], g32["fp"], g32["fn"]) == (0, 0, 0) and g32["f1"] == 1.0
-    assert g32["floor_rules"] == {"one": 0.0, "distinct": 1.0}
+    assert g32["precision"] is None and g32["recall"] is None
+    assert g32["trivial"]["one"]["precision"] == 0.0
+    assert g32["trivial"]["distinct"]["f1"] == 1.0
     assert g32["beats_floor"] is False
-    fam = s["read_3"]["families"]
     assert set(fam) == {"1700", "1880"} and fam["1700"]["games"] == [1]
-    assert fam["1700"]["a"]["f1"] == 1.0 and fam["1880"]["b"] == {
+    assert fam["1700"]["a"]["precision"] == 1.0 and fam["1880"]["b"] == {
         "decisions": 0}
-    # (4): robustness
+    # (4): robustness, precision and recall reported
     a4 = s["read_4"]["a"]
     assert set(a4) == {"0.5", "2"}
     assert (a4["0.5"]["4"]["tp"], a4["0.5"]["4"]["fn"]) == (0, 52)
+    assert a4["0.5"]["4"]["precision"] is None
     assert (a4["2"]["4"]["tp"], a4["2"]["4"]["fp"]) == (52, 20)
+    assert a4["2"]["4"]["precision"] == round(52 / 72, 4)
     b4 = s["read_4"]["b"]
     assert set(b4) == {"0.05", "0.2"}
-    assert (b4["0.05"]["tp"], b4["0.05"]["fp"]) == (5, 0)
+    assert (b4["0.05"]["tp"], b4["0.05"]["fp"]) == (4, 0)    # {5, 6, 7, 8}
+    assert b4["0.05"]["recall"] == 1.0
+    assert (b4["0.2"]["tp"], b4["0.2"]["fn"]) == (2, 2)
 
 
 def test_the_rare_split_with_t2s_rare_set():
     """(A1) with the full logs' rare set: the seven rare 4-frame tokens
-    leave one 4-frame pair (UPLEFT, DOWNLEFT: positions 6, 8) outside it;
-    the chosen class {4..8} holds rare actions."""
+    leave one 4-frame pair (UPLEFT, DOWNLEFT: positions 6, 8) outside it.
+    (A6): the members {5, 6, 7, 8} split into rare {5, 7} and the rest
+    {6, 8}; the chosen action 4 (DOWN) is rare."""
     rare = [0, 1, 2, 3, 6, 8, 12]
     s = e1.summarize(_records(), T2_GROUPS, rare, {1: 1700, 2: 1880})
     f = s["read_3"]["frequency"]
@@ -715,8 +810,13 @@ def test_the_rare_split_with_t2s_rare_set():
     assert (f["a"]["4"]["rare"]["tp"], f["a"]["4"]["rare"]["fn"]) == (30, 20)
     assert f["a"]["16"]["rare"]["pairs_per_decision"] == 0     # none rare
     assert f["a"]["32"]["rest"]["pairs_per_decision"] == 10
-    assert f["b"]["rare"]["decisions"] == 1 and f["b"]["rest"] == {
-        "decisions": 0}
+    mr, mo = f["b"]["members"]["rare"], f["b"]["members"]["rest"]
+    assert (mr["tp"], mr["fp"], mr["fn"]) == (1, 0, 1)    # 5 found, 7 missed
+    assert (mo["tp"], mo["fp"], mo["fn"]) == (1, 0, 1)    # 6 found, 8 missed
+    # all nine, rare members other than 4: {0, 1, 2, 3, 5, 7}, true 5 and 7
+    assert mr["trivial"]["one"]["precision"] == round(2 / 6, 4)
+    assert f["b"]["chosen"]["rare"]["decisions"] == 1
+    assert f["b"]["chosen"]["rest"] == {"decisions": 0}
     # the split is a report: the decision does not move
     assert s["verdict"] == e1.summarize(_records(), T2_GROUPS, [],
                                         {1: 1700, 2: 1880})["verdict"]
@@ -748,7 +848,9 @@ def test_the_reads_with_nothing_scored():
     s = e1.summarize([], T2_GROUPS, [], {})
     assert s["read_1"] == {"decisions": 0, "pairs_per_decision": 0}
     assert s["read_2"]["decisions"] == 0
-    assert s["verdict"] == "KAI_CALL_LOW" and s["verdict_f1"] is None
+    assert s["verdict"] == "KAI_CALL_LOW" and s["verdict_on"] == []
+    assert s["decision"]["A"]["precision"] is None
+    assert s["decision"]["B"]["families"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -841,3 +943,262 @@ def test_a_full_e1_is_never_overwritten(tmp_path, monkeypatch):
     s, d = e1.out_files("run-x", smoke=True)
     assert s.name == "probe_e1_equivalence-run-x-smoke.jsonl"
     assert d.name == "probe_e1_equivalence-run-x-smoke-decisions.jsonl"
+
+
+# --------------------------------------------------------------------------
+# (A5) on E0's census truth: no trivial rule can reach E2
+# --------------------------------------------------------------------------
+CENSUS_RUN = "mspacman-two-t2-s0-2026-10-29"
+
+
+def test_no_trivial_rule_reaches_e2_on_the_census_truth():
+    """All one class has merge precision ~0.61 on (A), all nine ~0.68 on
+    (B), all distinct recall 0 (precision None): every combination reads
+    KAI_CALL_LOW. A perfect model reaches E2 (the bar is reachable)."""
+    summary, dec = e1.census_files(CENSUS_RUN)
+    if not (summary.exists() and dec.exists()):
+        pytest.skip("E0's census is not in this tree")
+    census = e1.census_row(summary, CENSUS_RUN, 42)
+    truth, _ = e1.read_truth(dec)
+    by_fam = {}
+    for n, g in census["games"].items():
+        by_fam.setdefault(int(round(g[0])), []).append(int(n))
+    assert len(by_fam) == 8
+    four = [e1.GRID.index(T2_VOCAB[s]) for s in T2_GROUPS["4"]]
+    recs = []
+    for (game, d), (token, part) in sorted(truth.items()):
+        t = e1.restrict(part, four)
+        rec = {"game": game, "d": d, "token": token,
+               "groups": {"4": {"truth": t, "pred": {"1": t}}}}
+        if token in T2_GROUPS["4"]:
+            a = T2_GROUPS["4"].index(token)
+            cls = [x for x in range(9) if t[x] == t[a]]
+            rec["b"] = {"action": a, "q": [1 / 9] * 9, "argmax": a,
+                        "truth_class": cls, "pred_class": {"0.1": cls}}
+        recs.append(rec)
+    a, b = e1.group_read(recs, "4"), e1.b_read(recs)
+    assert a["decisions"] == 4636 and b["decisions"] == 506
+    ta, tb = a["trivial"], b["trivial"]
+    assert ta["one"]["precision"] == pytest.approx(0.61, abs=0.01)
+    assert tb["one"]["precision"] == pytest.approx(0.68, abs=0.01)
+    assert ta["one"]["recall"] == tb["one"]["recall"] == 1.0
+    for t in (ta, tb):
+        assert t["distinct"] == {"precision": None, "recall": 0.0, "f1": 0.0}
+
+    def families_meeting(read, rule):
+        n = 0
+        for games in by_fam.values():
+            r = read([x for x in recs if x["game"] in games])
+            if "trivial" in r:
+                tr = r["trivial"] if rule is None else r["trivial"][rule]
+                n += int(e1.meets(tr["precision"], tr["recall"], e1.E2_P,
+                                  e1.E2_R))
+        return n
+
+    for ra in ("one", "distinct"):
+        for rb in ("one", "distinct"):
+            cands = {"A": (ta[ra]["precision"], ta[ra]["recall"],
+                           families_meeting(lambda s: e1.group_read(s, "4"),
+                                            ra)),
+                     "B": (tb[rb]["precision"], tb[rb]["recall"],
+                           families_meeting(e1.b_read, rb))}
+            assert e1.verdict(cands) == ("KAI_CALL_LOW", []), (ra, rb)
+    # the perfect predictions given above: E2, in all 8 families
+    fam_a = sum(int(e1.meets(r["precision"], r["recall"], e1.E2_P, e1.E2_R))
+                for r in (e1.group_read([x for x in recs if x["game"] in g],
+                                        "4") for g in by_fam.values()))
+    assert (a["precision"], a["recall"], fam_a) == (1.0, 1.0, 8)
+    assert e1.verdict({"A": (1.0, 1.0, fam_a)}) == ("E2", ["A"])
+
+
+# --------------------------------------------------------------------------
+# audit r1: (A)'s nets, the refusals, A4's fixed IDM, tau's guard
+# --------------------------------------------------------------------------
+def _tiny_pred(seed=1):
+    torch.manual_seed(seed)
+    pred = networks.PredictionNetwork(latent_channels=16, action_space=18,
+                                      head_channels=4)
+    torch.nn.init.normal_(pred.policy_fc.weight, std=0.5)
+    torch.nn.init.normal_(pred.value_fc.weight, std=0.5)
+    return pred.eval()
+
+
+def _bn_shifted(state, by):
+    out = copy.deepcopy(state)
+    for k, v in out.items():
+        if k.endswith("running_mean"):
+            v += by
+        elif k.endswith("running_var"):
+            v *= 1.0 + by
+    return out
+
+
+def _apply_acting(run, d):
+    """probe_exhaustive_eval.apply_acting_states's steps (that module's
+    import would set ablation's env globals in this process)."""
+    for n, sd in d["acting_states"].items():
+        getattr(run.trainer, n).load_state_dict(sd)
+    run.set_train_mode(False)
+
+
+def test_as_nets_use_the_raw_bn_stats_while_the_main_line_acts():
+    """(audit r1 L4) nets_for_a: (A)'s representation keeps the trainer's
+    raw running statistics; the live representation (shared with the
+    network manager, as Run shares it) gets the acting ones, and
+    initial_inference reads those."""
+    nets0 = _tiny_nets()
+    rep, pred = nets0.rep, _tiny_pred()
+    nm = object.__new__(muzero.NetworkManager)
+    nm.device, nm.representation, nm.prediction = torch.device("cpu"), rep, \
+        pred
+    trainer = SimpleNamespace(representation=rep, prediction=pred,
+                              dynamics=nets0.dyn, projector=nets0.proj)
+
+    def set_train_mode(training):
+        for net in (rep, pred, nets0.dyn, nets0.proj):
+            net.train(training)
+    run = SimpleNamespace(trainer=trainer, set_train_mode=set_train_mode,
+                          searcher=SimpleNamespace(network_manager=nm))
+    raw = copy.deepcopy(rep.state_dict())
+    acting = {"representation": _bn_shifted(raw, 0.3),
+              "prediction": _bn_shifted(pred.state_dict(), 0.3)}
+    nets, differs = e1.nets_for_a(run, {"acting_states": acting},
+                                  _apply_acting)
+    assert differs and nets.rep is not rep
+    assert nets.dyn is nets0.dyn and nets.proj is nets0.proj
+    assert not any(n.training for n in nets)
+    for k, v in nets.rep.state_dict().items():
+        assert torch.equal(v, raw[k])                       # raw stats
+    for k, v in rep.state_dict().items():
+        assert torch.equal(v, acting["representation"][k])  # acting stats
+    rng = np.random.default_rng(9)
+    stack = muzero.initial_frame_stack(_frame(rng))
+    x = torch.tensor(stack[None], dtype=torch.float32) / 255.0
+    a_rep = copy.deepcopy(rep)
+    r_rep = copy.deepcopy(rep)
+    r_rep.load_state_dict(raw)
+    with torch.no_grad():
+        policy, _ = nm.initial_inference(stack)
+        want = torch.softmax(pred(a_rep(x))[0], dim=1)[0].numpy()
+        assert np.allclose(policy, want, atol=1e-6)
+        assert torch.allclose(nets.rep(x), r_rep(x), atol=1e-6)
+        assert not torch.allclose(nets.rep(x), a_rep(x), atol=1e-4)
+    with pytest.raises(SystemExit, match="acting states for"):
+        e1.nets_for_a(run, {"acting_states": {"dynamics": {}}},
+                      _apply_acting)
+
+
+def _census(snapshot, threads=2, decisions=3):
+    return {"snapshot": str(snapshot), "threads": threads,
+            "decisions": decisions}
+
+
+def test_the_preflight_refusals(tmp_path):
+    snap = tmp_path / "run" / "snaps" / "weights-iter042.pth"
+    snap.parent.mkdir(parents=True)
+    snap.write_bytes(b"weights")
+    truth = {(1, 0): None, (1, 1): None, (2, 0): None}
+    ref = {"games": {}}
+    ok = e1.preflight(snap, _census(snap), truth, ref, False, 2)
+    assert ok is None
+    # the same file by another spelling
+    alias = tmp_path / "run" / "snaps" / ".." / "snaps" / snap.name
+    assert e1.preflight(snap, _census(alias), truth, ref, False, 2) is None
+    with pytest.raises(SystemExit, match="no full census"):
+        e1.preflight(snap, None, truth, ref, False, 2)
+    with pytest.raises(SystemExit, match="has 3 decisions, its summary 4"):
+        e1.preflight(snap, _census(snap, decisions=4), truth, ref, False, 2)
+    # L2: another thread count than the census's
+    with pytest.raises(SystemExit, match="4 torch threads; the census ran 2"):
+        e1.preflight(snap, _census(snap), truth, ref, False, 4)
+    with pytest.raises(SystemExit, match="torch threads"):
+        e1.preflight(snap, {"snapshot": str(snap), "decisions": 3}, truth,
+                     ref, False, 2)
+    # a full run needs the exact eval's row; a smoke does not
+    with pytest.raises(SystemExit, match="exact-eval row"):
+        e1.preflight(snap, _census(snap), truth, None, False, 2)
+    assert e1.preflight(snap, _census(snap), truth, None, True, 2) is None
+
+
+def test_the_census_snapshot_check(tmp_path):
+    """(audit r1 L3) another path: accepted (and recorded) only when the
+    two files hash alike."""
+    snap = tmp_path / "a" / "weights-iter042.pth"
+    snap.parent.mkdir()
+    snap.write_bytes(b"the weights")
+    assert e1.same_snapshot(str(snap), snap) is None
+    copy_ = tmp_path / "b" / "weights-iter042.pth"
+    copy_.parent.mkdir()
+    copy_.write_bytes(b"the weights")
+    note = e1.same_snapshot(str(copy_), snap)
+    import hashlib
+    assert note == {"census_snapshot": str(copy_),
+                    "sha256": hashlib.sha256(b"the weights").hexdigest()}
+    copy_.write_bytes(b"other weights")
+    with pytest.raises(SystemExit, match="sha256"):
+        e1.same_snapshot(str(copy_), snap)
+    with pytest.raises(SystemExit, match="cannot be read"):
+        e1.same_snapshot(str(tmp_path / "gone.pth"), snap)
+    with pytest.raises(SystemExit, match="names no snapshot"):
+        e1.same_snapshot(None, snap)
+    # preflight passes the note on
+    copy_.write_bytes(b"the weights")
+    assert e1.preflight(snap, {"snapshot": str(copy_), "threads": 2,
+                               "decisions": 0}, {}, {}, False, 2) == note
+
+
+def test_the_knob_refusals():
+    e1.check_knobs(30, 0, 0, 10, 20000)
+    e1.check_knobs(1, 60, 12, 1, 1)
+    for bad in ((0, 0, 0, 10, 1), (31, 0, 0, 10, 1), (30, -1, 0, 10, 1),
+                (30, 0, -1, 10, 1), (30, 0, 0, 0, 1), (30, 0, 0, 10, 0)):
+        with pytest.raises(SystemExit, match="E1_GAMES"):
+            e1.check_knobs(*bad)
+
+
+def test_tau_refuses_an_empty_log():
+    with pytest.raises(SystemExit, match="calibrate tau"):
+        e1.calibrate_tau(np.zeros(0))
+    assert e1.calibrate_tau(np.array([0.3, 0.1, 0.2])) == pytest.approx(0.2)
+
+
+def test_a4s_fixed_idm_settings(monkeypatch):
+    """(A4) Nature-DQN convolutions, fc 256 -> 9, Adam lr 3e-4, batch 64,
+    10 epochs, seed 0, cap 20000, plain cross-entropy."""
+    assert (e1.IDM_LR, e1.IDM_BATCH, e1.IDM_EPOCHS_DEFAULT, e1.IDM_SEED,
+            e1.IDM_CAP_DEFAULT) == (3e-4, 64, 10, 0, 20000)
+    sig = inspect.signature(e1.train_idm).parameters
+    assert (sig["seed"].default, sig["batch"].default, sig["lr"].default) == \
+        (0, 64, 3e-4)
+    net = e1.IDM()
+    convs = [m for m in net.conv if isinstance(m, torch.nn.Conv2d)]
+    assert [(c.in_channels, c.out_channels, c.kernel_size, c.stride)
+            for c in convs] == [(9, 32, (8, 8), (4, 4)),
+                                (32, 64, (4, 4), (2, 2)),
+                                (64, 64, (3, 3), (1, 1))]
+    lins = [m for m in net.fc if isinstance(m, torch.nn.Linear)]
+    assert [(l.in_features, l.out_features) for l in lins] == [(3136, 256),
+                                                              (256, 9)]
+    assert sum(isinstance(m, torch.nn.ReLU) for m in net.modules()) == 4
+    assert not any(isinstance(m, (torch.nn.BatchNorm2d, torch.nn.Dropout))
+                   for m in net.modules())
+    calls = []
+    orig = e1.F.cross_entropy
+
+    def spy(*a, **k):
+        calls.append(k)
+        return orig(*a, **k)
+    monkeypatch.setattr(e1.F, "cross_entropy", spy)
+    rng = np.random.default_rng(10)
+    x = rng.integers(0, 256, size=(4, 9, 84, 84), dtype=np.uint8)
+    e1.train_idm(x, np.arange(4), 1)
+    assert calls == [{}]             # one batch, no weights / smoothing
+    opt_types = []
+    real_adam = torch.optim.Adam
+
+    def adam(params, **k):
+        opt_types.append(k)
+        return real_adam(params, **k)
+    monkeypatch.setattr(torch.optim, "Adam", adam)
+    e1.train_idm(x, np.arange(4), 1)
+    assert opt_types == [{"lr": 3e-4}]

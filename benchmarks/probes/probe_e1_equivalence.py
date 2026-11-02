@@ -13,8 +13,9 @@ CANDIDATES
   (A) FORWARD, no new training: T2's own dynamics g and consistency head
       (the snapshot's projector). At a state s, for each token i of a
       group, z_i = projector(g(h(s), i), with_prediction=True), h with the
-      trainer's (raw) BN statistics -- the birth search's and the
-      consistency loss's -- while the main line plays with the deployed
+      trainer's raw BN running statistics in eval mode (what the birth
+      search uses; train_step's consistency loss runs in train mode on
+      batch statistics), while the main line plays with the deployed
       acting states. Tokens i, j are predicted equivalent when 1 - cos(z_i,
       z_j) <= tau; the classes are the connected components. tau is the
       median one-step consistency error of the same nets over T2's own-play
@@ -33,43 +34,58 @@ CANDIDATES
       chosen action is {a : q(a | s, s') >= 0.1 x max_b q(b | s, s')}, s'
       the main line's next stack.
 
-READS (pre-registered)
-  (1) PRIMARY, (A) on the 4-frame group: pair-counting precision, recall
-      and F1 over the 36 token pairs per decision, pooled over the
-      decisions, against the census truth; the floor is the better F1 of
-      the two trivial rules (all one class; all distinct), scored the same
-      way. Also: the mean predicted class count against the truth's (E0:
-      2.09).
-  (2) (B) on the chosen 4-frame actions: precision and recall of the
-      predicted class's members against the census class of the chosen
-      action (the chosen action counts as a member of both; pooled member
-      counts); the same floor rules (all nine actions; the chosen action
-      alone); the IDM's held-out accuracy. Also reported, not used: the
-      same read with the chosen action left out of both sets.
-  (3) secondary: (A) on the 32- and 16-frame groups; (A) and (B) split by
-      token play frequency (amendment (A1), the lineage's 1% vocabulary
-      rule: a token is RARE when its plays are under 1% of all T2's
-      decisions in its own-play log over iterations 23-42 (its last 20),
-      strictly; (A) pairs involving a rare token against the others; (B)
-      decisions whose census class of the chosen action contains a rare
-      action against the others);
-      per game family (FAMILY: the game's return -- the 30 noop starts fall
-      into 8 near-duplicate families of one return each, whose base steps
-      differ by a few).
+READS (pre-registered; amendments (A1), (A5), (A6))
+  (1) PRIMARY, (A) on the 4-frame group: MERGE precision (the share of the
+      pooled pairs predicted equivalent that are truly equivalent) and
+      MERGE recall (the share of the truly equivalent pairs predicted),
+      over the 36 token pairs per decision, pooled over the decisions,
+      against the census truth. Also: the mean predicted class count
+      against the truth's (E0: 2.09).
+  (2) (B) on the chosen 4-frame actions, over the predicted class's
+      members OTHER than the chosen action: precision is the share truly
+      in the chosen action's census class, recall the share of that
+      class's other members predicted (pooled member counts). The chosen
+      action's own presence in its predicted class is reported per
+      decision and as a share (chosen_in_pred), not scored. Also: the
+      IDM's held-out accuracy, its top-1 on the census decisions, and the
+      A4 read that counts the chosen action in both classes (reported).
+  F1 and the floors (the better F1 of the trivial rules: all one class /
+      all nine; all distinct / the chosen action alone) and each trivial
+      rule's precision and recall are reported with (1) and (2), outside
+      the decision.
+  (3) secondary: (A) on the 32- and 16-frame groups; play frequency (A1):
+      a token is RARE when its plays are under 1% of all T2's decisions in
+      its own-play log over iterations 23-42 (its last 20), strictly; (A)
+      pairs involving a rare token against the others; (B) (A6) its
+      members split by whether the member action is rare (predicted and
+      true members alike), and its decisions by whether the chosen action
+      is rare; per game family (FAMILY: the game's return -- the 30 noop
+      starts fall into 8 near-duplicate families of one return each, whose
+      base steps differ by a few).
   (4) robustness: (A) at tau x 0.5 and tau x 2, (B) at 0.05 and 0.2;
-      reported, not used for the decision.
+      precision and recall reported, not used for the decision.
 F1 = 2tp / (2tp + fp + fn); when that denominator is 0 (neither the truth
 nor the prediction has a positive pair) F1 = 1.0, the two agree exactly.
 Precision (recall) is None when tp + fp (tp + fn) is 0.
-DECISION (on the better F1 of (1) and (2), each counted only where it beats
-its floor, unrounded): >= 0.8 -> "E2"; < 0.5, or neither beats its floor ->
-"KAI_CALL_LOW"; in between -> "KAI_CALL_MID". VOID when the main line is not
-the census's: the census must be valid (its main_line_ok), every game must
-equal the exact eval's game of the same noop start and the census's decision
-count, every replayed decision's token must equal the census's (and the
-hook's prior argmax), every census decision must be found.
+DECISION (A5), unrounded:
+  - "E2": (A) or (B) has precision >= 0.9 and recall >= 0.5 pooled AND in
+    at least 6 of the 8 game families (a family counts when its own pooled
+    precision and recall meet both bars);
+  - "KAI_CALL_LOW": neither reaches precision >= 0.7 with recall >= 0.2,
+    pooled;
+  - "KAI_CALL_MID" otherwise.
+  A None precision (no predicted merge) or recall (no true merge) fails
+  every bar. VOID when the main line is not the census's: the census must
+  be valid (its main_line_ok), every game must equal the exact eval's game
+  of the same noop start and the census's decision count, every replayed
+  decision's token must equal the census's (and the hook's prior argmax),
+  every census decision must be found.
 
 usage: python probe_e1_equivalence.py SNAPSHOT.pth   (T2 iteration 42)
+Refuses before anything plays: no full census of the snapshot, a census of
+another snapshot file (accepted, and recorded, when the two hash alike), a
+thread count other than the census's, a full run without the exact eval's
+row, an empty calibration log.
 Writes probe_e1_equivalence-<run>.jsonl (the summary: tau, reads (1)-(4),
 floors, IDM accuracies, verdict, main_line_ok, void_reasons, timings) and
 probe_e1_equivalence-<run>-decisions.jsonl (one line per decision: per group
@@ -120,7 +136,10 @@ PRIMARY = "4"
 TAU_MULTS = {"0.5": 0.5, "1": 1.0, "2": 2.0}  # (A): tau x; "1" is the read
 B_RATIOS = {"0.05": 0.05, "0.1": 0.1, "0.2": 0.2}   # (B): "0.1" is the read
 B_RATIO = "0.1"
-E2_AT, LOW_BELOW = 0.8, 0.5                  # the decision's thresholds
+# the decision (A5): merge precision / recall bars
+E2_P, E2_R = 0.9, 0.5                        # E2, pooled and per family
+E2_FAMILIES = 6                              # ... in >= 6 of the 8 families
+LOW_P, LOW_R = 0.7, 0.2                      # below both candidates: LOW
 LATE_ITERS = 20                              # the frequency split's window
 RARE_PER = 100                               # (A1): rare = under 1 in 100
 HELD_DIV = 10                                # T2's last 10% of lives (ceil)
@@ -232,16 +251,30 @@ def membership_counts(truth_class, pred_class):
     return len(t & p), len(p - t), len(t - p)
 
 
-def verdict(f1_a, floor_a, f1_b, floor_b):
-    """The pre-registered decision on the unrounded F1s: (verdict, the F1
-    it rests on or None). Each F1 counts only where it beats its floor."""
-    eligible = [f for f, fl in ((f1_a, floor_a), (f1_b, floor_b))
-                if f is not None and fl is not None and f > fl]
-    if not eligible:
-        return "KAI_CALL_LOW", None
-    best = max(eligible)
-    return ("E2" if best >= E2_AT else
-            "KAI_CALL_LOW" if best < LOW_BELOW else "KAI_CALL_MID"), best
+def meets(precision, recall, p_bar, r_bar):
+    """A merge precision / recall pair against two bars (inclusive); a
+    None (no predicted merge, or no true one) fails."""
+    # a plain bool: numpy counts make numpy scalars, and np.bool_ is not
+    # JSON-serializable
+    return bool(precision is not None and recall is not None
+                and precision >= p_bar and recall >= r_bar)
+
+
+def verdict(cands):
+    """(A5) on the unrounded reads. `cands` {name: (pooled precision,
+    pooled recall, families whose own pooled precision / recall meet the
+    E2 bars)}. Returns (verdict, the candidates it rests on): "E2" when one
+    meets E2_P / E2_R pooled and in >= E2_FAMILIES families; "KAI_CALL_LOW"
+    when none meets LOW_P / LOW_R pooled; "KAI_CALL_MID" otherwise."""
+    e2 = sorted(n for n, (p, r, fams) in cands.items()
+                if meets(p, r, E2_P, E2_R) and fams >= E2_FAMILIES)
+    if e2:
+        return "E2", e2
+    mid = sorted(n for n, (p, r, _) in cands.items()
+                 if meets(p, r, LOW_P, LOW_R))
+    if mid:
+        return "KAI_CALL_MID", mid
+    return "KAI_CALL_LOW", []
 
 
 # --------------------------------------------------------------------------
@@ -565,12 +598,14 @@ class Scorer:
         actions: token_groups)."""
         pos = self.four_pos[token]
         q = idm_probs(self.idm, idm_input(stack, nxt)[None])[0]
+        pred = {k: predicted_class(q, r) for k, r in B_RATIOS.items()}
         return {"action": pos,
                 "q": [round(float(v), 6) for v in q],
+                "argmax": int(np.argmax(q)),          # the unrounded q's
                 "truth_class": [a for a in range(N_ACTIONS)
                                 if four_truth[a] == four_truth[pos]],
-                "pred_class": {k: predicted_class(q, r)
-                               for k, r in B_RATIOS.items()}}
+                "pred_class": pred,
+                "chosen_in_pred": {k: pos in v for k, v in pred.items()}}
 
     @contextlib.contextmanager
     def hooked(self):
@@ -600,16 +635,22 @@ def _read(counts, floors=None):
     tp, fp, fn = counts[:3]
     p, r, f1 = prf(tp, fp, fn)
     out = {"tp": int(tp), "fp": int(fp), "fn": int(fn),
-           "precision": None if p is None else round(p, 4),
-           "recall": None if r is None else round(r, 4),
-           "f1": round(f1, 4), "_f1": f1}
+           "precision": _round(p), "recall": _round(r), "f1": round(f1, 4),
+           "_p": p, "_r": r}
     if floors is not None:
-        f1s = {k: prf(*c[:3])[2] for k, c in floors.items()}
-        out["floor_rules"] = {k: round(v, 4) for k, v in f1s.items()}
-        out["floor"] = round(floor_of(f1s), 4)
-        out["_floor"] = floor_of(f1s)
-        out["beats_floor"] = bool(f1 > floor_of(f1s))
+        # the trivial rules, reported outside the decision (A5)
+        triv = {k: prf(*c[:3]) for k, c in floors.items()}
+        out["trivial"] = {k: {"precision": _round(v[0]),
+                              "recall": _round(v[1]), "f1": round(v[2], 4)}
+                          for k, v in triv.items()}
+        floor = floor_of({k: v[2] for k, v in triv.items()})
+        out["floor"] = round(floor, 4)
+        out["beats_floor"] = bool(f1 > floor)
     return out
+
+
+def _round(x):
+    return None if x is None else round(x, 4)
 
 
 def group_read(recs, g, mult="1", positions=None, rare=None):
@@ -644,31 +685,41 @@ def group_read(recs, g, mult="1", positions=None, rare=None):
     return out
 
 
-def b_read(recs, ratio=B_RATIO, keep=None, exclude_chosen=False):
+def b_read(recs, ratio=B_RATIO, keep=None, include_chosen=False,
+           members=None):
     """(B) at `ratio`, pooled member counts over the scored 4-frame
-    decisions (`keep`: a filter on the (B) records)."""
+    decisions: by (A5) over the members OTHER than the chosen action
+    (`include_chosen`: A4's read, the chosen action in both classes);
+    `members` restricts the counted member actions (A6's rarity split);
+    `keep` filters the (B) records. The trivial rules: "one" = all nine
+    actions, "distinct" = the chosen action alone (no other member)."""
     bs = [r["b"] for r in recs if "b" in r and (keep is None or keep(r["b"]))]
     counts = np.zeros(3, dtype=np.int64)
     floors = {k: np.zeros(3, dtype=np.int64) for k in ("one", "distinct")}
-    top1 = top1_in = 0
+    top1 = top1_in = chosen_in = 0
     for b in bs:
         a, t, p = b["action"], set(b["truth_class"]), set(b["pred_class"][
             ratio])
         triv = {"one": set(range(N_ACTIONS)), "distinct": {a}}
-        if exclude_chosen:
+        chosen_in += int(a in p)
+        if not include_chosen:
             t, p = t - {a}, p - {a}
             triv = {k: v - {a} for k, v in triv.items()}
+        if members is not None:
+            t, p = t & members, p & members
+            triv = {k: v & members for k, v in triv.items()}
         counts += membership_counts(t, p)
         for k, v in triv.items():
             floors[k] += membership_counts(t, v)
-        top = int(np.argmax(b["q"]))
+        top = int(b["argmax"]) if "argmax" in b else int(np.argmax(b["q"]))
         top1 += int(top == a)
         top1_in += int(top in b["truth_class"])
     out = {"decisions": len(bs)}
     if not bs:
         return out
     out.update(_read(counts, floors))
-    if not exclude_chosen:
+    if not include_chosen and members is None:
+        out["chosen_in_pred"] = round(chosen_in / len(bs), 4)
         out["pred_class_mean"] = round(float(np.mean(
             [len(b["pred_class"][ratio]) for b in bs])), 4)
         out["truth_class_mean"] = round(float(np.mean(
@@ -693,7 +744,7 @@ def summarize(recs, groups, rare, families, held_acc=None):
     r1 = group_read(recs, PRIMARY)
     r2 = b_read(recs)
     r2["idm_held_acc"] = held_acc
-    r2["excluding_chosen"] = b_read(recs, exclude_chosen=True)
+    r2["including_chosen"] = b_read(recs, include_chosen=True)
     rare_pos = {g: {p for p, s in enumerate(slots) if s in rare}
                 for g, slots in groups.items()}
     rare_actions = rare_pos[PRIMARY]          # 4-frame positions = actions
@@ -708,24 +759,42 @@ def summarize(recs, groups, rare, families, held_acc=None):
                         "rest": group_read(recs, g, positions=rare_pos[g],
                                            rare=False)}
                     for g in groups},
-              "b": {"rare": b_read(recs, keep=lambda b: bool(
-                        set(b["truth_class"]) & rare_actions)),
-                    "rest": b_read(recs, keep=lambda b: not (
-                        set(b["truth_class"]) & rare_actions))}},
+              # (A6): the members by their own rarity; the decisions by the
+              # chosen action's
+              "b": {"members": {
+                        "rare": b_read(recs, members=rare_actions),
+                        "rest": b_read(recs, members=set(range(N_ACTIONS))
+                                       - rare_actions)},
+                    "chosen": {
+                        "rare": b_read(recs, keep=lambda b: b["action"]
+                                       in rare_actions),
+                        "rest": b_read(recs, keep=lambda b: b["action"]
+                                       not in rare_actions)}}},
           "families": {}}
+    fam_e2 = {"A": 0, "B": 0}
     for fam, games in fams.items():
         sub = [r for r in recs if r["game"] in games]
-        r3["families"][fam] = {"games": games,
-                               "a": group_read(sub, PRIMARY),
-                               "b": b_read(sub)}
+        a, b = group_read(sub, PRIMARY), b_read(sub)
+        m = {"A": meets(a.get("_p"), a.get("_r"), E2_P, E2_R),
+             "B": meets(b.get("_p"), b.get("_r"), E2_P, E2_R)}
+        for k in m:
+            fam_e2[k] += int(m[k])
+        r3["families"][fam] = {"games": games, "a": a, "b": b,
+                               "meets_e2": m}
     r4 = {"a": {k: {g: group_read(recs, g, k) for g in groups}
                 for k in TAU_MULTS if k != "1"},
           "b": {k: b_read(recs, k) for k in B_RATIOS if k != B_RATIO}}
-    v, best = verdict(r1.get("_f1"), r1.get("_floor"), r2.get("_f1"),
-                      r2.get("_floor"))
+    pooled = {"A": (r1.get("_p"), r1.get("_r")),
+              "B": (r2.get("_p"), r2.get("_r"))}
+    v, on = verdict({k: (p, r, fam_e2[k]) for k, (p, r) in pooled.items()})
+    decision = {k: {"precision": _round(p), "recall": _round(r),
+                    "pooled_e2": meets(p, r, E2_P, E2_R),
+                    "families_e2": fam_e2[k], "families": len(fams),
+                    "pooled_low_bar": meets(p, r, LOW_P, LOW_R)}
+                for k, (p, r) in pooled.items()}
     return {"read_1": _public(r1), "read_2": _public(r2),
             "read_3": _public(r3), "read_4": _public(r4),
-            "verdict": v, "verdict_f1": best}
+            "decision": decision, "verdict": v, "verdict_on": on}
 
 
 # --------------------------------------------------------------------------
@@ -864,6 +933,99 @@ def out_files(run_name, smoke):
     return HERE / f"{tag}.jsonl", dec
 
 
+def check_knobs(games, max_decisions, log_lives, epochs, cap):
+    """The env knobs' ranges (refusals before anything loads)."""
+    if (games < 1 or games > 30 or max_decisions < 0 or log_lives < 0
+            or epochs < 1 or cap < 1):
+        raise SystemExit(f"E1_GAMES {games} must be 1..30, E1_MAX_DECISIONS "
+                         f"{max_decisions} and E1_LOG_LIVES {log_lives} >= 0, "
+                         f"E1_IDM_EPOCHS {epochs} and E1_IDM_CAP {cap} >= 1")
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def same_snapshot(census_snapshot, path):
+    """(audit r1 L3) The census's snapshot against the argument: None when
+    both resolve to one file; when they differ, {the census's path, the
+    shared sha256} if the two files hash alike (accepted, recorded);
+    refuses otherwise (or when the census's file cannot be read)."""
+    if census_snapshot is None:
+        raise SystemExit("the census's summary names no snapshot")
+    theirs = pathlib.Path(census_snapshot)
+    try:
+        if theirs.resolve() == pathlib.Path(path).resolve():
+            return None
+        if not theirs.is_file():
+            raise SystemExit(f"the census's snapshot {theirs} is not "
+                             f"{path} and cannot be read to compare")
+        a, b = _sha256(theirs), _sha256(path)
+    except OSError as e:
+        raise SystemExit(f"the census's snapshot {theirs}: {e}")
+    if a != b:
+        raise SystemExit(f"the census's snapshot {theirs} is not {path} "
+                         f"(sha256 {a[:12]} != {b[:12]})")
+    return {"census_snapshot": str(theirs), "sha256": a}
+
+
+def preflight(path, census, truth, ref, smoke, threads):
+    """Refusals before anything plays: a full census of the snapshot (its
+    decisions all present, the same snapshot -- L3 -- and the same thread
+    count -- L2), and, for a full run, the exact eval's row. Returns the
+    snapshot check's note (None: the same path)."""
+    if census is None:
+        raise SystemExit(f"no full census of {path} next to the probe "
+                         f"(E1's truth)")
+    if len(truth) != census.get("decisions"):
+        raise SystemExit(f"the census's decisions file has {len(truth)} "
+                         f"decisions, its summary {census.get('decisions')}")
+    if census.get("threads") != threads:
+        raise SystemExit(f"{threads} torch threads; the census ran "
+                         f"{census.get('threads')!r} (PROBE_THREADS)")
+    note = same_snapshot(census.get("snapshot"), path)
+    if ref is None and not smoke:
+        raise SystemExit(f"no deployed exact-eval row for {path} (a full E1 "
+                         f"needs one to check its main line)")
+    return note
+
+
+def nets_for_a(run, d, apply_acting):
+    """(A)'s nets: a copy of the trainer's representation with its RAW BN
+    statistics, taken before `apply_acting` (probe_exhaustive_eval's
+    apply_acting_states) gives the live representation / prediction --
+    which the main line's initial_inference reads -- the deployed acting
+    statistics; the trainer's dynamics and projector, which no acting state
+    touches (refused otherwise). Returns (Nets, whether the raw and acting
+    representations differ)."""
+    raw_rep = copy.deepcopy(run.trainer.representation).eval()
+    extra = set(d.get("acting_states") or {}) - {"representation",
+                                                  "prediction"}
+    if extra:
+        raise SystemExit(f"acting states for {sorted(extra)}: (A)'s "
+                         f"dynamics / projector would not be the trainer's")
+    apply_acting(run, d)
+    differs = any(not torch.equal(a, b) for a, b in zip(
+        raw_rep.state_dict().values(),
+        run.trainer.representation.state_dict().values()))
+    nets = Nets(raw_rep, run.trainer.dynamics, run.trainer.projector)
+    if any(n.training for n in nets):
+        raise SystemExit("(A)'s nets must be in eval mode")
+    return nets, differs
+
+
+def calibrate_tau(errors):
+    """tau: the median calibration error; refuses an empty log (no nan)."""
+    if len(errors) == 0:
+        raise SystemExit("no logged decision to calibrate tau on")
+    return float(np.median(errors))
+
+
 def _memory():
     try:
         import psutil
@@ -883,12 +1045,7 @@ def main(argv):
     if not pe.ACTING:
         raise SystemExit("E1 replays the deployed policy: "
                          "PROBE_ACTING_STATES=1")
-    if (GAMES < 1 or GAMES > 30 or MAX_DECISIONS < 0 or LOG_LIVES < 0
-            or IDM_EPOCHS < 1 or IDM_CAP < 1):
-        raise SystemExit(f"E1_GAMES {GAMES} must be 1..30, E1_MAX_DECISIONS "
-                         f"{MAX_DECISIONS} and E1_LOG_LIVES {LOG_LIVES} >= 0, "
-                         f"E1_IDM_EPOCHS {IDM_EPOCHS} and E1_IDM_CAP "
-                         f"{IDM_CAP} >= 1")
+    check_knobs(GAMES, MAX_DECISIONS, LOG_LIVES, IDM_EPOCHS, IDM_CAP)
     t_start = time.time()
     path = pathlib.Path(argv[0]).resolve()
     vocab = pe.snapshot_vocab(path)
@@ -902,13 +1059,9 @@ def main(argv):
         raise SystemExit(f"no full census of {run_name} @{iteration} next to "
                          f"the probe (E1's truth)")
     truth, truth_games = read_truth(truth_path)
-    if len(truth) != census.get("decisions"):
-        raise SystemExit(f"{truth_path.name}: {len(truth)} decisions, the "
-                         f"census's summary says {census.get('decisions')}")
     ref = pc.exact_eval_row(path)
-    if ref is None and not SMOKE:
-        raise SystemExit(f"no deployed exact-eval row for {path} (a full E1 "
-                         f"needs one to check its main line)")
+    snapshot_note = preflight(path, census, truth, ref, SMOKE,
+                              torch.get_num_threads())
     logs = lineage(path, vocab, iteration)
     pbn = pe.snapshot_prefix_bn(path)
     summary_file, dec = out_files(run_name, SMOKE)
@@ -918,21 +1071,7 @@ def main(argv):
         run = ablation.Run(pe.ARM, 0, ablation.ARMS[pe.ARM])
         assert muzero.USE_SEARCH_ACTING is False       # greedy = prior argmax
         d = pe.load(run, path)
-        # the trainer's (raw) representation, kept before the acting states
-        # replace the live one's BN statistics
-        raw_rep = copy.deepcopy(run.trainer.representation).eval()
-        pe.apply_acting_states(run, d)
-        extra = set(d["acting_states"]) - {"representation", "prediction"}
-        if extra:
-            raise SystemExit(f"acting states for {sorted(extra)}: (A)'s "
-                             f"dynamics / projector would not be the "
-                             f"trainer's")
-        raw_differs = any(
-            not torch.equal(a, b) for a, b in zip(
-                raw_rep.state_dict().values(),
-                run.trainer.representation.state_dict().values()))
-        nets = Nets(raw_rep, run.trainer.dynamics, run.trainer.projector)
-        assert not any(n.training for n in nets)
+        nets, raw_differs = nets_for_a(run, d, pe.apply_acting_states)
         del d
         # 1. own play: tau, the IDM's set, the play frequencies
         t0 = time.time()
@@ -940,7 +1079,7 @@ def main(argv):
         errors, t2_lives, late = t2_pass(
             iter_own_play(t2["folder"], t2["last"], LOG_LIVES), t2["vocab"],
             nets, t2["last"])
-        tau = float(np.median(errors))
+        tau = calibrate_tau(errors)
         hold = held_out_count(len(t2_lives))
         held = [s for life in t2_lives[len(t2_lives) - hold:] for s in life]
         pool = Reservoir(IDM_CAP, IDM_SEED)
@@ -1042,7 +1181,11 @@ def main(argv):
                "exact_eval_mean": None if ref is None else ref["exact_mean"],
                "census": {"file": truth_path.name,
                           "main_line_ok": census.get("main_line_ok"),
-                          "decisions": len(truth)},
+                          "decisions": len(truth),
+                          "threads": census.get("threads"),
+                          # L3: None = the same snapshot path; else the
+                          # census's path and the shared sha256
+                          "snapshot_note": snapshot_note},
                "groups": groups,
                "tau": tau, "calibration": calibration_read(errors),
                "raw_rep_differs_from_acting": raw_differs,
