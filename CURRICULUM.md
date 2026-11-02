@@ -1344,6 +1344,32 @@ AUDIT r2 B (the chain at 63a5a9b3, fresh eyes): everything that launches,
   lands between the final row and the completion marker (a few seconds;
   documented, not changed). The fixes are scratchpad-only, so the smoked
   commit stays the launch commit.
+CHAIN FIXES r2 (scratchpad only):
+  - A1 is read over the rows intact in both runs: resumes come from the
+    supv2 logs, cross-checked against eager_collect_steps. C's row 25 is
+    excluded.
+  - prelaunch_testc2.py requires the smoke's "SMOKE OK at HEAD <sha>",
+    and requires the AUDITED files identical between that sha and the
+    run tree's HEAD.
+  - The procedures are given as cmd commands.
+  - The watcher re-checks for an ALERT 90 s after "evals done".
+  - The hand-off's probes ran cleanly on a C2-arm smoke snapshot: both
+    exact evals and probe_prefix_bn (p1_ratio 1.63, FIXED).
+AUDIT r3 B (the changed scripts, fresh eyes): nothing above LOW. The
+  chain's loop is CLOSED.
+  - LOW-1: prelaunch accepts any later rc=0 after the last SMOKE OK.
+    c2_chain_smoke_r2.log is one invocation (one start line, then SMOKE OK
+    and rc=0 on the next line), checked by hand.
+  - LOW-2: A1 keeps a row whose eager list proves an unlogged resume
+    (only a note). Unreachable under the supervisor, and A1 is
+    descriptive.
+  - NITs: an A1 row without step_loss_mean is skipped rather than listed;
+    the no-log fallback; the watcher prints "C2 DONE" for an abandoned run
+    (the tail shows ABANDONED); the PAUSE listing also shows the
+    preflight's own quick-probe pairs.
+ALL 26 SUITES passed in the build tree at c6dc8ac6, 12:12-12:30 EST 11-02,
+  one at a time under the lock. The AUDITED files are identical to the
+  smoked 63a5a9b3.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
