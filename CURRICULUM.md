@@ -1427,6 +1427,13 @@ started an interim exact eval now that commit has freed (CPU only). Resume
 about 22:51 by rerunning the launcher; it will continue from the
 iteration-36 checkpoint.
 
+During the pause the hand-off ran the interim exact evals for rows 5-35
+(commit free 6-24 GB, about 1 minute each, as in C). Deployed:
+502 / 400 / 682 / 653 / 858 / 500 / 808. Raw (trainer-BN, exact): 269 / 586 / 536 /
+701 / 607 / 420 / 540. RESUMED 22:52 EST 11-02 by rerunning the launcher
+(supervisor cmd wrapper 22960); it preflights, then resumes from the
+iteration-36 checkpoint.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
