@@ -1470,6 +1470,38 @@ against C's 0.87-1.16), and it plays fewer env steps per row (46,971 against
 C's 56,313 by row 80). With 20 rows left this points toward WORSE, but the
 read is still the deployed 90k+ window.
 
+Rows 85-120 (trainer-BN; C in brackets):
+
+| row | env steps | C2 | C |
+|---|---|---|---|
+| 85 | 49,614 | 988 | 1,210 |
+| 90 | 52,382 | 1,119 | 949 |
+| 95 | 55,607 | 713 | 1,115 |
+| 100 | 58,549 | 795 | 875 |
+| 105 | 62,474 | 614 | 1,313 |
+| 110 | 65,638 | 975 | 1,125 |
+| 115 | 68,526 | 764 | 1,329 |
+| 120 | 71,299 | 1,019 | 1,646 |
+
+Reset 5 fired after iteration 100, as in C. C2 then got a reset C never had:
+reset 6 after iteration 120, at 71,299 env steps, still under the
+pre-registered 80,000 cutoff (C was at 88,447 by then). It is the rule's
+outcome, not a fault; C2 reaches 80k env steps later in iterations because
+its games are shorter. Cycle 5's ramp trace is exact, and the "in"
+window's value loss is 0.088 (0.140 / 0.131 / 0.122 / 0.101 before).
+
+The dormant fraction is about 0 five iterations after every reset and
+0.21-0.34 five iterations later, in both C and C2. The ramps leave it
+unchanged.
+
+Memory: host commit free fell to 0.6 GB at 11:53 (Firefox reopening on a
+trainer peak). The commit limit is fixed (34.5 GB; the pagefiles are not
+system-managed). The replay buffer is capped and has been full since early in
+the run (31,125 base steps). A 2-minute sampler shows the trainer
+oscillating within each iteration between 8.3 and 11.0 GB, without growth,
+so free commit cycles between 1.6 and 4.4 GB. There is no creep; the risk
+is a new app opening on a peak.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
