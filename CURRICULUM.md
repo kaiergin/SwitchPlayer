@@ -1451,6 +1451,25 @@ by about 250 on the rows 20-40 average (687 vs 937) and by more at rows
 32,343. This is still trainer-BN and single rows; the read is the deployed
 90k+ window.
 
+Rows 55-80 (trainer-BN; C in brackets):
+
+| row | env steps | C2 | C |
+|---|---|---|---|
+| 55 | 31,793 | 614 | 991 |
+| 60 | 34,843 | 706 | 965 |
+| 65 | 37,454 | 765 | 871 |
+| 70 | 40,315 | 675 | 1,080 |
+| 75 | 43,563 | 688 | 1,505 |
+| 80 | 46,971 | 676 | 965 |
+
+Resets 3 and 4 fired after iterations 60 and 80, as in C. Cycle 4's ramp
+trace is identical to the earlier cycles; the "in" window's value loss is
+0.101 (0.140 / 0.131 / 0.122 before). From row 50, C2 has stayed at
+610-880 while C has held 870-1,505. C2's policy entropy runs higher (1.17-1.47
+against C's 0.87-1.16), and it plays fewer env steps per row (46,971 against
+C's 56,313 by row 80). With 20 rows left this points toward WORSE, but the
+read is still the deployed 90k+ window.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
