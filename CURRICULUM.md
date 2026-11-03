@@ -1534,6 +1534,10 @@ During the pause the hand-off finished the interim exact evals through row
     dynamics 0.094 at row 134). The resets keep the policy/value path alive
     under SGD, so the dormancy argument for an AdamW C3 does not hold.
 
+RESUMED 15:14 EST 11-03, early, when Kai said to continue, by rerunning
+the launcher (supervisor cmd wrapper 21628). It preflights, then resumes
+from the iteration-120 checkpoint.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
