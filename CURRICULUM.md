@@ -1502,6 +1502,13 @@ oscillating within each iteration between 8.3 and 11.0 GB, without growth,
 so free commit cycles between 1.6 and 4.4 GB. There is no creep; the risk
 is a new app opening on a peak.
 
+PAUSED A THIRD TIME 13:47 EST 11-03 at Kai's request (a couple of hours),
+in iteration 121, after the iteration-120 checkpoint (which holds reset 6
+and its ramp origin). The supervisor (26552; 23932 exited with it), then the
+trainer (17792; 9680 exited with it), were killed by exact PID; no Ray
+processes were left. The hand-off was left running. Resume about 15:48 by
+rerunning the launcher.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
