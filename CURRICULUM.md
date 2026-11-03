@@ -1509,6 +1509,31 @@ trainer (17792; 9680 exited with it), were killed by exact PID; no Ray
 processes were left. The hand-off was left running. Resume about 15:48 by
 rerunning the launcher.
 
+During the pause the hand-off finished the interim exact evals through row
+120 (24 rows each, all rc=0). Provisional read from score_testc2.py at
+14:30:
+  (2) deployed 20k windows:
+      C2 629 / 639 / 827 / 910 (n 4)
+      C  754 / 1,028 / 1,067 / 1,101 / 80-end 1,423
+      C0 564 / 1,015 / 1,160 / 1,290 / 1,300
+    C2 trails C in every window. The gap is beyond the band only at 20-40k
+    (-389, band 263); at 60-80k it is -191 (band 280). (1) is not yet
+    readable (last row 120 at 71,299 env steps).
+  (3) within-cycle deployed rates after resets 2-5: C2 +7.6 / +8.7 /
+    +3.1 / +19.1 per 1k env; C -21.1 / +4.0 / -16.2 / +30.4.
+  (4) all 24 rows and 120 trace entries are on the schedule. A1 (rows 5,
+    45, 65, 85, 105, intact in both): step_loss_mean C2 +0.430 vs C
+    +0.341. The "in" windows run 0.012-0.023 nats above the "out" windows in
+    every cycle. Mean value targets are lower inside the ramp (as designed:
+    lower gamma, longer n).
+  DORMANCY BY NET (correcting an aggregate read given to Kai the same day):
+    after the first reset, representation, dynamics and prediction stay
+    near 0 dormant (0.000-0.02) in both C and C2. The per-cycle regrowth
+    (0.29-0.64) is almost all in the PROJECTOR. Once resets stop (C,
+    rows 105-134) the trunk re-accumulates slowly (representation 0.044,
+    dynamics 0.094 at row 134). The resets keep the policy/value path alive
+    under SGD, so the dormancy argument for an AdamW C3 does not hold.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
