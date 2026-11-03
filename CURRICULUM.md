@@ -1536,7 +1536,18 @@ During the pause the hand-off finished the interim exact evals through row
 
 RESUMED 15:14 EST 11-03, early, when Kai said to continue, by rerunning
 the launcher (supervisor cmd wrapper 21628). It preflights, then resumes
-from the iteration-120 checkpoint.
+from the iteration-120 checkpoint. The trainer resumed after iteration 120 (71,299 env steps). Rows
+125-135 (trainer-BN from the training log): 1,063 / 1,165 / 974 at 74,795 /
+78,526 / 81,531 env steps. By env steps, C was at 1,313 (76,202) and 1,125
+(79,888). Resets stopped after reset 6 (past 80k env steps). 143 stale
+tail/grep processes from expired log watches (this session's) held about
+0.8 GB of commit; they were stopped by PID, and the watches now end themselves.
+
+PAUSED A FOURTH TIME 18:55 EST 11-03 at Kai's request (no duration given),
+in iteration 139, after the iteration-138 checkpoint: the supervisor (28024;
+27208 exited with it), then the trainer (1680; 8600 exited with it), were
+killed by exact PID. No Ray processes were left. The hand-off is running an
+interim exact eval. Resume when Kai says, by rerunning the launcher.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
