@@ -1413,6 +1413,20 @@ in cycle 1, 0.131 in cycle 2). Host commit free is about 4.9 GB, so the
 interim probes wait (the hand-off's hourly ALERT, advisory); there are no
 orphans from the 12:50 kill.
 
+Row 30 dipped (456; H(pi) 1.91, prefix 0.80 against control 0.37) and row 35
+recovered (1,026; H 1.05, prefix 0.15; C 783 at row 35): one row, no read.
+Firefox opened at 20:14 and took host commit free from 4.3 to about 2 GB.
+The supervisor's advisory "memory creep?" ALERT fired at row 35; the trainer
+itself held steady at 7.7 GB.
+
+PAUSED AGAIN 20:51 EST 11-02 at Kai's request (2 hours), in iteration 37,
+after the iteration-36 checkpoint: the supervisor (13544; its child 24280
+exited with it), then the trainer (10436; 18800 exited with it), killed by
+exact PID. No Ray processes were left. The hand-off was left running; it has
+started an interim exact eval now that commit has freed (CPU only). Resume
+about 22:51 by rerunning the launcher; it will continue from the
+iteration-36 checkpoint.
+
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
 (Pre-registration: "Queued experiment (pre-registered) -- E0", below
