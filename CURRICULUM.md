@@ -1432,7 +1432,24 @@ During the pause the hand-off ran the interim exact evals for rows 5-35
 502 / 400 / 682 / 653 / 858 / 500 / 808. Raw (trainer-BN, exact): 269 / 586 / 536 /
 701 / 607 / 420 / 540. RESUMED 22:52 EST 11-02 by rerunning the launcher
 (supervisor cmd wrapper 22960); it preflights, then resumes from the
-iteration-36 checkpoint.
+iteration-36 checkpoint. The trainer resumed after iteration 36 (20,340 env steps, 72,000
+gradient steps).
+
+Rows 40-50 (trainer-BN, from the training log; C at the same row in brackets):
+
+| row | env steps | C2 | C |
+|---|---|---|---|
+| 40 | 23,582 | 504 | 1,044 |
+| 45 | 26,406 | 520 | 1,253 |
+| 50 | 29,085 | 879 | 1,240 |
+
+Reset 2 fired after iteration 40 (gradient step 80,000), as in C. Cycle 3's
+ramp trace (iterations 41-45) is identical to cycles 1 and 2. The "in"
+window's value loss falls cycle by cycle: 0.140, 0.131, 0.122. C2 trails C
+by about 250 on the rows 20-40 average (687 vs 937) and by more at rows
+40-50. Its games are shorter: 29,085 env steps at row 50 against C's
+32,343. This is still trainer-BN and single rows; the read is the deployed
+90k+ window.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
