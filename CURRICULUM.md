@@ -955,6 +955,31 @@ emulator scores only, per Kai's long-term rule)
       is near 1 by construction (frame-equivalent candidates reach
       identical stacks), so only its precision informs; it stays
       descriptive and never decides.
+  AUDIT r1 (two fresh-eyes auditors, 11-04, read-only): r1a (the probe)
+  nothing HIGH -- the main line is undisturbed (branches touch only the raw
+  ALE from one cloned state, then restore), the reached-stack check matches
+  atari_wrappers' MaxAndSkip, the reads follow A1-A12; one MEDIUM (below,
+  A13) and LOWs. r1b (the tests) three HIGH -- no verdict case pinned
+  A8's precedence (grouping before the fallback); every fixture had read
+  (3) equal to read (2), so a verdict reading (3) would pass; every
+  scripted candidate play stood first in its group, so a wrong played
+  index would pass -- and MEDIUMs (no fast main() test on fakes; the
+  game-ending guard untested; the under-100 count unregistered; one tau
+  for every length), LOWs.
+  (A13) CANDIDATES ARE KEYED BY THEIR RAW INPUTS (audit r1a M1): a run's
+      key is its per-base-step input sequence (each token expanded to its
+      frames / 4 base steps of its action), not its token tuple, so
+      re-tokenizations of the same inputs -- ((a,32),(b,4)) and
+      ((a,16),(a,16),(b,4)) -- are ONE candidate (their counts summed; the
+      spelling played most often stands for it, and read (2) unrolls that
+      spelling). Such pairs are equivalent wherever played and would
+      otherwise inflate read (1) with duplicates that an exact,
+      model-free, game-agnostic canonicalization removes. The duration-
+      token drop of A3 / A10 then reads: a key whose inputs are one
+      action held for a length that is a token of T2's vocabulary.
+      E3 canonicalizes the same way.
+  (A14) THE UNDER-100 RULE of A8 counts the plays of A11's decision rate
+      (candidate plays whose length holds another candidate).
 
 E3 -- the lineage with mined tokens (after B2W and E3a)
   THE LINEAGE: the base recipe's three generations at ~33.3k env steps
