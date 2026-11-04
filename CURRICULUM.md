@@ -789,6 +789,158 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
+
+(Pre-registration: "Next experiment (pre-registered) -- Test C2", below
+E1's; the interim notes, pauses and resumes are at its end.)
+RUN (from the run worktree Y:\SwitchPlayer-testc2-run, detached at
+541a19ee, manifest from the audited cbfd9af5): C2 (a0) launched 12:35
+11-02. It was paused at 12:50 and relaunched fresh at 14:50 (no checkpoint
+yet), then paused three more times at Kai's request (20:51-22:52 11-02,
+13:47-15:14 11-03, 18:55 11-03 to 00:56 11-04), each resumed from the last
+checkpoint (iterations 36 / 120 / 138). It was complete at 05:51 11-04:
+iteration 165, 100,489 env steps, 330,000 train steps. The final evals and
+read (6) landed at 06:09.
+  - 6 resets, after iterations 20 / 40 / 60 / 80 / 100 / 120 (C had 5).
+    The rule resets every 20 iterations while env steps <= 80,000. C2
+    gained fewer env steps per iteration than C (609 against 753), so it
+    was still under 80k at iteration 120 (71,299). 24 held ships.
+  - Pace: 3.28 gradient steps per env step, against C's 2.66 (C reached
+    100,849 env steps at iteration 134, 268,000 train steps).
+  - supervisor.err is empty. Every row had 0 non-finite steps. No
+    exact-eval game was capped (33 rows, both evals).
+  - Host commit ran at 0.6-4.4 GB free while training (Firefox was open
+    at times). Only the advisory "memory creep?" ALERTs fired, and no
+    allocation failed. The interim probes for rows 140-160 waited for
+    memory and ran after the trainer exited.
+EXACT eval (whole games, 30 noop starts, prior argmax). Every score is
+unclipped. DEPLOYED is primary; trainer-BN is secondary. env = thousands
+of env steps. C's rows are in Test C's RESULT.
+       row     5    10    15    20    25    30    35    40    45    50    55
+  C2   env   2.6   5.6   8.7  11.7  14.4  17.0  19.7  23.6  26.4  29.1  31.8
+       dep   502   400   682   653   858   500   808   579   515   792   659
+       tBN   269   586   536   701   607   420   540   719   687   735   577
+       row    60    65    70    75    80    85    90    95   100   105   110
+  C2   env  34.8  37.5  40.3  43.6  47.0  49.6  52.4  55.6  58.5  62.5  65.6
+       dep   635   655   758   773   746   798  1005   805   903   836   948
+       tBN   570   581   966   580   838   952   774   716  1117  1037   886
+       row   115   120   125   130   135   140   145   150   155   160   165
+  C2   env  68.5  71.3  74.8  78.5  81.5  85.3  88.1  90.9  94.3  97.1 100.5
+       dep   772  1085   863   998   930   732   893   879   892   994   885
+       tBN   886  1066   846   905  1008   777   918   803   909   810   851
+  (Row 165 is the final row.)
+READ (1) PRIMARY at 100k: C2's rows in [90k, end] are 150 / 155 / 160 /
+  165 (n = 4): 912.6 deployed, against C's 1411.0 (n 3). C2 - C = -498.4,
+  band +-331.3 -> WORSE. Trainer-BN: 843.3 against 1358.1, -514.8 ->
+  WORSE.
+READ (2) per 20k window of env steps (n), deployed:
+      window              0-20k    20-40k    40-60k    60-80k    80-end
+      C2                  629 (7)   639 (6)   827 (7)   917 (6)   886 (7)
+      C                   754 (6)  1028 (5)  1067 (5)  1101 (6)  1423 (5)
+      C2 - C             -125      -389      -240      -184      -537
+      band (+-)            241       263       254       250       254
+      C0                  564 (6)  1015 (5)  1160 (5)  1290 (6)  1300 (6)
+      C2 - C0             +65      -376      -333      -373      -414
+      band (+-)            241       263       254       250       241
+      Test B2             622       801      1071      1484      1588
+  C2 is below C in every window, beyond the band at 20-40k and 80-end. It
+  is below C0 (no resets, no ramps) beyond the band in every window from
+  20k on. C2's [90k, end] against the other references:
+  - C0's 1262.4 (n 4): -349.8, band +-306.7 -> WORSE.
+  - Test B2's T2 1629.5 (n 4): -716.9, band +-306.7 -> WORSE.
+  C2 levelled off from 60k: 917 at 60-80k, 886 at 80-end. Its best row
+  was row 120 (1085, the last before reset 6), and no later row reached
+  it.
+READ (3) per reset. The dip is row 25 of the cycle against row 20. The
+  rate is OLS deployed per 1k env steps over the cycle's rows 25-40.
+      reset  rows      C2 dip   C dip   C2 rate  C rate  recovered (C2)
+      1      20->25     +205     +165    -17.7   -12.9   row 25
+      2      40->45      -64     +208     +7.6   -21.1   row 50
+      3      60->65      +20      +82     +8.7    +4.0   row 65
+      4      80->85      +52     +154     +3.1   -16.2   row 85
+      5     100->105     -67     +228    +19.1   +30.4   row 110
+      6     120->125    -222       -      -13.4      -    never
+  (Reset 6 has no counterpart in C. Over the same rows C, unreset, moved
+  -194 and rose +5.9 per 1k env steps.) Every one of C's resets "dipped"
+  upward. Three of C2's dipped down (resets 2, 5 and 6). Reset 6, the one
+  C did not have, cost the most and never recovered.
+  The start (rows 5-20, before any reset, so the ramp is the only
+  difference from C): C2 mean 559.3, rate +24.3 per 1k env, against C's
+  642.1 and +47.0 (n 4 each; -82.8, band +-306.7, inside).
+READ (4) mechanism:
+  - The ramp: 33 rows and 165 trace entries checked against the
+    schedule, n exactly and gamma within 1e-12: ALL ON IT. The ramp
+    windows' steps matched the schedule at all 33 rows.
+  - The ramp windows (value loss = the trainer's value cross-entropy per
+    unroll position, in nats; z = the batch's mean position-0 target): in
+    every cycle the value loss in the ramp was above the loss out of it,
+    by +0.008 to +0.023 nats, and the ramp's targets were smaller (mean z
+    0.85-3.16 lower: n 10 at gamma 0.97, against n 5 at 0.988). The
+    value loss fell steadily over the run, in and out (0.140 in cycle 1's
+    ramp, 0.039 at row 165).
+  - A1: the step loss on the rows ending a ramp window, intact in both
+    runs (rows 5 / 45 / 65 / 85 / 105): C2 +0.430 against C +0.341 (n 5),
+    C2 - C +0.089. C2 was higher at all five.
+  - The value |V - z| and the targets' mean |z| by row, over the 26
+    common rows: C2 1.275 / 5.99, C 1.555 / 7.18. The relative error is
+    the same (0.213 against 0.216). C2's targets are smaller because it
+    scores less.
+  - Plasticity: dormant fraction (<= 0.025), by net, representation /
+    dynamics / prediction:
+      row    C2                    C
+      20     14.2 / 17.2 / 31.3%   27 / 21 / 26%  (before reset 1)
+      40     17.5 /  8.2 /  8.3%   0.6 / 0.4 / 0%
+      60      0.2 /  0   /  0%     1.3 / 0.4 / 0.5%
+      80      0.2 /  0   /  1.0%   0 / 0.4 / 0%
+      100     0.4 /  0   /  0%     0.2 / 1.6 / 1.0%
+      120     0.4 /  0.8 /  1.0%   0.4 / 2.0 / 0.5%
+      final   1.0 / 12.5 /  0.5%   4.4 / 9.4 / 2.1%
+    C2's first reset left part of the trunk dormant for its whole cycle
+    (rows 30-40: representation 17.5-17.9%, dynamics 8.2-8.6%, prediction
+    8.3-9.4%). From reset 2 on, every net stayed at or under 1% within
+    cycles. After reset 6 the dynamics net re-accumulated, 0 to 12.5%
+    over 45 iterations, like C's after its last reset. The projector
+    re-collapsed to 31-67% within every cycle, as in C. value_prefix was
+    0 throughout. Weak first-layer filters: 22-28% at rows 15-40, 0-3%
+    from row 45 to 145, rising to 16% at the final row. erank 2.5-58.
+READ (5) the prior: policy_maxp C2 0.44-0.76, below C's at 25 of 26
+  common rows; C 0.53-0.77. The search targets' entropy: C2 0.71-1.82;
+  C 0.86-1.91. Neither prior collapsed.
+READ (6) mechanism: probe_prefix_bn FIXED at C2's final row 165 (p1_ratio
+  0.86).
+READ (7) stability: the largest adjacent deployed drop is -359 for C2 (row
+  25 -> 30, in the cycle after reset 1) and -228 for C (row 130 -> 134).
+  The reset dips are in read (3).
+PRE-REGISTERED DECISION: (1) WORSE -> the ramps hurt. Reads (3) and (4)
+  say why: the dips, the value loss in the ramp windows. Test D is next
+  unless Kai decides otherwise.
+  What reads (3) and (4) show (one seed, so "consistent with"):
+  - The ramp windows trained worse. The value loss was higher inside the
+    ramp than outside it in every cycle, and the step loss at the rows
+    ending a ramp window was above C's at all five comparable rows. The
+    ramp switches to a shorter-horizon target (n 10 at gamma 0.97) for
+    10,000 steps after each reset, then moves it back, so the value head
+    is retrained on a moving target exactly while the reset heads
+    relearn.
+  - The resets cost more with the ramps. None of C's resets dipped; three
+    of C2's did, and the extra reset 6 dipped -222 and never recovered.
+  - The cost is not only at the resets. In the start (rows 5-20, the ramp
+    without a reset), C2 rose at half C's rate (inside the band), and C2
+    sat below C0, which has neither, from 20k on.
+Beyond the letter:
+  - C2 used more gradient steps per env step than C (3.28 against 2.66)
+    and still scored less, so the gap is not a compute shortfall.
+  - C's final-cycle rise (+30.4 per 1k env) did not repeat. C2's last
+    cycle (rows 125-165, 45 iterations, no reset after) was flat to
+    falling (-13.4 over rows 125-140). Test C's reading that "resets help
+    once a cycle runs long enough" gets no support here, but the two
+    cycles are not alike: C2's followed an extra reset at 71k.
+  - The BBF bundle has now not paid in our stack, in either step: resets
+    NO DIFFERENT from no resets (Test C), and the ramps on top WORSE than
+    resets alone (here). It stays out of the base.
+  - Decision speed: frames per decision in the in-run evals 16.7-23.7;
+    36 tokens throughout.
+
 ### RESULT -- E1: a model trained on T2's own play does NOT recover E0's outcome classes (seed 0), 2026-11-02
 
 (Pre-registration: "Next experiment (pre-registered) -- E1", directly
