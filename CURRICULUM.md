@@ -1547,7 +1547,7 @@ PAUSED A FOURTH TIME 18:55 EST 11-03 at Kai's request (no duration given),
 in iteration 139, after the iteration-138 checkpoint: the supervisor (28024;
 27208 exited with it), then the trainer (1680; 8600 exited with it), were
 killed by exact PID. No Ray processes were left. The hand-off is running an
-interim exact eval. Resume when Kai says, by rerunning the launcher.
+interim exact eval. Resume when Kai says, by rerunning the launcher. RESUMED 00:56 EST 11-04 at Kai's request ("Can we continue?"), by rerunning the launcher: it skipped the still-running hand-off and started the supervisor (8780), which logged RESUMING a0 s0 and runs its preflight before resuming the trainer from the iteration-138 checkpoint. The hand-off's 4-6 h "supervisor.log silent" alerts during the pause were expected.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
