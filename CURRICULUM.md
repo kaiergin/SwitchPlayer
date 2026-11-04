@@ -1114,6 +1114,28 @@ under a listed supervisor; the round-trip test calls
 save_run_checkpoint / load_run_checkpoint; the five-optimizer test reads
 Run.__init__'s source for the five make_optimizer lines; read (4)'s
 confound goes into the scorer (A3).
+AUDIT r3 (one fresh-eyes auditor, 11-04): nothing HIGH; the r2 fixes
+correct. M: the smoke's end check compared HEAD for equality, stricter
+than the pre-launch check (the AUDITED files identical between the smoke's
+commit and the run tree's HEAD), so a CURRICULUM.md commit during a smoke
+would fail it after every phase passed. L: the PAUSE note's
+"ParentProcessId" rule was ambiguous for the child's second pid. NITs:
+the pre-launch check accepted any later "rc=0"; three test NITs (a
+no-op training_steps line, env_steps not asserted, a source check that
+an imported class could slip past) and a message wording. (The auditor
+once ran the venv's `python --version` against the brief; nothing else.)
+THE SMOKE passed at 666d00e9 (b2w_smoke_r2.log, 11:06-11:30): SMOKE OK --
+W0 / W1 / W2 to their stops (iterations 6 / 6 / 7, 3,055 / 3,005 / 3,250
+env steps), BBF's AdamW in W0's and W1's iteration-2 checkpoints (two
+groups each, W1's Adam step count 80 = 40 offline + 40 online), both
+resumes after iteration 2, no offline phase rerun, W2's whole offline
+phase, every row's non-finite count present and 0.
+FIXES r3 (the scratchpad tooling only; no AUDITED file changes, so the
+smoke stands): the smoke's end check compares the AUDITED files with the
+start's commit (git diff --quiet) and fails with its own message; the
+pre-launch check takes the FIRST rc line after SMOKE OK; the PAUSE note
+says the child's first pid has a supervisor as its parent. The test NITs
+are left: fixing them would change an AUDITED file after the smoke.
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
