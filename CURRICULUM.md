@@ -789,6 +789,141 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test B2W: Test B2's lineage with BBF's AdamW in place of EfficientZero's SGD (Kai, 2026-11-04)
+
+DECISION: Kai 2026-11-04, after Test C2's RESULT. Offered B2 with Adam
+(BBF's settings) rather than C with Adam, Kai answered "Yeah I'd like to
+try that as the next test". In the same message:
+  - Test D (the smart swap trigger) is BACKLOGGED: "skip D for now (add
+    it to the backlog) and stick with a constant number of steps between
+    swaps". Generations keep a fixed env-step length, as in Test B2.
+  - The test after this one is the queued E3 (tokens mined from the
+    agent's own play, at swaps), which depends on this result: it runs on
+    whichever recipe this test leaves as the base.
+Background:
+  - The optimizer was never tested on its own. SGD (lr 0.2, momentum 0.9,
+    coupled weight decay 1e-4, 1,000-step warmup) entered on 09-24 as one
+    of seven flags in the EfficientZero-fidelity bundle, applied at once
+    and never bisected. That bundle fixed Pong's projector collapse, but
+    the collapse's mechanism was later found to be the shared
+    augmentation draw (probe_shift_collapse), not the optimizer. Before
+    the bundle, the repo ran AdamW (lr 3e-4 on the edge arms, weight
+    decay 1e-4).
+  - Test B2's T2 is the best 100k result: 1629.5 deployed at [90k, end].
+    C0 (T0's recipe, no swaps) reached 1262.4, WORSE than T2. Test C's
+    resets (NO DIFFERENT from C0) and Test C2's ramps (WORSE than C) are
+    out of the base. BBF itself runs both with AdamW; the optimizer is the
+    one part of BBF's training kit not yet tried here.
+  - Weight decay strength. The repo's old AdamW default (lr 1e-3 or
+    3e-4, decay 1e-4) shrank weights by lr x wd = 1e-7 to 3e-8 per step:
+    almost none. EfficientZero's coupled SGD shrinks by lr x wd = 2e-5
+    per step (more with momentum). BBF's AdamW shrinks by 1e-4 x 0.1 =
+    1e-5 per step, the same order as our SGD. So with BBF's settings the
+    test is mostly about Adam's per-parameter step sizes, not about
+    dropping weight decay.
+QUESTION: on Test B2's lineage and budget (two swaps, three generations
+of ~33.3k env steps, 100k in all), does BBF's AdamW reach a higher
+deployed score at 100k than EfficientZero's SGD?
+BBF'S OPTIMIZER (verified 11-04 against the released
+bigger_better_faster/bbf/configs/BBF.gin and bbf/agents/spr_agent.py
+create_scaling_optimizer):
+  - optax.adamw: learning_rate 0.0001 (BBFAgent.learning_rate, and
+    encoder_learning_rate the same), eps 0.00015, weight_decay 0.1
+    (decoupled; both values "from DER (van Hasselt et al, 2019)"), b1
+    0.9, b2 0.999 (the function's defaults).
+  - decay_bias False: rank-1 parameters (biases; in our nets also the BN
+    affines) are not decayed.
+  - warmup 0: no learning-rate warmup.
+  - No gradient clipping in the optimizer.
+THE LINEAGE (seed 0; three generations W0-W2; every env step counted):
+  W0-W2 are Test B2's T0-T2 with one change, the optimizer:
+    - OPTIMIZER "adamw", LEARNING_RATE 1e-4, WEIGHT_DECAY 0.1, eps 1.5e-4,
+      betas (0.9, 0.999), rank-1 parameters excluded from the decay,
+      LR_WARMUP_STEPS 0. torch.optim.AdamW applies the decay as
+      p <- p - lr x wd x p, as optax.adamw does.
+    - Everything else is T0-T2's: TK's 36 tokens at the start,
+      policy-only acting, PREFIX_BN_PER_STEP, the own-play log, the sign
+      clip c0 = 1 in W0, DISCOUNT 0.98805 per base step at every
+      generation, the swap (the master's own play over its whole
+      generation, the halved-clip rule, the 1% vocabulary rule, the
+      master's 50-sim birth search targets, 20,000 offline steps, then
+      online play), the value check, the stop (round(100,000 x (k+1) /
+      3) minus the earlier generations' final env steps), the schedules
+      (nominal 50 iterations, cap 100) and the master gate (the master's
+      last two deployed rows averaging < 502.08 stop the chain; Kai's
+      call).
+    - The offline distillation steps run under the same AdamW (one
+      optimizer per network per generation, fresh at each generation,
+      as in B2).
+    - Kept from B2 although tied to SGD: EfficientZero's gradient
+      placement (EFFZERO_LOSS_SCALING) and the gradient-norm clip at 5.
+      Changing them too would make this more than an optimizer test.
+  The CONTROL is Test B2's T0-T2 (10-29/30, frozen tree
+  Y:\SwitchPlayer-testb2-run): same seed, same budget, already run.
+READS. EXACT eval as before (whole games, 30 noop starts, prior argmax,
+PROBE_ENV=MsPacmanNoFrameskip-v4); DEPLOYED primary, trainer-BN
+secondary. Rows every 5 iterations of each generation, plus each
+generation's final snapshot and the students' row 0 and offline curves.
+Cumulative env steps are the lineage's own online env steps.
+  (1) PRIMARY at 100k: the mean deployed score of W2's rows in [90k, W2's
+      end] (its final included; n rows) against T2's (1629.5, n 4). The
+      band is 2 x 216.9 x sqrt(1/n + 1/4): BETTER / NO DIFFERENT /
+      WORSE. Trainer-BN likewise (T2 1605.2).
+  (2) descriptive: the deployed mean per 20k window of cumulative env
+      steps, beside Test B2 (622 / 801 / 1071 / 1484 / 1588), C and C0,
+      each window against B2's with the same band rule.
+  (3) per generation and per swap, as Test B2's reads: the OLS
+      improvement rate within each generation, the transfer (student
+      row 0 against its master's final), the jump, the offline curves;
+      W0 against T0 over the first 33k env steps (the optimizer is the
+      only difference there, before any swap).
+  (4) mechanism: the gradient norm (step_grad_norm_mean), the value loss
+      and the value targets' mean by row, the prior (policy_maxp, the
+      search targets' entropy), and the plasticity read (dormant
+      fractions by net, weak first-layer filters, the projector's erank)
+      by row. Each is set against T0-T2 where Test B2's rows hold the
+      field and reported alone otherwise.
+  (5) probe_prefix_bn FIXED at each student's row 0 and each
+      generation's final row.
+  (6) stability: the largest adjacent deployed drop; non-finite steps.
+  STOP EARLY on loss divergence or repeated non-finite steps, or at the
+  master gate.
+DECISION AFTER:
+  - (1) BETTER: AdamW with BBF's settings joins the base. E3 runs on the
+    W recipe.
+  - (1) NO DIFFERENT: SGD stays, as the recipe behind every positive
+    result so far. E3 runs on Test B2's recipe. (Kai's call if reads (2)
+    to (4) disagree strongly with (1).)
+  - (1) WORSE: SGD stays. E3 runs on Test B2's recipe.
+CAVEAT:
+  - One seed, against a control run on 10-29/30 from an earlier tree:
+    the same seed but different async trajectories. The band is the
+    within-run row noise, not the seed noise.
+  - The optimizer is tested as BBF configures it (lr, eps, decay, the
+    bias mask, no warmup) as one unit. A verdict is on BBF's settings, not
+    on Adam in general. No learning rate is tuned.
+  - The kept gradient placement and clip were set for SGD. Under Adam a
+    uniform loss scale cancels except against eps, so the 1/K scaling
+    makes eps (1.5e-4) relatively larger than in BBF.
+BUILD (before launch; audited like every build):
+  - muzero.make_optimizer gains two knobs whose defaults leave every
+    existing arm bit for bit unchanged: ADAM_EPS (None = torch's 1e-8)
+    and DECAY_RANK1 (True = decay every parameter, as now; False = BBF's
+    mask, rank-1 parameters in a no-decay group).
+  - The W arms (W0 from T0, W1 / W2 from T1 / T2) with the optimizer
+    settings above; supervise_testb.py's lineage table gains the "w"
+    variant; the prep, student and offline paths take the arm's
+    optimizer unchanged.
+  - Tests: the new knobs (defaults unchanged, the mask's groups, eps
+    and decay reaching torch's AdamW), the W arms' specs against T's
+    (only the optimizer keys differ), and the preflight suites' arm
+    lists.
+  - In the scratchpad: the hand-off, launcher, checker, smoke and scoring
+    script, as for Test B2 and Test C2.
+  - A manifest and a fresh run tree. No change to any existing arm.
+COST: the build and its audit loop, then about 1.3 days of training (Test
+B2 took 27.2 h).
+
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
 (Pre-registration: "Next experiment (pre-registered) -- Test C2", below
@@ -938,6 +1073,10 @@ Beyond the letter:
   - The BBF bundle has now not paid in our stack, in either step: resets
     NO DIFFERENT from no resets (Test C), and the ramps on top WORSE than
     resets alone (here). It stays out of the base.
+KAI 2026-11-04, after this RESULT: Test D is BACKLOGGED (generations keep
+a constant env-step length). Next is Test B2W (Test B2 with BBF's AdamW),
+then the queued E3 (mined tokens), which depends on it. See Test B2W's
+pre-registration, above.
   - Decision speed: frames per decision in the in-run evals 16.7-23.7;
     36 tokens throughout.
 
