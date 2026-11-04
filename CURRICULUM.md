@@ -1341,6 +1341,16 @@ reached its stop (its final cumulative env steps >= round(100,000 x
 (k+1) / 3)); (b) each master's final row is its true final iteration (the
 supervisor's MASTER line); (c) a probe fragment from a killed probe keeps
 read (1) PROVISIONAL (safe side) -- check it by hand if it happens.
+W0 (11:59 launched after the preflight; ~10 min / iteration). Rows 5 /
+10 / 15 / 20 (exact eval, deployed / trainer-BN): 334 / 156, 753 / 392,
+310 / 139, 401 / 358 at 3,085 / 6,430 / 9,643 / 12,793 env steps; T0 at
+the same rows: 400 / 601 / 714 / 690 deployed. Two in-run reads differ
+from T0's recipe from row 10 on: frames per decision 16.9 -> 7.9 -> 7.2
+-> 6.4 (4-frame tokens 15% -> 67% -> 65% -> 70% of play; T0's recipe ran
+~19-27 in C0) and policy_maxp 0.46-0.50 (T0 0.59-0.80). One reading,
+not yet tested: at BBF's lr 1e-4 the prior sharpens more slowly than
+under SGD at 0.2. Single rows, far inside the one-row band; the primary
+read is W2's [90k, end].
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
