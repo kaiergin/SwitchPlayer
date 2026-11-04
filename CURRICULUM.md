@@ -789,6 +789,124 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Queued experiment (pre-registered) -- E3: tokens mined from the agent's own play, added at every swap, with E3a (does grouping by latents make sense?) first (Kai, 2026-11-04)
+
+DECISION: Kai 2026-11-04, with Test B2W ("plan out a queued test that
+will depend on the result of this test"). Test D is backlogged and the
+generations keep a constant env-step length. Kai's answers to the three
+design questions:
+  - GROUPING (E1 found that a model trained on the agent's own play cannot
+    yet tell which tokens are equivalent): "Before deciding on this option,
+    I'm wondering if we can run some sort of test to see if grouping by
+    latents even makes sense? If not, we can probably mine without
+    grouping for now and just assume that raw token sequences from high
+    level gameplay will have little duplicate spellings since it will
+    hopefully be somewhat optimized towards a consistently correct
+    solution." -> E3a below, before E3.
+  - TOKEN FORM: "I'm fine with fixed length as long as it can be a mix of
+    tokens so it isn't always the exact same (for example, in a different
+    game where tokens are a mix of inputs at the same time or in sequence,
+    I'd like this to be able to learn those tokens)."
+  - WHEN: at every swap.
+Background: E0 (T2's 18 tokens: 3.28 outcome classes per decision);
+E1 (LOW: T2's own forward model grouped single 4-frame tokens at chance,
+P 0.536 against the trivial 0.530, because T2's play is narrow -- 2 of its
+9 four-frame actions made 90% of its 4-frame plays). E1 never tested
+multi-token sequences, latents of REAL outcomes, or how often strong play
+spells one move two ways. This is E0's planned E3 ("tokens from successful
+play"), its grouping step now settled by E3a instead of E1; E2 (merged
+search) is not a prerequisite and is skipped.
+DEPENDS ON:
+  - Test B2W: E3 runs on the recipe B2W leaves as the base (BBF's AdamW if
+    B2W reads BETTER, else EfficientZero's SGD = Test B2's recipe). Its
+    control is that lineage's own run (W0-W2 or T0-T2), already run.
+  - E3a: whether, and how, mined sequences are grouped.
+
+E3a -- does grouping by latents make sense for mined sequences? (CPU; the
+emulator scores only, per Kai's long-term rule)
+  DATA: Test B2's T2 (its iteration-42 snapshot, deployed 1699.0) on the 30
+  exact-eval games E0 and E1 used; candidates mined from T2's own-play log.
+  CANDIDATES: contiguous runs of 2-4 decisions in T2's own play, each a
+  fixed sequence of (action, frames) tokens (mixed actions allowed), total
+  length at most 64 frames, counted over the HIGH-ADVANTAGE half of its
+  decisions (the decision's realized discounted return minus its value
+  estimate, ranked within the log); the top 32 by count, single-action
+  runs that equal an existing duration token removed.
+  TRUTH (the emulator, as E0's census): at each live decision of the 30
+  games, every candidate of the same total length is executed from the
+  same state; candidates landing on identical frames form one outcome
+  class.
+  READS:
+  - (1) the DUPLICATE-SPELLING RATE: of the candidate plays T2 actually
+    made at those decisions, the share for which another candidate of the
+    same length lands on identical frames (Kai's assumption: low).
+  - (2) grouping by PREDICTED latents (what works without a simulator):
+    T2's dynamics model unrolled over each candidate from the decision's
+    latent; pairs within a distance threshold grouped; precision / recall
+    against the truth, beside the trivial rules, as E1.
+  - (3) grouping by the latents of the REAL outcomes (an upper bound):
+    T2's representation of each candidate's resulting frames, the same
+    scoring. If (3) cannot separate outcomes, latent grouping is not worth
+    pursuing.
+  DECISION:
+  - (2) reaches precision 0.7 at recall 0.2 (E1's bar) -> E3 groups mined
+    sequences by predicted latents.
+  - else, (1) under 10% -> E3 mines WITHOUT grouping (Kai's fallback).
+  - else (duplicates common, latents fail) -> Kai's call.
+  COST: a probe and its tests (built and audited while B2W trains), about
+  1-3 h of CPU after B2W, under the lock.
+
+E3 -- the lineage with mined tokens (after B2W and E3a)
+  THE LINEAGE: the base recipe's three generations at ~33.3k env steps
+  each (constant), seed 0, every env step counted, mined tokens added at
+  BOTH swaps.
+  A MINED TOKEN is a fixed sequence of steps, each step an input state
+  held for a number of frames: on ALE an action (UPLEFT is up and left at
+  once), on a controller a set of buttons. So the same machinery covers
+  inputs at the same time and in sequence. Like a duration token it is ONE
+  dynamics transition and one search edge; its reward is the sum over its
+  frames, its edge discounted gamma_frame^frames.
+  AT EACH SWAP, in the prep (the master's own-play log, which the prep
+  already reads):
+  - the vocabulary keeps its fixed number of slots; the 1% rule drops the
+    least-used tokens as now; mined tokens fill freed slots (at most 8 per
+    swap);
+  - mining: the candidates as in E3a, from the master's own play, scored
+    by frequency, by compression (decisions saved), and by EFFECT
+    CONSISTENCY (low variance of the master's latent change across the
+    sequence's occurrences: game-agnostic), grouped or not per E3a;
+  - the distillation set relabels the master's stretches that match a
+    mined token as one decision of that token, so the student starts with
+    the new tokens in its targets (the exact target rule is a build
+    amendment, audited);
+  - a mined token the student stops using is dropped at the next swap by
+    the 1% rule, like any token.
+  READS (EXACT eval as before; DEPLOYED primary):
+  - (1) PRIMARY: the last generation's rows in [90k, end] against the
+    base lineage's (W2 or T2), band 2 x 216.9 x sqrt(1/n + 1/n_c):
+    BETTER / NO DIFFERENT / WORSE. Trainer-BN likewise.
+  - (2) the mined tokens: which, their play share and search share per
+    generation, their effect consistency, how many survive the next swap.
+  - (3) decision speed: frames per decision and decisions per second of
+    play (the real-time goal), against the base lineage.
+  - (4) per generation and swap as Test B2's reads; the prior;
+    probe_prefix_bn; stability.
+  DECISION AFTER:
+  - (1) BETTER: mining joins the swap.
+  - (1) NO DIFFERENT: if (3) shows longer decisions at the same score,
+    Kai's call (a speed gain at no cost); otherwise mining stays out.
+  - (1) WORSE: diagnose from (2) (unused or inconsistent tokens) before
+    any rerun.
+  CAVEAT: one seed. The mined tokens come from the master's own play
+  only (no watched footage, so P5c's barrier question does not arise).
+  BUILD: the prep's mining and relabeling, the student vocabulary's mined
+  entries (validate_student_vocab, the token executor and its inner
+  frames, the own-play log at raw-step resolution), the supervisor's
+  lineage, tests, tooling; audited like every build. Pre-registered in
+  detail (amendments) before the build starts.
+  COST: the build and its audit loop during or after E3a, then about 1.3
+  days of training.
+
 ### Next experiment (pre-registered) -- Test B2W: Test B2's lineage with BBF's AdamW in place of EfficientZero's SGD (Kai, 2026-11-04)
 
 DECISION: Kai 2026-11-04, after Test C2's RESULT. Offered B2 with Adam
