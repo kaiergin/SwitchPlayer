@@ -1,22 +1,33 @@
 """E3a: sequences mined from the agent's own play, and whether grouping them
 by latents makes sense (CURRICULUM "Queued experiment (pre-registered) --
-E3", its E3a part and amendments (A1)-(A8), Kai 2026-11-04). Pins: the
-advantage's returns (the prep's clip, unit and per-base-step discount)
+E3", its E3a part and amendments (A1)-(A14), Kai 2026-11-04). Pins: the
+advantage's returns (the prep's clip, unit and per-base-step discount, A9)
 against a hand computation and distill's value check, the high half and
-its ties, the candidate mining (counts, ties by first occurrence, the
-64-frame cap, the dropped duration tokens, the cut-short runs, the
-high-half filter), the multi-step calibration errors and tau_L per length,
-the unrolled and real-outcome projections, the raw-ALE branch (E0's
-digest, MaxAndSkip's observations), the main line's hook on a scripted
-emulator (the candidate plays' eligibility and pairing, the equivalence
-classes, the duplicate flags, the replay and reached-stack checks, the
-emulator restored, a smoke cut, a leaky emulator caught), read (1)'s rate,
-reads (2) / (3)'s pair scoring against the trivial rules (strictly below
-tau_L, the components), every verdict branch and the under-100 rule, the
-validity checks, the value terms and decoder refusals, the acting nets, the
-output files, and -- in subprocesses -- that importing the probe changes
-nothing process-wide and (slow) a smoke run on T2's real snapshot, log and
-census, valid and then VOID."""
+its ties, the candidate mining (A3, A10, A13: keyed by raw inputs, the
+re-tokenizations merged with their counts summed and the most-played
+spelling, ties by first occurrence, the 64-frame cap, the dropped duration
+tokens on inputs, the cut-short runs, the high-half filter), the
+multi-step calibration errors and tau_L per length, the unrolled and
+real-outcome projections, the raw-ALE branch (E0's digest, MaxAndSkip's
+observations, a life lost during the inputs and not in the tail), the main
+line's hook on a scripted emulator with a delayed visible effect (the
+candidate plays' eligibility -- at a lost life, a cut-short token, a token
+that ends the game at its last base step -- and pairing by inputs under
+another spelling, a played candidate that is not first in its group, the
+equivalence classes that need the NOOP tail, the duplicate flags, the
+replay and reached-stack checks against the played member, the real-
+outcome distances against hand-built stacks, distinct tau_L per length,
+the emulator restored, a smoke cut, a leaky emulator caught), read (1)'s
+decision rate (A11) and the under-100 count (A14), reads (2) / (3)'s pair
+scoring against the trivial rules, every verdict branch (A8's precedence,
+read (3) never deciding, the unrounded reads), the validity checks, the
+value terms and codec refusals, the acting nets, the output files, main()
+end to end on fakes (two games, the per-game reset, the meta before the
+replay, the calibration -> tau_L -> Prober wiring, the never-overwrite
+refusal, MISMATCH -> break -> VOID), and -- in subprocesses -- that
+importing the probe changes nothing process-wide and (slow) a smoke run on
+T2's real snapshot, log and census, valid and then VOID."""
+import contextlib
 import copy
 import io
 import json
@@ -24,6 +35,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import types
 from types import SimpleNamespace
 
 import numpy as np
@@ -86,7 +98,7 @@ def test_the_pre_registered_constants():
 
 
 # --------------------------------------------------------------------------
-# (A2) the advantage
+# (A2, A9) the advantage
 # --------------------------------------------------------------------------
 def _frame(rng):
     return rng.integers(0, 256, size=(3, 84, 84), dtype=np.uint8)
@@ -165,7 +177,7 @@ def test_the_high_half_and_its_ties():
 
 
 # --------------------------------------------------------------------------
-# (A3) the candidates
+# (A3, A10, A13) the candidates
 # --------------------------------------------------------------------------
 def test_the_logged_runs():
     runs = list(e3.logged_runs([9, 4, 0], T2_VOCAB))
@@ -175,14 +187,30 @@ def test_the_logged_runs():
     assert list(e3.logged_runs([9], T2_VOCAB)) == []
 
 
-def test_the_duration_tokens():
+def test_the_raw_inputs_of_a_key():
+    """(A13) A key is the input per base step: ((a,32),(b,4)) and
+    ((a,16),(a,16),(b,4)) are one key."""
+    assert e3.run_inputs(((3, 32), (5, 4))) == (3,) * 8 + (5,)
+    assert e3.run_inputs(((3, 16), (3, 16), (5, 4))) == (3,) * 8 + (5,)
+    assert e3.run_inputs(((3, 16), (5, 4), (3, 16))) != \
+        e3.run_inputs(((3, 32), (5, 4)))
+    assert e3.input_frames((2, 3), list(range(10, 19))) == [12] * 4 + [13] * 4
+    assert e3.token_inputs(((2, 4), (3, 8)), list(range(10, 19))) == \
+        [12] * 4 + [13] * 8
+
+
+def test_the_duration_tokens_on_inputs():
     vs = set(T2_VOCAB)
-    assert e3.is_duration_token(((8, 4), (8, 4)), vs)          # (8, 8)
-    assert e3.is_duration_token(((3, 16), (3, 16)), vs)        # (3, 32)
-    assert e3.is_duration_token(((8, 8), (8, 8)), vs)          # (8, 16)
-    assert not e3.is_duration_token(((6, 4), (6, 4)), vs)      # no (6, 8)
-    assert not e3.is_duration_token(((8, 16),) * 3, vs)        # no (8, 48)
-    assert not e3.is_duration_token(((3, 16), (5, 16)), vs)    # two actions
+    ri = e3.run_inputs
+    assert e3.is_duration_input(ri(((8, 4), (8, 4))), vs)          # (8, 8)
+    assert e3.is_duration_input(ri(((3, 16), (3, 16))), vs)        # (3, 32)
+    assert e3.is_duration_input(ri(((8, 8), (8, 8))), vs)          # (8, 16)
+    # (A13) another spelling of the same held input: (8, 4) (8, 4) (8, 8)
+    assert e3.is_duration_input(ri(((8, 4), (8, 4), (8, 8))), vs)
+    assert not e3.is_duration_input(ri(((6, 4), (6, 4))), vs)      # no (6, 8)
+    assert not e3.is_duration_input(ri(((8, 16),) * 3), vs)        # no (8, 48)
+    assert not e3.is_duration_input(ri(((8, 4), (8, 16))), vs)     # no (8, 20)
+    assert not e3.is_duration_input(ri(((3, 16), (5, 16))), vs)    # two inputs
 
 
 def _mining_lives():
@@ -207,6 +235,8 @@ def test_mining_counts_ties_cap_drops_and_the_high_half():
                     (t16, (5, 32)), (t16, (5, 32), (6, 4)),
                     (t16, (5, 32), (6, 4), (6, 4)), ((6, 4), (6, 4)),
                     (s16, t16, t16, s16), (t16, t16, s16)]
+    assert [c["inputs"] for c in cands] == [e3.run_inputs(k) for k in keys]
+    assert all(c["spellings"] == [(c["key"], c["count"])] for c in cands)
     assert [c["count"] for c in cands] == [2, 2] + [1] * 8
     assert [c["id"] for c in cands] == list(range(10))
     assert [c["length"] for c in cands] == [32, 48, 48, 64, 48, 52, 56, 8,
@@ -214,9 +244,10 @@ def test_mining_counts_ties_cap_drops_and_the_high_half():
     assert [c["n"] for c in cands] == [2, 3, 3, 4, 2, 3, 4, 2, 4, 3]
     # (5,16)x2 and (3,16)x2 are duration tokens (5,32) / (3,32); (6,4)x2 is
     # not (no (6, 8)); a 64-frame run is in, an 80-frame one out
-    assert dropped == {(s16, s16): 1, (t16, t16): 1}
+    assert dropped == {(5,) * 8: 1, (3,) * 8: 1}
     assert stats == {"high_runs": 17, "cut_short": 2, "over_length": 1,
-                     "duration_tokens": 2, "counted": 12, "keys": 10}
+                     "duration_tokens": 2, "counted": 12, "keys": 10,
+                     "merged_spellings": 0}
     # the low starts (A 2 and 4, B 2) count nothing
     assert (t16, t16, (5, 32)) not in keys and ((5, 32), (6, 4)) not in keys
     assert (t16, s16) not in keys                       # B's 2
@@ -231,6 +262,40 @@ def test_mining_counts_ties_cap_drops_and_the_high_half():
     assert e3.mine_candidates(lives, T2_VOCAB, set())[0] == []
 
 
+def test_re_tokenizations_merge_into_one_candidate():
+    """(A13) The same inputs spelled two ways: (3,32)(5,16) twice and
+    (3,16)(3,16)(5,16) three times -- one key, counts summed (5), the most
+    played spelling stands for it; a tie goes to the first seen. A key
+    whose inputs hold one action for a token's length is dropped whatever
+    its spelling."""
+    lives = [{"slots": [5, 9], "full": [True] * 2, "offset": 0},       # 32 16
+             {"slots": [4, 4, 9], "full": [True] * 3, "offset": 2},  # 16 16 16
+             {"slots": [4, 4, 9], "full": [True] * 3, "offset": 5},
+             {"slots": [5, 9], "full": [True] * 2, "offset": 8},
+             {"slots": [4, 4, 9], "full": [True] * 3, "offset": 10},
+             {"slots": [14, 14, 15], "full": [True] * 3, "offset": 13}]
+    high = {0, 2, 5, 8, 10, 13, 14}
+    cands, dropped, stats = e3.mine_candidates(lives, T2_VOCAB, high)
+    t32, t16, s16 = (3, 32), (3, 16), (5, 16)
+    first = cands[0]
+    assert first["inputs"] == (3,) * 8 + (5,) * 4 and first["count"] == 5
+    assert first["key"] == (t16, t16, s16)              # played 3 of 5
+    assert first["n"] == 3 and first["length"] == 48
+    assert first["spellings"] == [((t32, s16), 2), ((t16, t16, s16), 3)]
+    assert stats["merged_spellings"] == 1
+    # the lives' other runs: (3,16)(3,16) is (3,32) held -> dropped; the
+    # (8,4)(8,4)(8,8) run is (8,16) held -> dropped, as is its (8,4)(8,4)
+    assert dropped == {(3,) * 8: 3, (8,) * 4: 1, (8,) * 2: 1}
+    # (8,4)(8,8) from 14 is (8, 12): no such token -> a candidate
+    assert (8,) * 3 in [c["inputs"] for c in cands]
+    # a tie between two spellings: the first seen stands for the key
+    tie = [{"slots": [5, 9], "full": [True] * 2, "offset": 0},
+           {"slots": [4, 4, 9], "full": [True] * 3, "offset": 2}]
+    c, _, _ = e3.mine_candidates(tie, T2_VOCAB, {0, 2})
+    assert c[0]["key"] == (t32, s16) and c[0]["count"] == 2
+    assert e3.spelling({"a": 1, "b": 2, "c": 2}) == "b"
+
+
 def test_by_length():
     cands = [{"id": 0, "length": 32}, {"id": 1, "length": 48},
              {"id": 2, "length": 32}]
@@ -238,7 +303,7 @@ def test_by_length():
 
 
 # --------------------------------------------------------------------------
-# (A6) the forward model on tiny nets, its calibration
+# (A6, A12) the forward model on tiny nets, its calibration
 # --------------------------------------------------------------------------
 def _tiny_nets(actions=18, seed=0):
     torch.manual_seed(seed)
@@ -331,7 +396,8 @@ def test_the_length_calibration():
 
 def test_the_own_play_pass():
     """One pass over two lives: offsets, returns, values (acting nets),
-    advantages, the calibration's runs (full, at most 64 frames), counts."""
+    advantages, the calibration's runs (full, at most 64 frames), counts
+    (A9: the truncated life's decisions)."""
     nets, pred = _tiny_nets(), _tiny_pred()
     rng = np.random.default_rng(3)
     s0 = [9, 5, 5, 4, 0]                     # 16, 32, 32, 16, 4 frames
@@ -366,7 +432,8 @@ def test_the_own_play_pass():
                                            (48, 2), (52, 3), (64, 2)]
     errs_a = e3.life_run_errors(nets, e3.life_latents(nets.rep, a), s0)
     assert errors[0] == pytest.approx(errs_a[(0, 2)], abs=1e-6)
-    assert counts == {"lives": 2, "truncated_lives": 1, "decisions": 8,
+    assert counts == {"lives": 2, "truncated_lives": 1,
+                      "truncated_decisions": 3, "decisions": 8,
                       "cut_short_decisions": 1}
 
 
@@ -390,7 +457,7 @@ def test_the_unrolled_and_real_projections():
 
 
 # --------------------------------------------------------------------------
-# (A4) the truth: a scripted emulator with screens
+# (A4, A10) the truth: a scripted emulator with screens
 # --------------------------------------------------------------------------
 class _State:
     def __init__(self, t):
@@ -403,16 +470,29 @@ class _State:
 class _ImgALE:
     """A dot on a strip: RIGHT (2) and the diagonals 5-8 move it right, LEFT
     (3) left, NOOP / UP / DOWN (0, 1, 4) leave it; a corner flickers on odd
-    frames (so MaxAndSkip's max matters)."""
+    frames (so MaxAndSkip's max matters). UP also sets a DELAYED mark the
+    screen shows 20 frames after the last UP press, for 4 frames (an
+    effect only the NOOP tail sees). Moving below position 18 costs a life
+    (a bar shows the lives)."""
     EFFECT = {0: 0, 1: 0, 2: 1, 3: -1, 4: 0, 5: 1, 6: 1, 7: 1, 8: 1}
+    DELAY = 20
 
     def __init__(self):
         self.pos, self.frame, self.acts = 20, 0, 0
+        self.left, self.mark = 3, None
 
     def act(self, a):
+        old = self.pos
         self.pos += self.EFFECT[int(a)]
         self.frame += 1
         self.acts += 1
+        if int(a) == 1:
+            self.mark = self.frame + self.DELAY
+        if self.pos < 18 <= old:
+            self.left -= 1
+
+    def lives(self):
+        return self.left
 
     def getScreenRGB(self):
         img = np.zeros((210, 160, 3), dtype=np.uint8)
@@ -420,13 +500,16 @@ class _ImgALE:
         img[100:112, x:x + 6, :] = 200
         if self.frame % 2:
             img[0:12, 0:12, 0] = 255
+        if self.mark is not None and self.mark <= self.frame < self.mark + 4:
+            img[150:162, 0:12, 2] = 255
+        img[200:206, 0:12 * self.left, 1] = 120
         return img
 
     def cloneState(self):
-        return _State((self.pos, self.frame))
+        return _State((self.pos, self.frame, self.left, self.mark))
 
     def restoreState(self, s):
-        self.pos, self.frame = s.t
+        self.pos, self.frame, self.left, self.mark = s.t
 
 
 class _LeakyImgALE(_ImgALE):
@@ -443,8 +526,9 @@ def test_the_branch_is_e0s_with_maxandskip_observations():
     ale = _ImgALE()
     start = ale.cloneState()
     inputs = [2] * 4 + [3] * 4 + [5] * 8
-    dg, obs = e3.play_branch(ale, start, inputs, 16 + 9, 0)
+    dg, obs, lost = e3.play_branch(ale, start, inputs, 16 + 9, 0)
     assert dg == pc.play_window(ale, start, inputs, 16 + 9, 0)[0]
+    assert lost is False                    # 20 -> 24 -> 20 -> 28
     # by hand: each base step's last two raw frames, maxed
     ale.restoreState(start)
     screens = []
@@ -459,12 +543,14 @@ def test_the_branch_is_e0s_with_maxandskip_observations():
     # another input stream, another digest; the same one again, the same
     assert e3.play_branch(ale, start, [3] * 16, 25, 0)[0] != dg
     assert e3.play_branch(ale, start, inputs, 25, 0)[0] == dg
+    # (L3) a life lost during the inputs counts; one lost in the tail (a
+    # LEFT "tail" here) does not
+    assert e3.play_branch(ale, start, [3] * 16, 25, 0)[2] is True
+    assert e3.play_branch(ale, start, [0] * 4, 30, 3)[2] is False
     with pytest.raises(ValueError):
         e3.play_branch(ale, start, [2] * 6, 25, 0)
     with pytest.raises(ValueError):
         e3.play_branch(ale, start, [2] * 8, 7, 0)
-    assert e3.token_inputs(((2, 4), (3, 8)), list(range(10, 19))) == \
-        [12] * 4 + [13] * 8
     # the reached stack pushes each observation, preprocessed
     stack = muzero.initial_frame_stack(muzero.preprocess_frame(
         screens[0], muzero.IMAGE_RESHAPE))
@@ -476,26 +562,44 @@ def test_the_branch_is_e0s_with_maxandskip_observations():
     assert e3.reached_stack(stack, []) is stack
 
 
+def test_the_delayed_mark_needs_the_noop_tail():
+    """UP then NOOP and NOOP then UP: the same 12 frames, a mark 20 frames
+    later at different times. Without the 60-frame tail they would read as
+    one outcome."""
+    ale = _ImgALE()
+    start = ale.cloneState()
+    up_first = e3.input_frames((1, 0, 2), list(range(9)))
+    up_second = e3.input_frames((0, 1, 2), list(range(9)))
+    short = [e3.play_branch(ale, start, x, 12, 0)[0]
+             for x in (up_first, up_second)]
+    full = [e3.play_branch(ale, start, x, 12 + e3.HORIZON, 0)[0]
+            for x in (up_first, up_second)]
+    assert short[0] == short[1] and full[0] != full[1]
+
+
 # the scripted main line: slots of a small vocabulary, candidates over it
 V = ((0, 4), (2, 4), (3, 4), (5, 4), (2, 8), (1, 4))
-CAND_KEYS = (((2, 4), (2, 4)),            # c0  L8
-             ((5, 4), (2, 4)),            # c1  L8  = c0 (5 moves as 2)
-             ((3, 4), (2, 4)),            # c2  L8
-             ((2, 4), (2, 8)),            # c3  L12
-             ((0, 4), (2, 8)),            # c4  L12
-             ((1, 4), (0, 4), (2, 4)),    # c5  L12
-             ((0, 4), (1, 4), (2, 4)),    # c6  L12 = c5 (1 stays as 0)
-             ((3, 4), (2, 8)))            # c7  L12
-# d0..d9: (2,4) (2,4) (2,8) (1,4) (0,4) (2,4) (2,4)| (2,4) (3,4) (2,8)
-TOKENS = (1, 1, 4, 5, 0, 1, 1, 1, 2, 4)
+CAND_KEYS = (((5, 4), (2, 4)),            # c0  L8   in 5 2
+             ((2, 4), (5, 4)),            # c1  L8   in 2 5   = c0
+             ((3, 4), (2, 4)),            # c2  L8   in 3 2   (from 20: a life)
+             ((2, 4), (2, 8)),            # c3  L12  in 2 2 2
+             ((0, 4), (2, 8)),            # c4  L12  in 0 2 2
+             ((1, 4), (0, 4), (2, 4)),    # c5  L12  in 1 0 2
+             ((0, 4), (1, 4), (2, 4)),   # c6  L12  in 0 1 2 (c5 but the mark)
+             ((5, 4), (2, 8)),            # c7  L12  in 5 2 2  = c3
+             ((3, 4), (2, 8)))            # c8  L12  in 3 2 2
+# d0..d9: (5,4) (2,4) (2,8) (1,4) (0,4) (2,4) (2,4)| (2,4) (3,4) (2,8)
+TOKENS = (3, 1, 4, 5, 0, 1, 1, 1, 2, 4)
 # d6 loses a life at its last base step; d9 ends the game after one of its
 # two base steps (cut short)
 ENDS = {6: (0, False), 9: (0, True)}
+TAUS = {8: 0.05, 12: 0.07}                 # (M7) one tau_L per length
 
 
 def _cands(keys=CAND_KEYS):
-    return [{"id": j, "key": k, "length": sum(f for _, f in k), "n": len(k),
-             "count": 1} for j, k in enumerate(keys)]
+    return [{"id": j, "key": k, "inputs": e3.run_inputs(k),
+             "length": sum(f for _, f in k), "n": len(k), "count": 1,
+             "spellings": [(k, 1)]} for j, k in enumerate(keys)]
 
 
 class _Game:
@@ -561,20 +665,21 @@ def _prior(token, n=len(V)):
     return p
 
 
-def _truth(dead=(3,), drop=(9,), wrong=None):
-    """The census's lines for game 1: live (36 classes) but `dead` (one
+def _truth(dead=(3,), drop=(9,), wrong=None, tokens=TOKENS, game=1):
+    """The census's lines for one game: live (36 classes) but `dead` (one
     class), `drop` missing, `wrong` {d: another token}."""
     wrong = wrong or {}
-    return {(1, d): (wrong.get(d, t), [0] * 36 if d in dead
-                     else list(range(36)))
-            for d, t in enumerate(TOKENS) if d not in drop}
+    return {(game, d): (wrong.get(d, t), [0] * 36 if d in dead
+                        else list(range(36)))
+            for d, t in enumerate(tokens) if d not in drop}
 
 
-def _probe(monkeypatch, ale_cls=_ImgALE, max_decisions=0, truth=None):
+def _probe(monkeypatch, ale_cls=_ImgALE, max_decisions=0, truth=None,
+           tokens=TOKENS, ends=ENDS):
     """The scripted game under the Prober; returns (prober, stacks, the
     main line's observations, the final emulator state, out)."""
     monkeypatch.setattr(e3, "MAX_DECISIONS", max_decisions)
-    game = _Game(ale_cls())
+    game = _Game(ale_cls(), ends)
     monkeypatch.setattr(ablation, "play_token", game.play_token)
     priors = {}
     nm = SimpleNamespace(initial_inference=lambda s: (_prior(priors[id(s)]),
@@ -582,25 +687,35 @@ def _probe(monkeypatch, ale_cls=_ImgALE, max_decisions=0, truth=None):
     run = SimpleNamespace(searcher=SimpleNamespace(network_manager=nm))
     out = io.StringIO()
     prober = e3.Prober(run, _tiny_nets(actions=len(V)), V,
-                       _truth() if truth is None else truth, _cands(),
-                       {8: 0.05, 12: 0.05}, out)
+                       _truth(tokens=tokens) if truth is None else truth,
+                       _cands(), TAUS, out)
     prober.game = 1
     with prober.hooked():
-        stacks, seen = _drive(game, TOKENS, priors)
+        stacks, seen = _drive(game, tokens, priors)
     prober.flush(game)
     assert ablation.play_token == game.play_token       # the hook let go
     return prober, stacks, seen, game.unwrapped.ale.cloneState().t, out
 
 
-def _plain(ale_cls=_ImgALE):
-    game = _Game(ale_cls())
+def _plain(ale_cls=_ImgALE, tokens=TOKENS, ends=ENDS):
+    game = _Game(ale_cls(), ends)
     orig = ablation.play_token
     ablation.play_token = game.play_token
     try:
-        _, seen = _drive(game, TOKENS, {})
+        _, seen = _drive(game, tokens, {})
     finally:
         ablation.play_token = orig
     return seen, game.unwrapped.ale.cloneState().t
+
+
+def _hand_reached(stack, inputs):
+    """A candidate's reached stack from the game's first state, by hand."""
+    game = _Game(_ImgALE())
+    s = stack
+    for a in inputs:
+        s = muzero.push_frame(s, muzero.preprocess_frame(
+            game.base_step(a), muzero.IMAGE_RESHAPE))
+    return s
 
 
 def test_the_main_line_hook_on_a_scripted_game(monkeypatch):
@@ -618,63 +733,95 @@ def test_the_main_line_hook_on_a_scripted_game(monkeypatch):
     assert prober.replay_mismatches == prober.stack_mismatches == 0
     groups = {r["d"]: r["groups"] for r in recs if r.get("groups")}
     # d3's (1,4)(0,4)(2,4) is c5 but d3 is dead: no group
-    assert set(groups) == {0, 1, 5}
-    g0, g1, g5 = groups[0][0], groups[1][0], groups[5][0]
-    # d0 plays c0 (L8): c1 spells it too, c2 does not
+    assert set(groups) == {0, 1, 4}
+    g0, g1, g4 = groups[0][0], groups[1][0], groups[4][0]
+    # d0 plays c0 (L8): c1 spells it too, c2 does not (and loses a life)
     assert (g0["length"], g0["n"], g0["candidate"]) == (8, 2, 0)
     assert g0["members"] == [0, 1, 2] and g0["played"] == 0
     assert g0["truth"] == [0, 0, 1] and g0["duplicate"] is True
-    # d1 plays c3 (L12): five members, c5 = c6, none equals c3
+    assert g0["lives_changed"] == [False, False, True]
+    # d1 plays c3 (L12): c7 is c3; c5 and c6 differ only by the mark the
+    # NOOP tail shows
     assert (g1["length"], g1["candidate"], g1["played"]) == (12, 3, 0)
-    assert g1["members"] == [3, 4, 5, 6, 7]
-    assert g1["truth"] == [0, 1, 2, 2, 3] and g1["duplicate"] is False
-    # d5 plays c0 into d6's lost life (a life-loss at the run's last base
-    # step is in)
-    assert (g5["length"], g5["candidate"], g5["duplicate"]) == (8, 0, True)
-    for g in (g0, g1, g5):
+    assert g1["members"] == [3, 4, 5, 6, 7, 8]
+    assert g1["truth"] == [0, 1, 2, 3, 0, 4] and g1["duplicate"] is True
+    # (H3, A13) d4 plays (0,4)(2,4)(2,4) into d6's lost life: c4's inputs
+    # under another spelling, the SECOND member; its own class has no
+    # other member, though members[0]'s has (c7)
+    assert (g4["length"], g4["n"], g4["candidate"]) == (12, 3, 4)
+    assert g4["played_key"] == [[0, 4], [2, 4], [2, 4]]
+    assert g4["members"] == [3, 4, 5, 6, 7, 8] and g4["played"] == 1
+    assert g4["truth"] == [0, 1, 2, 3, 0, 4] and g4["duplicate"] is False
+    for g in (g0, g1, g4):
+        # the checks ran against the played member (members[0] would fail
+        # g4's: c3 moves at once, the main line waited)
         assert g["replay_ok"] is True and g["stack_ok"] is True
-        assert g["tau"] == 0.05
+        assert g["tau"] == TAUS[g["length"]]           # (M7) by length
         k = len(g["members"])
         assert len(g["dist_pred"]) == len(g["dist_real"]) == k * (k - 1) // 2
-    # identical frames reach identical stacks: c0 and c1 at distance 0
+    # read (3)'s distances against hand-built reached stacks: identical
+    # frames reach identical stacks (c0, c1), c2 does not
+    hand = [_hand_reached(stacks[0], e3.run_inputs(CAND_KEYS[c]))
+            for c in g0["members"]]
+    want_real = e3.pair_distances(e3.stack_projections(prober.nets, hand))
+    assert g0["dist_real"] == pytest.approx(want_real, abs=1e-6)
     assert g0["dist_real"][0] == pytest.approx(0.0, abs=1e-6)
-    seqs = [[1, 1], [3, 1], [2, 1]]
+    assert g0["dist_real"][1] > 0
+    # read (2) unrolls each candidate's spelling from d0's stack
+    seqs = [[3, 1], [1, 3], [2, 1]]
     want = e3.pair_distances(e3.unrolled_projections(prober.nets, stacks[0],
                                                      seqs))
     assert g0["dist_pred"] == pytest.approx(want, abs=1e-6)
     # T2's runs: eligibility at the life's and the game's ends
     runs = {r["d"]: r["runs"] for r in recs if "runs" in r}
     assert runs[5] == [{"n": 2, "length": 8, "eligible": True,
-                        "candidate": 0}]
+                        "candidate": None}]
     assert runs[6] == []                       # the life's last decision
     assert runs[7] == [{"n": 2, "length": 8, "eligible": True,
                         "candidate": None},
                        {"n": 3, "length": 16, "eligible": False,
                         "candidate": None}]
-    # d8 -> d9: c7's key, but d9 was cut short by the game's end
+    # d8 -> d9: c8's inputs, but d9 was cut short by the game's end
     assert runs[8] == [{"n": 2, "length": 12, "eligible": False,
-                        "candidate": 7}]
+                        "candidate": 8}]
     assert runs[4] == [{"n": 2, "length": 8, "eligible": True,
                         "candidate": None},
                        {"n": 3, "length": 12, "eligible": True,
-                        "candidate": None}]
+                        "candidate": 4}]
     assert [x["candidate"] for x in runs[3]] == [None, 5, None]
     assert recs[3]["live"] is False and recs[3]["groups"] == []
     # the reads on these records
     s = e3.summarize(recs)
     r1 = s["read_1"]
     assert (r1["plays"], r1["duplicates"]) == (3, 2)
-    assert r1["rate"] == round(2 / 3, 4)
-    assert (r1["pairs"], r1["equivalent_pairs"]) == (16, 3)
-    assert r1["classes_mean"] == round(8 / 3, 4)
-    assert r1["candidates_mean"] == round(11 / 3, 4)
+    assert r1["plays_with_another_candidate"] == 3
+    assert r1["rate_with_another_candidate"] == round(2 / 3, 4)
+    assert (r1["pairs"], r1["equivalent_pairs"]) == (33, 3)
+    assert r1["classes_mean"] == 4.0 and r1["candidates_mean"] == 5.0
     assert r1["by_length"] == {
-        "8": {"plays": 2, "duplicates": 2, "members": 3, "rate": 1.0},
-        "12": {"plays": 1, "duplicates": 0, "members": 5, "rate": 0.0}}
+        "8": {"plays": 1, "duplicates": 1, "members": 3, "rate": 1.0},
+        "12": {"plays": 2, "duplicates": 1, "members": 6, "rate": 0.5}}
+    assert (r1["branches"], r1["branches_lives_changed"],
+            r1["played_lives_changed"]) == (15, 1, 0)
     assert s["checks"] == {"replay_ok": 3, "stack_ok": 3, "plays": 3}
     assert s["live_decisions"] == 8 and s["decisions"] == 10
-    assert s["runs_on_live"]["2"]["candidate_plays"] == 3
+    assert s["runs_on_live"]["2"]["candidate_plays"] == 2
+    assert s["runs_on_live"]["3"]["candidate_plays"] == 1
     assert s["verdict"] == "KAI_CALL_TOO_FEW"              # 3 < 100 plays
+    assert s["decision"]["plays_counted"] == 3
+
+
+def test_a_token_ending_the_game_at_its_last_base_step(monkeypatch):
+    """(M5) d9 is (2,4), and the game ends at its only base step: it played
+    in full, but a run ending the game is not eligible (c2's inputs)."""
+    tokens = TOKENS[:9] + (1,)
+    prober, _, seen, end, _ = _probe(monkeypatch, tokens=tokens)
+    assert (seen, end) == _plain(tokens=tokens)
+    runs = {r["d"]: r["runs"] for r in prober.recs if "runs" in r}
+    assert runs[8] == [{"n": 2, "length": 8, "eligible": False,
+                        "candidate": 2}]
+    assert prober.recs[8]["live"] is True and prober.recs[8]["groups"] == []
+    assert prober.replay_mismatches == prober.stack_mismatches == 0
 
 
 def test_a_smoke_cut_scores_fewer_decisions_not_a_shorter_game(monkeypatch):
@@ -703,6 +850,20 @@ def test_a_leaky_emulator_is_caught(monkeypatch):
     assert "3 played candidates whose reached stack" in " ".join(why)
 
 
+def test_the_hook_needs_was_real_done(monkeypatch):
+    """A terminal on an env without EpisodicLife's was_real_done raises
+    instead of reading as a game end."""
+    game = _Game(_ImgALE())
+    del game.was_real_done
+    prober = e3.Prober(None, None, V, {}, _cands(), TAUS, None)
+    out = (np.zeros((210, 160, 3), np.uint8), 0.0, True, False,
+           muzero.initial_frame_stack(np.zeros((3, 84, 84), np.uint8)), 1)
+    with pytest.raises(AttributeError):
+        prober.after(game, 1, out[4], None, out)
+    with pytest.raises(ValueError, match="positions"):
+        e3.Prober(None, None, V, {}, _cands()[1:], TAUS, None)
+
+
 # --------------------------------------------------------------------------
 # the reads on hand-made candidate plays
 # --------------------------------------------------------------------------
@@ -710,6 +871,7 @@ def _g(truth, played, dist_pred, dist_real=None, tau=0.1, length=8):
     k = len(truth)
     return {"length": length, "n": 2, "candidate": 0,
             "members": list(range(k)), "played": played, "truth": truth,
+            "lives_changed": [False] * k,
             "duplicate": any(truth[j] == truth[played] for j in range(k)
                              if j != played),
             "tau": tau, "dist_pred": dist_pred,
@@ -722,11 +884,14 @@ def test_read_1_the_duplicate_spelling_rate():
               _g([0, 1, 1], 0, [0.0] * 3),             # c1 = c2, not c0
               _g([0], 0, [], length=12),               # alone: no duplicate
               _g([0, 1, 2, 2], 3, [0.0] * 6, length=16)]
+    groups[1]["lives_changed"] = [False, True, True]
     r = e3.read_1(groups)
     assert (r["plays"], r["duplicates"]) == (4, 2) and r["rate"] == 0.5
     assert r["_rate"] == 0.5
+    # (A11) the decision rate: the plays with another candidate only
     assert r["plays_with_another_candidate"] == 3
     assert r["rate_with_another_candidate"] == round(2 / 3, 4)
+    assert r["_rate_multi"] == pytest.approx(2 / 3)
     assert (r["pairs"], r["equivalent_pairs"]) == (12, 3)
     assert r["equivalent_pair_share"] == 0.25
     assert r["classes_mean"] == round((2 + 2 + 1 + 3) / 4, 4)
@@ -734,6 +899,8 @@ def test_read_1_the_duplicate_spelling_rate():
     assert list(r["by_length"]) == ["8", "12", "16"]
     assert r["by_length"]["8"] == {"plays": 2, "duplicates": 1,
                                    "members": 3, "rate": 0.5}
+    assert (r["branches"], r["branches_lives_changed"],
+            r["played_lives_changed"]) == (11, 2, 0)
     assert e3.read_1([])["rate"] is None and e3.read_1([])["_rate"] is None
 
 
@@ -744,8 +911,9 @@ def test_reads_2_and_3_against_the_trivial_rules():
     g1 = _g([0, 0, 1], 0, [0.05, 0.5, 0.5])
     g2 = _g([0, 1, 2, 2], 2, [0.05, 0.5, 0.5, 0.5, 0.5, 0.5],
             dist_real=[0.5, 0.5, 0.5, 0.5, 0.5, 0.01])
-    r = e3.latent_read([g1, g2], "dist_pred")
-    assert (r["tp"], r["fp"], r["fn"]) == (1, 1, 1) and r["groups"] == 2
+    r = e3.latent_read([g1, g2, _g([0], 0, [])], "dist_pred")
+    assert (r["tp"], r["fp"], r["fn"]) == (1, 1, 1)
+    assert r["plays_with_pairs"] == 2                  # the lone one has none
     assert (r["precision"], r["recall"]) == (0.5, 0.5)
     assert r["trivial"] == {
         "one": {"precision": round(2 / 9, 4), "recall": 1.0,
@@ -791,6 +959,9 @@ def test_grouping_is_strictly_below_tau_and_closes_components():
 @pytest.mark.parametrize("args,want", [
     # (plays, rate, precision, recall, trivial precisions)
     ((100, 0.5, 0.7, 0.2, [0.69, None]), "GROUP_BY_PREDICTED"),  # inclusive
+    # (H1, A8) grouping comes before the fallback: a low duplicate rate
+    # does not pre-empt read (2)
+    ((100, 0.05, 0.8, 0.5, [0.3, None]), "GROUP_BY_PREDICTED"),
     ((99, 0.0, 0.95, 0.9, [0.1, None]), "KAI_CALL_TOO_FEW"),     # < 100
     ((0, None, None, None, [None, None]), "KAI_CALL_TOO_FEW"),
     ((100, 0.0999, 0.6999, 0.9, [0.1, None]), "MINE_WITHOUT_GROUPING"),
@@ -803,10 +974,18 @@ def test_grouping_is_strictly_below_tau_and_closes_components():
     # no predicted merge: no precision, fails
     ((500, 0.5, None, 0.0, [0.3, None]), "KAI_CALL"),
     ((500, 0.5, 0.8, None, [0.3, None]), "KAI_CALL"),
+    ((100, None, None, None, [None, None]), "KAI_CALL"),
     # all distinct alone sets no bar
     ((100, 0.5, 0.7, 0.2, [None]), "GROUP_BY_PREDICTED")])
 def test_the_verdict_branches(args, want):
     assert e3.verdict(*args) == want
+
+
+def _recs_of(groups):
+    return [{"game": 1, "d": d, "token": 3, "live": True,
+             "runs": [{"n": 2, "length": g["length"], "eligible": True,
+                       "candidate": 0}], "groups": [g]}
+            for d, g in enumerate(groups)]
 
 
 def test_the_summary_reads_the_live_plays_and_survives_the_file():
@@ -825,11 +1004,16 @@ def test_the_summary_reads_the_live_plays_and_survives_the_file():
     assert s["runs_on_live"]["2"] == {"eligible": 1, "candidate_plays": 1}
     assert s["read_3_meets_bars"] is True
     assert s["verdict"] == "KAI_CALL_TOO_FEW"
+    assert s["decision"] == {
+        "plays_counted": 1,
+        "plays_counted_are": "plays_with_another_candidate (A14)",
+        "min_plays": 100, "duplicate_rate": 1.0, "duplicate_bar": 0.1,
+        "read_2_meets_bars": True}
     back = [json.loads(json.dumps(r)) for r in recs]
     assert e3.summarize(back) == s
     text = json.dumps(s)
     assert '"_p"' not in text and '"_rate"' not in text
-    assert '"_trivial_p"' not in text
+    assert '"_trivial_p"' not in text and '"_rate_multi"' not in text
     # 100 such plays read GROUP_BY_PREDICTED (P 1, R 1 above all one's 1/3)
     many = [dict(recs[0], d=d) for d in range(100)]
     assert e3.summarize(many)["verdict"] == "GROUP_BY_PREDICTED"
@@ -854,6 +1038,56 @@ def test_the_summary_reads_the_live_plays_and_survives_the_file():
     assert sm["read_1"]["rate"] == 0.075
     assert sm["read_1"]["rate_with_another_candidate"] == 0.3
     assert sm["verdict"] == "KAI_CALL"
+
+
+def test_read_3_never_decides():
+    """(H2, A12) Read (3) passing while read (2) fails leaves Kai's call
+    (a duplicate on every play); read (2) passing while read (3) fails
+    groups."""
+    only3 = _recs_of([_g([0, 0, 1], 0, [0.5] * 3,
+                         dist_real=[0.05, 0.5, 0.5]) for _ in range(100)])
+    s = e3.summarize(only3)
+    assert s["read_3_meets_bars"] and s["read_2"]["meets_bars"] is False
+    assert s["verdict"] == "KAI_CALL"
+    only2 = _recs_of([_g([0, 0, 1], 0, [0.05, 0.5, 0.5],
+                         dist_real=[0.5] * 3) for _ in range(100)])
+    s = e3.summarize(only2)
+    assert s["read_3_meets_bars"] is False and s["read_2"]["meets_bars"]
+    assert s["verdict"] == "GROUP_BY_PREDICTED"
+
+
+def test_the_under_100_rule_counts_plays_with_another_candidate():
+    """(M6, A14) 50 plays with alternatives that pass read (2), and 100 lone
+    plays: 150 candidate plays, 50 counted -> too few."""
+    groups = ([_g([0, 0, 1], 0, [0.05, 0.5, 0.5]) for _ in range(50)]
+              + [_g([0], 0, [], length=12) for _ in range(100)])
+    s = e3.summarize(_recs_of(groups))
+    assert s["read_1"]["plays"] == 150
+    assert s["read_1"]["plays_with_another_candidate"] == 50
+    assert s["read_2"]["meets_bars"] is True
+    assert s["decision"]["plays_counted"] == 50
+    assert s["verdict"] == "KAI_CALL_TOO_FEW"
+    # 100 of them with alternatives: read
+    s = e3.summarize(_recs_of(groups[:1] * 100 + groups[50:]))
+    assert s["verdict"] == "GROUP_BY_PREDICTED"
+
+
+def test_the_unrounded_reads_decide():
+    """The rate 200 / 2001 = 0.099950 reports as 0.1 but is under 10%
+    (mine without grouping); the precision 1402 / 2003 = 0.699950 reports
+    as 0.7 but is under the bar (Kai's call)."""
+    rate = _recs_of([_g([0, 0], 0, [0.5]) for _ in range(200)]
+                    + [_g([0, 1], 0, [0.5]) for _ in range(1801)])
+    s = e3.summarize(rate)
+    assert s["read_1"]["rate_with_another_candidate"] == 0.1
+    assert s["verdict"] == "MINE_WITHOUT_GROUPING"
+    prec = _recs_of([_g([0, 0], 0, [0.01]) for _ in range(1402)]
+                    + [_g([0, 1], 0, [0.01]) for _ in range(601)]
+                    + [_g([0, 1], 0, [0.5]) for _ in range(2000)])
+    s = e3.summarize(prec)
+    assert s["read_2"]["precision"] == 0.7 and s["read_2"]["recall"] == 1.0
+    assert s["read_2"]["meets_bars"] is False
+    assert s["verdict"] == "KAI_CALL"                   # rate 1402 / 4003
 
 
 # --------------------------------------------------------------------------
@@ -932,12 +1166,16 @@ def test_the_value_terms_and_their_refusals():
         e3.value_terms(T2_SPEC, {})
 
 
-def test_the_value_decoder_check():
+def test_the_value_codec_check():
     pred = _tiny_pred(support=muzero.VALUE_SUPPORT)
     e3.check_value_head(pred, {})
     e3.check_value_head(pred, {"VALUE_CEILING": muzero.VALUE_CEILING})
+    e3.check_value_head(pred, {"USE_H_TRANSFORM": True})
     with pytest.raises(SystemExit, match="h-transform"):
         e3.check_value_head(pred, {"_linear_support": True})
+    # (L5) the encode side
+    with pytest.raises(SystemExit, match="USE_H_TRANSFORM"):
+        e3.check_value_head(pred, {"USE_H_TRANSFORM": False})
     with pytest.raises(SystemExit, match="value support"):
         e3.check_value_head(pred, {"VALUE_CEILING": 400})
     with pytest.raises(SystemExit, match="value support"):
@@ -967,9 +1205,9 @@ def _apply_acting(run, d):
 
 
 def test_the_acting_nets():
-    """(A6) The representation and prediction carry the acting states (the
-    deployed ones, unlike E1's raw-statistics (A)); dynamics and projector
-    are the trainer's; an acting state for them is refused."""
+    """(A6, A12) The representation and prediction carry the acting states
+    (the deployed ones, unlike E1's raw-statistics (A)); dynamics and
+    projector are the trainer's; an acting state for them is refused."""
     nets0, pred = _tiny_nets(), _tiny_pred()
     raw = copy.deepcopy(nets0.rep.state_dict())
 
@@ -1020,6 +1258,198 @@ def test_the_knob_refusals():
             e3.check_knobs(*bad)
 
 
+def test_the_correlation_is_none_without_spread():
+    assert e3._corr([1.0, 2.0, 3.0], [2.0, 4.0, 6.5]) > 0.99
+    assert e3._corr([1.0, 2.0, 3.0], [5.0, 5.0, 5.0]) is None     # NaN
+    assert e3._corr([1.0, 2.0], [1.0, 2.0]) is None
+    json.dumps({"r": e3._corr([1.0, 2.0, 3.0], [5.0, 5.0, 5.0])})
+
+
+# --------------------------------------------------------------------------
+# (M4) main() end to end on fakes: no emulator, no real snapshot
+# --------------------------------------------------------------------------
+def _write_log(folder, n_iters, tokens, rng):
+    """An OwnPlayLog of one life per iteration, each playing `tokens` (V's
+    slots) in full with no reward."""
+    log = ablation.OwnPlayLog(folder)
+    for it in range(1, n_iters + 1):
+        traj = _life(V, list(tokens), rng)
+        log.write(it, traj, {"inner": [[] for _ in tokens], "real_done": True,
+                             "temperature": 0.5}, True, 12, 100 * it)
+
+
+def _fake_tree(tmp_path):
+    """A run tree: the two preps (the T2 prep with T2's value terms), T0 /
+    T1 log folders, a three-iteration T2 log and a T2 snapshot path."""
+    results = tmp_path / "tree" / "benchmarks" / "results"
+    vocab = [list(t) for t in V]
+    preps = {e1.PREPS[0]: {"master_vocab": [list(t) for t in pc.GRID],
+                           "vocab": vocab,
+                           "log_dir": "benchmarks/results/run-t0/"
+                                      "own-play-a-t0-seed0",
+                           "log_iterations": 1},
+             e1.PREPS[1]: {"master_vocab": vocab, "vocab": vocab,
+                           "log_dir": "benchmarks/results/run-t1/"
+                                      "own-play-a-t1-seed0",
+                           "log_iterations": 1, **T2_PREP}}
+    for name, j in preps.items():
+        (results / name).mkdir(parents=True)
+        (results / name / "vocab.json").write_text(json.dumps(j))
+    for k in (0, 1):
+        (results / f"run-t{k}" / f"own-play-a-t{k}-seed0").mkdir(parents=True)
+    _write_log(results / "run-t2" / "own-play-a-t2-seed0", 3, TOKENS,
+               np.random.default_rng(13))
+    snap = results / "run-t2" / "snapshots-a-t2-seed0" / "weights-iter003.pth"
+    snap.parent.mkdir(parents=True)
+    snap.write_bytes(b"weights")
+    return snap
+
+
+def test_main_end_to_end_on_fakes(tmp_path, monkeypatch):
+    """main() with a fake probe_exhaustive_eval, Run, play_token and
+    exact-eval row over a fake run tree and census, two games: the meta
+    line written before the replay, the candidates (A13: (2,4)(2,8) and
+    (2,4)(2,4)(2,4) one key), tau_L from the calibration into every scored
+    play, the per-game reset (game 2 scores as game 1), a valid summary; a
+    second full run refuses; a full run whose first game differs from the
+    exact eval stops there (MISMATCH -> break) and is VOID."""
+    snap = _fake_tree(tmp_path)
+    probes = tmp_path / "probes"
+    probes.mkdir()
+    monkeypatch.setattr(e3, "HERE", probes)
+    monkeypatch.setattr(e1, "HERE", probes)
+    lines = [{"game": n, "d": d, "token": t, "partition": list(range(36))}
+             for n in (1, 2) for d, t in enumerate(TOKENS)]
+    (probes / "probe_action_census-run-t2-decisions.jsonl").write_text(
+        "".join(json.dumps(l) + "\n" for l in lines))
+    game_row = [100.0, 12, True, len(TOKENS)]
+    row = {"run": "run-t2", "iteration": 3, "n_games": 30,
+           "max_decisions": None, "env": e1.ENV_ID, "main_line_ok": True,
+           "decisions": 2 * len(TOKENS), "threads": torch.get_num_threads(),
+           "snapshot": str(snap), "games": {"1": game_row, "2": game_row}}
+    (probes / "probe_action_census-run-t2.jsonl").write_text(
+        json.dumps(row) + "\n")
+    ref = {"games": {"1": list(game_row), "2": list(game_row)},
+           "exact_mean": 100.0}
+    monkeypatch.setattr(e3.pc, "exact_eval_row", lambda p: ref)
+    # the fake run: tiny nets; a value head of zeros (every advantage
+    # equal: the high half is the log's first half); the prior's argmax is
+    # the token played
+    nets0 = _tiny_nets(actions=len(V))
+    pred = _tiny_pred(actions=len(V), support=muzero.VALUE_SUPPORT)
+    torch.nn.init.zeros_(pred.value_fc.weight)
+    torch.nn.init.zeros_(pred.value_fc.bias)
+    priors, kept = {}, []
+    nm = SimpleNamespace(initial_inference=lambda s: (_prior(priors[id(s)]),
+                                                      0.0))
+
+    def set_train_mode(training):
+        for net in (nets0.rep, pred, nets0.dyn, nets0.proj):
+            net.train(training)
+    run = SimpleNamespace(
+        trainer=SimpleNamespace(representation=nets0.rep, prediction=pred,
+                                dynamics=nets0.dyn, projector=nets0.proj),
+        searcher=SimpleNamespace(network_manager=nm),
+        set_train_mode=set_train_mode, env=None)
+    d = {"spec": dict(T2_SPEC), "acting_states": {
+        "representation": _bn_shifted(nets0.rep.state_dict(), 0.3)}}
+    tag = probes / "probe_e3a_sequences-run-t2"
+    played, meta_first = [], []
+
+    def play(run_, n):
+        played.append(n)
+        meta_first.append(pathlib.Path(f"{tag}-meta.jsonl").exists())
+        game = _Game(_ImgALE())                 # a fresh game per noop start
+        run.env = game
+        stacks, _ = _drive(game, TOKENS, priors)
+        kept.extend(stacks)
+        return tuple(game_row)
+
+    def fake_play_token(env, token, stack, inner=None):
+        return env.play_token(env, token, stack, inner)
+
+    pe = types.ModuleType("probe_exhaustive_eval")
+    pe.SEARCH_SIMS, pe.ACTING, pe.ENV, pe.ARM = 0, True, e1.ENV_ID, "fake-arm"
+    pe.snapshot_vocab = lambda p: V
+    pe.snapshot_prefix_bn = lambda p: False
+    pe.snapshot_tokens = lambda v: contextlib.nullcontext()
+    pe.snapshot_prefix_layout = lambda b: contextlib.nullcontext()
+    pe.load = lambda run_, p: d
+    pe.apply_acting_states = _apply_acting
+    pe.play = play
+    monkeypatch.setitem(sys.modules, "probe_exhaustive_eval", pe)
+    monkeypatch.setattr(ablation, "arm_config",
+                        lambda arm: contextlib.nullcontext())
+    monkeypatch.setattr(ablation, "_run_length_globals",
+                        lambda i, s: contextlib.nullcontext())
+    monkeypatch.setitem(ablation.ARMS, "fake-arm", {})
+    monkeypatch.setattr(ablation, "Run", lambda arm, seed, spec: run)
+    monkeypatch.setattr(ablation, "play_token", fake_play_token)
+    for k, v in (("GAMES", 2), ("MAX_DECISIONS", 0), ("LOG_LIVES", 0),
+                 ("SMOKE", False)):
+        monkeypatch.setattr(e3, k, v)
+    e3.main([str(snap)])
+    assert ablation.play_token is fake_play_token        # the hook let go
+    assert played == [1, 2] and meta_first == [True, True]
+    meta = [json.loads(l) for l in
+            pathlib.Path(f"{tag}-meta.jsonl").read_text().splitlines()]
+    decs = [json.loads(l) for l in
+            pathlib.Path(f"{tag}-decisions.jsonl").read_text().splitlines()]
+    summ = [json.loads(l) for l in
+            pathlib.Path(f"{tag}.jsonl").read_text().splitlines()]
+    assert len(meta) == len(summ) == 1 and len(decs) == 2 * len(TOKENS)
+    m, s = meta[0], summ[0]
+    assert m["log"]["last"] == 3 and m["log"]["lives"] == 3
+    assert m["log"]["decisions"] == 3 * len(TOKENS)
+    assert m["log"]["truncated_decisions"] == 0
+    assert m["advantage"]["high"] == 15
+    # (A13) the key (2, 2, 2): (2,4)(2,8) twice in the high half, (2,4)x3
+    # once -- the most frequent candidate, spelled (2,4)(2,8)
+    first = m["candidates"][0]
+    assert first["inputs"] == [2, 2, 2] and first["count"] == 3
+    assert first["key"] == [[2, 4], [2, 8]]
+    assert first["spellings"] == [{"key": [[2, 4], [2, 8]], "count": 2},
+                                  {"key": [[2, 4], [2, 4], [2, 4]],
+                                   "count": 1}]
+    assert {"inputs": [2, 2], "action": 2, "length": 8, "count": 2} in \
+        m["dropped_duration_tokens"]
+    assert m["candidates"] == s["candidates"] and m["taus"] == s["taus"]
+    # tau_L: the calibration's, by length, into every scored play
+    assert set(m["taus"]) == {str(c["length"]) for c in m["candidates"]}
+    for L, tau in m["taus"].items():
+        assert tau == m["calibration"][L]["tau"]
+    assert len(set(m["taus"].values())) > 1
+    groups = [g for x in decs for g in x["groups"]]
+    assert groups and all(g["tau"] == s["taus"][str(g["length"])]
+                          for g in groups)
+    # the per-game reset: game 2 is game 1 again, decision by decision
+    assert [x["game"] for x in decs] == [1] * 10 + [2] * 10
+    assert [x["d"] for x in decs] == list(range(10)) * 2
+    strip = [{k: v for k, v in x.items() if k != "game"} for x in decs]
+    assert strip[:10] == strip[10:]
+    assert s["main_line_ok"] is True and s["void_reasons"] == []
+    assert all(v == 0 for v in s["counts"].values())
+    assert s["read_1"]["plays"] == len(groups)
+    assert s["checks"]["stack_ok"] == s["checks"]["replay_ok"] == len(groups)
+    assert s["verdict"] == "KAI_CALL_TOO_FEW"             # a few plays
+    # a second full run refuses before anything plays
+    with pytest.raises(SystemExit, match="never overwritten"):
+        e3.main([str(snap)])
+    assert played == [1, 2]
+    # a full two-game run whose first game differs from the exact eval:
+    # MISMATCH -> break -> VOID, stopped after one game
+    for suffix in ("-meta.jsonl", "-decisions.jsonl", ".jsonl"):
+        pathlib.Path(f"{tag}{suffix}").unlink()
+    ref["games"]["1"] = [101.0, 12, True, len(TOKENS)]
+    e3.main([str(snap)])
+    assert played == [1, 2, 1]                        # game 2 never played
+    v = json.loads(pathlib.Path(f"{tag}.jsonl").read_text())
+    assert v["main_line_ok"] is False and v["verdict"].startswith("VOID")
+    assert "verdict_if_valid" in v and v["games"] == {"1": game_row}
+    assert v["void_reasons"][0] == "stopped after 1 of 2 games"
+    assert v["void_reasons"][1].startswith("game 1 ")
+
+
 # --------------------------------------------------------------------------
 # end to end: a smoke on T2's real snapshot, own-play log and census
 # --------------------------------------------------------------------------
@@ -1038,7 +1468,7 @@ import probe_e3a_sequences as e3
 out = pathlib.Path({out!r})
 e3.HERE = out
 snap = {snap!r}
-# (a) a valid smoke: game 1, its first decisions scored, a few logged lives
+# (a) a valid smoke: game 1, its first decisions scored, some logged lives
 e3.main([snap])
 tag = "probe_e3a_sequences-{run}-smoke"
 shutil.copy(out / (tag + "-decisions.jsonl"), out / "a-decisions.jsonl")
@@ -1065,7 +1495,7 @@ def test_a_smoke_on_t2s_real_data(tmp_path):
     env = {**os.environ, "PROBE_ENV": e3.ENV_ID, "PROBE_ACTING_STATES": "1",
            "PROBE_THREADS": "2", "CUDA_VISIBLE_DEVICES": "-1",
            "E3A_GAMES": "1", "E3A_MAX_DECISIONS": "80",
-           "E3A_LOG_LIVES": "8"}
+           "E3A_LOG_LIVES": "40"}
     code = _E2E.format(probes=str(PROBES), exp=str(ROOT / "experiments"),
                        root=str(ROOT), out=str(tmp_path),
                        snap=str(REAL_SNAP), run=CENSUS_RUN)
@@ -1078,7 +1508,7 @@ def test_a_smoke_on_t2s_real_data(tmp_path):
     assert len(runs) == 2
     a, b = runs
     # (a) the main line is the census's and the exact eval's game 1
-    assert a["smoke"] is True and a["knobs"]["log_lives"] == 8
+    assert a["smoke"] is True and a["knobs"]["log_lives"] == 40
     assert a["main_line_ok"] is True and a["void_reasons"] == []
     assert all(v == 0 for v in a["counts"].values())
     truth, per_game = e1.read_truth(dec)
@@ -1089,7 +1519,7 @@ def test_a_smoke_on_t2s_real_data(tmp_path):
     assert all(x["token"] == truth[(1, x["d"])][0] for x in decs)
     assert all(x["live"] == (len(set(truth[(1, x["d"])][1])) > 1)
                for x in decs)
-    # the candidates (A3) and tau_L (A6)
+    # the candidates (A3, A13) and tau_L (A6)
     vocab = set(T2_VOCAB)
     cands = a["candidates"]
     assert 1 <= len(cands) <= 32
@@ -1099,16 +1529,34 @@ def test_a_smoke_on_t2s_real_data(tmp_path):
         key = tuple(tuple(t) for t in c["key"])
         assert 2 <= c["n"] == len(key) <= 4 and set(key) <= vocab
         assert c["length"] == sum(f for _, f in key) <= 64
-        assert not e3.is_duration_token(key, vocab)
+        assert tuple(c["inputs"]) == e3.run_inputs(key)
+        assert 4 * len(c["inputs"]) == c["length"]
+        assert not e3.is_duration_input(tuple(c["inputs"]), vocab)
+        counts = [s["count"] for s in c["spellings"]]
+        assert sum(counts) == c["count"] and max(counts) == next(
+            s["count"] for s in c["spellings"] if s["key"] == c["key"])
+        assert all(e3.run_inputs(tuple(tuple(t) for t in s["key"]))
+                   == tuple(c["inputs"]) for s in c["spellings"])
         assert a["taus"].get(str(c["length"]), 0) > 0
     adv = a["advantage"]
     assert adv["high"] == adv["decisions"] // 2
+    # the value head tracks the returns it was trained toward
+    assert adv["corr_return_value"] is not None
+    assert adv["corr_return_value"] > 0
+    rp50, vp50 = adv["returns"]["p50"], adv["values"]["p50"]
+    assert rp50 > 0 and 0.1 < vp50 / rp50 < 10
     meta = json.loads((tmp_path / "a-meta.jsonl").read_text())
     assert meta["candidates"] == cands and meta["taus"] == a["taus"]
+    for L, tau in meta["taus"].items():
+        assert tau == meta["calibration"][L]["tau"]
+    assert meta["log"]["last"] == 42
+    assert meta["log"]["lives"] == 40
+    assert meta["log"]["truncated_decisions"] >= 0
     assert meta["value_terms"] == {"reward_unit": 10.0,
                                    "ceiling": 17.398055555555555,
                                    "discount_per_base_step": 0.988053892081}
-    # the candidate plays (A4): every check passed; members of one length
+    # the candidate plays (A4, A10): every check passed; members of one
+    # length; the played run's inputs are its candidate's
     groups = [g for x in decs if x.get("live") for g in x["groups"]]
     assert a["read_1"]["plays"] == len(groups) >= 1, \
         "no candidate play in game 1's first 80 decisions"
@@ -1117,8 +1565,11 @@ def test_a_smoke_on_t2s_real_data(tmp_path):
         assert g["replay_ok"] is True and g["stack_ok"] is True
         assert {by_id[m]["length"] for m in g["members"]} == {g["length"]}
         assert g["members"][g["played"]] == g["candidate"]
+        assert e3.run_inputs(tuple(tuple(t) for t in g["played_key"])) == \
+            tuple(by_id[g["candidate"]]["inputs"])
         k = len(g["members"])
         assert len(g["truth"]) == k and len(g["dist_pred"]) == k * (k - 1) // 2
+        assert g["tau"] == a["taus"][str(g["length"])]
     assert a["checks"]["replay_ok"] == a["checks"]["stack_ok"] == len(groups)
     assert a["verdict"] in ("KAI_CALL_TOO_FEW", "GROUP_BY_PREDICTED",
                             "MINE_WITHOUT_GROUPING", "KAI_CALL")

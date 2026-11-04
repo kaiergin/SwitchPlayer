@@ -1,64 +1,75 @@
 """E3a: does grouping by latents make sense for sequences mined from the
 agent's own play? (CURRICULUM "Queued experiment (pre-registered) -- E3",
-its E3a part and amendments (A1)-(A8), Kai 2026-11-04.) Measurement only:
+its E3a part and amendments (A1)-(A14), Kai 2026-11-04.) Measurement only:
 the emulator only scores, and nothing here trains a model (Kai's rule for
 the E line).
 
 SOURCE (A1): Test B2's T2 -- its iteration-42 snapshot (E0's and E1's;
 deployed exact eval 1699.0) and its own-play log over its generation
 (iterations 1-42, at raw-step resolution with token boundaries; located as
-E1 locates it: probe_e1_equivalence.lineage).
+E1 locates it: probe_e1_equivalence.lineage, which also requires the T0 and
+T1 logs to exist -- a refusal before anything plays, never a VOID).
 
-ADVANTAGE (A2) of a logged decision: the life's discounted return from it
-minus T2's value estimate on the decision's stack. The return is the
+ADVANTAGE (A2, A9) of a logged decision: the life's discounted return from
+it minus T2's value estimate on the decision's stack. The return is the
 prep's value check's (distill.discounted_return_max): T2's raw per-base-
 step rewards / REWARD_UNIT, clipped (sign kept) at T2's constant ceiling,
-discounted by T2's DISCOUNT per base step (4 raw frames) from the
-decision's first base step to the life's end, with no bootstrap. The value
-is T2's prediction head on the decision's stack through the deployed
-acting states, decoded to value units. Ranked over the whole log; the
-HIGH half is the floor(n / 2) largest advantages, ties to the earlier
-decision in log order.
+discounted by T2's DISCOUNT per BASE STEP (4 raw frames) from the
+decision's first base step to the life's end. A life cut short (not
+terminated) is not bootstrapped; its lives and decisions are counted. The
+value is T2's iteration-42 prediction head on the decision's stack through
+the deployed acting states, decoded to value units, for every logged
+decision. Ranked over the whole log; the HIGH half is the floor(n / 2)
+largest advantages, ties to the earlier decision in log order.
 
-CANDIDATES (A3): every contiguous run of 2, 3 or 4 decisions inside one
-logged life whose FIRST decision is in the high half and whose decisions
-all played their full frames (a life's last token can be cut short by its
-end); its key is its token tuple ((action, frames), ...), its LENGTH the
-sum of its frames, at most 64. A run of ONE action whose length equals a
-token of T2's vocabulary (that action at that length) is dropped: it
-already exists as a duration token. The 32 most frequent keys are the
-candidates, ties by first occurrence in log order.
+CANDIDATES (A3, A10, A13): every contiguous run of 2, 3 or 4 decisions
+inside one logged life whose FIRST decision is in the high half and whose
+decisions all played their full frames (a life's last token can be cut
+short by its end), of LENGTH (the sum of its frames) at most 64. A run's
+KEY is its RAW INPUT sequence (A13): each token expanded to its frames / 4
+base steps of its action, so re-tokenizations of the same inputs --
+((a,32),(b,4)) and ((a,16),(a,16),(b,4)) -- are ONE candidate, their
+counts summed; its SPELLING (the token tuple read (2) unrolls) is the one
+played most often among them, ties by first occurrence. A key whose inputs
+are ONE action held for a length that is a token of T2's vocabulary (that
+action at that length) is dropped: it already exists as a duration token.
+The 32 most frequent keys are the candidates, ties by first occurrence in
+log order; each records its spellings and their counts.
 
-TRUTH (A4): the main line is the exact eval of the 30 noop starts, replayed
-exactly as E0's census and E1 replay it (probe_exhaustive_eval.play, the
-deployed acting states, the prior argmax), each game checked against its
-deployed exact-eval row and E0's census. At each LIVE decision t (E0's
+TRUTH (A4, A10): the main line is the exact eval of the 30 noop starts,
+replayed exactly as E0's census and E1 replay it (probe_exhaustive_eval.play,
+the deployed acting states, the prior argmax), each game checked against
+its deployed exact-eval row and E0's census. At each LIVE decision t (E0's
 definition: its census grid partition has more than one class), the run T2
 actually plays next -- its own next 2, 3 and 4 tokens, all inside t's life,
-each played in full, the last not ending the game -- is a CANDIDATE PLAY
-when its key is a candidate. For each candidate play, every candidate of
-the same LENGTH L is played on the raw ALE from t's saved emulator state,
-then NOOP to a common window of L + 60 frames (E0's branch play); two
-candidates are EQUIVALENT at t when every raw RGB frame of the window is
-identical (E0's digest). Each (t, L) is scored once. The branches run when
-T2's next tokens are known (MAX_RUN decisions later, or at the life's end),
-and the emulator is restored to the main line's state after them. Checked
-at every candidate play (A4, VOID otherwise): the played candidate,
-replayed after all the others, gives its digest again (branch-order
-independence, E0's check), and the stack its branch reached -- the max of
-each base step's last two raw frames (atari_wrappers.MaxAndSkipEnv),
-preprocessed and pushed onto t's stack -- is the main line's own next
-stack (the branch replays the main line's frames).
+each played in full, the last allowed to lose a life but not to end the
+game -- is a CANDIDATE PLAY when its INPUTS are a candidate's (A13: whatever
+its spelling). For each candidate play, every candidate of the same LENGTH
+L is played on the raw ALE from t's saved emulator state, then NOOP to a
+common window of L + 60 frames (E0's branch play); two candidates are
+EQUIVALENT at t when every raw RGB frame of the window is identical (E0's
+digest). Each (t, L) is scored once. The branches run when T2's next tokens
+are known (MAX_RUN decisions later, or at the life's end), and the emulator
+is restored to the main line's state after them. Checked at every candidate
+play (A10, VOID otherwise): the played candidate, replayed after all the
+others, gives its digest again (branch-order independence, E0's check), and
+the stack its branch reached -- the max of each base step's last two raw
+frames (atari_wrappers.MaxAndSkipEnv), preprocessed and pushed onto t's
+stack -- is the main line's own next stack (the branch replays the main
+line's frames). Descriptive: each branch records whether ale.lives()
+changed during the candidate's own inputs (before the NOOP tail).
 
 READS
-  (1) (A5) the DUPLICATE-SPELLING RATE: the share of candidate plays for
-      which another same-length candidate is equivalent at t. Descriptive:
-      the equivalent share of all same-length candidate pairs scored; the
-      classes per (t, L) against the candidates per (t, L); by length; the
-      rate over the plays that have another same-length candidate.
-  (2) (A6) PREDICTED latents: z_c = projector(g(...g(h(s_t), c_1)..., c_n),
-      with_prediction=True): h on t's stack with the deployed acting states,
-      T2's dynamics unrolled over candidate c's tokens, the online
+  (1) (A5, A11) the DUPLICATE-SPELLING RATE, the decision rate: the share of
+      the candidate plays WHOSE LENGTH HOLDS ANOTHER CANDIDATE
+      ("plays_with_another_candidate") for which another same-length
+      candidate is equivalent at t. Descriptive: the rate over all
+      candidate plays; the equivalent share of all same-length candidate
+      pairs scored; the classes per (t, L) against the candidates per
+      (t, L); by length; the branches that lost a life.
+  (2) (A6, A12) PREDICTED latents: z_c = projector(g(...g(h(s_t), c_1)...,
+      c_n), with_prediction=True): h on t's stack with the deployed acting
+      states, T2's dynamics unrolled over candidate c's spelling, the online
       projection (E1's forward model); the cosine distance 1 - cos between
       two candidates. A pair is GROUPED when its distance is below tau_L
       (strictly); the predicted classes are the connected components of the
@@ -69,36 +80,41 @@ READS
       projection, projector(h(the stack the run reached), False)) -- E1's
       one-step tau, by length. Scored as pairs against the truth, pooled
       over the scored (t, L): merge precision and recall, beside the trivial
-      rules (all one class; all distinct), as E1.
-  (3) (A7) REAL-OUTCOME latents (an upper bound): projector(h(the stack each
-      candidate's branch reached, before the NOOP tail), False), the target
-      projection the calibration measures against; grouped below the same
-      tau_L, scored the same way. Descriptive: the median distance of
-      equivalent against non-equivalent pairs (also for (2)).
+      rules (all one class; all distinct), as E1. CAVEAT (A12): two online
+      predictions are compared against an online-to-target tau_L.
+  (3) (A7, A12) REAL-OUTCOME latents (an upper bound): projector(h(the stack
+      each candidate's branch reached, before the NOOP tail), False), the
+      target projection the calibration measures against; grouped below
+      the same tau_L, scored the same way. Its recall is near 1 by
+      construction; it is descriptive and NEVER decides. Descriptive: the
+      median distance of equivalent against non-equivalent pairs (also for
+      (2)).
   Reported, not decided on: (2) and (3) at tau_L x 0.5 and x 2, and without
   the components (each pair on its own distance); whether (3) passes (2)'s
   bars ("If (3) cannot separate outcomes, latent grouping is not worth
   pursuing").
-DECISION (A8), on the unrounded reads:
-  - "KAI_CALL_TOO_FEW": under 100 candidate plays to read;
+DECISION (A8, A12, A14), on the unrounded reads, in this order:
+  - "KAI_CALL_TOO_FEW": under 100 plays_with_another_candidate (A14: the
+    plays of read (1)'s decision rate);
   - "GROUP_BY_PREDICTED": (2) has merge precision >= 0.7 at recall >= 0.2
     and precision strictly above every trivial rule's (all distinct has no
     precision: no bar) -> E3 groups mined sequences by predicted latents;
-  - "MINE_WITHOUT_GROUPING": else, (1) under 10% -> E3 mines without
-    grouping (Kai's fallback);
+  - "MINE_WITHOUT_GROUPING": else, (1)'s decision rate under 10% -> E3 mines
+    without grouping (Kai's fallback);
   - "KAI_CALL": else (duplicates common, latents fail).
   A None precision (no predicted merge) or recall (no true merge) fails.
   VOID when the main line is not the census's (E1's rules: the census
   valid, every game the exact eval's game and the census's decision count,
   every scored decision found in the census with its token and the hook's
-  prior argmax) or a played candidate fails A4's checks.
+  prior argmax) or a played candidate fails A10's checks.
 
 usage: python probe_e3a_sequences.py SNAPSHOT.pth   (T2 iteration 42)
 Refuses before anything plays: no full census of the snapshot next to the
 probe (E0's decisions file gives the live decisions), another snapshot's
 census, a thread count other than the census's, a full run without the
-exact eval's row (E1's preflight), a T2 spec whose clip, unit or discount
-is not its prep's, a value decoder that is not T2's.
+exact eval's row (E1's preflight), missing T0 / T1 / T2 logs (E1's
+lineage), a T2 spec whose clip, unit or discount is not its prep's, a value
+codec that is not T2's (the decode side, and the h-transform encode side).
 Writes, next to itself: probe_e3a_sequences-<run>-meta.jsonl BEFORE the
 replay (the value terms, the advantage, the candidates, the mining counts,
 tau_L and its calibration); probe_e3a_sequences-<run>-decisions.jsonl (one
@@ -148,7 +164,8 @@ MAX_RUN = max(RUN_SIZES)
 MAX_LENGTH = 64                              # (A3): frames per run, at most
 N_CANDIDATES = 32                            # (A3): the most frequent keys
 HORIZON = pc.HORIZON                         # (A4): NOOP frames after a run
-# (A8): (2)'s bars (E1's low bars), (1)'s fallback bar, the plays to read
+# (A8, A14): (2)'s bars (E1's low bars), (1)'s fallback bar, the plays to
+# read (plays_with_another_candidate)
 GROUP_P, GROUP_R = 0.7, 0.2
 DUP_BAR = 0.10
 MIN_PLAYS = 100
@@ -169,6 +186,17 @@ def _length(key):
     return sum(f for _, f in key)
 
 
+def run_inputs(key):
+    """(A13) A run's KEY: its raw input per base step -- each token (a, f)
+    expanded to f / BASE base steps of action a."""
+    return tuple(int(a) for a, f in key for _ in range(int(f) // BASE))
+
+
+def input_frames(inputs, actions):
+    """A key's raw inputs: each base step's ALE action once per frame."""
+    return [actions[int(a)] for a in inputs for _ in range(BASE)]
+
+
 # --------------------------------------------------------------------------
 # (A2) the advantage
 # --------------------------------------------------------------------------
@@ -181,7 +209,7 @@ def clipped(r, unit, ceiling):
 
 
 def decision_returns(traj, unit, ceiling, discount):
-    """(A2) Each acted decision's discounted return to the life's end:
+    """(A2, A9) Each acted decision's discounted return to the life's end:
     decision i's base-step rewards are the raw tuple record i + 1 carries
     (REWARD_GROWTH's records), every base step clipped, discounted by
     `discount` per base step from decision i's first base step (the prep's
@@ -204,7 +232,7 @@ def decision_returns(traj, unit, ceiling, discount):
 
 
 def high_half(adv):
-    """(A2) The HIGH half: the floor(n / 2) largest advantages, ties to the
+    """(A2, A9) The HIGH half: the floor(n / 2) largest advantages, ties to the
     earlier decision in log order. Returns (their indices, the smallest
     advantage among them or None)."""
     adv = np.asarray(adv, dtype=np.float64)
@@ -228,26 +256,36 @@ def logged_runs(slots, vocab, sizes=RUN_SIZES):
                 yield i, n, key, _length(key)
 
 
-def is_duration_token(key, vocab_set):
-    """(A3) A run of ONE action whose length equals a token of the
-    vocabulary (that action at that length): already a duration token."""
-    return (len({a for a, _ in key}) == 1
-            and (key[0][0], _length(key)) in vocab_set)
+def is_duration_input(inputs, vocab_set):
+    """(A3, A10, A13) A key whose inputs are ONE action held for a length
+    that is a token of the vocabulary (that action at that length):
+    already a duration token."""
+    return (len(set(inputs)) == 1
+            and (inputs[0], BASE * len(inputs)) in vocab_set)
+
+
+def spelling(spellings):
+    """(A13) A key's spelling: the token tuple played most often among
+    `spellings` {token tuple: count} (insertion order = first occurrence;
+    max() keeps the first of equal counts)."""
+    return max(spellings.items(), key=lambda kv: kv[1])[0]
 
 
 def mine_candidates(lives, vocab, high, top=N_CANDIDATES,
                     max_length=MAX_LENGTH):
-    """(A3) The candidates from the log's lives ({"slots", "full",
-    "offset"}: slot per decision, whether it played its full frames, its
-    first decision's index in the log), in log order; `high` the log
-    indices of the high-half decisions. Counts every run whose FIRST
-    decision is high, whose decisions all played in full and whose length
-    is at most `max_length`, minus the duration tokens; the `top` most
-    frequent keys, ties by first occurrence. Returns (candidates [{"id",
-    "key", "length", "n", "count"}], the dropped duration tokens {key:
-    count}, counts of the runs looked at)."""
+    """(A3, A10, A13) The candidates from the log's lives ({"slots",
+    "full", "offset"}: slot per decision, whether it played its full
+    frames, its first decision's index in the log), in log order; `high`
+    the log indices of the high-half decisions. Counts every run whose
+    FIRST decision is high, whose decisions all played in full and whose
+    length is at most `max_length`, by its raw INPUTS (run_inputs), minus
+    the duration tokens; the `top` most frequent keys, ties by first
+    occurrence. Returns (candidates [{"id", "inputs", "key" (the spelling),
+    "length", "n" (the spelling's tokens), "count", "spellings" [(token
+    tuple, count), in first-occurrence order]}], the dropped duration
+    tokens {inputs: count}, counts of the runs looked at)."""
     vocab_set = set(_key(vocab))
-    counts, dropped = {}, {}
+    counts, spells, dropped = {}, {}, {}
     stats = collections.Counter()
     for life in lives:
         full = life["full"]
@@ -255,22 +293,32 @@ def mine_candidates(lives, vocab, high, top=N_CANDIDATES,
             if life["offset"] + i not in high:
                 continue
             stats["high_runs"] += 1
+            inputs = run_inputs(key)
             if not all(full[i:i + n]):
                 stats["cut_short"] += 1
             elif length > max_length:
                 stats["over_length"] += 1
-            elif is_duration_token(key, vocab_set):
-                dropped[key] = dropped.get(key, 0) + 1
+            elif is_duration_input(inputs, vocab_set):
+                dropped[inputs] = dropped.get(inputs, 0) + 1
                 stats["duration_tokens"] += 1
             else:
-                counts[key] = counts.get(key, 0) + 1
+                counts[inputs] = counts.get(inputs, 0) + 1
+                s = spells.setdefault(inputs, {})
+                s[key] = s.get(key, 0) + 1
                 stats["counted"] += 1
     # dicts keep insertion order and sorted() is stable: ties stay in the
     # order of their first occurrence
     ranked = sorted(counts.items(), key=lambda kv: -kv[1])[:top]
-    cands = [{"id": j, "key": key, "length": _length(key), "n": len(key),
-              "count": int(c)} for j, (key, c) in enumerate(ranked)]
+    cands = []
+    for j, (inputs, c) in enumerate(ranked):
+        key = spelling(spells[inputs])
+        cands.append({"id": j, "inputs": inputs, "key": key,
+                      "length": BASE * len(inputs), "n": len(key),
+                      "count": int(c),
+                      "spellings": [(k, int(v)) for k, v in
+                                    spells[inputs].items()]})
     stats["keys"] = len(counts)
+    stats["merged_spellings"] = sum(len(s) - 1 for s in spells.values())
     return cands, dropped, dict(stats)
 
 
@@ -304,7 +352,7 @@ def latent_values(pred, lat, batch=CALIB_BATCH):
 
 @torch.no_grad()
 def life_run_errors(nets, lat, slots, sizes=RUN_SIZES, batch=CALIB_BATCH):
-    """(A6) The calibration errors of one life: for every start i and run
+    """(A6, A12) The calibration errors of one life: for every start i and run
     size n with i + n <= m (m = len(slots)), 1 - cos(proj(g(...g(lat[i],
     s_i)..., s_(i+n-1)), True), proj(lat[i + n], False)) -- train_step's
     multi-step consistency pairing. `lat`: h of the life's m + 1 stacks.
@@ -336,7 +384,7 @@ def life_run_errors(nets, lat, slots, sizes=RUN_SIZES, batch=CALIB_BATCH):
 
 
 def calibrate_lengths(lengths, sizes, errors):
-    """(A6) tau_L per total length L: the median error over the logged
+    """(A6, A12) tau_L per total length L: the median error over the logged
     runs of that length (run sizes pooled), with the calibration read
     (E1's) and the read per run size. {L: {"tau", ..., "by_size"}}."""
     lengths = np.asarray(lengths, dtype=np.int64)
@@ -355,7 +403,7 @@ def calibrate_lengths(lengths, sizes, errors):
 
 @torch.no_grad()
 def unrolled_projections(nets, stack, seqs):
-    """(A6) For each slot sequence c of `seqs`, proj(g(...g(h(stack),
+    """(A6, A12, A13) For each slot sequence c of `seqs`, proj(g(...g(h(stack),
     c_1)..., c_n), True): (len(seqs), d), in order (sequences of one size
     unrolled as one batch)."""
     lat = nets.rep(e1._floats(stack[None]))
@@ -377,7 +425,7 @@ def unrolled_projections(nets, stack, seqs):
 
 @torch.no_grad()
 def stack_projections(nets, stacks):
-    """(A7) proj(h(stack), False) for each stack: (len(stacks), d)."""
+    """(A7, A12) proj(h(stack), False) for each stack: (len(stacks), d)."""
     return nets.proj(nets.rep(e1._floats(np.stack(stacks))),
                      with_prediction=False)
 
@@ -392,8 +440,9 @@ def pair_distances(z):
 # (A4) the truth: branches on the raw ALE
 # --------------------------------------------------------------------------
 def token_inputs(key, actions):
-    """A run's raw inputs: each token's ALE action once per frame."""
-    return [actions[int(a)] for a, f in key for _ in range(int(f))]
+    """A token tuple's raw inputs: each token's ALE action once per frame
+    (input_frames of its run_inputs)."""
+    return input_frames(run_inputs(key), actions)
 
 
 def play_branch(ale, start, inputs, window, noop, base=BASE):
@@ -402,24 +451,28 @@ def play_branch(ale, start, inputs, window, noop, base=BASE):
     digest of the window's raw RGB frames) together with, for each base
     step inside `inputs`, the observation the wrapper stack returns there:
     the element-wise max of its last two raw frames
-    (atari_wrappers.MaxAndSkipEnv). Returns (digest, observations)."""
+    (atari_wrappers.MaxAndSkipEnv), and whether ale.lives() changed during
+    `inputs` (before the NOOP tail; descriptive). Returns (digest,
+    observations, lives changed)."""
     if base < 2 or len(inputs) % base or window < len(inputs):
         raise ValueError(f"{len(inputs)} inputs, base {base}, window "
                          f"{window}")
     ale.restoreState(start)
+    lives = ale.lives()
     h = hashlib.blake2b(digest_size=16)
-    obs, prev = [], None
+    obs, prev, changed = [], None, False
     for t in range(window):
         ale.act(inputs[t] if t < len(inputs) else noop)
         screen = ale.getScreenRGB()
         h.update(screen)
         if t < len(inputs):
+            changed = changed or ale.lives() != lives
             k = t % base
             if k == base - 2:
                 prev = np.array(screen, copy=True)
             elif k == base - 1:
                 obs.append(np.maximum(prev, screen))
-    return h.digest(), obs
+    return h.digest(), obs, bool(changed)
 
 
 def reached_stack(stack, observations):
@@ -440,8 +493,10 @@ class Prober:
     """Wraps ablation.play_token on the main line: saves each decision's
     emulator state before its token plays and records what it played; when
     T2's next tokens are known (MAX_RUN decisions later, or at the life's
-    or game's end) it scores the decision's candidate plays (A4-A7) and
-    restores the emulator to the main line's state."""
+    or game's end) it scores the decision's candidate plays (A4-A7, A10,
+    A13) and restores the emulator to the main line's state. `cands` as
+    mine_candidates returns them (ids = positions; matched by "inputs",
+    unrolled by "key"); `taus` {length: tau_L}."""
 
     def __init__(self, run, nets, vocab, truth, cands, taus, out):
         self.run, self.nets, self.out = run, nets, out
@@ -450,15 +505,19 @@ class Prober:
         self.truth, self.taus = truth, {int(k): float(v)
                                         for k, v in taus.items()}
         self.cands = list(cands)
-        self.cand_of = {_key(c["key"]): int(c["id"]) for c in self.cands}
+        if [int(c["id"]) for c in self.cands] != list(range(len(cands))):
+            raise ValueError("candidate ids must be their positions")
+        # (A13) a played run is matched by its raw inputs
+        self.cand_of = {tuple(int(a) for a in c["inputs"]): int(c["id"])
+                        for c in self.cands}
         self.by_length = by_length(self.cands)
         self.game, self.index, self.scored, self.recs = 0, 0, 0, []
         self.pending = []           # the current life's unscored decisions
         self.token_mismatches = 0   # the replayed token against the census's
         self.argmax_mismatches = 0  # the hook's prior argmax against it
         self.missing = 0            # decisions the census has no line for
-        self.replay_mismatches = 0  # (A4) a played candidate's replay digest
-        self.stack_mismatches = 0   # (A4) its reached stack: the main line's
+        self.replay_mismatches = 0  # (A10) a played candidate's replay digest
+        self.stack_mismatches = 0   # (A10) its reached stack: the main line's
 
     def after(self, env, token, stack, state, out):
         """Records one played decision; scores what has become scorable."""
@@ -473,8 +532,9 @@ class Prober:
             "full": int(out[5]) == self.vocab[token][1] // BASE,
             "ended": ended,
             # a real game over (or the time limit): EpisodicLife's
-            # was_real_done after the step; a lost life alone is not
-            "game_end": ended and bool(getattr(env, "was_real_done", True))})
+            # was_real_done after the step; a lost life alone is not. An
+            # env without it raises (no silent default)
+            "game_end": ended and bool(env.was_real_done)})
         self.index += 1
         if ended:
             self.flush(env)
@@ -494,9 +554,11 @@ class Prober:
         self.pending = self.pending[1:]
 
     def runs(self, life):
-        """T2's runs from life[0] (A4): [(n, key, length, eligible,
-        candidate id or None)]. Eligible: inside the life, every token
-        played in full, the last not ending the game."""
+        """T2's runs from life[0] (A4, A10, A13): [(n, key, length,
+        eligible, candidate id or None)], the candidate matched by the
+        run's raw inputs whatever its spelling. Eligible: inside the life,
+        every token played in full, the last allowed to lose a life but not
+        to end the game."""
         out = []
         for n in RUN_SIZES:
             if n > len(life):
@@ -506,7 +568,8 @@ class Prober:
             ok = (all(d["full"] for d in seq)
                   and not any(d["ended"] for d in seq[:-1])
                   and not seq[-1]["game_end"])
-            out.append((n, key, _length(key), ok, self.cand_of.get(key)))
+            out.append((n, key, _length(key), ok,
+                        self.cand_of.get(run_inputs(key))))
         return out
 
     def score(self, env, life):
@@ -539,16 +602,19 @@ class Prober:
                         and length not in seen:
                     seen.add(length)              # each (t, L) once
                     rec["groups"].append(self.group(env, life, n, cid,
-                                                    length))
+                                                    length, key))
         self.recs.append(rec)
         if self.out is not None:
             self.out.write(json.dumps(rec) + "\n")
             self.out.flush()
 
-    def group(self, env, life, n, cid, length):
-        """One candidate play (A4-A7): every candidate of its length from
-        the decision's saved state, the truth, both latent distances, the
-        replay and reached-stack checks; the emulator restored."""
+    def group(self, env, life, n, cid, length, key):
+        """One candidate play (A4-A7, A10, A13): every candidate of its
+        length from the decision's saved state (its raw inputs), the truth,
+        both latent distances (read (2) unrolls each candidate's spelling),
+        the replay and reached-stack checks against the PLAYED candidate,
+        whether each branch lost a life; the emulator restored. `key` the
+        spelling T2 played."""
         dec = life[0]
         ale = env.unwrapped.ale
         actions = list(env.unwrapped._action_set)
@@ -556,16 +622,17 @@ class Prober:
         p = members.index(cid)
         window = length + HORIZON
         now = ale.cloneState()
-        digests, reached = [], []
+        digests, reached, lost = [], [], []
         for c in members:
-            dg, obs = play_branch(ale, dec["state"], token_inputs(
-                self.cands[c]["key"], actions), window, actions[0])
+            dg, obs, gone = play_branch(ale, dec["state"], input_frames(
+                self.cands[c]["inputs"], actions), window, actions[0])
             digests.append(dg)
             reached.append(reached_stack(dec["stack"], obs))
+            lost.append(gone)
         # branch-order independence (E0's check): the played candidate,
         # replayed after every other branch, gives its digest again
-        again, _ = play_branch(ale, dec["state"], token_inputs(
-            self.cands[cid]["key"], actions), window, actions[0])
+        again, _, _ = play_branch(ale, dec["state"], input_frames(
+            self.cands[cid]["inputs"], actions), window, actions[0])
         ale.restoreState(now)
         replay_ok = again == digests[p]
         # the branch replays the main line: its reached stack is the main
@@ -577,7 +644,9 @@ class Prober:
         seqs = [[self.slot[t] for t in _key(self.cands[c]["key"])]
                 for c in members]
         return {"length": length, "n": n, "candidate": cid,
+                "played_key": [list(t) for t in key],
                 "members": members, "played": p, "truth": truth,
+                "lives_changed": lost,
                 "duplicate": any(truth[j] == truth[p]
                                  for j in range(len(members)) if j != p),
                 "tau": self.taus[length],
@@ -618,7 +687,12 @@ def _pairs_of(g):
 
 
 def read_1(groups):
-    """(A5) The duplicate-spelling rate and its descriptive reads."""
+    """(A5, A11, A14) The duplicate-spelling rate and its descriptive reads.
+    The DECISION rate is "rate_with_another_candidate" (unrounded
+    "_rate_multi"), over the "plays_with_another_candidate" -- also the
+    count A14's under-100 rule reads; "rate" is over all candidate plays,
+    descriptive. Also the branches whose candidate inputs lost a life
+    (descriptive)."""
     plays = len(groups)
     dups = sum(1 for g in groups if g["duplicate"])
     multi = [g for g in groups if len(g["members"]) > 1]
@@ -640,10 +714,16 @@ def read_1(groups):
     # candidate (a play with none cannot be a duplicate)
     rate_multi = (sum(1 for g in multi if g["duplicate"]) / len(multi)
                   if multi else None)
+    lost = [bool(x) for g in groups for x in g.get("lives_changed", [])]
     return {"plays": plays, "duplicates": dups, "rate": e1._round(rate),
             "_rate": rate, "_rate_multi": rate_multi,
             "plays_with_another_candidate": len(multi),
             "rate_with_another_candidate": e1._round(rate_multi),
+            # (L3) descriptive: a branch whose own inputs lost a life
+            "branches": len(lost), "branches_lives_changed": sum(lost),
+            "played_lives_changed": sum(
+                1 for g in groups if "lives_changed" in g
+                and g["lives_changed"][g["played"]]),
             "pairs": pairs, "equivalent_pairs": eq,
             "equivalent_pair_share": e1._round(eq / pairs if pairs else None),
             "classes_mean": (round(float(np.mean([len(set(g["truth"]))
@@ -716,12 +796,15 @@ def median_distances(groups, key):
 
 
 def latent_read(groups, key):
-    """(A6) / (A7) one latent grouping, pooled over the candidate plays:
+    """(A6, A7, A12) one latent grouping, pooled over the candidate plays:
     the decision read (components below tau_L), the trivial rules, the bar
     (A8); reported: the pairwise read, tau_L x 0.5 and x 2, the median
-    distances."""
+    distances. "plays_with_pairs": the candidate plays that hold at least
+    one same-length pair (two or more members), the plays these pair reads
+    pool."""
     counts, floors = latent_counts(groups, key)
-    out = {"groups": sum(1 for g in groups if len(g["truth"]) > 1),
+    out = {"plays_with_pairs": sum(1 for g in groups
+                                   if len(g["truth"]) > 1),
            **_prf_read(counts)}
     triv = {k: e1.prf(*c[:3]) for k, c in floors.items()}
     out["trivial"] = {k: {"precision": e1._round(v[0]),
@@ -741,7 +824,10 @@ def latent_read(groups, key):
 
 
 def verdict(plays, dup_rate, precision, recall, trivial_precisions):
-    """(A8) on the unrounded reads."""
+    """(A8, A12, A14) on the unrounded reads, in order: `plays` (A14: the
+    plays_with_another_candidate) under MIN_PLAYS; read (2)'s bars;
+    `dup_rate` (A11's decision rate) under DUP_BAR; else Kai's call. Read
+    (3) never enters."""
     if plays < MIN_PLAYS:
         return "KAI_CALL_TOO_FEW"
     if grouping_passes(precision, recall, trivial_precisions):
@@ -776,6 +862,14 @@ def summarize(recs):
             # "If (3) cannot separate outcomes, latent grouping is not worth
             # pursuing": reported, not decided on
             "read_3_meets_bars": r3["meets_bars"],
+            # what the verdict reads (A8, A11, A14), rounded for reading
+            "decision": {
+                "plays_counted": r1["plays_with_another_candidate"],
+                "plays_counted_are": "plays_with_another_candidate (A14)",
+                "min_plays": MIN_PLAYS,
+                "duplicate_rate": r1["rate_with_another_candidate"],
+                "duplicate_bar": DUP_BAR,
+                "read_2_meets_bars": r2["meets_bars"]},
             # (A11) the plays with another same-length candidate and their
             # duplicate rate decide; the all-plays rate is descriptive
             "verdict": verdict(r1["plays_with_another_candidate"],
@@ -794,7 +888,7 @@ def validity(games, ref, truth_games, scored, counts, census_ok,
     the decisions scored (`scored` {noop: n}, at most MAX_DECISIONS each);
     no scored decision missing from the census, none whose token is not the
     census's or the hook's prior argmax; a full run plays `n_games`. And
-    (A4)'s: no played candidate whose replay digest or reached stack
+    (A10)'s: no played candidate whose replay digest or reached stack
     differs. `counts` holds the Prober's five counters by name."""
     reasons = []
     if census_ok is not True:
@@ -832,7 +926,7 @@ def validity(games, ref, truth_games, scored, counts, census_ok,
 
 
 def value_terms(spec, prep):
-    """(A2) T2's reward unit, constant clip ceiling and discount per base
+    """(A2, A9) T2's reward unit, constant clip ceiling and discount per base
     step, from its snapshot's spec, which must equal its prep's vocab.json
     (the prep chose them: reward_unit, student_ceiling, student_discount).
     SystemExit otherwise."""
@@ -862,12 +956,18 @@ def value_terms(spec, prep):
 
 
 def check_value_head(prediction, spec):
-    """(A2) The probe's value decoder must be T2's: the h-transform over
-    the support of T2's VALUE_CEILING (ablation.build_networks)."""
+    """(A2, A9) The probe's value codec must be T2's: the h-transform on
+    the decode side (the probe's net) and on the encode side (T2's spec's
+    USE_H_TRANSFORM; muzero's default True when the spec leaves it out),
+    over the support of T2's VALUE_CEILING (ablation.build_networks)."""
     if spec.get("_linear_support") or not getattr(prediction, "transform",
                                                   False):
         raise SystemExit("T2's value head decodes without the h-transform "
                          "(the probe's would not)")
+    if spec.get("USE_H_TRANSFORM", True) is False:
+        raise SystemExit("T2's value targets were encoded without the "
+                         "h-transform (USE_H_TRANSFORM False): the decoded "
+                         "values would not be T2's")
     want = scalar_categorical.support_for(spec.get("VALUE_CEILING",
                                                    muzero.VALUE_CEILING))
     if abs(float(prediction.support_size) - want) > 1e-9:
@@ -876,7 +976,7 @@ def check_value_head(prediction, spec):
 
 
 def acting_nets(run, d, apply_acting):
-    """(A2, A6, A7) The deployed nets: `apply_acting`
+    """(A2, A6, A7, A12) The deployed nets: `apply_acting`
     (probe_exhaustive_eval.apply_acting_states, which the main line needs
     anyway) gives the representation and prediction the snapshot's acting
     states; the dynamics and projector stay the trainer's (refused if an
@@ -899,11 +999,12 @@ def acting_nets(run, d, apply_acting):
 def own_play_pass(lives_iter, vocab, nets, pred, unit, ceiling, discount,
                   batch=CALIB_BATCH):
     """T2's log, one pass, one life at a time: per life its slots, full
-    flags and log offset (A3); every decision's return, value and advantage
-    (A2); every logged run's (length, size, error) for tau_L (A6), runs of
-    full decisions at most MAX_LENGTH frames long. Returns (lives,
-    advantages, returns, values, calibration (lengths, sizes, errors),
-    counts)."""
+    flags and log offset (A3, A10); every decision's return, value and
+    advantage (A2, A9); every logged run's (length, size, error) for tau_L
+    (A6, A12), runs of full decisions at most MAX_LENGTH frames long.
+    Counts (A9) the lives cut short (not terminated: no bootstrap) and
+    their decisions. Returns (lives, advantages, returns, values,
+    calibration (lengths, sizes, errors), counts)."""
     vocab = _key(vocab)
     lives, rets, vals = [], [], []
     lengths, sizes, errors = [], [], []
@@ -911,8 +1012,10 @@ def own_play_pass(lives_iter, vocab, nets, pred, unit, ceiling, discount,
     for it, life in lives_iter:
         traj = life["traj"]
         m = len(traj) - 1
+        truncated = not life.get("terminated", True)
         counts["lives"] += 1
-        counts["truncated_lives"] += int(not life.get("terminated", True))
+        counts["truncated_lives"] += int(truncated)
+        counts["truncated_decisions"] += max(m, 0) if truncated else 0
         if m < 1:
             continue
         slots = [int(r[1]) for r in traj[:-1]]
@@ -970,7 +1073,21 @@ def out_files(run_name, smoke):
 
 
 def _jsonable_cands(cands):
-    return [{**c, "key": [list(t) for t in c["key"]]} for c in cands]
+    """(A13) the candidates as JSON: inputs, spelling, and every spelling
+    with its count."""
+    return [{**c, "inputs": [int(a) for a in c["inputs"]],
+             "key": [list(t) for t in c["key"]],
+             "spellings": [{"key": [list(t) for t in k], "count": int(v)}
+                           for k, v in c["spellings"]]} for c in cands]
+
+
+def _corr(x, y):
+    """Pearson's r, or None (too few points, or no spread: NaN)."""
+    if len(x) < 3:
+        return None
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r = float(np.corrcoef(x, y)[0, 1])
+    return round(r, 4) if math.isfinite(r) else None
 
 
 def main(argv):
@@ -1043,12 +1160,13 @@ def main(argv):
                      "high_threshold": threshold,
                      "advantage": _dist(adv), "returns": _dist(rets),
                      "values": _dist(vals),
-                     "corr_return_value": (round(float(np.corrcoef(
-                         rets, vals)[0, 1]), 4) if len(adv) > 2 else None)}
+                     "corr_return_value": _corr(rets, vals)}
         value = {"reward_unit": unit, "ceiling": ceiling,
                  "discount_per_base_step": discount}
         cand_rec = _jsonable_cands(cands)
-        drop_rec = [{"key": [list(t) for t in k], "count": v}
+        # (A13) a dropped key is one action held for a token's length
+        drop_rec = [{"inputs": [int(a) for a in k], "action": int(k[0]),
+                     "length": BASE * len(k), "count": v}
                     for k, v in sorted(dropped.items(),
                                        key=lambda kv: -kv[1])]
         # the own-play results before anything replays: they survive a
