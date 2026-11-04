@@ -980,6 +980,25 @@ emulator scores only, per Kai's long-term rule)
       E3 canonicalizes the same way.
   (A14) THE UNDER-100 RULE of A8 counts the plays of A11's decision rate
       (candidate plays whose length holds another candidate).
+  FIXES r1 (c4375b4e): A13 and A14 built; truncated decisions counted;
+  each branch's life loss recorded (descriptive); the encode-side h
+  transform checked; tests for every r1 finding (verdict precedence, read
+  (3) never deciding, a played index > 0, main() on fakes over two games,
+  the game-end guard, per-length taus, the NOOP tail's delayed effect,
+  A13's merges).
+  AUDIT r2 (two fresh-eyes auditors, 11-04): r2a (the probe) nothing above
+  LOW -- played runs map one-to-one to candidates by inputs, branches play
+  the main line's own frames, the main line is undisturbed, the right rate
+  and count decide; L: a few stale game-end targets entered tau_L's
+  calibration. r2b (the tests) three MEDIUM -- no fixture with mixed taus
+  (a pooled tau would pass), read (2)'s unrolled spelling pinned only
+  where it equals the played one, main()'s advantage-to-high-half wiring
+  unpinned -- and LOWs.
+  FIXES r2: the calibration drops runs ending at a game-ending life's last
+  decision (counted); the restore after branching in a finally; whole base
+  steps asserted; tests for each r2 finding (per-group tau, the
+  representative spelling unrolled, the advantage array reaching the high
+  half, an unrounded recall edge, argmax mismatches voiding).
 
 E3 -- the lineage with mined tokens (after B2W and E3a)
   THE LINEAGE: the base recipe's three generations at ~33.3k env steps

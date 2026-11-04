@@ -70,15 +70,20 @@ READS
   (2) (A6, A12) PREDICTED latents: z_c = projector(g(...g(h(s_t), c_1)...,
       c_n), with_prediction=True): h on t's stack with the deployed acting
       states, T2's dynamics unrolled over candidate c's spelling, the online
-      projection (E1's forward model); the cosine distance 1 - cos between
-      two candidates. A pair is GROUPED when its distance is below tau_L
+      projection: E1's forward-model construction, but encoded with the
+      deployed acting statistics (A12), not E1's raw-BN copy of the
+      representation; the cosine distance 1 - cos between two candidates.
+      A pair is GROUPED when its distance is below its own play's tau_L
       (strictly); the predicted classes are the connected components of the
       grouped pairs (E1's). tau_L is the median L-length prediction error
       over T2's logged runs of total length L (every contiguous run of 2-4
       decisions inside a logged life, each decision played in full, of any
-      start and any key; run sizes pooled): 1 - cos(the run's unrolled online
-      projection, projector(h(the stack the run reached), False)) -- E1's
-      one-step tau, by length. Scored as pairs against the truth, pooled
+      start and any key; run sizes pooled; runs ending at the last decision
+      of a life that ended the GAME are left out -- MaxAndSkip stops before
+      refreshing its buffer there, so that final stack is stale): 1 - cos(the
+      run's unrolled online projection, projector(h(the stack the run
+      reached), False)) -- E1's one-step tau, by length (the same h with
+      the acting statistics). Scored as pairs against the truth, pooled
       over the scored (t, L): merge precision and recall, beside the trivial
       rules (all one class; all distinct), as E1. CAVEAT (A12): two online
       predictions are compared against an online-to-target tau_L.
@@ -188,7 +193,11 @@ def _length(key):
 
 def run_inputs(key):
     """(A13) A run's KEY: its raw input per base step -- each token (a, f)
-    expanded to f / BASE base steps of action a."""
+    expanded to f / BASE base steps of action a. A token's frames must be a
+    whole number of base steps (asserted, never truncated)."""
+    for _, f in key:
+        assert int(f) % BASE == 0, f"a token of {f} frames: not whole " \
+            f"base steps of {BASE}"
     return tuple(int(a) for a, f in key for _ in range(int(f) // BASE))
 
 
@@ -623,17 +632,20 @@ class Prober:
         window = length + HORIZON
         now = ale.cloneState()
         digests, reached, lost = [], [], []
-        for c in members:
-            dg, obs, gone = play_branch(ale, dec["state"], input_frames(
-                self.cands[c]["inputs"], actions), window, actions[0])
-            digests.append(dg)
-            reached.append(reached_stack(dec["stack"], obs))
-            lost.append(gone)
-        # branch-order independence (E0's check): the played candidate,
-        # replayed after every other branch, gives its digest again
-        again, _, _ = play_branch(ale, dec["state"], input_frames(
-            self.cands[cid]["inputs"], actions), window, actions[0])
-        ale.restoreState(now)
+        try:
+            for c in members:
+                dg, obs, gone = play_branch(ale, dec["state"], input_frames(
+                    self.cands[c]["inputs"], actions), window, actions[0])
+                digests.append(dg)
+                reached.append(reached_stack(dec["stack"], obs))
+                lost.append(gone)
+            # branch-order independence (E0's check): the played candidate,
+            # replayed after every other branch, gives its digest again
+            again, _, _ = play_branch(ale, dec["state"], input_frames(
+                self.cands[cid]["inputs"], actions), window, actions[0])
+        finally:
+            # never leave the emulator at a branch's state (N1)
+            ale.restoreState(now)
         replay_ok = again == digests[p]
         # the branch replays the main line: its reached stack is the main
         # line's own next stack after the run
@@ -1001,9 +1013,14 @@ def own_play_pass(lives_iter, vocab, nets, pred, unit, ceiling, discount,
     """T2's log, one pass, one life at a time: per life its slots, full
     flags and log offset (A3, A10); every decision's return, value and
     advantage (A2, A9); every logged run's (length, size, error) for tau_L
-    (A6, A12), runs of full decisions at most MAX_LENGTH frames long.
-    Counts (A9) the lives cut short (not terminated: no bootstrap) and
-    their decisions. Returns (lives, advantages, returns, values,
+    (A6, A12), runs of full decisions at most MAX_LENGTH frames long --
+    except (L1) the runs ending at the last decision of a life that ended
+    the GAME (terminated and real_done: its token counts as full, but
+    MaxAndSkip stopped before refreshing its buffer, so the final stack is
+    stale; the main line excludes such runs too, A10), counted as
+    "game_end_runs_dropped". Counts (A9) the lives cut short (not
+    terminated: no bootstrap) and their decisions. Every life must carry
+    OwnPlayLog's "real_done". Returns (lives, advantages, returns, values,
     calibration (lengths, sizes, errors), counts)."""
     vocab = _key(vocab)
     lives, rets, vals = [], [], []
@@ -1013,9 +1030,12 @@ def own_play_pass(lives_iter, vocab, nets, pred, unit, ceiling, discount,
         traj = life["traj"]
         m = len(traj) - 1
         truncated = not life.get("terminated", True)
+        real_done = bool(life["real_done"])           # KeyError if absent
+        game_end = real_done and not truncated
         counts["lives"] += 1
         counts["truncated_lives"] += int(truncated)
         counts["truncated_decisions"] += max(m, 0) if truncated else 0
+        counts["game_end_runs_dropped"] += 0
         if m < 1:
             continue
         slots = [int(r[1]) for r in traj[:-1]]
@@ -1028,6 +1048,9 @@ def own_play_pass(lives_iter, vocab, nets, pred, unit, ceiling, discount,
                                                 batch=batch).items()):
             length = sum(frames[i:i + n])
             if all(full[i:i + n]) and length <= MAX_LENGTH:
+                if game_end and i + n == m:
+                    counts["game_end_runs_dropped"] += 1
+                    continue
                 lengths.append(length)
                 sizes.append(n)
                 errors.append(e)

@@ -197,6 +197,9 @@ def test_the_raw_inputs_of_a_key():
     assert e3.input_frames((2, 3), list(range(10, 19))) == [12] * 4 + [13] * 4
     assert e3.token_inputs(((2, 4), (3, 8)), list(range(10, 19))) == \
         [12] * 4 + [13] * 8
+    # (N3) a token that is not whole base steps is refused, not truncated
+    with pytest.raises(AssertionError, match="base steps"):
+        e3.run_inputs(((2, 4), (3, 6)))
 
 
 def test_the_duration_tokens_on_inputs():
@@ -405,8 +408,8 @@ def test_the_own_play_pass():
     a = _life(T2_VOCAB, s0, rng, r0)
     s1 = [14, 9, 15]                         # 4, 16, 8: the last cut short
     b = _life(T2_VOCAB, s1, rng, [(10,), (0, 0, 0, 0), (0,)], cut={2: 1})
-    lives_iter = [(1, {"traj": a, "terminated": True}),
-                  (2, {"traj": b, "terminated": False})]
+    lives_iter = [(1, {"traj": a, "terminated": True, "real_done": False}),
+                  (2, {"traj": b, "terminated": False, "real_done": True})]
     lives, adv, rets, vals, (lengths, sizes, errors), counts = \
         e3.own_play_pass(lives_iter, T2_VOCAB, nets, pred, 10.0, 17.4, 0.9)
     assert [l["offset"] for l in lives] == [0, 5]
@@ -434,7 +437,22 @@ def test_the_own_play_pass():
     assert errors[0] == pytest.approx(errs_a[(0, 2)], abs=1e-6)
     assert counts == {"lives": 2, "truncated_lives": 1,
                       "truncated_decisions": 3, "decisions": 8,
-                      "cut_short_decisions": 1}
+                      "cut_short_decisions": 1, "game_end_runs_dropped": 0}
+    # (L1) life a ended the GAME (terminated, real_done): its last token's
+    # stack is MaxAndSkip's stale buffer, so the runs ending there -- (3,2)
+    # of 20 frames and (2,3) of 52 -- leave the calibration; b's real_done
+    # without a terminal (cut short by the cap) changes nothing
+    over = [(1, {"traj": a, "terminated": True, "real_done": True}),
+            (2, {"traj": b, "terminated": False, "real_done": True})]
+    _, adv2, _, _, (lengths2, sizes2, _), counts2 = \
+        e3.own_play_pass(over, T2_VOCAB, nets, pred, 10.0, 17.4, 0.9)
+    assert sorted(zip(lengths2, sizes2)) == [(20, 2), (48, 2), (48, 2),
+                                             (64, 2)]
+    assert counts2["game_end_runs_dropped"] == 2
+    assert adv2 == pytest.approx(adv)          # the advantage is untouched
+    with pytest.raises(KeyError):              # OwnPlayLog's field required
+        e3.own_play_pass([(1, {"traj": a, "terminated": True})], T2_VOCAB,
+                         nets, pred, 10.0, 17.4, 0.9)
 
 
 def test_the_unrolled_and_real_projections():
@@ -675,15 +693,16 @@ def _truth(dead=(3,), drop=(9,), wrong=None, tokens=TOKENS, game=1):
 
 
 def _probe(monkeypatch, ale_cls=_ImgALE, max_decisions=0, truth=None,
-           tokens=TOKENS, ends=ENDS):
+           tokens=TOKENS, ends=ENDS, argmax_off=0):
     """The scripted game under the Prober; returns (prober, stacks, the
-    main line's observations, the final emulator state, out)."""
+    main line's observations, the final emulator state, out). `argmax_off`
+    shifts the hook's prior argmax off the token played."""
     monkeypatch.setattr(e3, "MAX_DECISIONS", max_decisions)
     game = _Game(ale_cls(), ends)
     monkeypatch.setattr(ablation, "play_token", game.play_token)
     priors = {}
-    nm = SimpleNamespace(initial_inference=lambda s: (_prior(priors[id(s)]),
-                                                      0.0))
+    nm = SimpleNamespace(initial_inference=lambda s: (
+        _prior((priors[id(s)] + argmax_off) % len(V)), 0.0))
     run = SimpleNamespace(searcher=SimpleNamespace(network_manager=nm))
     out = io.StringIO()
     prober = e3.Prober(run, _tiny_nets(actions=len(V)), V,
@@ -772,6 +791,16 @@ def test_the_main_line_hook_on_a_scripted_game(monkeypatch):
     want = e3.pair_distances(e3.unrolled_projections(prober.nets, stacks[0],
                                                      seqs))
     assert g0["dist_pred"] == pytest.approx(want, abs=1e-6)
+    # (M2, A13) read (2) unrolls each CANDIDATE's spelling: at d4 c4 is
+    # (0,4)(2,8), slots [0, 4], though T2 played it as (0,4)(2,4)(2,4)
+    reps = [[1, 4], [0, 4], [5, 0, 1], [0, 5, 1], [3, 4], [2, 4]]
+    want4 = e3.pair_distances(e3.unrolled_projections(prober.nets, stacks[4],
+                                                      reps))
+    assert g4["dist_pred"] == pytest.approx(want4, abs=1e-6)
+    as_played = reps[:1] + [[0, 1, 1]] + reps[2:]
+    other4 = e3.pair_distances(e3.unrolled_projections(prober.nets,
+                                                       stacks[4], as_played))
+    assert g4["dist_pred"] != pytest.approx(other4, abs=1e-6)
     # T2's runs: eligibility at the life's and the game's ends
     runs = {r["d"]: r["runs"] for r in recs if "runs" in r}
     assert runs[5] == [{"n": 2, "length": 8, "eligible": True,
@@ -848,6 +877,48 @@ def test_a_leaky_emulator_is_caught(monkeypatch):
     assert ok is False
     assert "3 played candidates whose replay differs" in " ".join(why)
     assert "3 played candidates whose reached stack" in " ".join(why)
+
+
+def test_a_prior_argmax_off_the_token_voids(monkeypatch):
+    """Every scored decision's prior argmax is another token: the hook
+    counts all ten (the d9 census line is missing, but the argmax is still
+    checked), and the run is VOID."""
+    prober, _, seen, end, _ = _probe(monkeypatch, argmax_off=1)
+    assert (seen, end) == _plain()              # the game itself unchanged
+    assert prober.argmax_mismatches == 10 and prober.token_mismatches == 0
+    counts = {k: getattr(prober, k) for k in (
+        "token_mismatches", "argmax_mismatches", "missing",
+        "replay_mismatches", "stack_mismatches")}
+    monkeypatch.setattr(e3, "MAX_DECISIONS", 0)
+    ok, why = e3.validity({1: (0.0, 25, True, 10)}, None, {1: 10}, {1: 10},
+                          counts, True)
+    assert ok is False
+    assert "10 decisions whose prior argmax is not the agent's token" in why
+    rec = {"verdict": "KAI_CALL_TOO_FEW"}
+    e1.finalize(rec, ok, why)
+    assert rec["verdict"].startswith("VOID (")
+
+
+def test_a_failing_branch_leaves_the_main_line_state(monkeypatch):
+    """(N1) An exception among a play's branches still restores the
+    emulator to the main line's state."""
+    game = _Game(_ImgALE())
+    ale = game.unwrapped.ale
+    start = ale.cloneState()                     # the decision's state
+    for _ in range(3):
+        game.base_step(2)                        # the main line moved on
+    now = ale.cloneState().t
+    prober = e3.Prober(None, _tiny_nets(actions=len(V)), V, {}, _cands(),
+                       TAUS, None)
+    stack = muzero.initial_frame_stack(np.zeros((3, 84, 84), np.uint8))
+
+    def boom(*a, **k):
+        raise RuntimeError("a branch failed")
+    monkeypatch.setattr(e3, "reached_stack", boom)
+    with pytest.raises(RuntimeError, match="a branch failed"):
+        prober.group(game, [{"state": start, "stack": stack}], 2, 0, 8,
+                     CAND_KEYS[0])
+    assert ale.cloneState().t == now
 
 
 def test_the_hook_needs_was_real_done(monkeypatch):
@@ -952,6 +1023,18 @@ def test_grouping_is_strictly_below_tau_and_closes_components():
     # a lone candidate has no pair
     assert tuple(e3.latent_counts([_g([0], 0, [])], "dist_pred")[0]) == \
         (0, 0, 0, 0)
+    # (M1) each play's OWN tau_L: a pair at 0.1 is grouped under tau 0.2,
+    # not under tau 0.05, in either order (a pooled tau, or groups[0]'s,
+    # would group both or neither)
+    lo = _g([0, 0], 0, [0.1], tau=0.05, length=8)
+    hi = _g([0, 0], 0, [0.1], tau=0.2, length=12)
+    for order in ([lo, hi], [hi, lo]):
+        assert tuple(e3.latent_counts(order, "dist_pred")[0]) == (1, 0, 1, 0)
+        r = e3.latent_read(order, "dist_pred")
+        assert (r["tp"], r["fn"]) == (1, 1) and r["recall"] == 0.5
+        assert (r["pairwise"]["tp"], r["pairwise"]["fn"]) == (1, 1)
+    assert tuple(e3.latent_counts([lo], "dist_pred")[0]) == (0, 0, 1, 0)
+    assert tuple(e3.latent_counts([hi], "dist_pred")[0]) == (1, 0, 0, 0)
     with pytest.raises(ValueError):
         e3.latent_counts([_g([0, 1, 2], 0, [0.1])], "dist_pred")
 
@@ -968,6 +1051,8 @@ def test_grouping_is_strictly_below_tau_and_closes_components():
     ((100, 0.1, 0.6999, 0.9, [0.1, None]), "KAI_CALL"),     # 10%: not under
     ((100, 0.05, 0.9, 0.1999, [0.1, None]), "MINE_WITHOUT_GROUPING"),
     ((100, 0.5, 0.9, 0.1999, [0.1, None]), "KAI_CALL"),
+    # an unrounded recall that reports as 0.2 is still under the bar
+    ((100, 0.5, 0.9, 0.19996, [0.1, None]), "KAI_CALL"),
     # not strictly above a trivial rule's precision
     ((100, 0.5, 0.75, 0.5, [0.75, None]), "KAI_CALL"),
     ((100, 0.05, 0.75, 0.5, [0.8, None]), "MINE_WITHOUT_GROUPING"),
@@ -1088,6 +1173,16 @@ def test_the_unrounded_reads_decide():
     assert s["read_2"]["precision"] == 0.7 and s["read_2"]["recall"] == 1.0
     assert s["read_2"]["meets_bars"] is False
     assert s["verdict"] == "KAI_CALL"                   # rate 1402 / 4003
+    # the recall 800 / 4001 = 0.199950 reports as 0.2 but is under the bar
+    # (precision 1, above all one's 0.5): Kai's call, not grouping
+    rec = _recs_of([_g([0, 0], 0, [0.01])] * 800
+                   + [_g([0, 0], 0, [0.5])] * 3201
+                   + [_g([0, 1], 0, [0.5])] * 4001)
+    s = e3.summarize(rec)
+    assert s["read_2"]["recall"] == 0.2 and s["read_2"]["precision"] == 1.0
+    assert s["read_2"]["trivial"]["one"]["precision"] == 0.5
+    assert s["read_2"]["meets_bars"] is False
+    assert s["verdict"] == "KAI_CALL"                   # rate 4001 / 8002
 
 
 # --------------------------------------------------------------------------
@@ -1388,9 +1483,26 @@ def test_main_end_to_end_on_fakes(tmp_path, monkeypatch):
     for k, v in (("GAMES", 2), ("MAX_DECISIONS", 0), ("LOG_LIVES", 0),
                  ("SMOKE", False)):
         monkeypatch.setattr(e3, k, v)
+    # (M3) spies: the high half must rank own_play_pass's ADVANTAGE array
+    # itself -- not the returns or the values alone
+    spied, real_pass, real_half = {}, e3.own_play_pass, e3.high_half
+
+    def pass_spy(*a, **k):
+        spied["pass"] = real_pass(*a, **k)
+        return spied["pass"]
+
+    def half_spy(adv):
+        spied["half"] = adv
+        return real_half(adv)
+    monkeypatch.setattr(e3, "own_play_pass", pass_spy)
+    monkeypatch.setattr(e3, "high_half", half_spy)
     e3.main([str(snap)])
     assert ablation.play_token is fake_play_token        # the hook let go
     assert played == [1, 2] and meta_first == [True, True]
+    _, adv, rets, vals, _, _ = spied["pass"]
+    assert spied["half"] is adv
+    assert spied["half"] is not rets and spied["half"] is not vals
+    assert np.array_equal(adv, rets - vals)
     meta = [json.loads(l) for l in
             pathlib.Path(f"{tag}-meta.jsonl").read_text().splitlines()]
     decs = [json.loads(l) for l in
@@ -1402,6 +1514,9 @@ def test_main_end_to_end_on_fakes(tmp_path, monkeypatch):
     assert m["log"]["last"] == 3 and m["log"]["lives"] == 3
     assert m["log"]["decisions"] == 3 * len(TOKENS)
     assert m["log"]["truncated_decisions"] == 0
+    # (L1) every logged life ended its game: its last token's stack is
+    # stale, so the runs ending there (sizes 2, 3, 4) leave the calibration
+    assert m["log"]["game_end_runs_dropped"] == 3 * 3
     assert m["advantage"]["high"] == 15
     # (A13) the key (2, 2, 2): (2,4)(2,8) twice in the high half, (2,4)x3
     # once -- the most frequent candidate, spelled (2,4)(2,8)
@@ -1428,6 +1543,7 @@ def test_main_end_to_end_on_fakes(tmp_path, monkeypatch):
     strip = [{k: v for k, v in x.items() if k != "game"} for x in decs]
     assert strip[:10] == strip[10:]
     assert s["main_line_ok"] is True and s["void_reasons"] == []
+    assert set(s["counts"]) == set(COUNTS0)              # every check ran
     assert all(v == 0 for v in s["counts"].values())
     assert s["read_1"]["plays"] == len(groups)
     assert s["checks"]["stack_ok"] == s["checks"]["replay_ok"] == len(groups)
@@ -1540,7 +1656,9 @@ def test_a_smoke_on_t2s_real_data(tmp_path):
         assert a["taus"].get(str(c["length"]), 0) > 0
     adv = a["advantage"]
     assert adv["high"] == adv["decisions"] // 2
-    # the value head tracks the returns it was trained toward
+    # DIAGNOSTICS (empirical expectations on T2's real data, not rules of
+    # the probe): the value head tracks the returns it was trained toward
+    # -- a positive correlation, and medians within 10x of each other
     assert adv["corr_return_value"] is not None
     assert adv["corr_return_value"] > 0
     rp50, vp50 = adv["returns"]["p50"], adv["values"]["p50"]
@@ -1552,14 +1670,28 @@ def test_a_smoke_on_t2s_real_data(tmp_path):
     assert meta["log"]["last"] == 42
     assert meta["log"]["lives"] == 40
     assert meta["log"]["truncated_decisions"] >= 0
+    assert meta["log"]["game_end_runs_dropped"] >= 0
     assert meta["value_terms"] == {"reward_unit": 10.0,
                                    "ceiling": 17.398055555555555,
                                    "discount_per_base_step": 0.988053892081}
+    assert a["verdict"] in ("KAI_CALL_TOO_FEW", "GROUP_BY_PREDICTED",
+                            "MINE_WITHOUT_GROUPING", "KAI_CALL")
+    # (b) a differing exact-eval row: VOID, the would-be verdict kept
+    assert b["main_line_ok"] is False and b["verdict"].startswith("VOID")
+    assert "verdict_if_valid" in b
+    assert b["void_reasons"][0].startswith("game 1 ")
     # the candidate plays (A4, A10): every check passed; members of one
-    # length; the played run's inputs are its candidate's
+    # length; the played run's inputs are its candidate's. DIAGNOSTIC: that
+    # game 1's first 80 decisions hold a candidate play at all is
+    # empirical -- without one these checks cannot run, so the test skips
+    # (after everything above passed) rather than fails
     groups = [g for x in decs if x.get("live") for g in x["groups"]]
-    assert a["read_1"]["plays"] == len(groups) >= 1, \
-        "no candidate play in game 1's first 80 decisions"
+    assert a["read_1"]["plays"] == len(groups)
+    assert a["checks"]["replay_ok"] == a["checks"]["stack_ok"] == len(groups)
+    if not groups:
+        pytest.skip("no candidate play in game 1's first 80 decisions: the "
+                    "per-play checks could not run (raise E3A_MAX_DECISIONS "
+                    "or E3A_LOG_LIVES)")
     by_id = {c["id"]: c for c in cands}
     for g in groups:
         assert g["replay_ok"] is True and g["stack_ok"] is True
@@ -1570,10 +1702,3 @@ def test_a_smoke_on_t2s_real_data(tmp_path):
         k = len(g["members"])
         assert len(g["truth"]) == k and len(g["dist_pred"]) == k * (k - 1) // 2
         assert g["tau"] == a["taus"][str(g["length"])]
-    assert a["checks"]["replay_ok"] == a["checks"]["stack_ok"] == len(groups)
-    assert a["verdict"] in ("KAI_CALL_TOO_FEW", "GROUP_BY_PREDICTED",
-                            "MINE_WITHOUT_GROUPING", "KAI_CALL")
-    # (b) a differing exact-eval row: VOID, the would-be verdict kept
-    assert b["main_line_ok"] is False and b["verdict"].startswith("VOID")
-    assert "verdict_if_valid" in b
-    assert b["void_reasons"][0].startswith("game 1 ")
