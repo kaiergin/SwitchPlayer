@@ -1162,6 +1162,27 @@ b2w_smoke_r2.log); launch_testb2w.ps1 started the hand-off post_testb2w.py
 w0 preflights (~25 min), then trains W0; w1 and w2 wait for their
 masters. Keep Y:\SwitchPlayer-testb2-run, -testc-run and -testc2-run until
 B2W is scored.
+THE SCORER (A3), built during the run: scratchpad score_testb2w.py
+(stdlib, python -I; reads the frozen trees) and its fake-tree check
+check_score_testb2w.py (SCORE CHECK OK). Every derived read is computed for
+both lineages by the same code, and T's are asserted on every run against
+Test B2's RESULT (T2's window 1629.5 / 1605.25, n 4; the rates +11.6 /
++24.5 / +5.2; transfers -169 / +245; jumps -211 / +133; the windows; the
+drops; T0's mean 709.2, which B2 printed for the exact 709.13).
+SCORER AUDITS s1-s5 (one fresh-eyes auditor each, 11-04): s1 HIGH x2 --
+the jump used row 0 (B2's jump is rows 5 and 10 against the master's last
+two rows) and the rate dropped row 0 -- and MEDIUMs (read (4) not by row;
+a final verdict possible before the final row's evals; a checker unable
+to catch definition errors); s2 MEDIUM (read (3)'s W0 vs T0 with no
+PROVISIONAL tag); s3 MEDIUM (a row lost into a malformed line could leave
+read (1) final on n-1 rows); s4 MEDIUM (read (1)'s tag ignored W0's and
+W1's integrity, though their final rows set W2's cumulative base); all
+fixed, each with its checker case. s5: nothing above LOW -> CLOSED.
+Accepted LOWs, checked BY HAND at scoring instead: (a) each generation
+reached its stop (its final cumulative env steps >= round(100,000 x
+(k+1) / 3)); (b) each master's final row is its true final iteration (the
+supervisor's MASTER line); (c) a probe fragment from a killed probe keeps
+read (1) PROVISIONAL (safe side) -- check it by hand if it happens.
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
