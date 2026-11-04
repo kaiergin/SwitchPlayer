@@ -183,7 +183,15 @@ def test_a_w_runs_five_optimizers_take_bbfs_adamw_and_no_warmup(
     """Inside W0's arm config (its 36 tokens), a run's five optimizers --
     built as Run.__init__ builds them -- are BBF's, the BN affines and
     biases undecayed; the warmup leaves the lr at 1e-4 from step 0 (T0's
-    sets it to 0 there)."""
+    sets it to 0 there). (Audit r2a L2) make_run copies Run.__init__'s
+    optimizer lines, so Run.__init__ itself must build all five through
+    muzero.make_optimizer and nothing else."""
+    import inspect
+    src = inspect.getsource(ablation.Run.__init__)
+    for n, o in zip(ablation.NET_NAMES, ablation.OPT_NAMES):
+        assert (f"self.trainer.{o} = muzero.make_optimizer("
+                f"nets[{n!r}].parameters())".replace("'", '"') in src), o
+    assert "optim." not in src.replace("_optimizer", "")
     with ablation.arm_config(W[0]) as spec, ablation.token_actions():
         run = make_run(spec, arm=W[0], steps=0)
         opts = [getattr(run.trainer, o) for o in ablation.OPT_NAMES]
@@ -211,14 +219,13 @@ def test_a_w_runs_five_optimizers_take_bbfs_adamw_and_no_warmup(
 
 def test_a_checkpoints_optimizer_state_round_trips(restore_rngs,  # noqa: F811
                                                     tmp_path):
-    """The two groups and Adam's moments survive the checkpoint's own path
-    -- _cpu_state, pickled as save_run_checkpoint streams its head, then
-    load_state_dict as load_run_checkpoint applies it -- into a resumed
-    run's FRESH optimizers, whose groups (audit r1a L3: compared BEFORE the
-    load, which would copy the saved hyperparameters over them) are the
-    saved ones: the rebuild splits and orders the parameters as the run
-    did."""
-    import pickle
+    """The two groups and Adam's moments survive the checkpoint itself --
+    ablation.save_run_checkpoint, then load_run_checkpoint (audit r2a L1:
+    the real functions, not a copy of them) -- into a resumed run's FRESH
+    optimizers, whose groups (audit r1a L3: compared BEFORE the load, which
+    would copy the saved hyperparameters over them) are the run's: the
+    rebuild splits the parameters into the same groups."""
+    from tests.test_checkpoint_resume import EXPECT, META
     with ablation.arm_config(W[1]) as spec, ablation.token_actions():
         run = make_run(spec, arm=W[1], steps=0)
         tr = run.trainer
@@ -228,21 +235,20 @@ def test_a_checkpoints_optimizer_state_round_trips(restore_rngs,  # noqa: F811
                 opt.zero_grad()
                 sum((p ** 2).sum() for p in net.parameters()).backward()
                 opt.step()
-        path = tmp_path / "head.pkl"
-        with open(path, "wb") as f:
-            pickle.dump({"optims": ablation._cpu_state(
-                {o: getattr(tr, o).state_dict()
-                 for o in ablation.OPT_NAMES})}, f, protocol=5)
-        with open(path, "rb") as f:
-            saved = pickle.load(f)["optims"]
+        tr.training_steps = META["training_steps"]
         fresh = make_run(spec, arm=W[1], steps=0)
         for o in ablation.OPT_NAMES:
             opt = getattr(fresh.trainer, o)
-            groups = saved[o]["param_groups"]
+            groups = getattr(tr, o).state_dict()["param_groups"]
             assert opt.state_dict()["param_groups"] == groups, o
             assert [g["weight_decay"] for g in groups] == [0.1, 0.0], o
             assert not opt.state_dict()["state"], o          # fresh
-            opt.load_state_dict(saved[o])
+        path = tmp_path / "resume.ckpt"
+        ablation.save_run_checkpoint(run, path, META)
+        ablation.load_run_checkpoint(fresh, path, EXPECT)
+        assert fresh.trainer.training_steps == META["training_steps"]
+        for o in ablation.OPT_NAMES:
+            opt = getattr(fresh.trainer, o)
             a, b = getattr(tr, o).state_dict(), opt.state_dict()
             assert a["param_groups"] == b["param_groups"], o
             assert a["state"].keys() == b["state"].keys(), o

@@ -1089,6 +1089,31 @@ offline steps plus its online ones), that a resume never reruns the
 offline phase and that the non-finite field is present and 0; the PAUSE
 listing matches only distill.py of a W arm; the launcher records A3; the
 usage and smoke-as-trainer tests know the w variants.
+AUDIT r2 (two fresh-eyes auditors, 11-04): r2a (the core) nothing above
+LOW -- the round-trip test copied the checkpoint path rather than calling
+it, no CPU check covered Run.__init__'s own optimizer lines, read (4)'s
+projector dead fraction is partly confounded (under W the BN gammas are
+not decayed; T's coupled SGD decays them), NITs. r2b (the tooling) one
+HIGH in the smoke: its "offline phase not rerun" check matched the W1 /
+W2 arms' _doc banner ("... its offline steps under the same optimizer"),
+which ablation prints at startup, so it could never pass on w1b (and its
+positive check on w2 passed vacuously). The smoke running at the time
+(b2w_smoke_r1.log, at 0bfa45a2) failed there as predicted, after W0's and
+W1's iteration-2 checkpoints had passed every optimizer check -- W1's
+Adam step count 80 = 40 offline + 40 online: the offline phase ran under
+the run's own optimizers -- and w1b's log holds no "] offline step"
+progress line (w1a's holds two): the resume did not rerun it. LOWs:
+provenance checked only at the smoke's start; the PAUSE listing's pytest
+alternative also matches a hand-run of the suites; NITs.
+FIXES r2: the smoke matches the trainer's own progress line ("] offline
+step N / M"; absent from w1b, "40 / 40" in w2) and re-checks the
+provenance (the same HEAD, AUDITED clean) before SMOKE OK;
+prelaunch_testb2w.py requires the smoke log's "start:" line to name
+smoke_testb2w.py; the launcher's PAUSE notes that a child counts only
+under a listed supervisor; the round-trip test calls
+save_run_checkpoint / load_run_checkpoint; the five-optimizer test reads
+Run.__init__'s source for the five make_optimizer lines; read (4)'s
+confound goes into the scorer (A3).
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
