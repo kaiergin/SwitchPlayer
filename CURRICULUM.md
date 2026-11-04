@@ -855,6 +855,61 @@ emulator scores only, per Kai's long-term rule)
   - else (duplicates common, latents fail) -> Kai's call.
   COST: a probe and its tests (built and audited while B2W trains), about
   1-3 h of CPU after B2W, under the lock.
+  E3a AMENDMENTS (the design, 11-04, before the build):
+  (A1) SOURCE: Test B2's T2 -- its iteration-42 snapshot (E0's and E1's;
+      deployed exact eval 1699.0) and its own-play log over its generation
+      (iterations 1-42, at raw-step resolution with token boundaries).
+  (A2) ADVANTAGE of a logged decision: the life's discounted return from
+      it (T2's reward clip and unit, gamma per frame, as the prep's value
+      check computes it) minus T2's value estimate on the decision's stack
+      (the deployed acting states); ranked over the whole log; the HIGH
+      half is the top 50%.
+  (A3) CANDIDATES: every contiguous run of 2, 3 or 4 decisions inside one
+      logged life whose FIRST decision is in the high half; its key is its
+      token tuple ((action, frames), ...), its LENGTH the sum of its
+      frames, at most 64. A run of one action whose length equals a token
+      already in T2's vocabulary is dropped (it already exists as a
+      duration token). The 32 most frequent keys are the candidates (ties
+      by first occurrence).
+  (A4) TRUTH (E0's rule, the emulator only scoring): the main line is the
+      exact eval of the 30 noop starts, each game validated against its
+      deployed exact-eval row (VOID otherwise, as E0). At each live
+      decision t, the run T2 actually plays next (its own next 2, 3 and 4
+      tokens on the main line) is a CANDIDATE PLAY when its key is a
+      candidate. For each candidate play, every candidate of the same
+      LENGTH is played from t's saved emulator state, then NOOP to a common
+      window of (length + 60) frames; two candidates are EQUIVALENT at t
+      when every raw RGB frame of the window is identical. Each (t,
+      length) is scored once. Also checked: the played candidate replays
+      to the main line's own frames (branch-order independence).
+  (A5) READ (1), the DUPLICATE-SPELLING RATE: the share of candidate
+      plays for which another same-length candidate is equivalent at t.
+      Descriptive: the equivalent share of all same-length candidate
+      pairs scored, and the classes per (t, length) against the
+      candidates per (t, length).
+  (A6) READ (2), PREDICTED latents: T2's representation of t's stack
+      (deployed acting states), its dynamics unrolled over each
+      candidate's tokens, the final latent projected (E1's forward model,
+      cosine distance in the projection space). A pair is GROUPED when its
+      distance is below tau_L: the median L-length prediction error over
+      T2's logged runs of that length (the distance between the unrolled,
+      projected latent and the target projection of the stack the run
+      actually reached; E1's one-step tau, by length). Scored as pairs
+      against the truth: precision and recall, beside the trivial rules
+      (all one class; all distinct), as E1.
+  (A7) READ (3), REAL-OUTCOME latents (an upper bound): T2's
+      representation of the stack each candidate actually reached in the
+      emulator (before the NOOP tail), projected; grouped below the same
+      tau_L; scored the same way. Descriptive: the median distance of
+      equivalent against non-equivalent pairs.
+  (A8) DECISION, as above: (2) precision >= 0.7 at recall >= 0.2 and above
+      every trivial rule's precision -> E3 groups by predicted latents;
+      else (1) under 10% -> E3 mines without grouping; else Kai's call.
+      Too few candidate plays to read (under 100) -> Kai's call.
+  BUILD: benchmarks/probes/probe_e3a_sequences.py (E0's main line and
+  branching, E1's forward model and calibration, reused by import) and
+  tests/test_e3a.py; audited like every build; tests and the run after
+  B2W (they need the host's memory), CPU, under the lock.
 
 E3 -- the lineage with mined tokens (after B2W and E3a)
   THE LINEAGE: the base recipe's three generations at ~33.3k env steps
