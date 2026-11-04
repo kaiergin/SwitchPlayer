@@ -1154,6 +1154,14 @@ ends); NITs, the preflight's own quick-probe test spawns a "-c" child that
 names the arm (CPU, seconds), two message / docstring wordings.
 THE SUITES: all 27 passed at 47cf92b0 (11:32-11:44 11-04, CPU, under the
 lock; its AUDITED files identical to the smoke's 666d00e9).
+LAUNCHED 11:46 EST 11-04: the manifest at ed359242 (written at
+e75e44d3); the run worktree Y:\SwitchPlayer-testb2w-run detached at
+ed359242; prelaunch_testb2w.py PRELAUNCH OK there (11:45, with
+b2w_smoke_r2.log); launch_testb2w.ps1 started the hand-off post_testb2w.py
+(cmd 20112) and the supervisors w0 / w1 / w2 (cmd 8188 / 24844 / 10176).
+w0 preflights (~25 min), then trains W0; w1 and w2 wait for their
+masters. Keep Y:\SwitchPlayer-testb2-run, -testc-run and -testc2-run until
+B2W is scored.
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
