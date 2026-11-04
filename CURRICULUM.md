@@ -910,6 +910,51 @@ emulator scores only, per Kai's long-term rule)
   branching, E1's forward model and calibration, reused by import) and
   tests/test_e3a.py; audited like every build; tests and the run after
   B2W (they need the host's memory), CPU, under the lock.
+  BUILT 2026-11-04 (pre-audit, uncommitted at first): the probe and its
+  tests, written by a build agent from A1-A8 (py_compile only: nothing ran
+  while B2W trains; the agent once ran a read-only `python -c` to print a
+  prep's vocab.json fields, against its brief). Its judgment calls, now
+  amendments:
+  (A9) A2 in detail: the return discounts per BASE STEP with T2's clip
+      and unit, exactly as distill.discounted_return_max (T2's own value
+      targets discount per token edge, so returns and values are slightly
+      offset; the ranking only uses their difference); a life cut short
+      (not terminated) is not bootstrapped -- such decisions are counted
+      and reported; T2's iteration-42 snapshot (deployed acting states)
+      values every logged decision, early iterations included; the high
+      half is the floor(n / 2) largest advantages, ties to the earlier
+      decision.
+  (A10) A3 / A4 in detail: runs containing a life's last, cut-short token
+      are excluded; a run is dropped as a duration token only when it is
+      ONE action and (that action, its length) is in T2's vocabulary. On
+      the main line a run is eligible only inside one life, every token
+      playing its full frames, its last token allowed to lose a life but
+      not to end the game (EpisodicLife's extra NOOP between lives;
+      MaxAndSkip stops mid-skip at game over). Branches run once the next
+      tokens are known, then the emulator is restored to the main line.
+      The replay check is two VOID-making checks: E0's replay digest of
+      the played candidate, and the stack its branch reaches equal to the
+      main line's own next stack. Liveness comes from E0's census file
+      (required, as for E1).
+  (A11) READ (1)'s DECISION RATE counts only the candidate plays whose
+      length holds at least one other candidate (a play with no
+      same-length alternative cannot be a duplicate; counting it would
+      dilute the rate toward "rare"). The rate over all candidate plays
+      is reported beside it, descriptive.
+  (A12) READS (2) / (3) in detail: the representation runs with the
+      deployed acting statistics; tau_L pools every full logged run of
+      length L (any start, any key); a pair is grouped strictly below
+      tau_L, classes are the connected components (E1's; the plain pair
+      rule reported beside it); the real-outcome latent of read (3) is
+      the TARGET projection; the trivial bar of A8 is strict, and "all
+      distinct" (no precision) sets none; the under-100 rule comes first;
+      tau x 0.5 and x 2 are reported, descriptive. CAVEATS: read (2)
+      compares two ONLINE predictions against an online-to-target tau_L
+      (as E1's forward read): a pair below it means the two predictions
+      sit closer than the model's own prediction error. Read (3)'s recall
+      is near 1 by construction (frame-equivalent candidates reach
+      identical stacks), so only its precision informs; it stays
+      descriptive and never decides.
 
 E3 -- the lineage with mined tokens (after B2W and E3a)
   THE LINEAGE: the base recipe's three generations at ~33.3k env steps
