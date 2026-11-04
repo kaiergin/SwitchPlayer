@@ -1547,7 +1547,18 @@ PAUSED A FOURTH TIME 18:55 EST 11-03 at Kai's request (no duration given),
 in iteration 139, after the iteration-138 checkpoint: the supervisor (28024;
 27208 exited with it), then the trainer (1680; 8600 exited with it), were
 killed by exact PID. No Ray processes were left. The hand-off is running an
-interim exact eval. Resume when Kai says, by rerunning the launcher. RESUMED 00:56 EST 11-04 at Kai's request ("Can we continue?"), by rerunning the launcher: it skipped the still-running hand-off and started the supervisor (8780), which logged RESUMING a0 s0 and runs its preflight before resuming the trainer from the iteration-138 checkpoint. The hand-off's 4-6 h "supervisor.log silent" alerts during the pause were expected.
+interim exact eval. Resume when Kai says, by rerunning the launcher.
+
+RESUMED 00:56 EST 11-04 when Kai said to continue ("Can we continue?"), by
+rerunning the launcher. It skipped the still-running hand-off and started
+the supervisor (8780), which logged RESUMING a0 s0, passed its preflight
+(manifest + quick probe + 26 suites) and relaunched the trainer (27840 ->
+5896). The trainer resumed after iteration 138 (83,695 env steps, 276,000
+train steps). The hand-off's 4-6 h "supervisor.log silent" alerts during
+the pause were expected. Rows 140-150 (trainer-BN from the training log):
+595 / 790 / 938 at 85,251 / 88,149 / 90,858 env steps; row 150 is C2's
+first row in the [90k, end] window. By env steps, C was at 1,329 (83,844),
+1,646 (88,447) and 1,111 (92,607).
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
