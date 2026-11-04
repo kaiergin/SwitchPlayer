@@ -999,6 +999,20 @@ emulator scores only, per Kai's long-term rule)
   steps asserted; tests for each r2 finding (per-group tau, the
   representative spelling unrolled, the advantage array reaching the high
   half, an unrounded recall edge, argmax mismatches voiding).
+  (Also r2: the slow smoke's empirical checks -- the return / value
+  correlation, the p50 ratio, at least one candidate play in game 1's
+  first 80 decisions -- relabelled DIAGNOSTICS; the last skips rather than
+  fails.)
+  AUDIT r3 (one fresh-eyes auditor, 11-04, on 98b4d67b): nothing above LOW
+  -> THE E3a AUDIT LOOP IS CLOSED. Accepted, not fixed: L, a capped life's
+  last runs (kept in the calibration, correctly) are not pinned by a test;
+  L, the slow smoke's skip on no candidate play could hide an eligibility
+  bug -- the full run would show it plainly (zero candidate plays, read as
+  KAI_CALL_TOO_FEW), so a full-run result with almost no eligible runs is
+  checked by hand before it is read; NITs.
+  NOT YET RUN: tests/test_e3a.py (fast and slow) and the probe, after B2W
+  (the host's memory), CPU, under the lock. A failure there is fixed and
+  re-audited before the probe runs.
 
 E3 -- the lineage with mined tokens (after B2W and E3a)
   THE LINEAGE: the base recipe's three generations at ~33.3k env steps
