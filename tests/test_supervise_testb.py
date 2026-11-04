@@ -630,11 +630,15 @@ def test_supervisor_refuses_bad_arguments(sup, monkeypatch, capsys):
                  ["R0", "0"], ["r", "0"], ["n", "0"],
                  # Test C2's: one run, seed 0
                  ["a1", "0"], ["a0", "1"], ["A0", "0"], ["a", "0"],
-                 ["a01", "0"], ["a0", "0", "1"]):
+                 ["a01", "0"], ["a0", "0", "1"],
+                 # Test B2W's: three generations, seed 0
+                 ["w3", "0"], ["w", "0"], ["w0", "1"], ["W0", "0"],
+                 ["w01", "0"], ["w1", "0", "1"]):
         assert sup.main(argv) == 2, argv
     out = capsys.readouterr().out
     assert ("usage: supervise_testb.py <variant: ['f0', 'f1', 'f2', 'f3', "
-            "'f4', 't0', 't1', 't2', 'r0', 'n0', 'a0']> <seed: [0]>") in out
+            "'f4', 't0', 't1', 't2', 'r0', 'n0', 'a0', 'w0', 'w1', 'w2']> "
+            "<seed: [0]>") in out
 
 
 def test_no_generation_2_leftovers(real_sup):
@@ -4076,30 +4080,35 @@ def test_a_smoke_counts_as_a_trainer(sup, monkeypatch, capsys):
     """Audit r1b L4: the Test C / C2 smokes (their parents and their
     "child" trainers) hold the GPU without an ablation.py on the command
     line: live_trainers counts them, so a supervisor started by hand beside
-    one waits."""
-    assert sup.SMOKE_SCRIPTS == ("smoke_testc.py", "smoke_testc2.py")
+    one waits. Test B2W's smoke (smoke_testb2w.py) too."""
+    assert sup.SMOKE_SCRIPTS == ("smoke_testc.py", "smoke_testc2.py",
+                                 "smoke_testb2w.py")
     procs = [
         (1, ["py", "-u", "C:" + chr(92) + "sp" + chr(92) + "smoke_testc2.py",
              "C:/sp/smoke_testc2_r2"]),
         (2, ["py", "-u", "C:/sp/smoke_testc2.py", "child", "C:/sp/a0",
              "resume1"]),
         (3, ["py", "smoke_testc.py", "kill", "out"]),
+        (8, ["py", "-u", "C:/sp/smoke_testb2w.py", "child", "w1a",
+             "C:/sp/b2w_smoke"]),
         (4, ["py", "smoke_testc2.py.bak"]),
         (5, ["py", "tests/test_smoke_testc2.py"]),
         (6, ["py", "benchmarks/supervisors/supervise_testb.py", "a0", "0"]),
-        (7, ["py", "post_testc2.py", "Y:/run"])]
+        (7, ["py", "post_testc2.py", "Y:/run"]),
+        (9, ["py", "smoke_testb2w.py.bak"]),
+        (10, ["py", "post_testb2w.py", "Y:/run"])]
     _procs(monkeypatch, sup, procs)
-    assert sup.live_trainers() == [1, 2, 3]
-    assert [p for p, c in procs if sup.is_trainer(c)] == [1, 2, 3]
+    assert sup.live_trainers() == [1, 2, 3, 8]
+    assert [p for p, c in procs if sup.is_trainer(c)] == [1, 2, 3, 8]
 
     def effect(n):
         if n == 2:
-            _procs(monkeypatch, sup, procs[3:])
+            _procs(monkeypatch, sup, procs[4:])
 
     monkeypatch.setattr(sup.time, "sleep", _bounded(effect))
     sup.wait_no_trainer()
     assert ("ALERT: an ablation.py or distill.py trainer is already running "
-            "(pids [1, 2, 3])") in capsys.readouterr().out
+            "(pids [1, 2, 3, 8])") in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
@@ -4226,7 +4235,11 @@ def test_b2ws_quick_probe_pins_adamw_and_every_other_lineage_sgd(sup):
     for letter, q in probes.items():
         want = BBF_OPTIM if letter == "w" else SGD_OPTIM
         for k, v in want.items():
-            assert f"assert spec.get({k!r}, muzero.{k}) == {v!r}; " in q
+            op = "is" if v is None or isinstance(v, bool) else "=="
+            assert f"assert spec.get({k!r}, muzero.{k}) {op} {v!r}; " in q
+        # (audit r1a L2) and it builds one net's optimizer under the arm
+        assert "muzero.make_optimizer(ablation.build_networks(_sp)" in q
+        assert ("'AdamW'" if letter == "w" else "'SGD'") in q
     a = "ablation.ARMS"
     w0 = W[0]
     breaks = [("w", f"{a}[{w0!r}]['OPTIMIZER'] = 'sgd'"),
@@ -4263,3 +4276,16 @@ def test_b2ws_quick_probe_pins_adamw_and_every_other_lineage_sgd(sup):
         assert flipped != probes[letter]
         g = _py_each([flipped])[0]
         assert g.startswith("AssertionError"), g
+    # the built optimizer (audit r1a L2): a builder that ignores the arm's
+    # knobs fails the probe though every spec pin passes -- each in its own
+    # child (EACH does not restore make_optimizer)
+    for letter, flip in (
+            ("w", "muzero.make_optimizer = lambda p: "
+                  "__import__('torch').optim.AdamW(p, lr=1e-4); "),
+            ("w", "muzero.make_optimizer = lambda p: "
+                  "__import__('torch').optim.SGD(p, lr=1e-4); "),
+            ("t", "muzero.make_optimizer = lambda p: "
+                  "__import__('torch').optim.AdamW(p); ")):
+        flipped = probes[letter].replace(head, head + flip)
+        g = _py_each([flipped])[0]
+        assert g.startswith("AssertionError"), (letter, flip, g)

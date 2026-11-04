@@ -702,12 +702,41 @@ def quick(variant, seed):
                  "spec['RAMP_GAMMA_END'] == spec['DISCOUNT']; ")
     # Test B2W: the optimizer knobs -- BBF's AdamW for its lineage, every
     # other lineage's EfficientZero SGD -- and the module's AdamW defaults
-    # (torch's eps, decay on every parameter)
+    # (the default eps, decay on every parameter)
     optim = LINEAGES[LINEAGE].get("optim", OPTIM_SGD)
+
+    def pin(k, v):
+        # (audit r1a NIT) a flag or None by identity: 0 / 1 never pass
+        op = "is" if v is None or isinstance(v, bool) else "=="
+        return f"assert spec.get({k!r}, muzero.{k}) {op} {v!r}; "
+
     code += ("assert muzero.ADAM_EPS is None and "
              "muzero.DECAY_RANK1 is True; "
-             + "".join(f"assert spec.get({k!r}, muzero.{k}) == {v!r}; "
-                       for k, v in optim.items()))
+             + "".join(pin(k, v) for k, v in optim.items()))
+    # ... and (audit r1a L2) the optimizer the arm really builds: one net's,
+    # under the arm's config -- AdamW's groups split by rank (decay, then
+    # none) with its lr and eps, or SGD's one group with its momentum
+    if optim["OPTIMIZER"] == "adamw":
+        decays = ([optim["WEIGHT_DECAY"]] if optim["DECAY_RANK1"]
+                  else [optim["WEIGHT_DECAY"], 0.0])
+        built = (f"assert type(_o).__name__ == 'AdamW'\n"
+                 f"assert [g['weight_decay'] for g in _o.param_groups] == "
+                 f"{decays!r}\n"
+                 f"assert all(g['lr'] == {optim['LEARNING_RATE']!r} and "
+                 f"g['eps'] == {optim['ADAM_EPS']!r} and "
+                 f"tuple(g['betas']) == (0.9, 0.999) "
+                 f"for g in _o.param_groups)\n")
+    else:
+        built = (f"assert type(_o).__name__ == 'SGD'\n"
+                 f"assert [(g['lr'], g['momentum'], g['weight_decay']) "
+                 f"for g in _o.param_groups] == "
+                 f"[({optim['LEARNING_RATE']!r}, {optim['SGD_MOMENTUM']!r}, "
+                 f"{optim['WEIGHT_DECAY']!r})]\n")
+    block = (f"with ablation.arm_config({arm!r}) as _sp, "
+             f"ablation.token_actions():\n"
+             f"    _o = muzero.make_optimizer(ablation.build_networks(_sp)"
+             f"['projector'].parameters())\n" + built)
+    code += f"exec({block!r}); "
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "

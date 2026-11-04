@@ -211,28 +211,43 @@ def test_a_w_runs_five_optimizers_take_bbfs_adamw_and_no_warmup(
 
 def test_a_checkpoints_optimizer_state_round_trips(restore_rngs,  # noqa: F811
                                                     tmp_path):
-    """The two groups' settings and Adam's moments survive the checkpoint's
-    state_dict / load_state_dict, as a resume reloads them."""
+    """The two groups and Adam's moments survive the checkpoint's own path
+    -- _cpu_state, pickled as save_run_checkpoint streams its head, then
+    load_state_dict as load_run_checkpoint applies it -- into a resumed
+    run's FRESH optimizers, whose groups (audit r1a L3: compared BEFORE the
+    load, which would copy the saved hyperparameters over them) are the
+    saved ones: the rebuild splits and orders the parameters as the run
+    did."""
+    import pickle
     with ablation.arm_config(W[1]) as spec, ablation.token_actions():
         run = make_run(spec, arm=W[1], steps=0)
         tr = run.trainer
-        for n, o in zip(ablation.NET_NAMES, ablation.OPT_NAMES):
-            net, opt = getattr(tr, n), getattr(tr, o)
-            opt.zero_grad()
-            sum((p ** 2).sum() for p in net.parameters()).backward()
-            opt.step()
-        path = tmp_path / "optims.pt"
-        torch.save({o: getattr(tr, o).state_dict()
-                    for o in ablation.OPT_NAMES}, path)
+        for _ in range(2):
+            for n, o in zip(ablation.NET_NAMES, ablation.OPT_NAMES):
+                net, opt = getattr(tr, n), getattr(tr, o)
+                opt.zero_grad()
+                sum((p ** 2).sum() for p in net.parameters()).backward()
+                opt.step()
+        path = tmp_path / "head.pkl"
+        with open(path, "wb") as f:
+            pickle.dump({"optims": ablation._cpu_state(
+                {o: getattr(tr, o).state_dict()
+                 for o in ablation.OPT_NAMES})}, f, protocol=5)
+        with open(path, "rb") as f:
+            saved = pickle.load(f)["optims"]
         fresh = make_run(spec, arm=W[1], steps=0)
-        saved = torch.load(path)
         for o in ablation.OPT_NAMES:
             opt = getattr(fresh.trainer, o)
+            groups = saved[o]["param_groups"]
+            assert opt.state_dict()["param_groups"] == groups, o
+            assert [g["weight_decay"] for g in groups] == [0.1, 0.0], o
+            assert not opt.state_dict()["state"], o          # fresh
             opt.load_state_dict(saved[o])
             a, b = getattr(tr, o).state_dict(), opt.state_dict()
             assert a["param_groups"] == b["param_groups"], o
             assert a["state"].keys() == b["state"].keys(), o
             for i in a["state"]:
+                assert float(b["state"][i]["step"]) == 2.0, (o, i)
                 for key in ("exp_avg", "exp_avg_sq"):
                     assert torch.equal(a["state"][i][key],
                                        b["state"][i][key]), (o, i, key)

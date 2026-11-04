@@ -1379,6 +1379,9 @@ def make_optimizer(params):
     could not converge inside a benchmark run (benchmarks/RESULTS.md). AdamW so
     the papers' 1e-4 weight decay is decoupled rather than folded into the
     adaptive gradient. OPTIMIZER "sgd" builds EfficientZero's instead.
+    Test B2W: ADAM_EPS sets AdamW's eps (None: torch's 1e-8) and DECAY_RANK1
+    False puts the rank-1 parameters in a no-decay group (BBF's mask); both
+    are refused under "sgd".
     """
     if OPTIMIZER == "sgd":
         if ADAM_EPS is not None or not DECAY_RANK1:

@@ -1041,6 +1041,54 @@ BUILD (before launch; audited like every build):
   - A manifest and a fresh run tree. No change to any existing arm.
 COST: the build and its audit loop, then about 1.3 days of training (Test
 B2 took 27.2 h).
+AMENDMENTS (the build, before launch):
+  (A1) READ (4)'s PLASTICITY READ is limited to what both lineages log:
+      the projector's erank and dead fraction (proj_erank, proj_dead_frac)
+      by row, against T0-T2's. The dormant fractions by net and the weak
+      first-layer filters come only from DORMANT_DIAGNOSTIC, which T0-T2
+      ran without; W0-W2 keep it off so that they stay T0-T2 but for the
+      optimizer. (A post-hoc probe on both lineages' snapshots could add
+      them later, descriptive only and Kai's call.) Audit r1a M1.
+  (A2) CAVEAT, added: the control ran from Test B2's tree (a8c83a58);
+      W0-W2 run from a tree that also holds Test C's and C2's code (the
+      resets, the ramps, the warmup origin), all off in these arms and
+      pinned off by tests/test_testc.py and tests/test_testc2.py ("every
+      other arm, bit for bit"). Audit r1a L1.
+  (A3) The scoring script (score_testb2w.py) and its check are built and
+      audited while the run trains, before any scoring. They read the
+      frozen trees only. Audit r1b L4.
+BUILT 2026-11-04 (pre-audit, 4a21836f): muzero.make_optimizer's ADAM_EPS
+and DECAY_RANK1 (defaults unchanged; refused under SGD); the W arms
+(ablation.ADAM_ARM, BBF_ADAMW); supervise_testb.py's lineage "w" with the
+optimizer pins (OPTIM_BBF for "w", OPTIM_SGD for every other lineage) and
+the smoke counted as a trainer; tests/test_testb2w.py (new) and the
+supervisor's, PBN's and the harness's tests; in the scratchpad the
+hand-off post_testb2w.py and its checker (generated from Test B2's by
+make_post_testb2w.py / make_check_testb2w.py), launch_testb2w.ps1,
+smoke_testb2w.py and prelaunch_testb2w.py. The 27 suites ran once
+(26 passed; the supervisor's usage-message test needed the new variants)
+and the checker printed CHECK OK.
+AUDIT r1 (two fresh-eyes auditors, 11-04): nothing HIGH.
+  - r1a (the core): M1 read (4)'s plasticity fields are never logged (A1);
+    LOWs: the control's older tree (A2), the quick probe checked the spec
+    but not the optimizer it builds, the checkpoint round-trip test
+    bypassed the checkpoint's path and compared groups after the load,
+    no CPU test of the student path (the GPU smoke runs it); NITs.
+  - r1b (the tooling): M1 the smoke's 900-env-step stop made iteration 2
+    the LAST iteration, which the trainer never checkpoints, so the kill
+    could never land; LOWs: the PAUSE listing matched any distill.py, the
+    smoke did not show the student's offline steps ran under the same
+    optimizer, its non-finite check passed on a missing field, the
+    scorer was not yet built (A3); a NIT.
+FIXES r1: all of them. The quick probe now builds one net's optimizer
+under the arm's config and checks its type and groups (and pins flags by
+identity); the round-trip test goes through _cpu_state and a protocol-5
+pickle and compares the fresh groups before the load; the smoke's stop is
+3,000 env steps, it checks every parameter's Adam step count (W1: its 40
+offline steps plus its online ones), that a resume never reruns the
+offline phase and that the non-finite field is present and 0; the PAUSE
+listing matches only distill.py of a W arm; the launcher records A3; the
+usage and smoke-as-trainer tests know the w variants.
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
