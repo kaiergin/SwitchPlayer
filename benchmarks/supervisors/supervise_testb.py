@@ -81,6 +81,18 @@ schedule (ramp_alert: an ALERT when off it); the EVAL lines print the ramp
 beside the plasticity read. A Test C / C2 smoke counts as a trainer
 (SMOKE_SCRIPTS).
 
+TEST B2W (Kai, 2026-11-04; CURRICULUM.md "Next experiment (pre-registered)
+-- Test B2W: Test B2's lineage with BBF's AdamW in place of EfficientZero's
+SGD"): Test B2's chain, three generations w0-w2 (...-tokens-adam-w0 ..
+-w2: T0-T2 with BBF's AdamW, the lineage's "optim" knobs; every other
+lineage's quick() pins EfficientZero's SGD, OPTIM_SGD), from its own run
+worktree (launch_testb2w.ps1, hand-off post_testb2w.py):
+
+    python benchmarks/supervisors/supervise_testb.py w0 0   (.. w2 0)
+
+For Test B2W read everything as for Test B2, with "w0-w2" / "W2" /
+launch_testb2w.ps1 / post_testb2w.py.
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
 round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
@@ -214,6 +226,17 @@ RESET_KNOBS = {"RESET_EVERY_STEPS": 40000, "RESET_UNTIL_ENV_STEPS": 80000,
                "RESET_HOLD_STEPS": 10000}
 RAMP_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
             "tokens-ramp")
+ADAM_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-adam")
+# Test B2W's optimizer (CURRICULUM "Test B2W"): its lineage's "optim", BBF's
+# AdamW (configs/BBF.gin); every other lineage's quick() pins OPTIM_SGD,
+# EfficientZero's (the faithful arms'), so neither can drift unnoticed.
+OPTIM_BBF = {"OPTIMIZER": "adamw", "LEARNING_RATE": 1e-4,
+             "WEIGHT_DECAY": 0.1, "ADAM_EPS": 0.00015, "DECAY_RANK1": False,
+             "LR_WARMUP_STEPS": 0}
+OPTIM_SGD = {"OPTIMIZER": "sgd", "LEARNING_RATE": 0.2, "WEIGHT_DECAY": 1e-4,
+             "SGD_MOMENTUM": 0.9, "ADAM_EPS": None, "DECAY_RANK1": True,
+             "LR_WARMUP_STEPS": 1000}
 # Test C2's ramp knobs (CURRICULUM "Test C2"): the ramp run's arm pins them
 # (its lineage's "ramps": quick() asserts them); every other lineage's probe
 # pins RAMP_OFF (muzero's defaults: RAMP_STEPS 0 is off). ramp_alert checks
@@ -240,7 +263,9 @@ RAMP_GAMMA_TOL = 1e-12
 # "after" r0 is complete and evaluated; "resets" the reset knobs quick()
 # pins. Test C2 (Kai 2026-11-02): "a" (C2: C plus BBF's ramps), one run
 # alone; "ramps" the ramp knobs quick() pins (every other lineage: RAMP_OFF)
-# and ramp_alert checks.
+# and ramp_alert checks. Test B2W (Kai 2026-11-04): "w" (W0-W2, Test B2's
+# lineage with BBF's AdamW); "optim" the optimizer knobs quick() pins (every
+# other lineage: OPTIM_SGD).
 LINEAGES = {
     "f": {"arm": FAST_ARM, "run": "mspacman-fast", "prep": "fast-prep",
           "generations": 5, "iterations": 60, "nominal": 30,
@@ -263,6 +288,10 @@ LINEAGES = {
           "generations": 1, "iterations": 300, "nominal": 150,
           "discounts": (0.997 ** 4,), "rule": "keep",
           "date": "2026-11-02", "resets": RESET_KNOBS, "ramps": RAMP_KNOBS},
+    "w": {"arm": ADAM_ARM, "run": "mspacman-adam", "prep": "adam-prep",
+          "generations": 3, "iterations": 100, "nominal": 50,
+          "discounts": (0.997 ** 4,) * 3,
+          "rule": "keep", "date": "2026-11-04", "optim": OPTIM_BBF},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
@@ -366,9 +395,10 @@ PREP_CHECKS = ("the value support (", "past the reward supports",
                # a kept discount past the cap
                "_discount_rule ", "past the cap")
 # Every suite supervise_gen2.py ran, plus this supervisor's, Test B's, Test
-# C's and Test C2's.
+# C's, Test C2's and Test B2W's.
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
           "tests/test_testc.py", "tests/test_testc2.py",
+          "tests/test_testb2w.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",
           "tests/test_supervise_gen1.py", "tests/test_gen1.py",
           "tests/test_pbn.py",
@@ -670,6 +700,14 @@ def quick(variant, seed):
                  "hasattr(ablation, 'ramp_step'); "
                  "assert spec['RAMP_N_END'] == spec['TD_STEPS'] and "
                  "spec['RAMP_GAMMA_END'] == spec['DISCOUNT']; ")
+    # Test B2W: the optimizer knobs -- BBF's AdamW for its lineage, every
+    # other lineage's EfficientZero SGD -- and the module's AdamW defaults
+    # (torch's eps, decay on every parameter)
+    optim = LINEAGES[LINEAGE].get("optim", OPTIM_SGD)
+    code += ("assert muzero.ADAM_EPS is None and "
+             "muzero.DECAY_RANK1 is True; "
+             + "".join(f"assert spec.get({k!r}, muzero.{k}) == {v!r}; "
+                       for k, v in optim.items()))
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "
@@ -1394,8 +1432,9 @@ TRAINER_MODULES = ("ablation", "distill", "experiments.ablation",
                    "experiments.distill")
 # Test C2 audit r1b L4: the pre-launch GPU smokes train in-process or as
 # "smoke_testc*.py child" (no ablation.py on the command line): a supervisor
-# started by hand beside one waits it out like any trainer
-SMOKE_SCRIPTS = ("smoke_testc.py", "smoke_testc2.py")
+# started by hand beside one waits it out like any trainer (Test B2W's
+# smoke too)
+SMOKE_SCRIPTS = ("smoke_testc.py", "smoke_testc2.py", "smoke_testb2w.py")
 
 
 def is_trainer(cmd):

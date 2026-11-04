@@ -1259,6 +1259,14 @@ LR_DECAY_FACTOR = 0.1
 # trial ran at lr 1e-4, 2000x below theirs.
 OPTIMIZER = "adamw"
 SGD_MOMENTUM = 0.9
+# Test B2W (Kai, 2026-11-04; CURRICULUM "Test B2W"): BBF's AdamW
+# (bbf/agents/spr_agent.py create_scaling_optimizer under configs/BBF.gin):
+# eps 0.00015, and no weight decay on rank-1 parameters (its decay_bias False
+# mask, x.ndim != 1 decayed; here biases and BN affines). None / True keep
+# torch's eps (1e-8) and decay every parameter: every other arm, bit for bit.
+# AdamW only (make_optimizer refuses them under "sgd").
+ADAM_EPS = None
+DECAY_RANK1 = True
 # Linear lr warmup from 0 over this many training steps, applied inside
 # train_step (EfficientZero: lr_warm_up 0.01 x 100k = 1000 steps,
 # core/train.py:30-41). 0 disables. Only the warmup is ported: their x0.1 decay
@@ -1373,11 +1381,25 @@ def make_optimizer(params):
     adaptive gradient. OPTIMIZER "sgd" builds EfficientZero's instead.
     """
     if OPTIMIZER == "sgd":
+        if ADAM_EPS is not None or not DECAY_RANK1:
+            raise ValueError("ADAM_EPS / DECAY_RANK1 are AdamW knobs; "
+                             "OPTIMIZER is 'sgd'")
         return optim.SGD(params, lr=LEARNING_RATE, momentum=SGD_MOMENTUM,
                          weight_decay=WEIGHT_DECAY)
     if OPTIMIZER != "adamw":
         raise ValueError(f"unknown OPTIMIZER {OPTIMIZER!r}")
-    return optim.AdamW(params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    eps = {} if ADAM_EPS is None else {"eps": ADAM_EPS}
+    if DECAY_RANK1:
+        return optim.AdamW(params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY,
+                           **eps)
+    # Test B2W: BBF's mask -- rank-1 parameters in a no-decay group (an
+    # empty group is left out)
+    params = list(params)
+    groups = [{"params": [p for p in params if p.ndim != 1]},
+              {"params": [p for p in params if p.ndim == 1],
+               "weight_decay": 0.0}]
+    return optim.AdamW([g for g in groups if g["params"]], lr=LEARNING_RATE,
+                       weight_decay=WEIGHT_DECAY, **eps)
 
 
 def apply_lr_warmup(optimizers, training_steps):

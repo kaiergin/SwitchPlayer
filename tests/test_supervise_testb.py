@@ -510,18 +510,19 @@ def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g2sup):
         assert (ROOT / rel).exists(), rel
     assert len(set(sup.AUDITED)) == len(sup.AUDITED)
     assert set(sup.SUITES) <= set(sup.AUDITED)
-    assert len(set(sup.SUITES)) == len(sup.SUITES) == 26
+    assert len(set(sup.SUITES)) == len(sup.SUITES) == 27
     # every suite supervise_gen2.py ran, after this supervisor's, Test B's,
-    # Test C's and Test C2's (first: -x stops on them before the slow
-    # suites)
-    assert sup.SUITES[:4] == ["tests/test_supervise_testb.py",
+    # Test C's, Test C2's and Test B2W's (first: -x stops on them before the
+    # slow suites)
+    assert sup.SUITES[:5] == ["tests/test_supervise_testb.py",
                               "tests/test_testb.py", "tests/test_testc.py",
-                              "tests/test_testc2.py"]
-    assert sup.SUITES[4:] == g2sup.SUITES
+                              "tests/test_testc2.py", "tests/test_testb2w.py"]
+    assert sup.SUITES[5:] == g2sup.SUITES
     assert set(g2sup.AUDITED) <= set(sup.AUDITED)
     assert set(sup.AUDITED) - set(g2sup.AUDITED) == {
         "tests/test_supervise_testb.py", "tests/test_testb.py",
         "tests/test_testc.py", "tests/test_testc2.py",
+        "tests/test_testb2w.py",
         "benchmarks/supervisors/supervise_testb.py"}
     assert [r for r in sup.AUDITED if not r.endswith(".py")] == [
         "pytest.ini", "benchmarks/probes/step0_prefix_bn/states.npz"]
@@ -2284,7 +2285,7 @@ def test_f0_runs_preflight_then_each_launch_guarded_without_a_prep(
     assert sup.main(["f0", "0"]) == 1                 # 5 quick deaths
     out = capsys.readouterr().out
     assert "CRASH LOOP" in out
-    assert ("preflight ok (manifest + quick probe + 26 suites); starting f0 "
+    assert ("preflight ok (manifest + quick probe + 27 suites); starting f0 "
             f"s0 ({F[0]}, --stop-env-steps 20000, at most 60 iterations)") \
         in out
     # no wait, no prep, no prep integrity: f0 has none
@@ -2837,7 +2838,7 @@ LINEAGE_NAMES = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES",
 
 def test_test_b2s_lineage_and_test_bs_unchanged(real_sup):
     sup = real_sup
-    assert set(sup.LINEAGES) == {"f", "t", "r", "n", "a"}
+    assert set(sup.LINEAGES) == {"f", "t", "r", "n", "a", "w"}
     assert sup.TOTAL_ENV_STEPS == 100000
     loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
     assert loaded["LINEAGE"] == "f"         # the module loads as Test B's
@@ -4099,3 +4100,166 @@ def test_a_smoke_counts_as_a_trainer(sup, monkeypatch, capsys):
     sup.wait_no_trainer()
     assert ("ALERT: an ablation.py or distill.py trainer is already running "
             "(pids [1, 2, 3])") in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# Test B2W (Kai, 2026-11-04): Test B2's chain, w0-w2, with BBF's AdamW
+# --------------------------------------------------------------------------
+ADAM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+        "tokens-adam")
+W = [f"{ADAM}-w{k}" for k in range(3)]
+WV = [f"w{k}" for k in range(3)]
+W_DATE = "2026-11-04"
+# the pre-registration's optimizers, written out here (not read from the
+# supervisor) so a drift in either is caught
+BBF_OPTIM = {"OPTIMIZER": "adamw", "LEARNING_RATE": 1e-4,
+             "WEIGHT_DECAY": 0.1, "ADAM_EPS": 0.00015, "DECAY_RANK1": False,
+             "LR_WARMUP_STEPS": 0}
+SGD_OPTIM = {"OPTIMIZER": "sgd", "LEARNING_RATE": 0.2, "WEIGHT_DECAY": 1e-4,
+             "SGD_MOMENTUM": 0.9, "ADAM_EPS": None, "DECAY_RANK1": True,
+             "LR_WARMUP_STEPS": 1000}
+
+
+@pytest.fixture
+def wsup(sup):
+    """`sup` bound to Test B2W's lineage, as main() binds it for w0-w2."""
+    sup.configure("w")
+    return sup
+
+
+def _knob(spec, k):
+    return spec.get(k, getattr(muzero, k))
+
+
+def test_test_b2ws_lineage(real_sup):
+    sup = real_sup
+    loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
+    sup.configure("w")
+    assert (sup.LINEAGE, sup.GENERATIONS) == ("w", 3)
+    assert sup.VARIANTS == dict(zip(WV, W))
+    assert sup.RUNS == {v: f"mspacman-adam-{v}" for v in WV}
+    assert sup.NAMES == {"w0": "W0", "w1": "W1", "w2": "W2"}
+    assert sup.SEEDS == {0: W_DATE} and sup.PREP_PREFIX == "adam-prep"
+    assert (sup.ITERATIONS, sup.NOMINAL_ITERATIONS) == (100, 50)
+    assert sup.DISCOUNTS == {v: KEPT for v in WV}
+    assert sup.DISCOUNT_RULE == "keep"
+    assert [sup.target(v) for v in WV] == [33333, 66667, 100000]
+    assert ablation.ADAM_ARM == sup.ADAM_ARM == ADAM
+    assert sup.OPTIM_BBF == ablation.BBF_ADAMW == BBF_OPTIM
+    assert sup.OPTIM_SGD == SGD_OPTIM
+    assert sup.LINEAGES["w"]["optim"] is sup.OPTIM_BBF
+    for k, v in enumerate(WV):
+        spec = ablation.ARMS[sup.VARIANTS[v]]
+        assert {o: _knob(spec, o) for o in BBF_OPTIM} == BBF_OPTIM
+        assert sup.gen(v) == k and sup.is_student(v) == (k > 0)
+        assert sup.master_of(v) == (WV[k - 1] if k else None)
+        assert spec.get("_master_arm") == (W[k - 1] if k else None)
+        if k:
+            assert sup.master_offline(v) == distill.master_offline_steps(
+                ablation.ARMS[W[k - 1]]) == (20000 if k > 1 else 0)
+        # T{k} but for the optimizer (its keys, the master and the doc)
+        t = ablation.ARMS[T[k]]
+        skip = set(BBF_OPTIM) | {"_master_arm", "_doc"}
+        assert ({x: y for x, y in spec.items() if x not in skip}
+                == {x: y for x, y in t.items() if x not in skip})
+        assert {o: _knob(t, o) for o in SGD_OPTIM} == SGD_OPTIM
+    # every other lineage: no "optim" (quick() pins OPTIM_SGD), and every
+    # one of its arms on EfficientZero's SGD
+    for letter, lin in sup.LINEAGES.items():
+        if letter == "w":
+            continue
+        assert "optim" not in lin, letter
+        for k in range(lin["generations"]):
+            arm = ablation.ARMS[f"{lin['arm']}-{letter}{k}"]
+            assert {o: _knob(arm, o) for o in SGD_OPTIM} == SGD_OPTIM, letter
+    # the others' names and numbers come back
+    sup.configure("f")
+    assert {k: getattr(sup, k) for k in LINEAGE_NAMES} == loaded
+
+
+def test_main_binds_the_w_lineage(sup, monkeypatch, capsys):
+    monkeypatch.setattr(sup, "other_supervisors", lambda v: [])
+    monkeypatch.setattr(sup, "run_done", lambda v, s: True)
+    assert sup.main(["w1", "0"]) == 0
+    assert sup.LINEAGE == "w" and sup.VARIANTS == dict(zip(WV, W))
+    assert "RUN COMPLETE w1 s0" in capsys.readouterr().out
+
+
+def test_test_b2ws_command_and_paths_are_test_b2s_with_the_arm_moved(wsup):
+    sup = wsup
+    tsup2 = _load(SUPERVISORS / "supervise_testb.py", "supervise_testb_t")
+    tsup2.configure("t")
+    for k, v in enumerate(WV):
+        t = TV[k]
+        want = [x.replace(T[k], W[k]).replace(tsup2.prep_rel(t),
+                                              sup.prep_rel(v))
+                for x in tsup2.command(t, 0, 123)]
+        assert sup.command(v, 0, 123) == want, v
+        rel = sup.paths(v, 0)[0]
+        assert rel == f"benchmarks/results/mspacman-adam-{v}-s0-{W_DATE}"
+        assert sup.prep_rel(v) == (
+            f"benchmarks/results/adam-prep-{v}-s0-{W_DATE}")
+    c0 = sup.command("w0", 0)
+    assert c0[c0.index("--stop-env-steps") + 1] == "33333"
+    assert c0[c0.index("--iterations") + 1] == "100"
+    assert c0[c0.index("--arms") + 1] == W[0] and "--token-vocab" not in c0
+
+
+@pytest.mark.parametrize("k", range(3))
+def test_test_b2ws_quick_probe_passes(wsup, k):
+    if k:
+        _master_ready(wsup, WV[k], final=48)
+    r = _py(wsup.quick(WV[k], 0))
+    assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_b2ws_quick_probe_pins_adamw_and_every_other_lineage_sgd(sup):
+    """w0's probe pins BBF's AdamW, every other lineage's EfficientZero's
+    SGD, both the module's AdamW defaults; each break of one knob alone
+    fails its probe, the controls pass."""
+    arms = {"w": W[0], "t": T[0], "f": F[0], "r": RESET + "-r0",
+            "n": LONG + "-n0", "a": RAMP + "-a0"}
+    probes = {}
+    for letter in arms:
+        sup.configure(letter)
+        probes[letter] = sup.quick(letter + "0", 0)
+    for letter, q in probes.items():
+        want = BBF_OPTIM if letter == "w" else SGD_OPTIM
+        for k, v in want.items():
+            assert f"assert spec.get({k!r}, muzero.{k}) == {v!r}; " in q
+    a = "ablation.ARMS"
+    w0 = W[0]
+    breaks = [("w", f"{a}[{w0!r}]['OPTIMIZER'] = 'sgd'"),
+              ("w", f"{a}[{w0!r}]['LEARNING_RATE'] = 3e-4"),
+              ("w", f"{a}[{w0!r}]['WEIGHT_DECAY'] = 1e-4"),
+              ("w", f"{a}[{w0!r}]['ADAM_EPS'] = 1e-8"),
+              ("w", f"del {a}[{w0!r}]['ADAM_EPS']"),
+              ("w", f"{a}[{w0!r}]['DECAY_RANK1'] = True"),
+              ("w", f"{a}[{w0!r}]['LR_WARMUP_STEPS'] = 1000")]
+    for letter in "tfrna":
+        arm = arms[letter]
+        breaks += [(letter, f"{a}[{arm!r}]['OPTIMIZER'] = 'adamw'"),
+                   (letter, f"{a}[{arm!r}]['LEARNING_RATE'] = 1e-4"),
+                   (letter, f"{a}[{arm!r}]['WEIGHT_DECAY'] = 0.1"),
+                   (letter, f"{a}[{arm!r}]['SGD_MOMENTUM'] = 0.0"),
+                   (letter, f"{a}[{arm!r}]['ADAM_EPS'] = 0.00015"),
+                   (letter, f"{a}[{arm!r}]['DECAY_RANK1'] = False"),
+                   (letter, f"{a}[{arm!r}]['LR_WARMUP_STEPS'] = 0")]
+    broken = []
+    for letter, prelude in breaks:
+        anchor = f"spec = ablation.ARMS[{arms[letter]!r}]; "
+        assert probes[letter].count(anchor) == 1
+        broken.append(probes[letter].replace(anchor, prelude + "; " + anchor))
+    got = _py_each(broken + list(probes.values()))
+    for code, g in zip(broken, got):
+        assert g.startswith("AssertionError"), (code[-300:], g)
+    assert got[len(broken):] == ["ok"] * len(probes)        # the controls
+    # the module's AdamW defaults flipped: each in its own child (EACH
+    # restores neither)
+    head = "import muzero, ablation, muzero_vtree, distill; "
+    for letter, flip in (("w", "muzero.ADAM_EPS = 1e-8; "),
+                         ("t", "muzero.DECAY_RANK1 = False; ")):
+        flipped = probes[letter].replace(head, head + flip)
+        assert flipped != probes[letter]
+        g = _py_each([flipped])[0]
+        assert g.startswith("AssertionError"), g

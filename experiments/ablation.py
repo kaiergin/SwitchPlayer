@@ -1296,6 +1296,35 @@ for _k in range(1, 3):
     }
 del _k
 
+# Test B2W (Kai, 2026-11-04; pre-registered in CURRICULUM "Test B2W"): Test
+# B2's lineage with one change, the optimizer -- BBF's AdamW (configs/BBF.gin,
+# agents/spr_agent.py create_scaling_optimizer: lr 0.0001, eps 0.00015,
+# decoupled weight decay 0.1, rank-1 parameters undecayed, no warmup) in
+# place of EfficientZero's SGD (lr 0.2, momentum 0.9, coupled decay 1e-4,
+# 1,000-step warmup). W0-W2 are T0-T2 otherwise, the students' offline steps
+# included; the chain supervisor's lineage "w".
+ADAM_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-adam")
+BBF_ADAMW = {"OPTIMIZER": "adamw", "LEARNING_RATE": 1e-4,
+             "WEIGHT_DECAY": 0.1, "ADAM_EPS": 0.00015, "DECAY_RANK1": False,
+             "LR_WARMUP_STEPS": 0}
+for _k in range(3):
+    ARMS[f"{ADAM_ARM}-w{_k}"] = {
+        **ARMS[f"{TWO_ARM}-t{_k}"],
+        **BBF_ADAMW,
+        **({"_master_arm": f"{ADAM_ARM}-w{_k - 1}"} if _k else {}),
+        "_doc": f"{TWO_ARM}-t{_k} (Test B2's T{_k}) as Test B2W's "
+                f"generation W{_k}, with BBF's AdamW in place of "
+                f"EfficientZero's SGD: lr 1e-4, eps 1.5e-4, decoupled weight "
+                f"decay 0.1 on every parameter but the rank-1 ones (biases, "
+                f"BN affines), no warmup"
+                + (f"; the distilled student of W{_k - 1}'s final snapshot "
+                   f"through Test B2's swap, its offline steps under the "
+                   f"same optimizer" if _k else "; from scratch")
+                + ". Run as TK.",
+    }
+del _k
+
 # Test C (Kai, 2026-10-29; pre-registered in CURRICULUM "Test C: BBF-style
 # resets in one 100k run, against a no-reset twin"): T0's recipe run from
 # scratch to 100,000 env steps (planned length 150 iterations: Test B's 30
