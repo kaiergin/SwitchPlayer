@@ -1136,6 +1136,24 @@ start's commit (git diff --quiet) and fails with its own message; the
 pre-launch check takes the FIRST rc line after SMOKE OK; the PAUSE note
 says the child's first pid has a supervisor as its parent. The test NITs
 are left: fixing them would change an AUDITED file after the smoke.
+AUDIT r4 (one fresh-eyes auditor, 11-04): nothing above LOW; the r3
+fixes correct (the smoke's end check passes a CURRICULUM.md commit and
+fails on any AUDITED change; the pre-launch check takes b2w_smoke_r2.log
+and refuses r1's, a non-zero rc, a foreign smoke's log). L: the PAUSE
+rule told the operator to leave a W trainer whose supervisor was already
+dead; NITs. FIXES r4 (scratchpad): every ablation.py / distill.py line of
+a tokens-adam-w arm is the run's, killed whatever its parent; the
+pre-launch check's rc line must come before any later "start:"; the
+smoke's end-check message carries git's stderr.
+AUDIT r5 (one fresh-eyes auditor, 11-04): nothing above LOW -> THE AUDIT
+LOOP IS CLOSED. Accepted, not fixed (wording; the operator in practice
+notes the supervisor pids before killing): L, a preflight pytest started
+between the listing and the supervisor's kill has a dead parent in step
+3's relisting, so the literal rule says to leave it (it is CPU only and
+ends); NITs, the preflight's own quick-probe test spawns a "-c" child that
+names the arm (CPU, seconds), two message / docstring wordings.
+THE SUITES: all 27 passed at 47cf92b0 (11:32-11:44 11-04, CPU, under the
+lock; its AUDITED files identical to the smoke's 666d00e9).
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
