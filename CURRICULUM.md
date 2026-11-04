@@ -1559,6 +1559,11 @@ the pause were expected. Rows 140-150 (trainer-BN from the training log):
 595 / 790 / 938 at 85,251 / 88,149 / 90,858 env steps; row 150 is C2's
 first row in the [90k, end] window. By env steps, C was at 1,329 (83,844),
 1,646 (88,447) and 1,111 (92,607).
+Rows 155-165: 780 / 1,105 / 770 at 94,345 / 97,136 / 100,489 env steps
+(C: 1,458 at 97,314, 1,180 at 100,849). RUN COMPLETE 05:51 EST 11-04: the
+trainer passed 100k env steps in iteration 165 and exited rc=0 (16,979 s
+since the last resume). The hand-off then started the queued interim probes
+(rows 140-165) and the final pass.
 
 ### RESULT -- E0: the action-equivalence census on T2's own play (seed 0), 2026-11-02
 
