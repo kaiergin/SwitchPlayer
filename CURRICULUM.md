@@ -1372,6 +1372,17 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   Kai's call); "unreadable or incomplete". Suites test_e3, test_distill,
   test_supervise_testb, test_tokens pass; the new tests fail on the old
   code.
+  AUDIT r4 (fresh eyes on fa8c30de, 11-05): NOTHING ABOVE LOW -- the
+  in-tree AUDIT LOOP IS CLOSED. check_disjoint_paths cannot raise on a
+  legitimate set (a one-token spelling and a one-decision run are one
+  key; select_mined keeps inputs prefix-free); it runs before any search
+  on exactly the credited paths; the non-finite check cannot fire on
+  legitimate data; a prep without --mine bit for bit; the PREP_CHECKS
+  strings exact and unique; the tests catch the obvious mutations.
+  NITs accepted (no behaviour at stake): a NaN in the master's policy
+  outside the credited slots is reported as an overlap (still a stop);
+  numpy's repr in the message; PREP_CHECKS pinned against hand-copied
+  messages.
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
