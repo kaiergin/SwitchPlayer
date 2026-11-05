@@ -1361,6 +1361,7 @@ between W0 and W1: the supervisors w1 (25812 / 25968) and w2 (29136 /
 29572) stopped by exact PID while w1 waited for W0's final evals; no
 trainer, prep or preflight child was running. The hand-off runs on
 (W0's final evals). Resume by rerunning launch_testb2w.ps1.
+RESUMED 21:47 EST 11-04 when Kai said to continue (the 2-h timer cancelled): launch_testb2w.ps1 skipped the running hand-off and restarted the supervisors w0 (it logs RUN COMPLETE and exits), w1 and w2.
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
