@@ -1061,6 +1061,9 @@ emulator scores only, per Kai's long-term rule)
   NOT YET RUN: tests/test_e3a.py (fast and slow) and the probe, after B2W
   (the host's memory), CPU, under the lock. A failure there is fixed and
   re-audited before the probe runs.
+  RAN 11-05 (B2W stopped, the host free): tests/test_e3a.py, all 55 passed
+  on the first run (07:36, 42 s, the slow real-data smoke included); the
+  probe launched 07:37 on T2's iteration-42 snapshot (CPU, under the lock).
 
 E3 -- the lineage with mined tokens (after B2W and E3a)
   THE LINEAGE: the base recipe's three generations at ~33.3k env steps
