@@ -1362,6 +1362,35 @@ between W0 and W1: the supervisors w1 (25812 / 25968) and w2 (29136 /
 trainer, prep or preflight child was running. The hand-off runs on
 (W0's final evals). Resume by rerunning launch_testb2w.ps1.
 RESUMED 21:47 EST 11-04 when Kai said to continue (the 2-h timer cancelled): launch_testb2w.ps1 skipped the running hand-off and restarted the supervisors w0 (it logs RUN COMPLETE and exits), w1 and w2.
+W0's last rows (deployed / trainer-BN): 45 694 / 821, 50 739 / 1,067,
+final 52 630 / 681; W0's every row 655.5 (n 11) against T0's 709.1.
+THE FIRST SWAP (22:00-22:12): w1's preflight ok; MASTER W0 iteration 52
+(last two rows 684.5, the gate passed); the prep kept 17 tokens (T1: 22),
+dropping 19 -- nearly every 16- and 32-frame token -- the clip 9.93 (T1
+7.26), the discount kept; 25,374 records (T1's set 7,174: W0 made ~3x the
+decisions per game), with 38% of the master's search mass on dropped
+tokens discarded. W1 launched 22:12; its 20,000 offline steps took ~2 h.
+W1's offline curve (deployed / trainer-BN): 661 / 333, 873 / 333, 555 /
+333, 536 / 403 at 4k-16k steps; row 0 520 / 333 (T1: 710-745 rising, row
+0 892; its trainer-BN 633 -> 898). Rows 5 / 10 / 15 / 20: 846 / 333, 396
+/ 240, 508 / 240, 277 / 240 (T1 730 / 656 / 850 / 901). Transfer -110
+(T -169); jump (rows 5, 10 against W0's last two) -64 (T -211).
+W1's TRAINER-BN NETS ARE DEGENERATE: the raw exact eval reads exactly
+333.3 (sd 99.8) at row 0, row 5 and three offline points, then exactly
+240 at rows 10-20 -- a fixed, poor policy of ~4-frame tokens whose score
+does not move as the weights do -- while the deployed policy (the
+recalibrated acting statistics) varies. W0's trainer-BN already ran far
+below its deployed (156 / 334, 139 / 310 at rows 5 / 15); T0's and T1's
+tracked theirs. This matters for training, not only for the secondary
+read: the birth search that labels new data runs on the trainer's nets in
+eval mode (ablation.py, the search keeps `nets`; only the logged prior
+uses the acting statistics), so W1's policy targets come from the
+degenerate nets: 4-frame tokens took 84-86% of the search mass and
+90-95% of play by rows 20-25 (frames per decision 4.5). Not yet known:
+whether it is AdamW's own effect in this stack or an artifact of AdamW
+with our BN setup (BBF has no such eval-mode birth search) -- a CPU
+diagnostic on W1's snapshots after B2W. THE MASTER GATE at W1's end (its
+last two deployed rows >= 502.08) may stop the chain (Kai's call).
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
