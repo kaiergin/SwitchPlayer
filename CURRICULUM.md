@@ -1459,6 +1459,13 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   .562; 7,32;5,16;5,16 22 / .494; 5,16;5,16;7,32 18 / .501), 14 dropped,
   vocabulary 30 slots (prep 15:42-15:46). M1 LAUNCHED 15:46 (attempt 1,
   fresh; trainer pid 21280).
+  M1 ROWS (control T1 in brackets): deployed row 0 (the distilled
+  student) 821.3, sd 233 [892.3, sd 252]; 25.6 frames/decision [22.8].
+  Iter 5 (3,785 env): trainer-BN return 881.2 [726.2]; 28.4
+  frames/decision [23.4]; mined tokens 15.2% of play / 23.4% of search
+  -- the holds 3,16x3 5.4% and 7,32x2 5.8%, 5,16x3 3.0%, the turn
+  sequences 0-0.4% of play (0.4-3.1% of search); H(pi) 1.15 [0.93],
+  search/prior agreement 0.45 [0.58], KL(target||prior) 1.14 [0.76].
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
