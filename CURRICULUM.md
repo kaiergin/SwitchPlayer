@@ -805,7 +805,7 @@ env steps). 0 non-finite steps; no alert but the advisory memory ones.
 DEPLOYED / trainer-BN exact eval (T = Test B2's control at the same row):
   W0 rows 5-final: 334 / 753 / 310 / 401 / 1327 / 612 / 980 / 431 / 694 /
      739 / 630 (iteration 52); every row 655.5 (n 11) against T0's 709.1
-     (n 10): -53.6, band +-189.6 -> no different (read (3)'s W0 against
+     (n 10): -53.6, band +-189.5 -> no different (read (3)'s W0 against
      T0, descriptive). Far more volatile than T0 (adjacent swings up to
      +-926; T0's largest drop -67).
   W1 row 0 520 (T1 892), rows 5-30: 846 / 396 / 508 / 277 / 245 / 245
