@@ -1414,6 +1414,20 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   (low consistency, chosen on count), the rest turn sequences with high
   consistency; every mined token's target nonzero at some record (means
   0.0004-0.060).
+  TOOLING AUDIT LOOP CLOSED (r5 one MEDIUM: a misleading "absorbed" label
+  in the smoke's COVERAGE line -- fitting inside a new token does not
+  prove a play was absorbed; fixed; r6 nothing above LOW). SMOKE r2
+  (12:01-12:21) and r3 on the final script (12:21-12:43): SMOKE OK at
+  ae6cdea2.
+  LAUNCHED 12:44 11-05: manifest a6aefbdb (from ae6cdea2; 62 AUDITED
+  files, test_e3.py and probe_e3a_sequences.py added); run worktree
+  Y:\SwitchPlayer-teste3-run at a6aefbdb; PRELAUNCH OK (smoke r3 at
+  ae6cdea2, dry run r1 at 6ee611c1: AUDITED identical; T0's arm = its
+  snapshot's spec, _doc included; m1's stop 33,051 = 66,667 - 33,616);
+  launch_teste3.ps1 started the hand-off post_teste3.py (cmd pid 22172)
+  and the supervisors m1 (cmd pid 26884; STOP 33051, preflighting) and m2
+  (cmd pid 13592; WAITING for M1). KEEP Y:\SwitchPlayer-testb2-run (T0 is
+  generation 0; T1-T2 the control).
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
