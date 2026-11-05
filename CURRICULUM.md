@@ -1457,7 +1457,8 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   consistencies (3,16x3 219 / c .156; 7,32x2 353 / .167; 7,32;5,16;0,16
   16 / .883; 5,16;0,16;7,32 14 / .952; 5,16x3 36 / .351; 7,32;3,32 41 /
   .562; 7,32;5,16;5,16 22 / .494; 5,16;5,16;7,32 18 / .501), 14 dropped,
-  vocabulary 30 slots. M1 LAUNCHED (attempt 1, fresh; trainer pid 21280).
+  vocabulary 30 slots (prep 15:42-15:46). M1 LAUNCHED 15:46 (attempt 1,
+  fresh; trainer pid 21280).
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
