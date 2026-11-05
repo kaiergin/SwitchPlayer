@@ -1447,6 +1447,10 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   but the idle hand-off. Plan after it: rerun the launcher (the
   supervisors preflight again; a repeat failure is retried every 10 min
   and then investigated).
+  RESUMED 15:25 11-05 (pause over; GPU free, 21 GB commit free):
+  launch_teste3.ps1 rerun -- hand-off skipped (still running, pids
+  26128 / 16232), supervisors m1 (cmd pid 26332; preflighting again) and
+  m2 (cmd pid 18164; WAITING for M1).
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
