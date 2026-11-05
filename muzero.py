@@ -774,10 +774,14 @@ def _token_seq(x):
 
 def _token_int(x):
     """An action or a frame count as an int: integral numbers only (8.0
-    passes, 8.9, a bool or a string do not); ValueError otherwise."""
+    passes, 8.9, a bool, a string, inf or nan do not); ValueError
+    otherwise."""
     if isinstance(x, (bool, np.bool_, str, bytes)):
         raise ValueError(f"not an integral number: {x!r}")
-    v = int(x)
+    try:
+        v = int(x)
+    except OverflowError:
+        raise ValueError(f"not an integral number: {x!r}")
     if v != x:
         raise ValueError(f"not an integral number: {x!r}")
     return v

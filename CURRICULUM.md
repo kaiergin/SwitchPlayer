@@ -1336,6 +1336,27 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   pseudo-variant t0, first = 1, absolute paths only for it; --mine; the
   reward_max bound from the run's longest token, 16 base steps at most;
   the MINED line; quick() pins); SUITES 28 (tests/test_e3.py).
+  AUDIT r2 (two fresh-eyes auditors on 199720df / feb257fd, 11-05): the
+  core / distill side nothing above LOW (E3-A13's masses disjoint; a prep
+  without --mine bit for bit; strict token numbers accept every valid
+  form) -- L: a float32 prior could sum just above 1 and trip the stricter
+  of two overlap asserts, stopping the prep (PREP FAILED) though nothing
+  overlapped; test gaps. The supervisor's lineage m nothing above LOW
+  (T0's real files match; stops 33,051; --mine for m only; every other
+  lineage bit for bit) -- L: a lapsed test redirect could let a test write
+  into the frozen tree; T0's recorded spec not pinned against the arm;
+  the wait's advice wrong for a frozen master; NITs.
+  FIXES r2: the prior in float64; one overlap tolerance (1e-9, relative to
+  each slot's q) raising ValueError; the overlap-at-q=0 and one-token-
+  spelling-through-distill_lives tests; inf refused cleanly; the test
+  fixture asserts every m path lands in tmp; quick() compares T0's
+  recorded spec key by key with this tree's T0 arm (T0's real snapshot
+  passes); the frozen-master ALERT text ("run nothing in that tree");
+  the MINED line on restarts; an ALERT when a mined prep appends nothing;
+  run_token_steps capped; other lineages' quick() strings pinned;
+  smoke_teste3.py counted as a trainer. Suites: test_e3 77, test_distill
+  58, test_supervise_testb 265, test_tokens 72, test_testb 67, test_pbn
+  30.
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's

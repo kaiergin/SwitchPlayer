@@ -97,9 +97,14 @@ def test_canon_token_reads_json_lists_and_collapses_one_step():
                 # and actions are integral numbers only
                 np.array(5), [np.array(1), np.array(8)][0:1],
                 [1, 8.9], [[1, 8], [3, 4.5]], [True, 4], ["1", "8"],
-                [1.5, 8]):
+                [1.5, 8], [1, float("inf")], [float("nan"), 4]):
         with pytest.raises((TypeError, ValueError)):
             muzero.canon_token(bad)
+    # (audit r2) inf is a ValueError too: the vocabulary check exits with
+    # its message, never an OverflowError
+    with pytest.raises(SystemExit, match="pairs"):
+        ablation.validate_student_vocab([[0, 4], [1, float("inf")]],
+                                        TK_VOCAB)
     assert not muzero._token_seq(np.array(5))
     assert muzero._token_seq(np.array([5]))
     assert muzero.canon_vocab([[0, 4], [[1, 8], [3, 4]], [[2, 8]]]) == \
@@ -825,6 +830,14 @@ def test_a_stale_final_stack_is_left_out_of_the_consistency():
     run01 = [x for x in rec["scored"] if x["inputs"] == [0, 1]][0]
     assert run01["consistency"] == pytest.approx(2 ** -0.5)
     assert rec["stale_occurrences"] == 0
+    # (audit r2) a zero-decision life first: the latents still come from
+    # each occurrence's OWN life (lives[infos[li]["life"]], not lives[li])
+    empty = {"traj": [(st(0, 7, 7), 0, ())], "terminated": True,
+             "game_end": False}
+    _, rec2 = distill.mine_tokens(_lat_run(0.0), [empty, a, b], V, V, 8,
+                                  1.0, 9.0, 1.0)
+    assert rec2["scored"] == rec["scored"] and rec2["lives"] == 3
+    assert rec2["decisions"] == rec["decisions"] == 5
 
 
 # --------------------------------------------------------------------------
@@ -1010,16 +1023,29 @@ def test_a_mined_token_sums_its_spellings_one_token_included():
 
 
 def test_overlapping_paths_fail_loudly():
+    """A real overlap raises a ValueError (never an assert, which `python
+    -O` strips), at one tolerance (OVERLAP_TOL, float64 products) -- also
+    at a slot whose q is 0 (audit r2 T1); float residue is clamped."""
     student = ((0, 4), (1, 4), (2, 4), (1, 8), MH, ((1, 4), (2, 4)))
     q = np.array([0.0, 1.0, 0.0, 0.0, 0.0])
+    assert distill.OVERLAP_TOL == 1e-9
     # two paths from slot 1 whose products sum past 1: not disjoint
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="overlapping mined paths"):
         distill.masked_targets([q], V12, student, mined=[[1], [1]],
                                weights=[[0.7, 0.4]])
-    # within the products' float tolerance but a slot driven below 0
-    with pytest.raises(AssertionError):
+    # ... the same where slot 1's q is 0 (nothing would go below 0)
+    with pytest.raises(ValueError, match="overlapping mined paths"):
+        distill.masked_targets([np.array([1.0, 0.0, 0.0, 0.0, 0.0])], V12,
+                               student, mined=[[1], [1]],
+                               weights=[[0.7, 0.4]])
+    # past the tolerance by a hair, and within it
+    with pytest.raises(ValueError, match="overlapping mined paths"):
         distill.masked_targets([q], V12, student, mined=[[1], [1]],
-                               weights=[[0.5, 0.5 + 5e-7]])
+                               weights=[[0.5, 0.5 + 5e-9]])
+    out, _, _ = distill.masked_targets([q], V12, student, mined=[[1], [1]],
+                                       weights=[[0.5, 0.5 + 5e-10]])
+    assert out[0] == pytest.approx([0, 0, 0, 0, 0.5, 0.5])
+    assert min(out[0]) >= 0.0                       # the residue clamped
     out, _, _ = distill.masked_targets([q], V12, student, mined=[[1], [1]],
                                        weights=[[0.5, 0.5]])
     assert out[0] == pytest.approx([0, 0, 0, 0, 0.5, 0.5])
@@ -1252,9 +1278,10 @@ def test_a_student_replaying_relabeled_records_sees_the_same_records(
 # path products on the RAW states at the re-tokenized records, the tail's
 # order, every record's target per slot
 # --------------------------------------------------------------------------
-VP = ((0, 4), (1, 4), (2, 4), (1, 8), (0, 16), (2, 8))
+VP = ((0, 4), (1, 4), (2, 4), (1, 8), (0, 16), (2, 8), (1, 16))
 PA = ((1, 8), (2, 4))           # also spelled (1, 4) (1, 4) (2, 4)
 PB = ((0, 16), (2, 4))          # through the dropped (0, 16)
+PC = ((2, 4), (2, 4))           # the dropped (2, 8)'s inputs (audit r2 T2)
 NS = 64                         # the fakes' latent states
 
 
@@ -1322,10 +1349,11 @@ class _SRun:
 
 
 def _fake_lives():
-    """10 lives over VP, every base step's frame a fresh state: PA spelled
-    (1,8)(2,4) four times and (1,4)(1,4)(2,4) twice, PB three times (its
-    (2,4) pays 200: 20 units, past the master's ceiling 1), then (0,4) and
-    the dropped (2,8)."""
+    """12 lives over VP, every base step's frame a fresh state: PA spelled
+    (1,8)(2,4) four times, PC (2,4)(2,4) twice, PA spelled (1,4)(1,4)(2,4)
+    twice, PB three times (its (2,4) pays 200: 20 units, past the master's
+    ceiling 1), then (0,4) and the dropped (2,8) -- PC's inputs in ONE
+    decision; (1,16) never played."""
     ids = iter(range(1, NS))
 
     def frame(v):
@@ -1350,6 +1378,7 @@ def _fake_lives():
                 "game_end": False}
 
     return ([life([(3, (10, 10)), (2, (10,))]) for _ in range(4)]
+            + [life([(2, (10,)), (2, (10,))]) for _ in range(2)]
             + [life([(1, (10,)), (1, (10,)), (2, (10,))]) for _ in range(2)]
             + [life([(4, (10,) * 4), (2, (200,))]) for _ in range(3)]
             + [life([(0, (10,)), (5, (10, 10))])])
@@ -1372,20 +1401,22 @@ def test_the_preps_core_wires_states_clip_discount_tail_and_records():
             "student_ceiling": 5.0}
     logs = []
     got = distill.distill_lives(run, lives, VP, states[0], states[1], clip,
-                                0.9, drop_share=0.15, mine=True,
+                                0.9, drop_share=0.14, mine=True,
                                 log=logs.append)
-    # the 1% rule (at 15% here) and the appended tail, in score order
-    assert got["dropped"] == ((0, 16), (2, 8))
-    assert got["vocab"] == ((0, 4), (1, 4), (2, 4), (1, 8), PA, PB)
-    assert [c["token"] for c in got["chosen"]] == [PA, PB]
+    # the 1% rule (at 14% here) and the appended tail, in score order
+    assert got["dropped"] == ((0, 16), (2, 8), (1, 16))
+    assert got["vocab"] == ((0, 4), (1, 4), (2, 4), (1, 8), PA, PB, PC)
+    assert [c["token"] for c in got["chosen"]] == [PA, PB, PC]
     assert got["chosen"][0]["target_spellings"] == [((3, 2), 4),
                                                     ((1, 1, 2), 2)]
     assert got["chosen"][1]["target_spellings"] == [((4, 2), 3)]
+    # (audit r2 T2) PC's one-token spelling: the dropped (2, 8), played once
+    assert got["chosen"][2]["target_spellings"] == [((5,), 1), ((2, 2), 2)]
     # mining read the ACTING values (0) and the master's clip (1 unit) and
     # discount (0.9) per BASE step -- by hand, in log order
     d = 0.9
     r3 = 1 + d + d * d
-    rets = ([r3, 1.0] * 4 + [r3, 1 + d, 1.0] * 2
+    rets = ([r3, 1.0] * 4 + [1 + d, 1.0] * 2 + [r3, 1 + d, 1.0] * 2
             + [1 + d + d ** 2 + d ** 3 + d ** 4, 1.0] * 3 + [r3, 1 + d])
     q = np.percentile(rets, [10, 50, 90])
     want = {"mean": round(float(np.mean(rets)), 4),
@@ -1394,18 +1425,22 @@ def test_the_preps_core_wires_states_clip_discount_tail_and_records():
     m = got["mining"]
     assert m["returns"] == want and m["advantage"] == want
     assert m["values"] == {"mean": 0.0, "p10": 0.0, "p50": 0.0, "p90": 0.0}
-    assert m["high"] == 11 and m["cap"] == 2
+    assert m["high"] == 13 and m["cap"] == 3
     assert m["value_terms"] == {"reward_unit": 10.0, "ceiling": 1.0,
                                 "discount_per_base_step": 0.9}
-    # the records: relabeled (PA, PB) and not (the last life's)
-    want_slots = [[4, 0]] * 6 + [[5, 0]] * 3 + [[0, 2, 2, 0]]
+    # the records: relabeled (PA, PC, PB -- and the last life's (2, 8), a
+    # k = 1 relabel to PC) and not (its (0, 4))
+    want_slots = ([[4, 0]] * 4 + [[6, 0]] * 2 + [[4, 0]] * 2 + [[5, 0]] * 3
+                  + [[0, 6, 0]])
     out = got["out_lives"]
     assert [[r[1] for r in lf["traj"]] for lf in out] == want_slots
     assert [r[2] for r in out[0]["traj"]] == [(), (10.0, 10.0, 10.0)]
-    assert [r[2] for r in out[6]["traj"]] == [(), (10.0,) * 4 + (200.0,)]
-    assert [r[2] for r in out[9]["traj"]] == [(), (10.0,), (10.0,), (10.0,)]
+    assert [r[2] for r in out[4]["traj"]] == [(), (10.0, 10.0)]
+    assert [r[2] for r in out[8]["traj"]] == [(), (10.0,) * 4 + (200.0,)]
+    assert [r[2] for r in out[11]["traj"]] == [(), (10.0,), (10.0, 10.0)]
     assert out[0]["traj"][0][0] is stacks[0][0]
     assert out[0]["traj"][1][0] is stacks[0][2]          # the interior left
+    assert out[11]["traj"][1][0] is stacks[11][1]        # (2, 8)'s own stack
 
     # every record's target by hand: q at its state (uniform on the
     # terminated tail), each spelling's path product on the RAW prior
@@ -1417,12 +1452,14 @@ def test_the_preps_core_wires_states_clip_discount_tail_and_records():
         return prod
 
     def target(q, s):
-        rest, mass = np.array(q, dtype=np.float64), [0.0, 0.0]
-        for j, paths in enumerate(([(3, 2), (1, 1, 2)], [(4, 2)])):
+        rest, mass = np.array(q, dtype=np.float64), [0.0, 0.0, 0.0]
+        for j, paths in enumerate(([(3, 2), (1, 1, 2)], [(4, 2)],
+                                   [(5,), (2, 2)])):
             for p in paths:
-                moved = q[p[0]] * w(p, s)
+                moved = q[p[0]] * w(p, s)     # (5,): q(2, 8) whole
                 rest[p[0]] -= moved
                 mass[j] += moved
+        assert rest[5] == 0.0
         st = np.array([rest[0], rest[1], rest[2], rest[3], *mass])
         return st / st.sum()
 
@@ -1436,23 +1473,34 @@ def test_the_preps_core_wires_states_clip_discount_tail_and_records():
             if not tail:
                 n += 1
                 moved_32 += qq[3] * w((3, 2), s)
-    assert n == got["trule"]["records"] == 12
+    assert n == got["trule"]["records"] == 13
+    # q(2, 8) moves WHOLE to PC: at the k = 1 record PC's target against
+    # (0, 4)'s (no spelling starts there) is (q(2,8) + q(2,4) x w) / q(0,4)
+    s = int(out[11]["traj"][1][0][-1, 0, 0])
+    pol = out[11]["traj"][1][3]
+    assert pol[6] / pol[0] == pytest.approx(
+        (Q[s][5] + Q[s][2] * w((2, 2), s)) / Q[s][0], rel=1e-6)
+    assert pol[6] / pol[0] > Q[s][5] / Q[s][0]
     head = distill.mined_header(got)
     sp = head["target_rule"]["spellings"][muzero.token_key(PA)]
     assert [(x["path"], x["logged"]) for x in sp] == [([3, 2], 4),
                                                       ([1, 1, 2], 2)]
     assert sp[0]["moved_mean"] == pytest.approx(moved_32 / n, abs=2e-6)
     assert head["relabeled"] == {muzero.token_key(PA): 6,
-                                 muzero.token_key(PB): 3}
-    assert head["relabeled_decisions"] == 20
+                                 muzero.token_key(PB): 3,
+                                 muzero.token_key(PC): 3}
+    assert head["relabeled_decisions"] == 25
     assert head["mined"][0]["target_spellings"] == [
         {"path": [3, 2], "logged": 4}, {"path": [1, 1, 2], "logged": 2}]
-    # (audit r1b NITs) the splits' extra records apart from the relabels'
-    assert (got["splits"], got["split_extra"], got["net_extra"]) == (1, 1,
-                                                                     -10)
-    assert head["net_extra_records"] == -10
+    assert head["mined"][2]["target_spellings"] == [
+        {"path": [5], "logged": 1}, {"path": [2, 2], "logged": 2}]
+    # (audit r1b NITs) the splits' extra records apart from the relabels':
+    # the (2, 8) is relabeled, never split
+    assert (got["splits"], got["split_extra"], got["net_extra"]) == (0, 0,
+                                                                     -13)
+    assert head["net_extra_records"] == -13
     line = [x for x in logs if x.startswith("re-tokenized")][0]
-    assert "20 decisions relabeled as 9 mined records) [" in line
+    assert "25 decisions relabeled as 12 mined records) [" in line
     assert ") ;" not in line
     json.dumps(head)
 

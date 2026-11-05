@@ -193,9 +193,14 @@ def sup(real_sup, monkeypatch, tmp_path):
     repo.mkdir()
     monkeypatch.setattr(real_sup, "REPO", str(repo))
     monkeypatch.setattr(real_sup, "MANIFEST", str(tmp_path / "no-m.json"))
-    # E3: the external T0's frozen tree, into tmp too
+    # E3: the external T0's frozen tree, into tmp too -- and checked (audit
+    # r2): a lapsed redirect must never let a test touch Test B2's tree
     monkeypatch.setitem(real_sup.LINEAGES["m"]["external"], "tree",
                         str(tmp_path / "external"))
+    real_sup.configure("m")
+    assert real_sup.tree_of("t0").startswith(str(tmp_path))
+    assert real_sup.paths("t0", 0)[1].startswith(str(tmp_path))
+    real_sup.configure("f")
     monkeypatch.setattr(real_sup, "_procs", lambda: iter(()))
     monkeypatch.setattr(real_sup, "commit_free_gb", lambda: None)
 
@@ -345,6 +350,22 @@ def test_the_sup_fixture_redirects_every_path(sup, tmp_path):
         _n, marker, probes, suplog, _s, _p, flag = sup.predecessor(v, 0)
         for p in [marker, suplog, flag] + [p for p, _r in probes]:
             assert p.startswith(str(tmp_path)), p
+    # E3 (audit r2): m1 / m2 and the external T0's every path too
+    sup.configure("m")
+    for v in ("m1", "m2", "t0"):
+        assert all(p.startswith(str(tmp_path)) for p in sup.paths(v, 0)[1:])
+        assert sup.snapshot_path(v, 0, 47).startswith(str(tmp_path))
+        assert sup.own_play_arg(v, 0).startswith(
+            str(tmp_path)) or not os.path.isabs(sup.own_play_arg(v, 0))
+    for v in ("m1", "m2"):
+        assert sup.prep_dir(v).startswith(str(tmp_path))
+        assert all(p.startswith(str(tmp_path))
+                   for p in sup.probe_jsonls(v, 0))
+        _n, marker, probes, suplog, _s, _p, flag = sup.predecessor(v, 0)
+        for p in [marker, suplog, flag] + [p for p, _r in probes]:
+            assert p.startswith(str(tmp_path)), p
+    assert sup.own_play_arg("t0", 0).startswith(str(tmp_path / "external"))
+    sup.configure("f")
 
 
 # --------------------------------------------------------------------------
@@ -4103,9 +4124,10 @@ def test_a_smoke_counts_as_a_trainer(sup, monkeypatch, capsys):
     """Audit r1b L4: the Test C / C2 smokes (their parents and their
     "child" trainers) hold the GPU without an ablation.py on the command
     line: live_trainers counts them, so a supervisor started by hand beside
-    one waits. Test B2W's smoke (smoke_testb2w.py) too."""
+    one waits. Test B2W's smoke (smoke_testb2w.py) too, and E3's
+    (smoke_teste3.py: its parent and its "child" trainers)."""
     assert sup.SMOKE_SCRIPTS == ("smoke_testc.py", "smoke_testc2.py",
-                                 "smoke_testb2w.py")
+                                 "smoke_testb2w.py", "smoke_teste3.py")
     procs = [
         (1, ["py", "-u", "C:" + chr(92) + "sp" + chr(92) + "smoke_testc2.py",
              "C:/sp/smoke_testc2_r2"]),
@@ -4114,24 +4136,31 @@ def test_a_smoke_counts_as_a_trainer(sup, monkeypatch, capsys):
         (3, ["py", "smoke_testc.py", "kill", "out"]),
         (8, ["py", "-u", "C:/sp/smoke_testb2w.py", "child", "w1a",
              "C:/sp/b2w_smoke"]),
+        (11, ["py", "-u", "C:" + chr(92) + "sp" + chr(92) + "smoke_teste3.py",
+              "C:/sp/e3_smoke"]),
+        (12, ["py", "-u", "C:/sp/smoke_teste3.py", "child", "m1",
+              "C:/sp/e3_smoke"]),
         (4, ["py", "smoke_testc2.py.bak"]),
         (5, ["py", "tests/test_smoke_testc2.py"]),
         (6, ["py", "benchmarks/supervisors/supervise_testb.py", "a0", "0"]),
         (7, ["py", "post_testc2.py", "Y:/run"]),
         (9, ["py", "smoke_testb2w.py.bak"]),
-        (10, ["py", "post_testb2w.py", "Y:/run"])]
+        (10, ["py", "post_testb2w.py", "Y:/run"]),
+        (13, ["py", "smoke_teste3.py.bak"]),
+        (14, ["py", "tests/test_smoke_teste3.py"])]
     _procs(monkeypatch, sup, procs)
-    assert sup.live_trainers() == [1, 2, 3, 8]
-    assert [p for p, c in procs if sup.is_trainer(c)] == [1, 2, 3, 8]
+    assert sup.live_trainers() == [1, 2, 3, 8, 11, 12]
+    assert [p for p, c in procs if sup.is_trainer(c)] == [1, 2, 3, 8, 11,
+                                                          12]
 
     def effect(n):
         if n == 2:
-            _procs(monkeypatch, sup, procs[4:])
+            _procs(monkeypatch, sup, procs[6:])
 
     monkeypatch.setattr(sup.time, "sleep", _bounded(effect))
     sup.wait_no_trainer()
     assert ("ALERT: an ablation.py or distill.py trainer is already running "
-            "(pids [1, 2, 3, 8])") in capsys.readouterr().out
+            "(pids [1, 2, 3, 8, 11, 12])") in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
@@ -4617,7 +4646,9 @@ def test_the_token_bound_is_the_mined_vocabularys_longest_token(msup):
                         ([[0, 4], [1, 32], MINED_TOK], 16),
                         ([[0, 4], [[2, 8], [3, 12]]], 5),
                         ("nonsense", 16), ([[0, 4], [[2, 8], "x"]], 16),
-                        ([[0, 4], [2.0, 8]], 16), (GONE, 16)):
+                        ([[0, 4], [2.0, 8]], 16), (GONE, 16),
+                        # (audit r2) capped at MINED_TOKEN_STEPS: 96 frames
+                        ([[0, 4], [[1, 64], [3, 32]]], 16)):
         _m1_prep(sup, vocab=vocab)
         assert sup.run_token_steps("m1") == want, vocab
     sup.configure("t")
@@ -4726,10 +4757,15 @@ def test_e3s_quick_probes_pass_and_end_with_their_masters_checks(msup):
     sup = msup
     _m_masters(sup)
     q1, q2 = sup.quick("m1", 0), sup.quick("m2", 0)
-    assert q1.endswith(
-        f"distill.master_checks({sup.snapshot_path('t0', 0, 47)!r}, 47)")
+    # the external T0: its master checks, then its recorded spec key by key
+    # against its arm (E3-A1: generation 0 shared exactly)
+    assert (f"_mb = distill.master_checks("
+            f"{sup.snapshot_path('t0', 0, 47)!r}, 47)[0]; ") in q1
+    assert q1.endswith("'keys that differ', _diff)")
     assert sup.snapshot_path("t0", 0, 47).startswith(
         sup.LINEAGES["m"]["external"]["tree"])
+    assert f"assert muzero.TOKEN_BASE_FRAMES == {sup.BASE_FRAMES}; " in q1
+    assert sup.BASE_FRAMES == muzero.TOKEN_BASE_FRAMES == 4
     assert q2.endswith(
         f"distill.master_checks({sup.snapshot_path('m1', 0, 46)!r}, 46)")
     for q, twin in ((q1, T[1]), (q2, T[2])):
@@ -4779,14 +4815,119 @@ def test_each_mining_pin_of_the_quick_probe_bites(msup):
         assert g.startswith("AssertionError"), (flip, g)
 
 
+def test_the_external_masters_spec_must_be_its_arm_key_by_key(msup):
+    """(audit r2) T0's snapshot recorded a spec the prep's master checks do
+    not compare beyond its vocabulary (a non-student master runs as its
+    arm): m1's probe compares every key -- a value that differs, or a key
+    in one only, fails it, by name."""
+    sup = msup
+    _m_masters(sup)
+    snap = sup.snapshot_path("t0", 0, 47)
+    for change, key in (({"ACT_SEARCH_SIMS": 8}, "ACT_SEARCH_SIMS"),
+                        ({"_an_extra_key": 1}, "_an_extra_key")):
+        _master_like(snap, 0, 47, arms=T, discounts=[KEPT] * 3, **change)
+        g = _py_each([sup.quick("m1", 0)])[0]
+        assert g.startswith("AssertionError") and key in g, g
+        assert "the external master snapshot spec is not its arm" in g
+    _master_like(snap, 0, 47, arms=T, discounts=[KEPT] * 3)
+    assert _py_each([sup.quick("m1", 0)]) == ["ok"]
+
+
 def test_e3s_quick_probe_on_t0s_real_final_snapshot(real_sup):
     """The preflight's real probe for m1: distill.master_checks on T0's
-    REAL final snapshot in the frozen tree (read only)."""
+    REAL final snapshot in the frozen tree (read only), and its recorded
+    spec key by key against T0's arm in this tree."""
     if not (FROZEN / "benchmarks" / "results" / T0_RUN).exists():
         pytest.skip("Test B2's frozen tree is not on this host")
     sup = real_sup
     sup.configure("m")
     q = sup.quick("m1", 0)
-    assert q.endswith(f"distill.master_checks("
-                      f"{sup.snapshot_path('t0', 0, 47)!r}, 47)")
+    assert (f"_mb = distill.master_checks("
+            f"{sup.snapshot_path('t0', 0, 47)!r}, 47)[0]; ") in q
     assert _py_each([q]) == ["ok"]
+
+
+def test_other_lineages_quick_probes_are_their_own(sup):
+    """(audit r2) Binding "m" leaves nothing behind: every other lineage's
+    generation-0 probe is the one a separately loaded copy bound to that
+    lineage writes, with no mining pin."""
+    for letter in ("f", "t", "r", "n", "a", "w"):
+        fresh = _load(SUPERVISORS / "supervise_testb.py",
+                      f"supervise_testb_{letter}_fresh")
+        fresh.configure(letter)
+        sup.configure("m")
+        sup.configure(letter)
+        q = sup.quick(letter + "0", 0)
+        assert q == fresh.quick(letter + "0", 0), letter
+        assert "_mine" not in q and "TOKEN_MINED" not in q, letter
+
+
+def test_an_external_master_alerts_name_its_frozen_tree(msup, monkeypatch,
+                                                        capsys):
+    """(audit r2) T0 unreadable or incomplete in its frozen tree: the wait
+    and the master gate say so -- never "rerun its launcher" or "is its
+    hand-off alive?"."""
+    sup = msup
+    ext = sup.LINEAGES["m"]["external"]["tree"]
+    frozen = (f"T0's frozen files in {ext} are unreadable -- run nothing in "
+              f"that tree; Kai's call")
+    monkeypatch.setattr(sup.time, "sleep", _bounded(lambda n: None, n=1))
+    with pytest.raises(Stop):
+        sup.wait_external("m1", 0)
+    out = capsys.readouterr().out
+    assert "WAITING for T0 before m1 s0" in out
+    assert f"ALERT: {frozen}" in out
+    for word in ("rerun its launcher", "hand-off", "keep T0's run folder",
+                 "nothing drives it"):
+        assert word not in out, word
+    # complete but its deployed rows missing: the gate says the same
+    _finish_t0(sup, evals=False)
+    with pytest.raises(SystemExit) as e:
+        sup.choose_master("m1", 0)
+    assert str(e.value).endswith(frozen) and "hand-off" not in str(e.value)
+    # its own-play log incomplete there
+    _finish_t0(sup)
+    (pathlib.Path(sup.own_play_arg("t0", 0)) / "iter-003.pkl").unlink()
+    with pytest.raises(SystemExit) as e:
+        sup.choose_master("m1", 0)
+    assert "iterations [3]" in str(e.value)
+    assert str(e.value).endswith(frozen)
+    # an in-tree master (M1 for m2) keeps its own texts
+    with pytest.raises(SystemExit, match="land them"):
+        _finish(sup, "m1", final=46, env=33100, evals=False)
+        sup.choose_master("m2", 0)
+
+
+def test_the_mined_line_and_its_alert_on_every_prep_found(msup,
+                                                          monkeypatch,
+                                                          capsys):
+    """(audit r2) The MINED line also when an intact prep is found on a
+    restart, and an ALERT (Kai's call) when the mined prep appended no
+    token."""
+    sup = msup
+    _finish_t0(sup, final=47, env=33616, value=900.0)
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+    _m1_prep(sup, vocab=[[0, 4], MINED_TOK], dropped=[[0, 8]],
+             mined=[{"token": MINED_TOK, "count": 4, "k": 2,
+                     "consistency": 0.5, "score": 2.0}])
+    sup.write_pick(os.path.join(sup.prep_dir("m1"), "master.json"),
+                   sup.choose_master("m1", 0))
+    assert sup.run_prep("m1", 0, {}) is True
+    out = capsys.readouterr().out
+    assert "MINED m1: 1 tokens appended: 1,32;3,32" in out
+    assert "ALERT" not in out
+    _m1_prep(sup, vocab=[[0, 4]], dropped=[[0, 8]], mined=[])
+    assert sup.run_prep("m1", 0, {}) is True
+    out = capsys.readouterr().out
+    assert "MINED m1: 0 tokens appended; vocabulary 1 slots" in out
+    assert ("ALERT: M1's mined prep appended NO mined token -- it would run "
+            "as T1 with no mining (Kai's call)") in out
+    # Test B2's: no MINED line at all
+    sup.configure("t")
+    _finish(sup, "t0", final=48, evals=False)
+    _write_prep(sup, "t1", k=48)
+    sup.write_pick(os.path.join(sup.prep_dir("t1"), "master.json"),
+                   {"which": "T0", "snapshot": "s", "iterations": 48,
+                    "master_mean_last2": 700.0})
+    assert sup.run_prep("t1", 0, {}) is True
+    assert "MINED" not in capsys.readouterr().out

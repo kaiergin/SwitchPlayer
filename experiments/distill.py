@@ -347,6 +347,8 @@ def log_lives(folder, last_iteration):
 MINE_RUN_SIZES = (2, 3, 4)          # decisions per run (E3a's A3)
 MINE_BATCH = 128                    # stacks per representation forward
 MINE_SCORED_SHOWN = 32              # the top-scored candidates vocab.json lists
+# E3-A13: the tolerance of the disjointness check (float64 path products)
+OVERLAP_TOL = 1e-9
 
 
 def clipped(r, unit, ceiling):
@@ -830,9 +832,10 @@ def masked_targets(pols, master_vocab, student_vocab, mined=None,
     t1..tj-1) at record i, flat in that order (mined_path_weights; 1 for a
     one-token spelling). At EVERY record each mined token m gets P(m) = the
     SUM over its spellings of q(t1) x the spelling's product, each moved
-    from its own t1's slot -- the paths from one slot are disjoint (asserted:
-    their products sum to at most 1, and no slot goes below 0 beyond float
-    residue, which is clamped); then the dropped tokens' mass is discarded
+    from its own t1's slot -- the paths from one slot are disjoint (checked,
+    ValueError otherwise: their products sum to at most 1 + OVERLAP_TOL and
+    no slot goes below -OVERLAP_TOL x its q; the float residue is clamped);
+    then the dropped tokens' mass is discarded
     and the rest renormalized, as above. A mined slot carries the master's
     own preference for the whole sequence everywhere, never a forced 0."""
     student_vocab = muzero.canon_vocab(student_vocab)
@@ -867,13 +870,19 @@ def masked_targets(pols, master_vocab, student_vocab, mined=None,
                              f"spellings")
         per_slot = np.zeros(len(full))
         np.add.at(per_slot, firsts, w)
-        # the disjointness of the paths from one slot (E3-A13)
-        assert per_slot.max() <= 1.0 + 1e-6, (i, per_slot.max())
         moved = full[firsts] * w
         rest = full.copy()
         np.subtract.at(rest, firsts, moved)
-        # a real overlap fails loudly; only float residue is clamped
-        assert rest.min() > -1e-9, (i, rest.min())
+        # the disjointness of the paths from one slot (E3-A13): their
+        # products sum to at most 1, so no slot goes below 0 -- one
+        # tolerance for both, OVERLAP_TOL (relative to the slot's q for the
+        # second), past float64 residue; a real overlap raises (also at a
+        # slot whose q is 0), only the residue is clamped
+        if (per_slot.max() > 1.0 + OVERLAP_TOL
+                or np.any(rest < -OVERLAP_TOL * full)):
+            raise ValueError(f"overlapping mined paths at record {i}: path "
+                             f"products sum to {per_slot.max()!r} at slot "
+                             f"{int(per_slot.argmax())} (at most 1)")
         rest = np.maximum(rest, 0.0)
         mass = np.bincount(owner, weights=moved, minlength=n_new)
         q = np.concatenate([rest[idx], mass])
@@ -915,8 +924,10 @@ def mined_path_weights(nets, stacks, paths, device, batch=MINE_BATCH):
                         a = torch.full((B,), int(path[j - 1]),
                                        dtype=torch.long, device=device)
                         z = dyn(z, a)[0]
-                        prior = torch.softmax(pred(z)[0].float(), dim=1)
-                        w = w * prior[:, int(path[j])].double().cpu().numpy()
+                        # float64 (audit r2): disjoint paths' products then
+                        # sum to at most 1 within OVERLAP_TOL
+                        prior = torch.softmax(pred(z)[0].double(), dim=1)
+                        w = w * prior[:, int(path[j])].cpu().numpy()
                     out[i0:i0 + B, p] = w
     finally:
         for n, m in zip((rep, dyn, pred), modes):

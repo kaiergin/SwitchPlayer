@@ -397,6 +397,8 @@ MAX_TOKEN_STEPS = 8
 # 64 frames, 16 base steps (muzero.TOKEN_MINED_MAX_FRAMES); this bound when
 # its vocab.json cannot be read
 MINED_TOKEN_STEPS = 16
+# the raw frames of one base step (muzero.TOKEN_BASE_FRAMES; quick() pins it)
+BASE_FRAMES = 4
 REWARD_MAX_SLACK = 1e-4
 # A stored record reward past the reward support's edge (muzero.REWARD_CLIP
 # units) saturates the reward / value-prefix heads (the distillation step's
@@ -855,6 +857,7 @@ def quick(variant, seed):
                  "hasattr(ablation, 'support_steps') and "
                  "hasattr(ablation, 'declared_mined'); "
                  "assert muzero.TOKEN_MINED_PER_SWAP == 8; "
+                 f"assert muzero.TOKEN_BASE_FRAMES == {BASE_FRAMES}; "
                  "assert muzero.TOKEN_MINED_MAX_FRAMES // "
                  f"muzero.TOKEN_BASE_FRAMES == {MINED_TOKEN_STEPS}; "
                  f"assert ablation.ARMS[{VARIANTS[mm]!r}].get('_mine') is "
@@ -867,6 +870,19 @@ def quick(variant, seed):
                        f"spec['REWARD_GROWTH_CEILING'] == {F0_CEILING}")
     k, snap = master_final(variant, seed)
     kind = "distill" if is_student(m) else None
+    checks = f"distill.master_checks({snap!r}, {k})"
+    if is_external(m):
+        # E3-A1 (audit r2): the two lineages share generation 0 EXACTLY --
+        # the external T0's final snapshot's recorded spec, key by key, is
+        # its arm in this tree (keys in one only, keys whose values differ)
+        checks = (f"_mb = {checks}[0]; "
+                  "_ms = _mb['spec']; "
+                  "_only = sorted(set(_ms) ^ set(master)); "
+                  "_diff = sorted(_x for _x in set(_ms) & set(master) "
+                  "if _ms[_x] != master[_x]); "
+                  "assert not _only and not _diff, ('the external master "
+                  "snapshot spec is not its arm: keys in one only', _only, "
+                  "'keys that differ', _diff)")
     return code + (
         f"master = ablation.ARMS[{VARIANTS[m]!r}]; "
         "assert master['PREFIX_BN_PER_STEP'] is True; "
@@ -895,7 +911,7 @@ def quick(variant, seed):
         "hasattr(distill, 'master_spec') and "
         "hasattr(distill, 'halved_ceiling') and "
         "distill.DROP_SHARE == 0.01; "
-        f"distill.master_checks({snap!r}, {k})")
+        + checks)
 
 
 def master_offline(variant):
@@ -1148,6 +1164,13 @@ def wait_external(variant, seed):
             print(f"WAITING for {name} before {variant} s{seed} "
                   f"[{polls // 60} h]: missing " + "; ".join(missing)[:400],
                   flush=True)
+            if is_external(upstream(variant)):
+                # E3's frozen T0: nothing here may be rerun or relaunched
+                print(f"ALERT: {frozen_msg(upstream(variant))}", flush=True)
+                first = False
+                time.sleep(60)
+                polls += 1
+                continue
             if pred_gave_up(variant, seed):
                 print(f"ALERT: {name}'s supervisor gave up -- {variant} keeps "
                       f"waiting", flush=True)
@@ -1168,6 +1191,13 @@ def wait_external(variant, seed):
         first = False
         time.sleep(60)
         polls += 1
+
+
+def frozen_msg(m):
+    """E3: what an unreadable or incomplete EXTERNAL master (Test B2's T0 in
+    its frozen tree) calls for -- never a rerun of anything there."""
+    return (f"{NAMES[m]}'s frozen files in {tree_of(m)} are unreadable -- "
+            f"run nothing in that tree; Kai's call")
 
 
 def master_files_missing(variant, seed):
@@ -1213,8 +1243,9 @@ def choose_master(variant, seed):
     if len(last2) < 2 or any(isinstance(rows.get(i), bool) or not isinstance(
             rows.get(i), (int, float)) for i in last2):
         raise SystemExit(f"{name}'s last two deployed rows {last2} are "
-                         f"incomplete in {acting} -- land them (its hand-off) "
-                         f"first")
+                         f"incomplete in {acting} -- "
+                         + (frozen_msg(m) if is_external(m)
+                            else "land them (its hand-off) first"))
     mean = sum(rows[i] for i in last2) / 2
     g = (mean - G_RANDOM) / G_HUMAN
     if mean < NEAR_RANDOM - NEAR_RANDOM_TOL:
@@ -1225,7 +1256,8 @@ def choose_master(variant, seed):
     gone = master_files_missing(variant, seed)
     if gone:
         raise SystemExit(f"{name}'s master files are missing: "
-                         f"{'; '.join(gone)}")
+                         f"{'; '.join(gone)}"
+                         + (f" -- {frozen_msg(m)}" if is_external(m) else ""))
     return {"which": name, "snapshot": snap, "iterations": k,
             "master_mean_last2": mean}
 
@@ -1427,19 +1459,42 @@ def run_token_steps(variant):
     """E3-A9: the base steps one record of `variant`'s run can sum, the
     bound row_alerts reads -- MAX_TOKEN_STEPS (8: a 32-frame token) for
     every lineage that does not mine (bit for bit as ever); for a mining
-    lineage's student, its prep's vocabulary's longest token (vocab.json's
-    "vocab", nested mined tokens read as JSON lists), MINED_TOKEN_STEPS (16)
-    while that cannot be read."""
+    lineage's student, its prep's vocabulary's longest token in base steps
+    of BASE_FRAMES (vocab.json's "vocab", nested mined tokens read as JSON
+    lists), at most MINED_TOKEN_STEPS (16) -- and that cap while the
+    vocabulary cannot be read."""
     if not LINEAGES[LINEAGE].get("mine") or not is_student(variant):
         return MAX_TOKEN_STEPS
     doc = prep_doc(variant)
     try:
         vocab = doc["vocab"]
-        steps = max(sum(f for _, f in json_token_steps(t)) // 4
+        steps = max(sum(f for _, f in json_token_steps(t)) // BASE_FRAMES
                     for t in vocab)
     except (TypeError, KeyError, ValueError):
         return MINED_TOKEN_STEPS
-    return steps
+    return min(steps, MINED_TOKEN_STEPS)
+
+
+def mined_alerts(variant):
+    """E3: what a mining lineage's finished prep shows that needs a human --
+    no mined token appended (the student then runs as Test B2's twin: Kai's
+    call)."""
+    doc = prep_doc(variant)
+    mined = doc.get("mined") if isinstance(doc, dict) else None
+    if isinstance(mined, list) and not mined:
+        twin = LINEAGES[LINEAGE].get("twin")
+        same = f"{twin}{gen(variant)}".upper() if twin else "its twin"
+        return [f"{NAMES[variant]}'s mined prep appended NO mined token -- "
+                f"it would run as {same} with no mining (Kai's call)"]
+    return []
+
+
+def print_mined(variant):
+    """E3: the MINED line and its ALERTs, for a mining lineage's prep."""
+    if LINEAGES[LINEAGE].get("mine"):
+        print(prep_tokens_line(variant), flush=True)
+        for alert in mined_alerts(variant):
+            print(f"ALERT: {alert}", flush=True)
 
 
 def prep_tokens_line(variant):
@@ -1496,6 +1551,8 @@ def run_prep(variant, seed, env, redo_ok=True):
             pick_bad = ok and redo_ok and read_pick(os.path.join(
                 pdir, "master.json")) is None
             if ok and not pick_bad:
+                # (audit r2) on a restart too: the MINED line (E3)
+                print_mined(variant)
                 return True
             if k < 2:
                 time.sleep(60)
@@ -1536,8 +1593,7 @@ def run_prep(variant, seed, env, redo_ok=True):
         # counts. With no prep alive, its tmp files are stale.
         if prep_done(variant) and set_intact(variant, seed)[0]:
             print(f"PREP done (by an earlier prep): {prel}", flush=True)
-            if LINEAGES[LINEAGE].get("mine"):
-                print(prep_tokens_line(variant), flush=True)
+            print_mined(variant)
             return True
         for name in os.listdir(pdir):
             if name.endswith(".tmp"):
@@ -1571,8 +1627,7 @@ def run_prep(variant, seed, env, redo_ok=True):
             ok, why = set_intact(variant, seed)
             if ok:
                 print(f"PREP done (attempt {attempt}): {prel}", flush=True)
-                if LINEAGES[LINEAGE].get("mine"):
-                    print(prep_tokens_line(variant), flush=True)
+                print_mined(variant)
                 return True
             print(f"PREP attempt {attempt}: {why}", flush=True)
         else:
@@ -1681,8 +1736,9 @@ TRAINER_MODULES = ("ablation", "distill", "experiments.ablation",
 # Test C2 audit r1b L4: the pre-launch GPU smokes train in-process or as
 # "smoke_testc*.py child" (no ablation.py on the command line): a supervisor
 # started by hand beside one waits it out like any trainer (Test B2W's
-# smoke too)
-SMOKE_SCRIPTS = ("smoke_testc.py", "smoke_testc2.py", "smoke_testb2w.py")
+# smoke too, and E3's, smoke_teste3.py)
+SMOKE_SCRIPTS = ("smoke_testc.py", "smoke_testc2.py", "smoke_testb2w.py",
+                 "smoke_teste3.py")
 
 
 def is_trainer(cmd):
