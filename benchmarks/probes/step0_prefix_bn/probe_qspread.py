@@ -46,9 +46,21 @@ def snap(it):
     return SNAP_DIR / f"weights-iter{it:03d}.pth"
 
 
+def refuse_mined(vocab):
+    """E3: this probe reads (action, frames) duration tokens only -- a
+    vocabulary holding MINED tokens (sequences of steps) is refused by name
+    (it imports the frozen distill-run tree's muzero, which predates them)."""
+    mined = [t for t in vocab if isinstance(t[0], (list, tuple))]
+    if mined:
+        raise SystemExit(f"the vocabulary holds mined tokens (E3) {mined}: "
+                         f"this probe reads (action, frames) duration tokens "
+                         f"only")
+    return vocab
+
+
 def snapshot_vocab(path):
     d = torch.load(str(path), map_location="cpu", weights_only=False)
-    return tuple(tuple(t) for t in d["spec"]["TOKEN_VOCAB"])
+    return refuse_mined(tuple(tuple(t) for t in d["spec"]["TOKEN_VOCAB"]))
 
 
 def make_run():
@@ -64,7 +76,7 @@ def make_run():
 
 def load(run, path, acting=False):
     d = torch.load(str(path), map_location="cpu", weights_only=False)
-    v = tuple(tuple(t) for t in d["spec"]["TOKEN_VOCAB"])
+    v = refuse_mined(tuple(tuple(t) for t in d["spec"]["TOKEN_VOCAB"]))
     assert v == muzero.TOKEN_VOCAB, (v, muzero.TOKEN_VOCAB)
     assert d["arm"] == ARM, d["arm"]
     for n in ablation.NET_NAMES:

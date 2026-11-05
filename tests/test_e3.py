@@ -89,10 +89,19 @@ def test_canon_token_reads_json_lists_and_collapses_one_step():
         ((1.0, 8.0), (3, 4))) for x in s)
     assert muzero.canon_token([[1, 8]]) == (1, 8)      # a one-step sequence
     assert muzero.canon_token(np.array([2, 8])) == (2, 8)
+    assert muzero.canon_token(np.array([[1, 8], [3, 4]])) == M1
+    assert muzero.canon_token((np.int64(2), np.float64(8.0))) == (2, 8)
     for bad in ("ab", [], [1, 2, 3], [[1, 8], 3], [[1, 8], [[2, 4]]], 5,
-                [[1, 2, 3]], [[]]):
+                [[1, 2, 3]], [[]],
+                # (audit r1a) a 0-d array is a number, not a step; frames
+                # and actions are integral numbers only
+                np.array(5), [np.array(1), np.array(8)][0:1],
+                [1, 8.9], [[1, 8], [3, 4.5]], [True, 4], ["1", "8"],
+                [1.5, 8]):
         with pytest.raises((TypeError, ValueError)):
             muzero.canon_token(bad)
+    assert not muzero._token_seq(np.array(5))
+    assert muzero._token_seq(np.array([5]))
     assert muzero.canon_vocab([[0, 4], [[1, 8], [3, 4]], [[2, 8]]]) == \
         ((0, 4), M1, (2, 8))
     with pytest.raises(TypeError):
@@ -232,16 +241,23 @@ def test_the_gate_refuses(tok_arm, monkeypatch, vocab, match):
         ablation.token_gate(tok_arm, True, True, 0)
 
 
-def test_the_bias_caps_a_mined_token_at_the_longest_duration(monkeypatch):
+def test_the_bias_caps_a_mined_token_at_the_constant_32_frames(monkeypatch):
+    """E3-A7 as written (E3-A13): the cap is the constant 32 frames."""
+    assert muzero.TOKEN_BIAS_CAP_FRAMES == 32
     monkeypatch.setattr(muzero, "TOKEN_VOCAB", ((0, 4), (0, 32), M1, BIG))
     w = ablation.token_bias_weights(0.5)
-    # M1 (12 frames) uncapped; BIG (64) at the 32-frame token's weight
+    # M1 (12 frames) uncapped; BIG (64) at 32 frames
     assert w.tolist() == [1.0, (32 / 4) ** 0.5, (12 / 4) ** 0.5,
                           (32 / 4) ** 0.5]
     assert w[3] < (64 / 4) ** 0.5
-    # the vocabulary's own longest duration token sets the cap
-    monkeypatch.setattr(muzero, "TOKEN_VOCAB", ((0, 4), (0, 16), BIG))
-    assert ablation.token_bias_weights(0.5)[2] == (16 / 4) ** 0.5
+    # the vocabulary's longest duration token (16) and its longest other
+    # token of either kind (M2, 20 frames) do not move the cap; a duration
+    # token past 32 frames is never capped
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", ((0, 4), (0, 16), M2, BIG,
+                                                (1, 48)))
+    w = ablation.token_bias_weights(0.5)
+    assert w.tolist() == [1.0, (16 / 4) ** 0.5, (20 / 4) ** 0.5,
+                          (32 / 4) ** 0.5, (48 / 4) ** 0.5]
 
 
 def test_supports_read_the_longest_token_only_with_mined_tokens(
@@ -264,6 +280,25 @@ def test_supports_read_the_longest_token_only_with_mined_tokens(
     assert ablation.ceiling_fits_supports(25.0, 16)    # 400 per record
     assert not ablation.ceiling_fits_supports(25.01, 16)
     assert not ablation.ceiling_fits_supports(160.0, 16)
+
+
+def test_steps_scale_both_support_bounds(monkeypatch):
+    """(audit r1a) The two bounds apart: a value-prefix support for 1,000
+    (a record of c x steps, UNROLL_STEPS of them, must fit) -- then a reward
+    support for 100 -- so `steps` applied to only one bound fails."""
+    sup = muzero.scalar_categorical.support_for
+    monkeypatch.setattr(muzero, "VALUE_PREFIX_SUPPORT", sup(1000.0))
+    # c 15 x 16 steps = 240 per record (under the reward's 400) but x 5 =
+    # 1,200 per prefix (past 1,000)
+    assert not ablation.ceiling_fits_supports(15.0, 16)
+    assert ablation.ceiling_fits_supports(15.0, 1)     # 75 per prefix
+    assert ablation.ceiling_fits_supports(12.5, 16)    # 1,000 exactly
+    monkeypatch.setattr(muzero, "VALUE_PREFIX_SUPPORT", sup(2000.0))
+    monkeypatch.setattr(muzero, "REWARD_SUPPORT", sup(100.0))
+    # c 10 x 16 = 160 per record (past 100) though x 5 = 800 fits 2,000
+    assert not ablation.ceiling_fits_supports(10.0, 16)
+    assert ablation.ceiling_fits_supports(10.0, 1)
+    assert ablation.ceiling_fits_supports(6.25, 16)    # 100 exactly
 
 
 def test_the_growth_gate_reads_the_longest_mined_token(monkeypatch):
@@ -619,6 +654,27 @@ def test_the_port_matches_e3as_probe_on_duration_vocabularies():
         assert gs["keys"] == ws["keys"]
 
 
+def test_the_duration_token_probes_refuse_a_mined_vocabulary():
+    """(audit r1a) E0's census and the E1 / E3a probes built on it read
+    (action, frames) tokens only: their shared snapshot check refuses a
+    mined vocabulary by name."""
+    import inspect
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] /
+                           "benchmarks" / "probes"))
+    import probe_action_census as pc
+    import probe_e1_equivalence as e1
+    import probe_e3a_sequences as e3
+    with pytest.raises(SystemExit, match=r"holds mined tokens \(E3\)"):
+        pc.check_snapshot(TK_VOCAB + (M1,), pc.ENV_ID)
+    pc.check_snapshot(TK_VOCAB, pc.ENV_ID)            # the grid, as ever
+    with pytest.raises(SystemExit, match="outside the 36-token grid"):
+        pc.check_snapshot(((0, 12),), pc.ENV_ID)
+    for mod in (e1, e3):            # each refuses before anything plays
+        src = inspect.getsource(mod.main)
+        assert src.index("pc.check_snapshot(vocab, pe.ENV)") < src.index(
+            "ablation.Run(")
+
+
 def test_the_selection_is_prefix_free_by_score_and_capped():
     def c(inputs, score):
         return {"inputs": inputs, "score": score}
@@ -728,7 +784,14 @@ def test_mine_wires_the_advantage_the_latents_and_the_score():
         assert muzero.token_inputs(c["token"]) == c["inputs"]
         assert c["token"] == distill.mined_token(c["key"])
     assert rec["cap"] == 3
+    # (audit r1b, memory) only the counted runs' start / end latents kept
+    need = {(li, x) for c in cands for li, i, n in c["occurrences"]
+            for x in (i, i + n)}
+    assert rec["latents_kept"] == len(need) < 12 + 2
     json.dumps(rec)                                   # vocab.json-ready
+    # no slot freed: nothing computed (the run is never touched)
+    assert distill.mine_tokens(None, lives, V, V, 0, 1.0, 100.0, 1.0) == (
+        [], {"cap": 0, "candidates": 0, "skipped": "no slot freed"})
 
 
 def test_a_stale_final_stack_is_left_out_of_the_consistency():
@@ -893,6 +956,78 @@ def test_two_mined_tokens_from_one_slot_split_its_mass():
     assert out[0][1] + out[0][4] + out[0][5] == pytest.approx(0.5 / 0.9)
 
 
+V12 = ((0, 4), (1, 4), (2, 4), (1, 8), (1, 12))
+MH = ((1, 8), (1, 4))                       # inputs 1, 1, 1: (1, 12)'s
+
+
+def _slot_life(plan):
+    """A life of (slot, base steps played) decisions over V12 (stacks
+    irrelevant here)."""
+    traj = [(None, plan[0][0], ())]
+    for i, (slot, m) in enumerate(plan):
+        nxt = plan[i + 1][0] if i + 1 < len(plan) else 0
+        traj.append((None, nxt, (1.0,) * m))
+    return {"traj": traj}
+
+
+def test_target_spellings_are_every_logged_path_and_the_masters_token():
+    """E3-A13: MH's spellings -- the master's own (1, 12) (one token, first,
+    whether or not it was played), then every run of the log whose inputs
+    are (1, 1, 1), any start, every decision played in full."""
+    lives = [_slot_life([(0, 1), (3, 2), (1, 1), (2, 1)]),     # (1,8)(1,4)
+             _slot_life([(1, 1), (3, 2), (0, 1)]),             # (1,4)(1,8)
+             _slot_life([(1, 1), (1, 1), (1, 1), (1, 1)]),     # x2: 0, 1
+             _slot_life([(3, 2), (1, 1)]),                     # (1,8)(1,4)
+             _slot_life([(4, 3)]),                             # (1,12)
+             _slot_life([(3, 2), (1, 0)])]                     # cut short
+    sp = distill.target_spellings(lives, V12, [MH, ((2, 4), (0, 4))])
+    assert sp[0] == [((4,), 1), ((3, 1), 2), ((1, 3), 1), ((1, 1, 1), 2)]
+    assert sp[1] == []                          # (2, 0) never played
+    # the master's own token counts even when the log never played it
+    sp = distill.target_spellings(lives[:4], V12, [MH])
+    assert sp[0][0] == ((4,), 0)
+    # never a slot-prefix of another spelling of the same inputs
+    paths = [p for p, _n in sp[0]]
+    assert not any(a != b and b[:len(a)] == a for a in paths for b in paths)
+    assert distill.target_spellings(lives, V12, []) == []
+
+
+def test_a_mined_token_sums_its_spellings_one_token_included():
+    """E3-A13 by hand: MH's P = q(1,12) (one token, whole) + q(1,8) x w1 +
+    q(1,4) x w2, each moved from its own first slot; (1, 12) dropped."""
+    student = ((0, 4), (1, 4), (2, 4), (1, 8), MH)
+    q = np.array([0.1, 0.3, 0.1, 0.2, 0.3])
+    out, fb, gone = distill.masked_targets(
+        [q], V12, student, mined=[[4, 3, 1]], weights=[[1.0, 0.5, 0.25]])
+    mass = 0.3 + 0.2 * 0.5 + 0.3 * 0.25
+    want = np.array([0.1, 0.3 - 0.075, 0.1, 0.2 - 0.1, mass])
+    assert out[0] == pytest.approx(want / want.sum())
+    assert gone[0] == pytest.approx(0.0)        # (1, 12)'s q all moved
+    # the most-played spelling alone would credit only q(1,8) x w1
+    alone, _, _ = distill.masked_targets([q], V12, student, mined=[[3]],
+                                         weights=[[0.5]])
+    assert alone[0][4] < out[0][4]
+
+
+def test_overlapping_paths_fail_loudly():
+    student = ((0, 4), (1, 4), (2, 4), (1, 8), MH, ((1, 4), (2, 4)))
+    q = np.array([0.0, 1.0, 0.0, 0.0, 0.0])
+    # two paths from slot 1 whose products sum past 1: not disjoint
+    with pytest.raises(AssertionError):
+        distill.masked_targets([q], V12, student, mined=[[1], [1]],
+                               weights=[[0.7, 0.4]])
+    # within the products' float tolerance but a slot driven below 0
+    with pytest.raises(AssertionError):
+        distill.masked_targets([q], V12, student, mined=[[1], [1]],
+                               weights=[[0.5, 0.5 + 5e-7]])
+    out, _, _ = distill.masked_targets([q], V12, student, mined=[[1], [1]],
+                                       weights=[[0.5, 0.5]])
+    assert out[0] == pytest.approx([0, 0, 0, 0, 0.5, 0.5])
+    with pytest.raises(ValueError, match="path products"):
+        distill.masked_targets([q], V12, student, mined=[[1], [1]],
+                               weights=[[0.5]])
+
+
 # --------------------------------------------------------------------------
 # E3-A6: relabeling; E3-A8: a master's dropped mined token
 # --------------------------------------------------------------------------
@@ -946,7 +1081,8 @@ def test_relabeling_greedy_at_decision_boundaries():
     # the split dropped token: its base steps' stacks
     for j in range(4):
         assert out[1 + j][0][-3:].max() == 3 + j
-    assert stats == {"records": {5: 2}, "decisions": 5, "split": 1}
+    assert stats == {"records": {5: 2}, "decisions": 5, "split": 1,
+                     "split_extra": 3}
     # every raw reward and base step exactly once
     assert sum(sum(r[2]) for r in out) == sum(sum(r[2]) for r in traj)
     assert sum(len(r[2]) for r in out) == sum(len(r[2]) for r in traj)
@@ -954,13 +1090,29 @@ def test_relabeling_greedy_at_decision_boundaries():
 
 def test_relabeling_takes_the_longest_and_only_whole_decisions():
     traj, inner = _plan_life(V6, [(3, 2), (2, 1), (1, 1)])
-    # two mined keys from one boundary (not prefix-free here): the longest
-    out = distill.retokenize(traj, inner, V6, S6 + (((1, 4), (1, 4)),),
-                             mined={(1, 1): 6, (1, 1, 2): 5})
-    assert [r[1] for r in out] == [5, 1, 0]
-    out = distill.retokenize(traj, inner, V6, S6 + (((1, 4), (1, 4)),),
-                             mined={(1, 1): 6})
-    assert [r[1] for r in out] == [6, 2, 1, 0]
+    # a VALID student vocabulary (audit r1b): (1, 8) and (0, 16) dropped,
+    # MX and MK appended -- MK's inputs (1, 1) are the dropped (1, 8)'s
+    MK = ((1, 4), (1, 4))
+    student = ((0, 4), (1, 4), (2, 4), (2, 8), MX, MK)
+    assert ablation.validate_student_vocab(student, V6, mined=(MX, MK),
+                                           max_mined=8) == student
+    # two mined keys from one boundary (not prefix-free here: the
+    # mechanics): the longest
+    out = distill.retokenize(traj, inner, V6, student,
+                             mined={(1, 1): 5, (1, 1, 2): 4})
+    assert [r[1] for r in out] == [4, 1, 0]
+    # the k = 1 relabel: the master's dropped (1, 8) decision IS MK's inputs
+    stats = {}
+    out = distill.retokenize(traj, inner, V6, student, mined={(1, 1): 5},
+                             stats=stats)
+    assert [r[1] for r in out] == [5, 2, 1, 0]
+    assert [r[2] for r in out] == [(), (1.0, 2.0), (3.0,), (4.0,)]
+    assert stats == {"records": {5: 1}, "decisions": 1}
+    # without MK the dropped (1, 8) is split into two (1, 4) records
+    stats = {}
+    out = distill.retokenize(traj, inner, V6, student[:5], stats=stats)
+    assert [r[1] for r in out] == [1, 1, 2, 1, 0]
+    assert stats == {"split": 1, "split_extra": 1}
     # (1, 2) occurs only across d0's second base step and d1: never matched
     out = distill.retokenize(traj, inner, V6, S6, mined={(1, 2): 5})
     assert [r[1] for r in out] == [3, 2, 1, 0]
@@ -990,7 +1142,8 @@ def test_a_masters_dropped_mined_token_replays_its_own_actions():
     traj, inner = _plan_life(master, [(4, 3), (3, 3), (4, 2)])
     stats = {}
     out = distill.retokenize(traj, inner, master, student, stats=stats)
-    assert stats == {"split": 2}         # both MZ decisions, nothing relabeled
+    # both MZ decisions, nothing relabeled: 3 - 1 and 2 - 1 extra records
+    assert stats == {"split": 2, "split_extra": 3}
     assert [r[1] for r in out] == [1, 1, 0, 3, 1, 1, 0]
     assert [r[2] for r in out] == [(), (1.0,), (2.0,), (3.0,),
                                    (4.0, 5.0, 6.0), (7.0,), (8.0,)]
@@ -1091,6 +1244,245 @@ def test_a_student_replaying_relabeled_records_sees_the_same_records(
         assert np.array_equal(a[0], b[0]) and a[1] == b[1]
         assert tuple(a[2]) == tuple(b[2])
     assert senv.actions == menv.actions and len(menv.actions) == steps
+
+
+# --------------------------------------------------------------------------
+# the prep's core on fakes (audit r1b): distill_lives' wiring -- mining on
+# the ACTING states with the master's clip and per-base-step discount, the
+# path products on the RAW states at the re-tokenized records, the tail's
+# order, every record's target per slot
+# --------------------------------------------------------------------------
+VP = ((0, 4), (1, 4), (2, 4), (1, 8), (0, 16), (2, 8))
+PA = ((1, 8), (2, 4))           # also spelled (1, 4) (1, 4) (2, 4)
+PB = ((0, 16), (2, 4))          # through the dropped (0, 16)
+NS = 64                         # the fakes' latent states
+
+
+class _SRep(nn.Module):
+    """The latent: one-hot of the stack's newest frame's value."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("mode", torch.zeros(()))
+
+    def forward(self, x):
+        s = (x[:, -1, 0, 0] * 255.0).round().long()
+        return torch.nn.functional.one_hot(s, NS).float()
+
+
+class _SPred(nn.Module):
+    """Prior P[mode][s], value V[mode][s]: mode 0 the RAW states, 1 the
+    ACTING ones (its buffer, which the states load)."""
+
+    def __init__(self, P, V):
+        super().__init__()
+        self.register_buffer("mode", torch.zeros(()))
+        self.P = torch.as_tensor(P, dtype=torch.float32)
+        self.V = torch.as_tensor(V, dtype=torch.float32)
+
+    def forward(self, z):
+        s, m = z.argmax(1), int(self.mode.item())
+        return torch.log(self.P[m][s]), self.V[m][s].unsqueeze(1), None
+
+
+class _SDyn(nn.Module):
+    def __init__(self, Tr):
+        super().__init__()
+        self.Tr = torch.as_tensor(Tr)
+
+    def forward(self, z, a):
+        return (torch.nn.functional.one_hot(self.Tr[z.argmax(1), a],
+                                            NS).float(), None)
+
+
+class _SRun:
+    """What distill_lives reads of a Run: the trainer's nets, set_train_mode
+    and a birth search whose policy is Q[the stack's state] (uniform on a
+    terminated tail, as Run._birth_search's)."""
+
+    def __init__(self, rep, dyn, pred, Q):
+        self.trainer = SimpleNamespace(representation=rep, dynamics=dyn,
+                                       prediction=pred,
+                                       device=torch.device("cpu"))
+        self.Q = Q
+
+    def set_train_mode(self, training):
+        for n in (self.trainer.representation, self.trainer.dynamics,
+                  self.trainer.prediction):
+            n.train(training)
+
+    def _birth_search(self, traj, terminated):
+        out = []
+        for i, r in enumerate(traj):
+            s = int(r[0][-1, 0, 0])
+            tail = terminated and i == len(traj) - 1
+            pol = np.ones(len(VP)) / len(VP) if tail else self.Q[s]
+            out.append((r[0], r[1], r[2], pol, float(s)))
+        return out
+
+
+def _fake_lives():
+    """10 lives over VP, every base step's frame a fresh state: PA spelled
+    (1,8)(2,4) four times and (1,4)(1,4)(2,4) twice, PB three times (its
+    (2,4) pays 200: 20 units, past the master's ceiling 1), then (0,4) and
+    the dropped (2,8)."""
+    ids = iter(range(1, NS))
+
+    def frame(v):
+        return np.full((3, 1, 1), v, np.uint8)
+
+    def life(plan):
+        s = muzero.initial_frame_stack(frame(next(ids)))
+        traj, inner, incoming = [], [], ()
+        for slot, rewards in plan:
+            traj.append((s, slot, incoming))
+            pushed = []
+            for j in range(len(rewards)):
+                f = frame(next(ids))
+                if j < len(rewards) - 1:
+                    pushed.append(f)
+                s = muzero.push_frame(s, f)
+            inner.append(pushed)
+            incoming = tuple(float(r) for r in rewards)
+        traj.append((s, 0, incoming))
+        distill.check_life(traj, inner)
+        return {"traj": traj, "inner": inner, "terminated": True,
+                "game_end": False}
+
+    return ([life([(3, (10, 10)), (2, (10,))]) for _ in range(4)]
+            + [life([(1, (10,)), (1, (10,)), (2, (10,))]) for _ in range(2)]
+            + [life([(4, (10,) * 4), (2, (200,))]) for _ in range(3)]
+            + [life([(0, (10,)), (5, (10, 10))])])
+
+
+def test_the_preps_core_wires_states_clip_discount_tail_and_records():
+    rng = np.random.default_rng(5)
+    Q = rng.dirichlet(np.ones(len(VP)), NS)
+    P = np.stack([rng.dirichlet(np.ones(len(VP)), NS) for _ in range(2)])
+    Tr = rng.integers(0, NS, (NS, len(VP)))
+    V = np.zeros((2, NS))
+    V[0] = 2.0                  # the RAW values; the acting ones are 0
+    run = _SRun(_SRep(), _SDyn(Tr), _SPred(P, V), Q)
+    states = {m: {"representation": {"mode": torch.tensor(float(m))},
+                  "prediction": {"mode": torch.tensor(float(m))}}
+              for m in (0, 1)}
+    lives = _fake_lives()
+    stacks = [[r[0] for r in lf["traj"]] for lf in lives]
+    clip = {"reward_unit": 10.0, "master_ceiling": 1.0,
+            "student_ceiling": 5.0}
+    logs = []
+    got = distill.distill_lives(run, lives, VP, states[0], states[1], clip,
+                                0.9, drop_share=0.15, mine=True,
+                                log=logs.append)
+    # the 1% rule (at 15% here) and the appended tail, in score order
+    assert got["dropped"] == ((0, 16), (2, 8))
+    assert got["vocab"] == ((0, 4), (1, 4), (2, 4), (1, 8), PA, PB)
+    assert [c["token"] for c in got["chosen"]] == [PA, PB]
+    assert got["chosen"][0]["target_spellings"] == [((3, 2), 4),
+                                                    ((1, 1, 2), 2)]
+    assert got["chosen"][1]["target_spellings"] == [((4, 2), 3)]
+    # mining read the ACTING values (0) and the master's clip (1 unit) and
+    # discount (0.9) per BASE step -- by hand, in log order
+    d = 0.9
+    r3 = 1 + d + d * d
+    rets = ([r3, 1.0] * 4 + [r3, 1 + d, 1.0] * 2
+            + [1 + d + d ** 2 + d ** 3 + d ** 4, 1.0] * 3 + [r3, 1 + d])
+    q = np.percentile(rets, [10, 50, 90])
+    want = {"mean": round(float(np.mean(rets)), 4),
+            "p10": round(float(q[0]), 4), "p50": round(float(q[1]), 4),
+            "p90": round(float(q[2]), 4)}
+    m = got["mining"]
+    assert m["returns"] == want and m["advantage"] == want
+    assert m["values"] == {"mean": 0.0, "p10": 0.0, "p50": 0.0, "p90": 0.0}
+    assert m["high"] == 11 and m["cap"] == 2
+    assert m["value_terms"] == {"reward_unit": 10.0, "ceiling": 1.0,
+                                "discount_per_base_step": 0.9}
+    # the records: relabeled (PA, PB) and not (the last life's)
+    want_slots = [[4, 0]] * 6 + [[5, 0]] * 3 + [[0, 2, 2, 0]]
+    out = got["out_lives"]
+    assert [[r[1] for r in lf["traj"]] for lf in out] == want_slots
+    assert [r[2] for r in out[0]["traj"]] == [(), (10.0, 10.0, 10.0)]
+    assert [r[2] for r in out[6]["traj"]] == [(), (10.0,) * 4 + (200.0,)]
+    assert [r[2] for r in out[9]["traj"]] == [(), (10.0,), (10.0,), (10.0,)]
+    assert out[0]["traj"][0][0] is stacks[0][0]
+    assert out[0]["traj"][1][0] is stacks[0][2]          # the interior left
+
+    # every record's target by hand: q at its state (uniform on the
+    # terminated tail), each spelling's path product on the RAW prior
+    def w(path, s):
+        z, prod = Tr[s, path[0]], 1.0
+        for t in path[1:]:
+            prod *= P[0][z][t]
+            z = Tr[z, t]
+        return prod
+
+    def target(q, s):
+        rest, mass = np.array(q, dtype=np.float64), [0.0, 0.0]
+        for j, paths in enumerate(([(3, 2), (1, 1, 2)], [(4, 2)])):
+            for p in paths:
+                moved = q[p[0]] * w(p, s)
+                rest[p[0]] -= moved
+                mass[j] += moved
+        st = np.array([rest[0], rest[1], rest[2], rest[3], *mass])
+        return st / st.sum()
+
+    n, moved_32 = 0, 0.0
+    for lf in out:
+        for i, (obs, slot, raw, pol, val) in enumerate(lf["traj"]):
+            s = int(obs[-1, 0, 0])
+            tail = i == len(lf["traj"]) - 1
+            qq = np.ones(len(VP)) / len(VP) if tail else Q[s]
+            assert pol == pytest.approx(target(qq, s), rel=1e-5, abs=1e-7)
+            if not tail:
+                n += 1
+                moved_32 += qq[3] * w((3, 2), s)
+    assert n == got["trule"]["records"] == 12
+    head = distill.mined_header(got)
+    sp = head["target_rule"]["spellings"][muzero.token_key(PA)]
+    assert [(x["path"], x["logged"]) for x in sp] == [([3, 2], 4),
+                                                      ([1, 1, 2], 2)]
+    assert sp[0]["moved_mean"] == pytest.approx(moved_32 / n, abs=2e-6)
+    assert head["relabeled"] == {muzero.token_key(PA): 6,
+                                 muzero.token_key(PB): 3}
+    assert head["relabeled_decisions"] == 20
+    assert head["mined"][0]["target_spellings"] == [
+        {"path": [3, 2], "logged": 4}, {"path": [1, 1, 2], "logged": 2}]
+    # (audit r1b NITs) the splits' extra records apart from the relabels'
+    assert (got["splits"], got["split_extra"], got["net_extra"]) == (1, 1,
+                                                                     -10)
+    assert head["net_extra_records"] == -10
+    line = [x for x in logs if x.startswith("re-tokenized")][0]
+    assert "20 decisions relabeled as 9 mined records) [" in line
+    assert ") ;" not in line
+    json.dumps(head)
+
+
+def test_the_preps_support_check_runs_without_mining_too():
+    """(audit r1b) Without --mine, a master's KEPT mined token (16 base
+    steps) still bounds the student's ceiling; once it is dropped, the
+    vocabulary is duration-only and the check the per-base-step one, as
+    ever."""
+    rng = np.random.default_rng(1)
+    Q7 = rng.dirichlet(np.ones(len(VP) + 1), NS)
+    run = _SRun(_SRep(), _SDyn(rng.integers(0, NS, (NS, len(VP) + 1))),
+                _SPred(np.stack([Q7, Q7]), np.zeros((2, NS))), Q7)
+    run._birth_search = lambda traj, term: [
+        (r[0], r[1], r[2], Q7[int(r[0][-1, 0, 0])], 0.0) for r in traj]
+    master = VP + (BIG,)          # a 16-step mined token the master holds
+    states = {"representation": {"mode": torch.tensor(0.0)},
+              "prediction": {"mode": torch.tensor(0.0)}}
+
+    def go(c, share):
+        return distill.distill_lives(
+            run, _fake_lives(), master, states, states,
+            {"reward_unit": 10.0, "master_ceiling": 1.0,
+             "student_ceiling": c}, 0.9, drop_share=share,
+            log=lambda m: None)
+
+    with pytest.raises(SystemExit, match="record of 16 base steps"):
+        go(30.0, 0.0)                   # BIG kept: 30 x 16 = 480 per record
+    assert BIG in go(20.0, 0.0)["vocab"]                # 320 fits
+    assert BIG not in go(30.0, 0.01)["vocab"]           # never played
 
 
 # --------------------------------------------------------------------------
@@ -1244,6 +1636,17 @@ def test_a_mined_lineage_from_a_logged_master(logged, monkeypatch, tmp_path):
             ablation.distill_prefill(run, set_lives)
             ablation.distill_offline(run, s1, 0, spec, True)
             assert run.trainer.training_steps == 4
+            # (audit r1a) a FORCED prior, seeded: the first mined slot
+            # holds 0.3 of it (it is played, deterministically), the other
+            # mined slots 0 (never played: the second swap drops them),
+            # the kept tokens the rest
+            first = len(vocab) - len(mined)
+            forced = np.full(len(vocab), 0.7 / first)
+            forced[first:] = 0.0
+            forced[first] = 0.3
+            run.searcher.network_manager.initial_inference = (
+                lambda stack: (forced.copy(), 0.0))
+            np.random.seed(11)
             n, played = 0, set()
             for it in (1, 2):
                 for _ in range(2):
@@ -1265,6 +1668,9 @@ def test_a_mined_lineage_from_a_logged_master(logged, monkeypatch, tmp_path):
                                               run.env.was_real_done),
                                           "temperature": 0.5},
                                term, steps, n)
+            # a mined slot WAS played, through play_token's per-step inputs
+            assert first in played
+            assert not played & set(range(first + 1, len(vocab)))
             nets = {k: getattr(run.trainer, k) for k in ablation.NET_NAMES}
             blob = {"arm": s1, "seed": 0, "spec": dict(spec),
                     "training_steps": 4 + 2 * distill.TRAIN_STEPS,
@@ -1288,8 +1694,12 @@ def test_a_mined_lineage_from_a_logged_master(logged, monkeypatch, tmp_path):
     dropped2 = muzero.canon_vocab(h2["dropped"])
     mined2 = ablation.declared_mined(h2)
     kept2 = vocab2[:len(vocab2) - len(mined2)]
-    # M1's mined tokens are tokens: each kept or dropped by the 1% rule
+    # M1's mined tokens are tokens: each kept or dropped by the 1% rule --
+    # the one it played kept, the ones it never played dropped
     assert all((t in kept2) != (t in dropped2) for t in mined)
+    assert mined[0] in kept2
+    assert all(t in dropped2 for t in mined[1:])
+    assert h2["shares"][muzero.token_key(mined[0])] >= 0.05
     # every base step once, whatever was split or relabeled
     _, lives2 = distill.read_set(out2 / "set.pkl")
     assert sum(len(r[2]) for lf in lives2 for r in lf["traj"]) == \

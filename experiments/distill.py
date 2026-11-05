@@ -62,7 +62,7 @@ pre-fills its replay through Run.paper_targets (ablation.distill_prefill).
 
 Usage:
   python experiments/distill.py --master SNAPSHOT.pth --master-iterations N
-      --out DIR [--seed 0] [--base-steps 31250] [--from-log DIR]
+      --out DIR [--seed 0] [--base-steps 31250] [--from-log DIR] [--mine]
 """
 import argparse
 import contextlib
@@ -534,11 +534,12 @@ def mined_token(spelled):
                                     for s in muzero.token_steps(t)))
 
 
-def stack_latents_values(run, stacks, batch=MINE_BATCH):
+def stack_latents_values(run, stacks, batch=MINE_BATCH, latents=True):
     """The master's representation of each stack (flattened, float32) and
     its decoded value, through run.trainer's representation / prediction
     as they stand (the caller sets the acting states), in eval mode;
-    initial_inference's /255 input."""
+    initial_inference's /255 input. `latents` False: (None, values) -- no
+    latent kept."""
     rep, pred = run.trainer.representation, run.trainer.prediction
     if rep.training or pred.training:
         raise SystemExit("mining reads the master's nets in eval mode")
@@ -550,8 +551,9 @@ def stack_latents_values(run, stacks, batch=MINE_BATCH):
                              dtype=torch.float32, device=dev) / 255.0
             z = rep(x)
             vs.append(pred(z)[1].reshape(-1).double().cpu().numpy())
-            hs.append(z.reshape(len(z), -1).float().cpu().numpy())
-    return np.concatenate(hs), np.concatenate(vs)
+            if latents:
+                hs.append(z.reshape(len(z), -1).float().cpu().numpy())
+    return (np.concatenate(hs) if latents else None), np.concatenate(vs)
 
 
 def mine_tokens(run, lives, master_vocab, student_vocab, cap, unit, ceiling,
@@ -565,17 +567,24 @@ def mine_tokens(run, lives, master_vocab, student_vocab, cap, unit, ceiling,
     the run) - h(stack before) -- an occurrence ending at the final record
     of a life that ended the GAME is left out of c (MaxAndSkip stops before
     refreshing its buffer there, so that stack is stale; E3a's L1), its
-    count kept; the score; the selection (at most `cap`). Returns (the
-    selected candidates, each with "token", "score", "consistency",
-    "consistency_occurrences" and "path" (its spelling as master slots),
-    the record vocab.json keeps)."""
+    count kept; the score; the selection (at most `cap`; none computed at
+    a cap of 0). Returns (the selected candidates, each with "token",
+    "score", "consistency", "consistency_occurrences" and "path" (its
+    spelling as master slots), the record vocab.json keeps).
+
+    MEMORY: two passes over the log -- the values first (no latent kept),
+    then the latents of only the stacks the counted runs start and end on
+    (float32), the ones the consistency reads."""
     import collections
+    if cap <= 0:
+        # (audit r1b NIT) no slot freed: nothing to mine, nothing computed
+        return [], {"cap": 0, "candidates": 0, "skipped": "no slot freed"}
     master_vocab = muzero.canon_vocab(master_vocab)
     slot_of = {t: i for i, t in enumerate(master_vocab)}
     base = muzero.TOKEN_BASE_FRAMES
     infos, rets, vals = [], [], []
     counts = collections.Counter()
-    for life in lives:
+    for li, life in enumerate(lives):
         traj = life["traj"]
         m = len(traj) - 1
         counts["lives"] += 1
@@ -585,11 +594,12 @@ def mine_tokens(run, lives, master_vocab, student_vocab, cap, unit, ceiling,
         g, steps = decision_returns(traj, unit, ceiling, discount)
         full = [steps[i] == muzero.token_total_frames(master_vocab[s]) // base
                 for i, s in enumerate(slots)]
-        h, v = stack_latents_values(run, [r[0] for r in traj], batch)
+        _, v = stack_latents_values(run, [r[0] for r in traj[:-1]], batch,
+                                    latents=False)
         infos.append({"slots": slots, "full": full, "offset": len(rets),
-                      "latents": h, "game_end": bool(life.get("game_end"))})
+                      "life": li, "game_end": bool(life.get("game_end"))})
         rets.extend(g.tolist())
-        vals.extend(v[:m].tolist())
+        vals.extend(v.tolist())
         counts["decisions"] += m
         counts["truncated_lives"] += int(not life["terminated"])
     rets, vals = np.asarray(rets), np.asarray(vals)
@@ -597,6 +607,18 @@ def mine_tokens(run, lives, master_vocab, student_vocab, cap, unit, ceiling,
     high, threshold = high_half(adv)
     cands, dropped, stats = mine_candidates(infos, master_vocab, high,
                                             student_vocab)
+    # the second pass: the latents of the counted runs' start / end stacks
+    need = {}
+    for c in cands:
+        for li, i, n in c["occurrences"]:
+            need.setdefault(li, set()).update((i, i + n))
+    lat = {}
+    for li, idx in need.items():
+        idx = sorted(idx)
+        traj = lives[infos[li]["life"]]["traj"]
+        h, _ = stack_latents_values(run, [traj[i][0] for i in idx], batch)
+        lat.update({(li, i): h[r] for r, i in enumerate(idx)})
+    counts["latents_kept"] = len(lat)
     stale = 0
     for c in cands:
         deltas = []
@@ -605,7 +627,7 @@ def mine_tokens(run, lives, master_vocab, student_vocab, cap, unit, ceiling,
             if life["game_end"] and i + n == len(life["slots"]):
                 stale += 1
                 continue
-            deltas.append(life["latents"][i + n] - life["latents"][i])
+            deltas.append(lat[(li, i + n)] - lat[(li, i)])
         c["consistency"] = effect_consistency(deltas)
         c["consistency_occurrences"] = len(deltas)
         c["score"] = mined_score(c["count"], c["n"], c["consistency"])
@@ -654,7 +676,52 @@ def mined_entry(c, slot):
             "consistency_occurrences": int(c["consistency_occurrences"]),
             "score": float(c["score"]),
             "spellings": [{"spelling": [muzero.token_json(t) for t in k],
-                           "count": int(v)} for k, v in c["spellings"]]}
+                           "count": int(v)} for k, v in c["spellings"]],
+            # E3-A13: the master paths whose path products sum to P(m)
+            "target_spellings": [{"path": [int(s) for s in p],
+                                  "logged": int(n)}
+                                 for p, n in c.get("target_spellings", ())]}
+
+
+def target_spellings(lives, master_vocab, tokens):
+    """(E3-A13) Every spelling of each mined token's inputs that is a path of
+    master tokens: the master's own token with exactly those inputs (a
+    one-token spelling: a dropped (a, 32), or a dropped master mined token
+    re-mined -- its q counts directly), and every run of the master's log
+    (any start, inside one life, every decision played in full) whose
+    concatenated inputs are the token's. Returns, per token (in `tokens`'
+    order), [(path of master slots, times logged)] -- the one-token spelling
+    first, then the runs in first-occurrence order. Two spellings of the
+    same inputs are never slot-prefixes of one another (the longer would
+    add inputs), and the tokens' inputs are prefix-free (select_mined): the
+    paths from any one slot are disjoint."""
+    master_vocab = muzero.canon_vocab(master_vocab)
+    base = muzero.TOKEN_BASE_FRAMES
+    want = {muzero.token_inputs(t): j for j, t in enumerate(tokens)}
+    out = [{} for _ in tokens]
+    if not want:
+        return []
+    for s, t in enumerate(master_vocab):
+        j = want.get(muzero.token_inputs(t))
+        if j is not None:
+            out[j].setdefault((s,), 0)
+    max_steps = max(len(k) for k in want)
+    for life in lives:
+        traj = life["traj"]
+        for i in range(len(traj) - 1):
+            acc = ()
+            for e in range(i, len(traj) - 1):
+                tok = master_vocab[int(traj[e][1])]
+                if len(traj[e + 1][2]) != muzero.token_total_frames(tok) // base:
+                    break                               # not played in full
+                acc = acc + muzero.token_inputs(tok)
+                if len(acc) > max_steps:
+                    break
+                j = want.get(acc)
+                if j is not None:
+                    path = tuple(int(traj[x][1]) for x in range(i, e + 1))
+                    out[j][path] = out[j].get(path, 0) + 1
+    return [list(d.items()) for d in out]
 
 
 # -- 3. re-tokenization -----------------------------------------------------------
@@ -699,8 +766,8 @@ def retokenize(traj, inner, master_vocab, student_vocab, mined=None,
     raw per-base-step rewards concatenated (the learner sums them, each
     base step clipped). The interior stacks leave the set. `stats` (a dict)
     counts the relabels: "records" {slot: n}, "decisions" (master
-    decisions replaced) -- and "split", the dropped-token decisions
-    split."""
+    decisions replaced) -- and "split", the dropped-token decisions split,
+    "split_extra" the records their splits added."""
     student_vocab = muzero.canon_vocab(student_vocab)
     master_vocab = muzero.canon_vocab(master_vocab)
     index = {t: i for i, t in enumerate(student_vocab)}
@@ -733,6 +800,7 @@ def retokenize(traj, inner, master_vocab, student_vocab, mined=None,
         inputs = muzero.token_inputs(tok)
         if stats is not None:
             stats["split"] = stats.get("split", 0) + 1
+            stats["split_extra"] = stats.get("split_extra", 0) + len(raw) - 1
         s = stack
         out.append((s, index[(inputs[0], base)], incoming))
         for j in range(1, len(raw)):
@@ -754,16 +822,19 @@ def masked_targets(pols, master_vocab, student_vocab, mined=None,
     visits over every child, so the read-out sharpens the targets by
     1 / (1 - discarded); audit r1 A's note).
 
-    E3-A5 (the key rule), `mined` (None: the rule above, exactly): the
-    master slot of t1 for each token mined at this swap, in the order they
-    close the student vocabulary, and `weights[i][m]` = prod_{j>=2} pi(tj |
-    the master's latent after t1..tj-1) at record i (mined_path_weights).
-    At EVERY record each mined token m gets P(m) = q(t1) x weights[i][m],
-    moved from t1's slot (prefix-free keys keep the moved masses disjoint,
-    so they never exceed q(t1); a float residue below 0 is clamped); then
-    the dropped tokens' mass is discarded and the rest renormalized, as
-    above. A mined slot carries the master's own preference for the whole
-    sequence everywhere, never a forced 0."""
+    E3-A5 (the key rule) and E3-A13, `mined` (None: the rule above,
+    exactly): for each token mined at this swap, in the order they close
+    the student vocabulary, the master slot t1 each of its spellings starts
+    from (target_spellings; a bare int: one spelling), and `weights[i]` the
+    spellings' path products prod_{j>=2} pi(tj | the master's latent after
+    t1..tj-1) at record i, flat in that order (mined_path_weights; 1 for a
+    one-token spelling). At EVERY record each mined token m gets P(m) = the
+    SUM over its spellings of q(t1) x the spelling's product, each moved
+    from its own t1's slot -- the paths from one slot are disjoint (asserted:
+    their products sum to at most 1, and no slot goes below 0 beyond float
+    residue, which is clamped); then the dropped tokens' mass is discarded
+    and the rest renormalized, as above. A mined slot carries the master's
+    own preference for the whole sequence everywhere, never a forced 0."""
     student_vocab = muzero.canon_vocab(student_vocab)
     master = list(muzero.canon_vocab(master_vocab))
     n_new = 0 if mined is None else len(mined)
@@ -782,14 +853,30 @@ def masked_targets(pols, master_vocab, student_vocab, mined=None,
                 out.append(np.ones(len(idx)) / len(idx))
                 fallbacks += 1
         return out, fallbacks, gone
-    firsts = np.asarray(mined, dtype=np.int64)
+    groups = [[int(x)] if np.ndim(x) == 0 else [int(y) for y in x]
+              for x in mined]
+    if any(not g for g in groups):
+        raise ValueError("a mined token without a spelling")
+    firsts = np.asarray([s for g in groups for s in g], dtype=np.int64)
+    owner = np.repeat(np.arange(n_new), [len(g) for g in groups])
     for i, p in enumerate(pols):
         full = np.asarray(p, dtype=np.float64)
-        moved = full[firsts] * np.asarray(weights[i], dtype=np.float64)
+        w = np.asarray(weights[i], dtype=np.float64).reshape(-1)
+        if len(w) != len(firsts):
+            raise ValueError(f"{len(w)} path products for {len(firsts)} "
+                             f"spellings")
+        per_slot = np.zeros(len(full))
+        np.add.at(per_slot, firsts, w)
+        # the disjointness of the paths from one slot (E3-A13)
+        assert per_slot.max() <= 1.0 + 1e-6, (i, per_slot.max())
+        moved = full[firsts] * w
         rest = full.copy()
         np.subtract.at(rest, firsts, moved)
+        # a real overlap fails loudly; only float residue is clamped
+        assert rest.min() > -1e-9, (i, rest.min())
         rest = np.maximum(rest, 0.0)
-        q = np.concatenate([rest[idx], moved])
+        mass = np.bincount(owner, weights=moved, minlength=n_new)
+        q = np.concatenate([rest[idx], mass])
         s = q.sum()
         gone.append(float(full.sum() - s))
         if s > 0:
@@ -1032,6 +1119,194 @@ def master_checks(master, master_iterations):
     return blob, arm, mspec, offline
 
 
+# -- steps 2-4 on the master's lives --------------------------------------------------
+def distill_lives(run, lives, master_vocab, raw_states, acting_states, clip,
+                  discount, drop_share=DROP_SHARE, mine=False, log=print,
+                  t0=None):
+    """Steps 2-4 (module docstring) on the master's `lives` (record /
+    log_lives), the prep's core: the 1% rule; with `mine` (E3), mining on
+    the master's ACTING states (its deployed values and latents; `clip`'s
+    reward unit and master_ceiling, `discount` per base step: the master's)
+    and the appended tokens; the reward / value-prefix support check of the
+    student's ceiling for a record of the vocabulary's longest token (E3-A9;
+    whenever REWARD_GROWTH set a ceiling: a master's kept mined token counts
+    too); then, on the master's RAW states (the nets its search runs),
+    re-tokenization with relabeling (E3-A6), the master's search on every
+    record and the targets (E3-A5 / A13: every spelling's path product on
+    the re-tokenized records' stacks). `run` provides trainer.{representation,
+    dynamics, prediction, device}, set_train_mode and _birth_search (Run's).
+    Returns a dict: "vocab", "dropped", "shares", "counts", "chosen",
+    "mining", "n_kept", "out_lives", "records", "splits", "split_extra",
+    "net_extra", "fallbacks", "gone_mass", "rstats", "trule"."""
+    import ablation
+    t0 = time.time() if t0 is None else t0
+    master_vocab = muzero.canon_vocab(master_vocab)
+    shares, counts = token_shares(lives, len(master_vocab))
+    vocab, dropped = student_vocabulary(master_vocab, shares, drop_share)
+    log(f"student vocabulary: {len(vocab)} of {len(master_vocab)} "
+        f"tokens; dropped {list(dropped)}")
+    chosen, mining = [], None
+    if mine:
+        # E3-A3 / E3-A4: mined on the master's own play with its acting
+        # states, appended after the kept tokens
+        if "student_ceiling" not in clip:
+            raise SystemExit("--mine needs REWARD_GROWTH (raw per-base-step "
+                             "rewards, the master's clip)")
+        set_rep_pred(run, acting_states)
+        cap = min(muzero.TOKEN_MINED_PER_SWAP, len(dropped))
+        chosen, mining = mine_tokens(
+            run, lives, master_vocab, vocab, cap, clip["reward_unit"],
+            clip["master_ceiling"], discount)
+        vocab = vocab + tuple(c["token"] for c in chosen)
+        ablation.validate_student_vocab(
+            vocab, master_vocab, mined=tuple(c["token"] for c in chosen),
+            max_mined=muzero.TOKEN_MINED_PER_SWAP)
+        log(f"mined {len(chosen)} of {mining['candidates']} candidates (cap "
+            f"{cap}): "
+            + "; ".join(f"{muzero.token_key(c['token'])} (count "
+                        f"{c['count']}, k {c['n']}, c "
+                        f"{c['consistency']:.3f}, score {c['score']:.1f})"
+                        for c in chosen)
+            + f" [{time.time() - t0:.0f}s]")
+    if "student_ceiling" in clip:
+        # E3-A9 (audit r1b): always -- 1 base step for a duration-only
+        # vocabulary (the check the prep always ran), the longest token's
+        # once it holds a mined token (appended, or the master's kept)
+        steps = ablation.support_steps(vocab)
+        if not ablation.ceiling_fits_supports(clip["student_ceiling"], steps):
+            raise SystemExit(
+                f"the student's ceiling {clip['student_ceiling']!r} lies past "
+                f"the reward supports for a record of {steps} base steps (its "
+                f"longest token)")
+    set_rep_pred(run, raw_states)
+    n_kept = len(vocab) - len(chosen)
+    # E3-A6: the mined tokens' inputs -> their student slots
+    relabel = {muzero.token_inputs(c["token"]): n_kept + j
+               for j, c in enumerate(chosen)} or None
+    # E3-A13: every spelling of each mined token, its path's first slot
+    spellings = target_spellings(lives, master_vocab,
+                                 [c["token"] for c in chosen])
+    for c, sp in zip(chosen, spellings):
+        c["target_spellings"] = sp
+    paths = [p for sp in spellings for p, _n in sp]
+    groups = [[p[0] for p, _n in sp] for sp in spellings] or None
+    firsts = np.asarray([p[0] for p in paths], dtype=np.int64)
+    owner = np.repeat(np.arange(len(chosen)),
+                      [len(sp) for sp in spellings]).astype(np.int64)
+    nets = {k: getattr(run.trainer, k) for k in
+            ("representation", "dynamics", "prediction")}
+    rstats = {}
+    M = len(chosen)
+    trule = {"records": 0, "moved": np.zeros(M), "target": np.zeros(M),
+             "nonzero": np.zeros(M), "labelled": np.zeros(M),
+             "at_label": np.zeros(M), "moved_spelling": np.zeros(len(paths))}
+    out_lives, records, net_extra, fallbacks = [], 0, 0, 0
+    gone_mass = []
+    for life in lives:
+        recs = retokenize(life["traj"], life["inner"], master_vocab, vocab,
+                          mined=relabel, stats=rstats)
+        pols, vals = master_search(run, recs, life["terminated"])
+        weights = None
+        n_s = len(recs) - (1 if life["terminated"] else 0)
+        if paths:
+            # E3-A5 / A13: the master's prior along each spelling, on the
+            # nets its search ran (the raw states), at the RE-TOKENIZED
+            # records' stacks
+            weights = mined_path_weights(nets, [r[0] for r in recs], paths,
+                                         run.trainer.device)
+            for i in range(n_s):
+                moved = np.asarray(pols[i], dtype=np.float64)[firsts] \
+                    * weights[i]
+                trule["moved_spelling"] += moved
+                trule["moved"] += np.bincount(owner, weights=moved,
+                                              minlength=M)
+        pols, fb, gone = masked_targets(pols, master_vocab, vocab,
+                                        mined=groups, weights=weights)
+        if paths:
+            for i in range(n_s):
+                t = np.asarray(pols[i])[n_kept:]
+                trule["target"] += t
+                trule["nonzero"] += t > 0
+                s = int(recs[i][1]) - n_kept
+                if s >= 0:
+                    trule["labelled"][s] += 1
+                    trule["at_label"][s] += t[s]
+            trule["records"] += n_s
+        fallbacks += fb
+        # acted records only (a terminated tail's uniform is no search)
+        gone_mass += gone[:-1] if life["terminated"] else gone
+        out_lives.append({
+            "traj": [(r[0], r[1], tuple(r[2]), p, v)
+                     for r, p, v in zip(recs, pols, vals)],
+            "terminated": life["terminated"]})
+        records += len(recs)
+        net_extra += len(recs) - len(life["traj"])
+        life["inner"] = None          # free as we go
+    splits, split_extra = rstats.get("split", 0), rstats.get("split_extra", 0)
+    log(f"re-tokenized + master-searched {records} records "
+        f"({splits} dropped-token decisions split into {split_extra} "
+        f"extra records; {fallbacks} uniform fallbacks; mean visit "
+        f"mass discarded on dropped tokens "
+        f"{np.mean(gone_mass) if gone_mass else 0.0:.3f}"
+        + (f"; {rstats.get('decisions', 0)} decisions relabeled as "
+           f"{sum(rstats.get('records', {}).values())} mined records"
+           if mine else "")
+        + f") [{time.time() - t0:.0f}s]")
+    return {"vocab": vocab, "dropped": dropped, "shares": shares,
+            "counts": counts, "chosen": chosen, "mining": mining,
+            "n_kept": n_kept, "out_lives": out_lives, "records": records,
+            "splits": splits, "split_extra": split_extra,
+            "net_extra": net_extra, "fallbacks": fallbacks,
+            "gone_mass": gone_mass, "rstats": rstats, "trule": trule}
+
+
+def mined_header(got):
+    """(E3) The header keys of a mined prep (distill_lives' result `got`):
+    "mine"; "mined" (E3-A4: the appended tokens, in the order they close the
+    student vocabulary, their spellings, counts, scores, consistency and
+    E3-A13's target spellings); "mining"; "relabeled" and
+    "relabeled_decisions" (E3-A6); "net_extra_records" (the records the
+    re-tokenization added net of the relabels; split_extra_records counts
+    the splits' alone); "target_rule" (E3-A5 / A13, over the searched
+    records: per mined token the mean mass moved to it before
+    renormalizing, its mean target, the share of records where it is
+    nonzero, its mean target at its own relabeled records, and each
+    spelling's mean moved mass)."""
+    chosen, n_kept = got["chosen"], got["n_kept"]
+    trule, rstats = got["trule"], got["rstats"]
+    n = max(1, trule["records"])
+    keys = [muzero.token_key(c["token"]) for c in chosen]
+    moved_sp, idx = [], 0
+    for c in chosen:
+        sp = []
+        for p, logged in c["target_spellings"]:
+            sp.append({"path": [int(s) for s in p], "logged": int(logged),
+                       "moved_mean": round(float(
+                           trule["moved_spelling"][idx] / n), 6)})
+            idx += 1
+        moved_sp.append(sp)
+    return {
+        "mine": True,
+        "mined": [mined_entry(c, n_kept + j) for j, c in enumerate(chosen)],
+        "mining": got["mining"],
+        "relabeled": {keys[s - n_kept]: int(v) for s, v in sorted(
+            rstats.get("records", {}).items())},
+        "relabeled_decisions": int(rstats.get("decisions", 0)),
+        "net_extra_records": int(got["net_extra"]),
+        "target_rule": {
+            "records": int(trule["records"]),
+            "moved_mean": {k: round(float(v / n), 6) for k, v in
+                           zip(keys, trule["moved"])},
+            "target_mean": {k: round(float(v / n), 6) for k, v in
+                            zip(keys, trule["target"])},
+            "nonzero_share": {k: round(float(v / n), 6) for k, v in
+                              zip(keys, trule["nonzero"])},
+            "target_at_relabeled_mean": {
+                k: (round(float(a / c), 6) if c else None) for k, a, c
+                in zip(keys, trule["at_label"], trule["labelled"])},
+            "spellings": dict(zip(keys, moved_sp))}}
+
+
 # -- the prep ---------------------------------------------------------------------
 def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
          drop_share=DROP_SHARE, log=print, from_log=None, mine=False):
@@ -1145,113 +1420,14 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                 log(f"student discount: {g0} -> {g1} (rule {rule}); the "
                     f"largest discounted return {vmax:.1f} units (value "
                     f"support {muzero.VALUE_CEILING})")
-            shares, counts = token_shares(lives, len(master_vocab))
-            vocab, dropped = student_vocabulary(master_vocab, shares,
-                                                drop_share)
-            log(f"student vocabulary: {len(vocab)} of {len(master_vocab)} "
-                f"tokens; dropped {list(dropped)}")
-            chosen, mining = [], None
-            if mine:
-                # E3-A3 / E3-A4: mined on the master's own play with its
-                # acting states (its deployed values and latents), appended
-                # after the kept tokens
-                if "student_ceiling" not in clip:
-                    raise SystemExit("--mine needs REWARD_GROWTH (raw per-"
-                                     "base-step rewards, the master's clip)")
-                set_rep_pred(run, blob["acting_states"])
-                cap = min(muzero.TOKEN_MINED_PER_SWAP, len(dropped))
-                chosen, mining = mine_tokens(
-                    run, lives, master_vocab, vocab, cap,
-                    clip["reward_unit"], clip["master_ceiling"],
-                    float(muzero.DISCOUNT))
-                vocab = vocab + tuple(c["token"] for c in chosen)
-                ablation.validate_student_vocab(
-                    vocab, master_vocab,
-                    mined=tuple(c["token"] for c in chosen),
-                    max_mined=muzero.TOKEN_MINED_PER_SWAP)
-                steps = ablation.support_steps(vocab)
-                if not ablation.ceiling_fits_supports(
-                        clip["student_ceiling"], steps):
-                    # E3-A9: a record of the longest token's base steps
-                    raise SystemExit(
-                        f"the student's ceiling {clip['student_ceiling']!r} "
-                        f"lies past the reward supports for a record of "
-                        f"{steps} base steps (its longest mined token)")
-                log(f"mined {len(chosen)} of {mining['candidates']} "
-                    f"candidates (cap {cap}): "
-                    + "; ".join(f"{muzero.token_key(c['token'])} (count "
-                                f"{c['count']}, k {c['n']}, c "
-                                f"{c['consistency']:.3f}, score "
-                                f"{c['score']:.1f})" for c in chosen)
-                    + f" [{time.time() - t0:.0f}s]")
-            set_rep_pred(run, raw_states)
-            n_kept = len(vocab) - len(chosen)
-            # E3-A6: the mined tokens' inputs -> their student slots
-            relabel = {muzero.token_inputs(c["token"]): n_kept + j
-                       for j, c in enumerate(chosen)} or None
-            paths = [c["path"] for c in chosen]
-            firsts = [p[0] for p in paths] if paths else None
-            nets = {k: getattr(run.trainer, k) for k in
-                    ("representation", "dynamics", "prediction")}
-            rstats = {}
-            M = len(chosen)
-            trule = {"records": 0, "moved": np.zeros(M),
-                     "target": np.zeros(M), "nonzero": np.zeros(M),
-                     "labelled": np.zeros(M), "at_label": np.zeros(M)}
-            out_lives, records, extra, fallbacks = [], 0, 0, 0
-            gone_mass = []
-            for life in lives:
-                # (rstats["split"]: the dropped-token decisions split -- all
-                # of them without mined tokens; a relabeled one is not)
-                recs = retokenize(life["traj"], life["inner"], master_vocab,
-                                  vocab, mined=relabel, stats=rstats)
-                pols, vals = master_search(run, recs, life["terminated"])
-                weights = None
-                if paths:
-                    # E3-A5: the master's prior along each mined path, on
-                    # the nets its search ran (the raw states)
-                    weights = mined_path_weights(
-                        nets, [r[0] for r in recs], paths,
-                        run.trainer.device)
-                    n_s = len(recs) - (1 if life["terminated"] else 0)
-                    for i in range(n_s):
-                        trule["moved"] += (np.asarray(pols[i])[firsts]
-                                           * weights[i])
-                pols, fb, gone = masked_targets(pols, master_vocab, vocab,
-                                                mined=firsts, weights=weights)
-                if paths:
-                    for i in range(n_s):
-                        t = np.asarray(pols[i])[n_kept:]
-                        trule["target"] += t
-                        trule["nonzero"] += t > 0
-                        s = int(recs[i][1]) - n_kept
-                        if s >= 0:
-                            trule["labelled"][s] += 1
-                            trule["at_label"][s] += t[s]
-                    trule["records"] += n_s
-                fallbacks += fb
-                # acted records only (a terminated tail's uniform is no
-                # search)
-                gone_mass += gone[:-1] if life["terminated"] else gone
-                out_lives.append({
-                    "traj": [(r[0], r[1], tuple(r[2]), p, v)
-                             for r, p, v in zip(recs, pols, vals)],
-                    "terminated": life["terminated"]})
-                records += len(recs)
-                extra += len(recs) - len(life["traj"])
-                life["inner"] = None          # free as we go
-            splits = rstats.get("split", 0)
-            log(f"re-tokenized + master-searched {records} records "
-                f"({splits} dropped-token decisions split into {extra} "
-                f"extra records; {fallbacks} uniform fallbacks; mean visit "
-                f"mass discarded on dropped tokens "
-                f"{np.mean(gone_mass) if gone_mass else 0.0:.3f}) "
-                + (f"; {rstats.get('decisions', 0)} decisions relabeled as "
-                   f"{sum(rstats.get('records', {}).values())} mined records "
-                   if mine else "")
-                + f"[{time.time() - t0:.0f}s]")
+            got = distill_lives(run, lives, master_vocab, raw_states,
+                                blob["acting_states"], clip,
+                                float(muzero.DISCOUNT), drop_share=drop_share,
+                                mine=mine, log=log, t0=t0)
         finally:
             run.env.close()
+    vocab, dropped, shares, counts = (got["vocab"], got["dropped"],
+                                      got["shares"], got["counts"])
     header = {
         "format": FORMAT, "env": ENV, "seed": seed,
         "master_snapshot": str(master), "master_arm": arm,
@@ -1268,13 +1444,15 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                    for t, s in zip(master_vocab, shares)},
         "decisions": int(counts.sum()),
         "games": len(games), "game_returns": [float(g) for g in games],
-        "base_steps": int(total), "records": int(records),
-        "split_decisions": int(splits), "split_extra_records": int(extra),
-        "uniform_fallbacks": int(fallbacks),
-        "discarded_visit_mass_mean": (round(float(np.mean(gone_mass)), 4)
-                                      if gone_mass else 0.0),
+        "base_steps": int(total), "records": int(got["records"]),
+        "split_decisions": int(got["splits"]),
+        "split_extra_records": int(got["split_extra"]),
+        "uniform_fallbacks": int(got["fallbacks"]),
+        "discarded_visit_mass_mean": (
+            round(float(np.mean(got["gone_mass"])), 4)
+            if got["gone_mass"] else 0.0),
         "acting_temperature": float(temp), "long_token_bias": float(bias),
-        "lives": len(out_lives),
+        "lives": len(got["out_lives"]),
         **clip,
         **disc,
         **source,
@@ -1285,35 +1463,8 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
         # its student's vocabulary checks read
         header["master_mined"] = [muzero.token_json(t) for t in master_mined]
     if mine:
-        n = max(1, trule["records"])
-        keys = [muzero.token_key(c["token"]) for c in chosen]
-        header.update({
-            "mine": True,
-            # E3-A4: the appended tokens, their spellings, counts, scores,
-            # consistency (the student's declared mined tail, in order)
-            "mined": [mined_entry(c, n_kept + j)
-                      for j, c in enumerate(chosen)],
-            "mining": mining,
-            # E3-A6: relabeled records per mined token, decisions replaced
-            "relabeled": {keys[s - n_kept]: int(v) for s, v in sorted(
-                rstats.get("records", {}).items())},
-            "relabeled_decisions": int(rstats.get("decisions", 0)),
-            # E3-A5: per mined token over the searched records, the mean
-            # mass moved to it (before renormalizing), its mean target, the
-            # share of records where it is nonzero, its mean target at its
-            # own relabeled records
-            "target_rule": {
-                "records": int(trule["records"]),
-                "moved_mean": {k: round(float(v / n), 6) for k, v in
-                               zip(keys, trule["moved"])},
-                "target_mean": {k: round(float(v / n), 6) for k, v in
-                                zip(keys, trule["target"])},
-                "nonzero_share": {k: round(float(v / n), 6) for k, v in
-                                  zip(keys, trule["nonzero"])},
-                "target_at_relabeled_mean": {
-                    k: (round(float(a / c), 6) if c else None) for k, a, c
-                    in zip(keys, trule["at_label"], trule["labelled"])}}})
-    write_set(out / "set.pkl", header, out_lives)
+        header.update(mined_header(got))
+    write_set(out / "set.pkl", header, got["out_lives"])
     doc = {k: v for k, v in header.items()}
     doc["set_sha256"] = ablation.file_sha256(out / "set.pkl")
     tmp = out / f"vocab.json.{os.getpid()}.tmp"

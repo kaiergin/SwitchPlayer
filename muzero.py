@@ -428,6 +428,9 @@ TOKEN_BASE_FRAMES = 4
 # mined tokens one swap appends
 TOKEN_MINED_MAX_FRAMES = 64
 TOKEN_MINED_PER_SWAP = 8
+# E3-A7 / E3-A13: a mined token's long-token bias weight counts at most this
+# many frames (the constant 32, the duration tokens' longest as registered)
+TOKEN_BIAS_CAP_FRAMES = 32
 # Early long-token bias for prior acting under TOKEN_VOCAB: the sampling
 # weights are multiplied by (frames / TOKEN_BASE_FRAMES) ** b, b falling
 # linearly from TOKEN_LONG_BIAS at step 0 to 0 at TOKEN_LONG_BIAS_END of the
@@ -762,7 +765,22 @@ def prior_acting_temperature(training_steps):
 
 
 def _token_seq(x):
-    return isinstance(x, (list, tuple, np.ndarray))
+    """A sequence a token or a step can be: a list, a tuple or an array of
+    at least one dimension (a 0-d array is a number)."""
+    if isinstance(x, np.ndarray):
+        return x.ndim >= 1
+    return isinstance(x, (list, tuple))
+
+
+def _token_int(x):
+    """An action or a frame count as an int: integral numbers only (8.0
+    passes, 8.9, a bool or a string do not); ValueError otherwise."""
+    if isinstance(x, (bool, np.bool_, str, bytes)):
+        raise ValueError(f"not an integral number: {x!r}")
+    v = int(x)
+    if v != x:
+        raise ValueError(f"not an integral number: {x!r}")
+    return v
 
 
 def token_is_mined(tok):
@@ -803,13 +821,13 @@ def canon_token(tok):
         raise TypeError(f"not a token: {tok!r}")
     if not _token_seq(tok[0]):
         a, f = tok
-        return (int(a), int(f))
+        return (_token_int(a), _token_int(f))
     steps = []
     for s in tok:
         if not _token_seq(s) or len(s) == 0 or _token_seq(s[0]):
             raise TypeError(f"not a token step: {s!r}")
         a, f = s
-        steps.append((int(a), int(f)))
+        steps.append((_token_int(a), _token_int(f)))
     return steps[0] if len(steps) == 1 else tuple(steps)
 
 

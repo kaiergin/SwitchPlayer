@@ -340,11 +340,18 @@ class Census:
 
 def check_snapshot(vocab, env):
     """The census needs a token snapshot on Ms. Pac-Man whose tokens are
-    grid tokens."""
+    grid tokens. E3: a vocabulary holding MINED tokens (sequences of steps)
+    is refused by name -- this probe and the E0 / E1 / E3a probes built on
+    it read (action, frames) duration tokens only."""
     if env != ENV_ID:
         raise SystemExit(f"PROBE_ENV must be {ENV_ID}, got {env}")
     if vocab is None:
         raise SystemExit("the census needs a TOKEN_VOCAB snapshot")
+    mined = [t for t in vocab if muzero.token_is_mined(t)]
+    if mined:
+        raise SystemExit(f"the snapshot's vocabulary holds mined tokens (E3) "
+                         f"{mined}: this probe reads (action, frames) "
+                         f"duration tokens only")
     bad = [t for t in vocab if tuple(t) not in GRID]
     if bad:
         raise SystemExit(f"tokens outside the 36-token grid: {bad}")

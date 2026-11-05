@@ -1314,6 +1314,28 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
       where m is the relabeled label -- pushing mined slots toward the
       self-fulfilling 0. And E3-A7's cap is the constant 32 frames, as
       written.
+  FIXES r1 (a build agent; nine suites pass: test_e3 77, test_tokens 72,
+  test_distill 58, test_supervise_testb 261, test_testb 67, test_pbn 30,
+  test_e3a 55, test_gen0 37, test_rgrow 72): E3-A13 built
+  (target_spellings: the master's own token with exactly the mined inputs,
+  listed first, played or not, contributing its whole q; and every logged
+  run of master decisions with those inputs, any start, one life, all
+  full; each spelling's mass moved from its own first slot; the products
+  from any one slot asserted <= 1); the overlap assert before the clamp;
+  the support check whenever a ceiling is set; latents kept only for the
+  counted runs' end stacks (two passes, float32); the prep's steps in
+  distill_lives(), pinned on fakes with acting != raw states (four
+  mutations each failing); the k = 1 relabel on a valid vocabulary;
+  TOKEN_BIAS_CAP_FRAMES 32; strict token numbers; load_student_vocab
+  deleted; the slow lineage test forces a mined slot to be played (and the
+  never-played ones are dropped at the second swap); probe_action_census
+  and probe_qspread refuse a mined vocabulary by name.
+  BUILT, PART 2a (feb257fd): arms M1 / M2 (T1 / T2 plus _mine; student_arm
+  refuses a non-mined prep for them); the supervisor's lineage "m"
+  (generation 1's master T0 read from Test B2's frozen tree as the bound
+  pseudo-variant t0, first = 1, absolute paths only for it; --mine; the
+  reward_max bound from the run's longest token, 16 base steps at most;
+  the MINED line; quick() pins); SUITES 28 (tests/test_e3.py).
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's

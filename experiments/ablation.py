@@ -2348,17 +2348,15 @@ def read_own_play(folder, last_iteration):
 
 def token_bias_weights(b):
     """TOKEN_LONG_BIAS sampling weights (frames / TOKEN_BASE_FRAMES) ** b per
-    TOKEN_VOCAB slot. E3-A7: a MINED token's frames are capped at the
-    vocabulary's longest DURATION token's (32 frames on the token arms), so
-    length alone does not advantage it; a duration token's weight is
-    unchanged."""
+    TOKEN_VOCAB slot. E3-A7 (E3-A13: as written): a MINED token's frames
+    are capped at the constant muzero.TOKEN_BIAS_CAP_FRAMES (32), so length
+    alone does not advantage it; a duration token's weight is unchanged."""
     vocab = muzero.TOKEN_VOCAB
-    cap = max((muzero.token_total_frames(t) for t in vocab
-               if not muzero.token_is_mined(t)), default=None)
+    cap = muzero.TOKEN_BIAS_CAP_FRAMES
 
     def frames(t):
         f = muzero.token_total_frames(t)
-        if muzero.token_is_mined(t) and cap is not None:
+        if muzero.token_is_mined(t):
             return min(f, cap)
         return f
 
@@ -2661,13 +2659,6 @@ def load_student_doc(path, master_vocab):
             doc["vocab"], master_vocab, mined=mined,
             max_mined=muzero.TOKEN_MINED_PER_SWAP)
     return vocab, hashlib.sha256(data).hexdigest(), doc
-
-
-def load_student_vocab(path, master_vocab):
-    """(vocab, sha256 of the file, its "set_sha256" or None) -- one read
-    (load_student_doc)."""
-    vocab, sha, doc = load_student_doc(path, master_vocab)
-    return vocab, sha, doc.get("set_sha256")
 
 
 def student_ceiling(doc, path, steps=1):
