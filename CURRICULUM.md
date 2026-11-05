@@ -1288,6 +1288,32 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
       tokens agreeing on every base step they share, the played slot
       excluded; at most 8 mined per swap is enforced on the student, not
       on a master (its mined tokens may span swaps).
+  AUDIT r1 of part 1 (two fresh-eyes auditors on 743c925a, 11-05): r1a
+  (the core) nothing above LOW -- every duration-token arm bit for bit
+  (play, discounts, bias weights, gate, vocab checks, resume equality, row
+  keys); mined tokens play, discount and canonicalize correctly; LOWs: the
+  E3-A7 cap took the student vocabulary's longest duration token, not the
+  spec's 32 frames; probes outside E3's reads unpack (a, f); the slow
+  lineage test never asserted a mined token was played; NITs. r1b (the
+  distill side) nothing HIGH -- the port matches probe_e3a, the target
+  rule moves mass before discarding dropped tokens, relabeling aligns
+  records and rewards, the second swap splits dropped mined tokens by
+  their own actions, a prep without --mine is bit for bit; MEDIUM: E3-A5
+  credited a mined token only along its most-played spelling (below,
+  E3-A13); MEDIUM: the prep's wiring untested (acting vs raw states, the
+  master's ceiling, the discount, the tail's order, weights on the
+  relabeled records); LOWs.
+  (E3-A13) E3-A5 SUMS OVER EVERY SPELLING: P(m) is the sum of the path
+      products over every logged spelling of m's inputs that is a path of
+      master tokens -- a one-token spelling (the master's own token with
+      the same inputs, e.g. a dropped (a, 32) or a dropped master mined
+      token re-mined) contributing its q directly. Spellings of the same
+      inputs are never slot-prefixes of one another, so the masses stay
+      disjoint and below q. Otherwise the master's mass on another
+      spelling of m's exact inputs never reached m -- small precisely
+      where m is the relabeled label -- pushing mined slots toward the
+      self-fulfilling 0. And E3-A7's cap is the constant 32 frames, as
+      written.
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
