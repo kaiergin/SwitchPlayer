@@ -1437,6 +1437,16 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   one process pass). Stopped the m1 / m2 supervisors by exact pid (no
   child was running); the hand-off left waiting. Diagnosis: the
   preflight's own order in one process, run in the run tree.
+  DIAGNOSIS: the preflight's own order (the 17 suites through
+  test_bnrecal) in ONE pytest process in the run tree PASSES twice -- from
+  this shell (12:58-13:13) and launched through WMI exactly as a
+  supervisor is (hidden cmd.exe, its environment, no -B; 13:14-13:26) --
+  and the test never failed in any earlier run's preflight: an
+  INTERMITTENT failure, its traceback lost (the preflight keeps only the
+  FAILED line). PAUSE (Kai, 13:26): two hours; nothing of E3's running
+  but the idle hand-off. Plan after it: rerun the launcher (the
+  supervisors preflight again; a repeat failure is retried every 10 min
+  and then investigated).
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
