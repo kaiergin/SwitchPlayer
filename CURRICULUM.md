@@ -789,6 +789,60 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- E3a: duplicate spellings are COMMON in strong play and latents do not group them (T2, seed 0), 2026-11-05
+
+(Pre-registration: E3a in "Queued experiment (pre-registered) -- E3",
+below, with amendments A1-A14 and its audit loop, closed at r3.)
+RUN: 07:36-07:56 EST 11-05 (1,164 s), CPU, under the lock, on T2's
+iteration-42 snapshot; tests/test_e3a.py's 55 tests passed first. Output:
+benchmarks/probes/probe_e3a_sequences-mspacman-two-t2-s0-2026-10-29.jsonl
+(summary), -meta.jsonl and -decisions.jsonl.
+VALIDITY: main_line_ok -- all 30 games MATCH the exact eval (mean 1699.0);
+the replay and reached-stack checks held at all 4,454 candidate plays; no
+branch lost a life inside a candidate's inputs.
+INPUTS: T2's log 126 lives, 6,548 decisions; 32 candidates (keyed by raw
+inputs, A13); tau_L 0.030-0.037 by length. Eligible runs on the main
+line 3,798 / 3,774 / 3,735 (2 / 3 / 4 decisions), of which candidate plays
+1,796 / 1,719 / 939.
+READ (1) the DUPLICATE-SPELLING RATE (A11): 65.3% of the 3,815 candidate
+  plays with another same-length candidate had one landing on identical
+  frames (all 4,454 plays: 55.9%). By length: 64 frames 79% (12
+  candidates), 48 52% (8), 36 38% (3), 20 9% (3); the single-candidate
+  lengths 0 by construction. 14.1% of same-length candidate pairs were
+  equivalent; 5.35 outcome classes per (t, length) against 8.57
+  candidates.
+READ (2) PREDICTED latents: precision 0.177, recall 0.269 (all one class:
+  0.141); the plain pair rule 0.207 / 0.176; tau x 0.5 0.190 / 0.065, x 2
+  0.159 / 0.671. Median distance: equivalent pairs 0.071, non-equivalent
+  0.094. Above the trivial rule, far below the 0.7 bar: FAILS.
+READ (3) REAL-OUTCOME latents (descriptive): precision 0.381 at recall 1.0
+  (by construction); at tau x 0.5 0.596. Equivalent pairs sit at distance
+  0 exactly, non-equivalent at a median 0.093, but many below tau_L.
+VERDICT (A8): KAI_CALL -- duplicates are common (65% >= 10%) and grouping
+  by predicted latents fails.
+BEYOND THE LETTER:
+  - Kai's assumption ("raw token sequences from high level gameplay will
+    have little duplicate spellings") does not hold on T2: even after
+    merging identical inputs (A13), most long candidates have a
+    same-outcome sibling in the state where they are played. The
+    duplicates grow with length (corridor travel: several directions
+    have the same effect between junctions) -- E0's finding (3.28 outcome
+    classes among 18 tokens) at sequence scale.
+  - The equivalence is STATE-dependent: two spellings are one move in a
+    corridor and two at a junction. A global merge in the vocabulary
+    would be wrong at junctions; the redundancy is a search problem (one
+    expanded child per outcome class, E2), which needs a per-state
+    equivalence model -- and the agent's own model cannot yet supply one
+    (read (2); E1 likewise).
+  - Even real-outcome latents separate outcomes only partly at tau_L
+    (precision 0.38), so "identical latents" as a criterion needs a much
+    tighter threshold than the model's own prediction error.
+  Kai's call among: E3 mining WITHOUT grouping (tokens are distinct input
+  sequences; their state-dependent redundancy measured in E3 -- search
+  visits split across equivalent children, slot use); variable-length
+  "until the next decision point" tokens (absorbing corridor travel);
+  back to E1 with diverse own play for an equivalence model first.
+
 ### RESULT -- Test B2W: Test B2's lineage with BBF's AdamW -- STOPPED in W1 by Kai, AdamW dropped (seed 0), 2026-11-05
 
 (Pre-registration: "Next experiment (pre-registered) -- Test B2W", below,
