@@ -1175,6 +1175,88 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   detail (amendments) before the build starts.
   COST: the build and its audit loop during or after E3a, then about 1.3
   days of training.
+  E3 AMENDMENTS (the design, 11-05, after E3a and Kai's decision to mine
+  WITHOUT grouping; the token map of the code is in the build notes):
+  (E3-A1) THE BASE: Test B2's recipe (EfficientZero's SGD; Test B2W
+      dropped AdamW). THE FIRST GENERATION IS TEST B2'S T0 ITSELF: its
+      recipe has no mining, so E3's generation 0 would be a rerun of it.
+      E3 starts at the first swap from T0's final snapshot (iteration 47)
+      and own-play log in the frozen tree Y:\SwitchPlayer-testb2-run
+      (read-only; T0 passes the master gate: its last two rows average
+      904). E3's M1 and M2 are T1's and T2's recipes plus mining at both
+      swaps; the control is T1-T2 themselves, and the two lineages share
+      generation 0 exactly. Saves ~9 GPU hours.
+  (E3-A2) TOKENS: a duration token stays (action, frames), bit for bit; a
+      MINED token is a tuple of steps ((a1, f1), (a2, f2), ...), at most
+      64 frames (16 base steps), canonical as nested tuples (JSON lists
+      converted on read; a one-step sequence collapses to (a, f)). It is
+      one slot, one dynamics transition (the slot's own learned
+      embedding row), one search edge; its reward is the sum over its
+      base steps, its edge discount gamma_frame^(total frames), its
+      frame-time n-step targets by its total frames. play_token plays
+      each base step with that step's action. Two tokens with the same
+      per-base-step inputs are one token (A13).
+  (E3-A3) MINING, in the prep, from the master's own-play log: E3a's
+      candidates (runs of 2-4 decisions inside one life, the first in the
+      high-advantage half, full tokens, length <= 64, keyed by raw inputs,
+      the most-played spelling standing for each key), the advantage from
+      the master's own value on each decision's stack (deployed acting
+      states). Dropped: a key equal in inputs to a token of the student's
+      vocabulary; a key whose inputs are a PREFIX of a higher-scored
+      selected key's, or extend one (prefix-free, so mined paths are
+      disjoint, E3-A5). SCORE = count x (decisions saved per use, k - 1)
+      x effect consistency c, c = 1 - the mean cosine distance of each
+      occurrence's latent change (the master's representation of the
+      stack after the run minus before, deployed acting states) from the
+      candidate's mean change. NO GROUPING (Kai 11-05).
+  (E3-A4) THE VOCABULARY: the 1% rule as before; then the top-scored
+      candidates are APPENDED after the kept tokens, at most 8 and at most
+      the slots the rule freed (the slot count never grows past the
+      master's). vocab.json records the mined tokens, their spellings,
+      counts, scores and consistency.
+  (E3-A5) THE TARGETS (the key rule): at EVERY distillation record -- not
+      only where a mined token was played -- each mined token m = (t1,
+      ..., tk) gets the mass P(m) = q(t1) x prod_{j>=2} pi(tj | the
+      master's latent after t1..tj-1), where q is the master's search
+      target at the record and pi the master's prior on its own
+      dynamics-unrolled latents; P(m) is moved from t1's slot (prefix-free
+      keys keep the moved masses disjoint, so they never exceed q(t1));
+      then the dropped tokens' mass is discarded and the rest
+      renormalized, as now. So a mined slot carries the master's own
+      preference for the whole sequence everywhere, never a forced 0 (a
+      0 elsewhere would train it down and the 1% rule would drop it at the
+      next swap).
+  (E3-A6) RELABELING: when re-tokenizing the master's log into the
+      student's vocabulary, at each decision boundary the longest mined
+      token whose inputs equal the next k decisions' concatenated inputs
+      (all played in full, inside one life) replaces them with ONE record
+      (the start stack, the mined slot, the summed raw rewards); greedy,
+      left to right. Its target is E3-A5's at that record. The interior
+      stacks leave the set. Relabeled counts are recorded.
+  (E3-A7) THE LONG-TOKEN BIAS (TOKEN_LONG_BIAS 0.5, inherited from TK): a
+      mined token's bias weight is capped at the longest duration token's
+      (32 frames), so length alone does not advantage it.
+  (E3-A8) THE SECOND SWAP: the master (M1) holds mined tokens; mining,
+      the 1% rule, relabeling and E3-A5 treat its mined tokens as tokens
+      (a kept mined token stays; a dropped one is replayed as its raw
+      base steps, each with its own action); new candidates are mined
+      from M1's own play and appended likewise. Every vocabulary check
+      (validate_student_vocab, student_arm, master_spec) accepts a mined
+      tail declared in vocab.json.
+  (E3-A9) SUPPORTS AND ALERTS: the reward and value-prefix support check
+      (ceiling_fits_supports) and the supervisor's MAX_TOKEN_STEPS bound
+      use the vocabulary's longest token (16 base steps), not 32 frames.
+  (E3-A10) READS, as above: (1) PRIMARY M2's [90k, end] against T2's
+      (1629.5, n 4), band rule; (2) per mined token: its play share and
+      search share per generation, its effect consistency, whether it
+      survives the next swap's 1% rule; the REDUNDANCY E3a predicts: the
+      search visits split across same-outcome children (descriptive:
+      the share of each record's search mass on mined tokens whose inputs
+      overlap the played token's); (3) frames per decision; (4) Test B2's
+      reads per generation against T1-T2.
+  (E3-A11) DECISION AFTER: (1) BETTER -> mining joins the swap; NO
+      DIFFERENT -> Kai's call (with (3): longer decisions at the same
+      score are a real-time gain); WORSE -> diagnose from (2).
 
 ### Next experiment (pre-registered) -- Test B2W: Test B2's lineage with BBF's AdamW in place of EfficientZero's SGD (Kai, 2026-11-04)
 
