@@ -808,9 +808,9 @@ DEPLOYED / trainer-BN exact eval (T = Test B2's control at the same row):
      (n 10): -53.6, band +-189.5 -> no different (read (3)'s W0 against
      T0, descriptive). Far more volatile than T0 (adjacent swings up to
      +-926; T0's largest drop -67).
-  W1 row 0 520 (T1 892), rows 5-30: 846 / 396 / 508 / 277 / 245 / 245
-     (T1 730 / 656 / 850 / 901 / 1045 / 1849): by row 20 at or below a
-     random policy (307), where it stayed.
+  W1 row 0 520 (T1 892), rows 5-35: 846 / 396 / 508 / 277 / 245 / 245 /
+     311 (T1 730 / 656 / 850 / 901 / 1045 / 1849 / 1123): by row 20 at or
+     below a random policy (307), where it stayed (trainer-BN 290 at 35).
   W1's TRAINER-BN nets were degenerate from the offline phase on: exactly
      333.3 at row 0, row 5 and three offline points, exactly 240 from row
      10 -- a fixed policy whose score did not move as the weights did.
