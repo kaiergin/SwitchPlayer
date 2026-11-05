@@ -31,12 +31,22 @@ its trace and its windows: off the schedule, malformed, across a resume,
 through Rows.emit with a rewritten row), the reset checks as r0's, and the
 smokes counted as trainers.
 
+E3 (Kai, 2026-11-05; the last section): the lineage "m" (m1, m2; generation
+0 Test B2's T0, external, in its frozen tree): its names, paths and arms,
+the external master's wait / gate / snapshot / own-play log / stop in that
+tree, the prep's --mine and absolute --from-log, set_intact's "mine", the
+reward_max bound at the mined vocabulary's longest token (m only), the
+MINED line's nested tokens, and the quick probe passing with each mining
+pin biting.
+
 No test reads LIVE state (the distillation step's audit r5 HIGH): the `sup`
 fixture points REPO (every run folder, probe jsonl, prep and snapshot of
-the five runs) into tmp, the manifest away and the process table at an
-empty stand-in, and traps an unstubbed sleep; tests that need a lineage
-build it in tmp (_finish). Only the constants tests read the modules as
-deployed (`real_sup`, `g2sup`), and only their names."""
+the five runs) and E3's external tree into tmp, the manifest away and the
+process table at an empty stand-in, and traps an unstubbed sleep; tests
+that need a lineage build it in tmp (_finish). Only the constants tests read
+the modules as deployed (`real_sup`, `g2sup`), and only their names -- but
+for E3's two reads of T0's FROZEN run in Test B2's tree (read only; skipped
+where that tree is absent)."""
 import hashlib
 import inspect
 import json
@@ -183,6 +193,9 @@ def sup(real_sup, monkeypatch, tmp_path):
     repo.mkdir()
     monkeypatch.setattr(real_sup, "REPO", str(repo))
     monkeypatch.setattr(real_sup, "MANIFEST", str(tmp_path / "no-m.json"))
+    # E3: the external T0's frozen tree, into tmp too
+    monkeypatch.setitem(real_sup.LINEAGES["m"]["external"], "tree",
+                        str(tmp_path / "external"))
     monkeypatch.setattr(real_sup, "_procs", lambda: iter(()))
     monkeypatch.setattr(real_sup, "commit_free_gb", lambda: None)
 
@@ -510,19 +523,24 @@ def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g2sup):
         assert (ROOT / rel).exists(), rel
     assert len(set(sup.AUDITED)) == len(sup.AUDITED)
     assert set(sup.SUITES) <= set(sup.AUDITED)
-    assert len(set(sup.SUITES)) == len(sup.SUITES) == 27
+    assert len(set(sup.SUITES)) == len(sup.SUITES) == 28
     # every suite supervise_gen2.py ran, after this supervisor's, Test B's,
-    # Test C's, Test C2's and Test B2W's (first: -x stops on them before the
-    # slow suites)
-    assert sup.SUITES[:5] == ["tests/test_supervise_testb.py",
+    # Test C's, Test C2's, Test B2W's and E3's (first: -x stops on them
+    # before the slow suites)
+    assert sup.SUITES[:6] == ["tests/test_supervise_testb.py",
                               "tests/test_testb.py", "tests/test_testc.py",
-                              "tests/test_testc2.py", "tests/test_testb2w.py"]
-    assert sup.SUITES[5:] == g2sup.SUITES
+                              "tests/test_testc2.py", "tests/test_testb2w.py",
+                              "tests/test_e3.py"]
+    assert sup.SUITES[6:] == g2sup.SUITES
     assert set(g2sup.AUDITED) <= set(sup.AUDITED)
     assert set(sup.AUDITED) - set(g2sup.AUDITED) == {
         "tests/test_supervise_testb.py", "tests/test_testb.py",
         "tests/test_testc.py", "tests/test_testc2.py",
-        "tests/test_testb2w.py",
+        "tests/test_testb2w.py", "tests/test_e3.py",
+        # E3's suite reads E3a's probe (and the probes it imports)
+        "benchmarks/probes/probe_e3a_sequences.py",
+        "benchmarks/probes/probe_action_census.py",
+        "benchmarks/probes/probe_e1_equivalence.py",
         "benchmarks/supervisors/supervise_testb.py"}
     assert [r for r in sup.AUDITED if not r.endswith(".py")] == [
         "pytest.ini", "benchmarks/probes/step0_prefix_bn/states.npz"]
@@ -633,12 +651,16 @@ def test_supervisor_refuses_bad_arguments(sup, monkeypatch, capsys):
                  ["a01", "0"], ["a0", "0", "1"],
                  # Test B2W's: three generations, seed 0
                  ["w3", "0"], ["w", "0"], ["w0", "1"], ["W0", "0"],
-                 ["w01", "0"], ["w1", "0", "1"]):
+                 ["w01", "0"], ["w1", "0", "1"],
+                 # E3's: m1 and m2 only (its generation 0 is Test B2's T0,
+                 # never run here), seed 0
+                 ["m0", "0"], ["m3", "0"], ["m", "0"], ["m1", "1"],
+                 ["M1", "0"], ["m01", "0"], ["m1", "0", "1"]):
         assert sup.main(argv) == 2, argv
     out = capsys.readouterr().out
     assert ("usage: supervise_testb.py <variant: ['f0', 'f1', 'f2', 'f3', "
-            "'f4', 't0', 't1', 't2', 'r0', 'n0', 'a0', 'w0', 'w1', 'w2']> "
-            "<seed: [0]>") in out
+            "'f4', 't0', 't1', 't2', 'r0', 'n0', 'a0', 'w0', 'w1', 'w2', "
+            "'m1', 'm2']> <seed: [0]>") in out
 
 
 def test_no_generation_2_leftovers(real_sup):
@@ -2289,7 +2311,7 @@ def test_f0_runs_preflight_then_each_launch_guarded_without_a_prep(
     assert sup.main(["f0", "0"]) == 1                 # 5 quick deaths
     out = capsys.readouterr().out
     assert "CRASH LOOP" in out
-    assert ("preflight ok (manifest + quick probe + 27 suites); starting f0 "
+    assert ("preflight ok (manifest + quick probe + 28 suites); starting f0 "
             f"s0 ({F[0]}, --stop-env-steps 20000, at most 60 iterations)") \
         in out
     # no wait, no prep, no prep integrity: f0 has none
@@ -2842,7 +2864,7 @@ LINEAGE_NAMES = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES",
 
 def test_test_b2s_lineage_and_test_bs_unchanged(real_sup):
     sup = real_sup
-    assert set(sup.LINEAGES) == {"f", "t", "r", "n", "a", "w"}
+    assert set(sup.LINEAGES) == {"f", "t", "r", "n", "a", "w", "m"}
     assert sup.TOTAL_ENV_STEPS == 100000
     loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
     assert loaded["LINEAGE"] == "f"         # the module loads as Test B's
@@ -3459,7 +3481,8 @@ def test_test_c2s_lineage(real_sup):
     for letter, lin in sup.LINEAGES.items():
         if letter != "a":
             assert "ramps" not in lin, letter
-            for k in range(lin["generations"]):
+            # (E3's "m" runs generations 1-2 only: "first")
+            for k in range(lin.get("first", 0), lin["generations"]):
                 arm = ablation.ARMS[f"{lin['arm']}-{letter}{k}"]
                 assert not any(x.startswith("RAMP_") for x in arm), letter
     # the tolerance sits far below one step of the ramp (~1e-6 in gamma)
@@ -4178,7 +4201,8 @@ def test_test_b2ws_lineage(real_sup):
         if letter == "w":
             continue
         assert "optim" not in lin, letter
-        for k in range(lin["generations"]):
+        # (E3's "m" runs generations 1-2 only: "first")
+        for k in range(lin.get("first", 0), lin["generations"]):
             arm = ablation.ARMS[f"{lin['arm']}-{letter}{k}"]
             assert {o: _knob(arm, o) for o in SGD_OPTIM} == SGD_OPTIM, letter
     # the others' names and numbers come back
@@ -4289,3 +4313,480 @@ def test_b2ws_quick_probe_pins_adamw_and_every_other_lineage_sgd(sup):
         flipped = probes[letter].replace(head, head + flip)
         g = _py_each([flipped])[0]
         assert g.startswith("AssertionError"), (letter, flip, g)
+
+
+# --------------------------------------------------------------------------
+# E3 (Kai, 2026-11-05): Test B2's chain with mining at both swaps -- m1, m2
+# here; generation 0 is Test B2's T0 itself, EXTERNAL, in its frozen tree
+# --------------------------------------------------------------------------
+MINED = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+         "tokens-mined")
+M = {"m1": f"{MINED}-m1", "m2": f"{MINED}-m2"}
+M_DATE = "2026-11-05"
+FROZEN = pathlib.Path(r"Y:\SwitchPlayer-testb2-run")
+T0_RUN = f"mspacman-two-t0-s0-{T_DATE}"
+MINED_TOK = [[1, 32], [3, 32]]       # a 64-frame mined token: 16 base steps
+
+
+@pytest.fixture
+def msup(sup):
+    """`sup` bound to E3's lineage, as main() binds it for m1 / m2 -- its
+    external T0's tree in tmp (the `sup` fixture)."""
+    sup.configure("m")
+    return sup
+
+
+def _finish_t0(sup, final=47, env=33616, value=900.0, evals=True,
+               files=True):
+    """T0 complete in the EXTERNAL tree (tmp): its in-run rows (the last at
+    `env` env steps), its marker, its final snapshot and own-play log, both
+    exact evals there (_finish, which writes into REPO, for the external
+    run). Returns its rows."""
+    rows = _in_run(final)
+    _jsonl(sup, "t0", {i: env if i == final else env * i // (final + 1)
+                       for i in rows})
+    pathlib.Path(sup.paths("t0", 0)[3]).write_bytes(b"done")
+    if files:
+        snap = pathlib.Path(sup.snapshot_path("t0", 0, final))
+        snap.parent.mkdir(parents=True, exist_ok=True)
+        snap.write_bytes(b"x")
+        log = pathlib.Path(sup.own_play_arg("t0", 0))
+        log.mkdir(parents=True, exist_ok=True)
+        for i in range(1, final + 1):
+            (log / f"iter-{i:03d}.pkl").write_bytes(b"x")
+    if evals:
+        for s in ("-acting", ""):
+            _rows(sup.probe_path(T0_RUN, s, sup.tree_of("t0")), rows, value)
+    return rows
+
+
+def _m1_prep(sup, **doc):
+    """m1's prep, a mined one, of the external T0's final snapshot (k 47)
+    from its own-play log (the absolute path the prep was given)."""
+    _write_prep(sup, "m1", k=47, **{"log_dir": sup.own_play_arg("t0", 0),
+                                    "mine": True, **doc})
+
+
+def test_e3s_lineage(real_sup):
+    sup = real_sup
+    loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
+    sup.configure("m")
+    assert (sup.LINEAGE, sup.GENERATIONS) == ("m", 3)
+    assert sup.VARIANTS == {**M, "t0": T[0]}
+    assert sup.RUNS == {"m1": "mspacman-mined-m1", "m2": "mspacman-mined-m2",
+                        "t0": "mspacman-two-t0"}
+    assert sup.NAMES == {"m1": "M1", "m2": "M2", "t0": "T0"}
+    assert sup.SEEDS == {0: M_DATE} and sup.PREP_PREFIX == "mined-prep"
+    assert (sup.ITERATIONS, sup.NOMINAL_ITERATIONS) == (100, 50)
+    assert sup.DISCOUNTS == {"t0": KEPT, "m1": KEPT, "m2": KEPT}
+    assert sup.DISCOUNT_RULE == "keep"
+    # the budget is Test B2's: its first third spent by T0 itself
+    assert [sup.target(v) for v in ("m1", "m2")] == [66667, 100000]
+    assert [sup.lineage_variant("m", k) for k in range(3)] == ["t0", "m1",
+                                                               "m2"]
+    assert (sup.master_of("m1"), sup.master_of("m2")) == ("t0", "m1")
+    assert sup.master_of("t0") is None and not sup.is_student("t0")
+    assert sup.is_student("m1") and sup.is_student("m2")
+    assert sup.is_external("t0") and not sup.is_external("m1")
+    assert sup.tree_of("t0") == str(FROZEN) and sup.tree_of("m2") == sup.REPO
+    assert sup.run_name("t0", 0) == T0_RUN
+    rel, base, jsonl, ckpt, _d = sup.paths("t0", 0)
+    assert pathlib.Path(base) == FROZEN / "benchmarks" / "results" / T0_RUN
+    assert ckpt.endswith(f"resume-mspacmannoframeskip-skip4-{T[0]}-seed0.ckpt")
+    assert pathlib.Path(sup.snapshot_path("t0", 0, 47)) == (
+        FROZEN / rel / f"snapshots{sup.TAG}-{T[0]}-seed0"
+        / "weights-iter047.pth")
+    assert sup.paths("m1", 0)[0] == (
+        f"benchmarks/results/mspacman-mined-m1-s0-{M_DATE}")
+    assert pathlib.Path(sup.paths("m1", 0)[1]).parent == (
+        ROOT / "benchmarks" / "results")
+    assert sup.prep_rel("m2") == (
+        f"benchmarks/results/mined-prep-m2-s0-{M_DATE}")
+    assert (sup.master_offline("m1"), sup.master_offline("m2")) == (0, 20000)
+    lin = sup.LINEAGES["m"]
+    assert lin["mine"] is True and lin["twin"] == "t" and lin["first"] == 1
+    assert lin["external"] == {"variant": "t0", "tree": str(FROZEN)}
+    assert ablation.MINE_ARM == sup.MINE_ARM == MINED
+    for k, v in ((1, "m1"), (2, "m2")):
+        spec, t = ablation.ARMS[M[v]], ablation.ARMS[T[k]]
+        skip = {"_master_arm", "_mine", "_doc"}
+        assert ({x: y for x, y in spec.items() if x not in skip}
+                == {x: y for x, y in t.items() if x not in skip}), v
+        assert spec["_mine"] is True and "_mine" not in t
+        assert spec["_master_arm"] == sup.VARIANTS[sup.master_of(v)]
+        assert sup.master_offline(v) == distill.master_offline_steps(
+            ablation.ARMS[spec["_master_arm"]])
+    # every other lineage: no mining, no external generation
+    for letter, other in sup.LINEAGES.items():
+        if letter != "m":
+            assert not {"mine", "external", "first", "twin"} & set(other), \
+                letter
+    sup.configure("f")
+    assert {k: getattr(sup, k) for k in LINEAGE_NAMES} == loaded
+    sup.configure("t")                       # Test B2's own t0 is in-tree
+    assert not sup.is_external("t0") and sup.tree_of("t0") == sup.REPO
+
+
+def test_main_binds_the_m_lineage(sup, monkeypatch, capsys):
+    monkeypatch.setattr(sup, "other_supervisors", lambda v: [])
+    monkeypatch.setattr(sup, "run_done", lambda v, s: True)
+    assert sup.main(["m2", "0"]) == 0
+    assert sup.LINEAGE == "m" and sup.VARIANTS == {**M, "t0": T[0]}
+    assert "RUN COMPLETE m2 s0" in capsys.readouterr().out
+    assert sup.main(["m0", "0"]) == 2          # T0 is never run here
+
+
+def test_e3s_paths_and_the_external_master(msup, tmp_path):
+    sup = msup
+    ext = sup.LINEAGES["m"]["external"]["tree"]
+    assert ext == str(tmp_path / "external")
+    rel, base, jsonl, ckpt, _d = sup.paths("t0", 0)
+    assert base == os.path.join(ext, *rel.split("/"))
+    assert sup.snapshot_path("t0", 0, 47).startswith(ext)
+    assert sup.own_play_arg("t0", 0) == os.path.join(
+        ext, *sup.own_play_rel("t0", 0).split("/"))
+    assert sup.own_play_arg("m1", 0) == sup.own_play_rel("m1", 0)
+    name, marker, probes, log, script, pvar, flag = sup.predecessor("m1", 0)
+    assert (name, script, pvar) == ("T0", "supervise_testb.py", "t0")
+    assert (marker, log, flag) == (ckpt, os.path.join(base, "supervisor.log"),
+                                   os.path.join(base, "ABANDONED"))
+    # T0 is no student: its two exact evals, no row 0 and no offline curve
+    assert [p for p, _r in probes] == [
+        sup.probe_path(T0_RUN, s, ext) for s in ("-acting", "")]
+    assert all(p.startswith(ext) for p, _r in probes)
+    name, marker, probes, *_x = sup.predecessor("m2", 0)
+    assert name == "M1" and marker == sup.paths("m1", 0)[3]
+    assert [os.path.basename(p) for p, _r in probes] == [
+        f"probe_exhaustive_eval-mspacman-mined-m1-s0-{M_DATE}{s}.jsonl"
+        for s in ("-acting", "", "-offline-acting", "-offline")]
+    assert all(p.startswith(sup.REPO) for p, _r in probes)
+    # T0 complete and evaluated in ITS tree: m1 may start, on T0's final
+    # snapshot and own-play log there
+    assert sup.pred_missing("m1", 0)
+    _finish_t0(sup)
+    assert sup.pred_missing("m1", 0) == []
+    assert sup.master_final("m1", 0) == (47, sup.snapshot_path("t0", 0, 47))
+    assert sup.master_files_missing("m1", 0) == []
+    assert sup.choose_master("m1", 0) == {
+        "which": "T0", "snapshot": sup.snapshot_path("t0", 0, 47),
+        "iterations": 47, "master_mean_last2": 900.0}
+    assert not (pathlib.Path(sup.REPO) / "benchmarks" / "results"
+                / T0_RUN).exists()            # nothing of T0's in this tree
+    # an own-play iteration missing there, an ABANDONED T0: no master
+    (pathlib.Path(sup.own_play_arg("t0", 0)) / "iter-047.pkl").unlink()
+    assert "iterations [47]" in sup.master_files_missing("m1", 0)[0]
+    pathlib.Path(base, "ABANDONED").write_text("")
+    with pytest.raises(SystemExit, match="MASTER ABANDONED: T0's run folder"):
+        sup.choose_master("m1", 0)
+
+
+def test_e3s_stops_count_t0s_final_env_steps(msup):
+    sup = msup
+    with pytest.raises(SystemExit,
+                       match="STOP UNKNOWN: T0 has no completion marker"):
+        sup.stop_env_steps("m1", 0)
+    _finish_t0(sup, final=47, env=33616, evals=False, files=False)
+    assert sup.stop_env_steps("m1", 0) == 66667 - 33616 == 33051
+    _finish(sup, "m1", final=46, env=33100, evals=False, files=False)
+    assert sup.stop_env_steps("m2", 0) == 100000 - 33616 - 33100
+
+
+def test_a_spent_e3_budget_names_t0_and_m1(msup):
+    _finish_t0(msup, final=47, env=60000, evals=False, files=False)
+    _finish(msup, "m1", final=46, env=40000, evals=False, files=False)
+    with pytest.raises(SystemExit, match=(
+            r"STOP NOT POSITIVE: M2's --stop-env-steps would be 0 = 100000 "
+            r"- 100000 \(the final env steps of T0, M1: \[60000, 40000\]\)")):
+        msup.stop_env_steps("m2", 0)
+
+
+def test_e3s_master_and_stop_from_t0s_real_frozen_run(real_sup):
+    """T0's REAL files in the frozen tree (read only, never written; frozen,
+    so the numbers never move): its final row 47 at 33,616 env steps, both
+    evals complete, its last two deployed rows 745.667 and 1061.667 (mean
+    903.667 >= 502.08), its snapshot and own-play log there -- m1's stop
+    33,051."""
+    if not (FROZEN / "benchmarks" / "results" / T0_RUN).exists():
+        pytest.skip("Test B2's frozen tree is not on this host")
+    sup = real_sup
+    sup.configure("m")
+    assert sup.final_row("t0", 0) == (47, 33616)
+    assert sup.stop_env_steps("m1", 0) == 66667 - 33616 == 33051
+    assert sup.pred_missing("m1", 0) == []
+    assert sup.master_files_missing("m1", 0) == []
+    pick = sup.choose_master("m1", 0)
+    assert (pick["which"], pick["iterations"]) == ("T0", 47)
+    assert pick["snapshot"] == sup.snapshot_path("t0", 0, 47)
+    assert pick["master_mean_last2"] == pytest.approx(
+        (745.667 + 1061.667) / 2, abs=1e-9)
+    assert pick["master_mean_last2"] >= sup.NEAR_RANDOM
+
+
+def test_e3s_command_is_test_b2s_with_the_arm_moved(msup):
+    sup = msup
+    tsup2 = _load(SUPERVISORS / "supervise_testb.py", "supervise_testb_t2")
+    tsup2.configure("t")
+    for k, v in ((1, "m1"), (2, "m2")):
+        t = TV[k]
+        want = [x.replace(T[k], M[v]).replace(tsup2.prep_rel(t),
+                                              sup.prep_rel(v))
+                for x in tsup2.command(t, 0, 123)]
+        got = sup.command(v, 0, 123)
+        assert got == want and got != tsup2.command(t, 0, 123), v
+        assert "--mine" not in got              # mining is the prep's
+        assert got[got.index("--token-vocab") + 1] == (
+            f"benchmarks/results/mined-prep-{v}-s0-{M_DATE}/vocab.json")
+
+
+def test_e3s_prep_reads_t0_in_its_tree_and_mines(msup, monkeypatch, capsys):
+    """run_prep for m1, the real master gate: T0's final snapshot and
+    own-play log in the external tree (absolute paths), --mine; then the
+    MINED line from vocab.json's nested tokens."""
+    sup = msup
+    _finish_t0(sup, final=47, env=33616, value=900.0)
+    monkeypatch.setattr(sup, "wait_no_trainer", lambda *a: None)
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+    runs = []
+    doc = {"vocab": [[0, 4], [1, 4], MINED_TOK],
+           "dropped": [[0, 8], [0, 32]],
+           "mined": [{"token": MINED_TOK, "count": 5, "k": 2,
+                      "consistency": 0.75, "score": 3.75}]}
+    _popen(monkeypatch, sup, [(0, lambda: _m1_prep(sup, **doc))], runs)
+    assert sup.run_prep("m1", 0, {}) is True
+    out = capsys.readouterr().out
+    snap = sup.snapshot_path("t0", 0, 47)
+    assert (f"MASTER T0: {snap} (iteration 47; deployed mean of its last two "
+            f"rows 900.00") in out
+    assert "PREP done (attempt 1): " + sup.prep_rel("m1") in out
+    assert ("MINED m1: 1 tokens appended: 1,32;3,32 (count 5, k 2, c 0.750, "
+            "score 3.8); vocabulary 3 slots; dropped 2" + NL) in out
+    args, _k = runs[0]
+    assert args == [sup.PY, "experiments/distill.py", "--master", snap,
+                    "--master-iterations", "47", "--out",
+                    f"benchmarks/results/mined-prep-m1-s0-{M_DATE}",
+                    "--seed", "0", "--from-log", sup.own_play_arg("t0", 0),
+                    "--mine"]
+    assert os.path.isabs(args[args.index("--from-log") + 1])
+    assert sup.prep_command("m1", 0, {"snapshot": snap, "iterations": 47}) \
+        == args
+    # Test B2's prep: no --mine, its master's log REPO-relative (as ever)
+    sup.configure("t")
+    t = sup.prep_command("t1", 0, {"snapshot": "s.pth", "iterations": 48})
+    assert "--mine" not in t
+    assert t[t.index("--from-log") + 1] == sup.own_play_rel("t0", 0)
+
+
+def test_e3s_set_intact_needs_a_mined_prep_of_t0_in_its_tree(msup):
+    sup = msup
+    _finish_t0(sup, final=47, evals=False, files=False)
+    _m1_prep(sup)
+    assert sup.set_intact("m1", 0) == (True, "")
+    for mine, shown in ((GONE, "None"), (False, "False"), (1, "1")):
+        _m1_prep(sup, mine=mine)
+        assert sup.set_intact("m1", 0) == (False, (
+            f"vocab.json's mine is {shown}, not the lineage's True "
+            f"(distill.py --mine)"))
+    # the log T0's prep read must be T0's own-play log in its tree
+    _m1_prep(sup, log_dir=sup.own_play_rel("t0", 0))
+    ok, why = sup.set_intact("m1", 0)
+    assert not ok and why.endswith(
+        f"not T0's own-play log {sup.own_play_arg('t0', 0)}")
+    # ... and a Test B2 prep must not be a mined one
+    sup.configure("t")
+    _finish(sup, "t0", final=48, evals=False, files=False)
+    _write_prep(sup, "t1", k=48)
+    assert sup.set_intact("t1", 0) == (True, "")
+    _write_prep(sup, "t1", k=48, mine=True)
+    assert sup.set_intact("t1", 0) == (False, (
+        "vocab.json's mine is True, not the lineage's False (distill.py "
+        "--mine)"))
+
+
+def test_the_token_bound_is_the_mined_vocabularys_longest_token(msup):
+    """E3-A9: m1's bound is its prep's vocabulary's longest token (nested
+    mined tokens read as JSON lists), MINED_TOKEN_STEPS (16) while it
+    cannot be read; every other lineage's MAX_TOKEN_STEPS (8) whatever its
+    prep holds."""
+    sup = msup
+    assert (sup.MAX_TOKEN_STEPS, sup.MINED_TOKEN_STEPS) == (8, 16)
+    assert sup.MINED_TOKEN_STEPS == muzero.TOKEN_MINED_MAX_FRAMES // 4
+    assert sup.run_token_steps("m1") == 16                    # no prep yet
+    _finish_t0(sup, evals=False, files=False)
+    for vocab, want in (([[0, 4], [1, 32], [[2, 8], [3, 4]]], 8),
+                        ([[0, 4], [1, 32], MINED_TOK], 16),
+                        ([[0, 4], [[2, 8], [3, 12]]], 5),
+                        ("nonsense", 16), ([[0, 4], [[2, 8], "x"]], 16),
+                        ([[0, 4], [2.0, 8]], 16), (GONE, 16)):
+        _m1_prep(sup, vocab=vocab)
+        assert sup.run_token_steps("m1") == want, vocab
+    sup.configure("t")
+    _finish(sup, "t0", final=48, evals=False, files=False)
+    _write_prep(sup, "t1", k=48, vocab=[[0, 4], MINED_TOK])
+    assert sup.run_token_steps("t1") == sup.run_token_steps("t0") == 8
+
+
+def test_row_alerts_at_the_mined_bound(sup):
+    row = {"iteration": 20, "reward_ceiling": C}
+    assert sup.row_alerts({**row, "reward_max": 16 * C}, "n/a", C, 16) == []
+    got = sup.row_alerts({**row, "reward_max": 16 * C + 0.01}, "n/a", C, 16)
+    assert got == [f"reward_max {16 * C + 0.01} > 16 x the ceiling 7.5000 "
+                   f"(the vocabulary's longest token sums at most 16 base "
+                   f"steps at the ceiling: the clip did not apply)"]
+    # the bound as ever (None or 8): the 32-frame token's text
+    for steps in (None, 8):
+        got = sup.row_alerts({**row, "reward_max": 8 * C + 0.01}, "n/a", C,
+                             steps)
+        assert got == [f"reward_max {8 * C + 0.01} > 8 x the ceiling 7.5000 "
+                       f"(a 32-frame token sums at most 8 base steps at the "
+                       f"ceiling: the clip did not apply)"]
+
+
+def test_e3s_rows_check_reward_max_at_the_vocabularys_bound(
+        msup, tmp_path, capsys):
+    sup = msup
+    _finish_t0(sup, evals=False, files=False)
+    _m1_prep(sup, student_ceiling=C, vocab=[[0, 4], [1, 32], MINED_TOK])
+    jsonl = tmp_path / "m1.jsonl"
+    rows = sup.Rows(str(jsonl), "m1", 0)
+
+    def row(path, **r):
+        with open(path, "a") as f:
+            f.write(json.dumps({"elapsed_s": 1.0, "reward_ceiling": C, **r})
+                    + NL)
+
+    row(jsonl, iteration=5, reward_max=16 * C)
+    rows.emit()
+    out = capsys.readouterr().out
+    assert out.startswith("EVAL m1 s0 iter 5") and "ALERT" not in out
+    row(jsonl, iteration=10, reward_max=16 * C + 0.5,
+        tok_mined_play_share={"1,32;3,32": 0.25},
+        tok_mined_search_share={"1,32;3,32": 0.5},
+        tok_mined_overlap_search_share=0.125)
+    rows.emit()
+    out = capsys.readouterr().out
+    assert ("mined play {'1,32;3,32': 0.25}  search {'1,32;3,32': 0.5}  "
+            "overlap 0.125") in out
+    assert ("ALERT: m1 s0 row 10: reward_max 120.5 > 16 x the ceiling 7.5000 "
+            "(the vocabulary's longest token") in out
+    # Test B2's t1 at the same kind of row: its 8-step bound, its text
+    sup.configure("t")
+    _finish(sup, "t0", final=48, evals=False, files=False)
+    _write_prep(sup, "t1", k=48, student_ceiling=C)
+    tjsonl = tmp_path / "t1.jsonl"
+    rows = sup.Rows(str(tjsonl), "t1", 0)
+    row(tjsonl, iteration=5, reward_max=8 * C + 0.5)
+    rows.emit()
+    out = capsys.readouterr().out
+    assert "ALERT: t1 s0 row 5: reward_max 60.5 > 8 x the ceiling" in out
+    assert "a 32-frame token" in out and " | mined play" not in out
+
+
+def test_the_mined_line_reads_nested_tokens(msup):
+    sup = msup
+    _finish_t0(sup, evals=False, files=False)
+    _m1_prep(sup, vocab=[[0, 4], [[1, 8], [3, 4]], MINED_TOK],
+             dropped=[[0, 8], [[2, 4], [5, 8]]],
+             mined=[{"token": MINED_TOK, "count": 3, "k": 3,
+                     "consistency": 0.5, "score": 3.0},
+                    {"token": [[1, 8], [3, 4]], "count": 2, "k": 2,
+                     "consistency": 1.0, "score": 2.0}])
+    assert sup.prep_tokens_line("m1") == (
+        "MINED m1: 2 tokens appended: 1,32;3,32 (count 3, k 3, c 0.500, "
+        "score 3.0); 1,8;3,4 (count 2, k 2, c 1.000, score 2.0); vocabulary "
+        "3 slots; dropped 2 (mined tokens among them: 2,4;5,8)")
+    for bad in ({"mined": GONE}, {"dropped": [[0, "8"]]},
+                {"mined": [{"token": MINED_TOK}]},
+                {"mined": [{"token": MINED_TOK, "count": 1, "k": 2,
+                            "consistency": None, "score": 1.0}]}):
+        _m1_prep(sup, **bad)
+        assert sup.prep_tokens_line("m1").startswith(
+            "MINED m1: vocab.json's mined tokens cannot be read"), bad
+    assert sup.json_token_steps([[1, 8], [3, 4]]) == [(1, 8), (3, 4)]
+    assert sup.json_token_steps([2, 16]) == [(2, 16)]
+    for bad in ([], [1], [1, 2, 3], [[1, 2], [3]], [True, 4], "ab", None):
+        with pytest.raises(ValueError):
+            sup.json_token_steps(bad)
+
+
+def _m_masters(sup):
+    """m1's master T0 and m2's master M1, each complete and master-like
+    (_master_like) in its tree: T0 in the external one (its arm after 47 x
+    2,000 steps), M1 here (M1's arm as student_arm leaves it, 20,000 + 46 x
+    2,000 steps)."""
+    _finish_t0(sup, final=47, evals=False)
+    _master_like(sup.snapshot_path("t0", 0, 47), 0, 47, arms=T,
+                 discounts=[KEPT] * 3)
+    _finish(sup, "m1", final=46, env=33100, evals=False)
+    _master_like(sup.snapshot_path("m1", 0, 46), 1, 46,
+                 arms=[T[0], M["m1"], M["m2"]], discounts=[KEPT] * 3)
+
+
+def test_e3s_quick_probes_pass_and_end_with_their_masters_checks(msup):
+    sup = msup
+    _m_masters(sup)
+    q1, q2 = sup.quick("m1", 0), sup.quick("m2", 0)
+    assert q1.endswith(
+        f"distill.master_checks({sup.snapshot_path('t0', 0, 47)!r}, 47)")
+    assert sup.snapshot_path("t0", 0, 47).startswith(
+        sup.LINEAGES["m"]["external"]["tree"])
+    assert q2.endswith(
+        f"distill.master_checks({sup.snapshot_path('m1', 0, 46)!r}, 46)")
+    for q, twin in ((q1, T[1]), (q2, T[2])):
+        assert "assert spec.get('_mine') is True; " in q
+        assert f"_t = ablation.ARMS[{twin!r}]; " in q
+    assert f"assert ablation.ARMS[{T[0]!r}].get('_mine') is None; " in q1
+    assert f"assert ablation.ARMS[{M['m1']!r}].get('_mine') is True; " in q2
+    assert _py_each([q1, q2]) == ["ok", "ok"]
+    # every other lineage's probe: no mining pin (bit for bit)
+    sup.configure("t")
+    assert "_mine" not in sup.quick("t0", 0)
+
+
+def test_each_mining_pin_of_the_quick_probe_bites(msup):
+    sup = msup
+    _m_masters(sup)
+    a = "ablation.ARMS"
+    probes = {"m1": sup.quick("m1", 0), "m2": sup.quick("m2", 0)}
+    breaks = [("m1", f"{a}[{M['m1']!r}]['_mine'] = False"),
+              ("m1", f"del {a}[{M['m1']!r}]['_mine']"),
+              ("m1", f"{a}[{M['m1']!r}]['ACT_SEARCH_SIMS'] = 8"),
+              ("m1", f"{a}[{T[1]!r}]['ACT_SEARCH_SIMS'] = 8"),
+              ("m1", f"{a}[{T[1]!r}]['_mine'] = True"),
+              ("m1", f"{a}[{T[0]!r}]['_mine'] = True"),
+              ("m2", f"{a}[{M['m1']!r}]['_mine'] = None"),
+              ("m2", f"{a}[{M['m2']!r}]['TD_STEPS'] = 3"),
+              ("m2", f"{a}[{M['m2']!r}]['_master_arm'] = {T[1]!r}")]
+    broken = []
+    for v, prelude in breaks:
+        anchor = f"spec = ablation.ARMS[{M[v]!r}]; "
+        assert probes[v].count(anchor) == 1
+        broken.append(probes[v].replace(anchor, prelude + "; " + anchor))
+    got = _py_each(broken + list(probes.values()))
+    for code, g in zip(broken, got):
+        assert g.startswith("AssertionError"), (code[-300:], g)
+    assert got[len(broken):] == ["ok", "ok"]                # the controls
+    # the build's own names, each in a child of its own (EACH restores
+    # neither distill nor these muzero globals)
+    head = "import muzero, ablation, muzero_vtree, distill; "
+    for flip in ("del distill.mine_tokens; ", "del ablation.support_steps; ",
+                 "muzero.TOKEN_MINED_PER_SWAP = 4; ",
+                 "muzero.TOKEN_MINED_MAX_FRAMES = 32; ",
+                 "distill.prep = lambda master: None; "):
+        flipped = probes["m1"].replace(head, head + flip)
+        assert flipped != probes["m1"]
+        g = _py_each([flipped])[0]
+        assert g.startswith("AssertionError"), (flip, g)
+
+
+def test_e3s_quick_probe_on_t0s_real_final_snapshot(real_sup):
+    """The preflight's real probe for m1: distill.master_checks on T0's
+    REAL final snapshot in the frozen tree (read only)."""
+    if not (FROZEN / "benchmarks" / "results" / T0_RUN).exists():
+        pytest.skip("Test B2's frozen tree is not on this host")
+    sup = real_sup
+    sup.configure("m")
+    q = sup.quick("m1", 0)
+    assert q.endswith(f"distill.master_checks("
+                      f"{sup.snapshot_path('t0', 0, 47)!r}, 47)")
+    assert _py_each([q]) == ["ok"]

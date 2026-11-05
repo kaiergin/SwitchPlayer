@@ -44,6 +44,14 @@ DROP = ((0, 8), (0, 32), (5, 16))
 KEPT = tuple(t for t in TK_VOCAB if t not in DROP)            # 33 tokens
 G = 0.997 ** 4
 SLOT = {t: i for i, t in enumerate(TK_VOCAB)}
+# Test B2's T2's 18 tokens (tests/test_e3a.py's, written out here)
+T2_VOCAB = ((0, 4), (1, 4), (2, 4), (3, 4), (3, 16), (3, 32), (4, 4), (4, 32),
+            (5, 4), (5, 16), (5, 32), (6, 4), (7, 4), (7, 32), (8, 4), (8, 8),
+            (8, 16), (8, 32))
+# E3's arms (part 2): T1 / T2 but for _mine and M2's master
+MINE_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
+            "mspacman-tokens-mined")
+MARMS = [MINE_ARM + "-m1", MINE_ARM + "-m2"]
 
 
 def J(vocab):
@@ -373,11 +381,13 @@ def test_validate_refusals(vocab, mined, match):
 
 
 def _e3_doc(tmp_path, vocab, mined, master_arm=T[0], master_vocab=None,
-            master_mined=None, c=7.26, set_path=None, name="vocab.json"):
+            master_mined=None, c=7.26, set_path=None, name="vocab.json",
+            **extra):
     doc = {"vocab": J(vocab), "student_ceiling": c, "master_arm": master_arm,
            "master_iterations": 47, "student_discount": G,
            "discount_rule": "keep", "master_discount": G,
-           "mined": [{"token": muzero.token_json(t)} for t in mined]}
+           "mined": [{"token": muzero.token_json(t)} for t in mined],
+           **extra}
     if master_vocab is not None:
         doc["master_vocab"] = J(master_vocab)
     if master_mined is not None:
@@ -574,7 +584,6 @@ def test_the_port_matches_e3as_probe_on_duration_vocabularies():
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] /
                            "benchmarks" / "probes"))
     import probe_e3a_sequences as e3
-    from tests.test_e3a import T2_VOCAB
     rng = np.random.default_rng(11)
     for _ in range(5):
         lives, adv, off = [], [], 0
@@ -1082,6 +1091,71 @@ def test_a_student_replaying_relabeled_records_sees_the_same_records(
         assert np.array_equal(a[0], b[0]) and a[1] == b[1]
         assert tuple(a[2]) == tuple(b[2])
     assert senv.actions == menv.actions and len(menv.actions) == steps
+
+
+# --------------------------------------------------------------------------
+# E3's arms (part 2): M1 / M2 -- Test B2's T1 / T2 but for _mine (the prep's
+# --mine) and M2's master M1
+# --------------------------------------------------------------------------
+@pytest.fixture
+def marms(arms, monkeypatch):
+    """ARMS restored (T's, by `arms`; M1 / M2's here) after a test applies
+    --token-vocab."""
+    for arm in MARMS:
+        monkeypatch.setitem(ablation.ARMS, arm, ablation.ARMS[arm])
+
+
+def test_the_mined_arms_are_t1_and_t2_but_for_mining():
+    assert ablation.MINE_ARM == MINE_ARM
+    for k, arm in ((1, MARMS[0]), (2, MARMS[1])):
+        spec, t = ablation.ARMS[arm], ablation.ARMS[T[k]]
+        delta = {x for x in set(spec) | set(t) if spec.get(x) != t.get(x)}
+        # M1's master is T1's (T0); M2's is M1, not T1
+        assert delta == ({"_mine", "_doc"} if k == 1
+                         else {"_mine", "_master_arm", "_doc"}), arm
+        assert spec["_mine"] is True and "_mine" not in t
+    assert ablation.ARMS[MARMS[0]]["_master_arm"] == T[0]
+    assert ablation.ARMS[MARMS[1]]["_master_arm"] == MARMS[0]
+    # T0 is generation 0 of both lineages (E3-A1): no M0 arm; no other arm
+    # mines
+    assert MINE_ARM + "-m0" not in ablation.ARMS
+    assert {n for n, s in ablation.ARMS.items()
+            if s.get("_mine")} == set(MARMS)
+    with ablation.arm_config(MARMS[0]):
+        assert muzero.DISCOUNT == G              # the T arms' constant
+
+
+def test_a_mined_arm_takes_only_a_mined_prep(tmp_path, marms):
+    m1 = MARMS[0]
+    static = ablation.ARMS[m1]
+    for mine in (None, False, 1, "true"):
+        extra = {} if mine is None else {"mine": mine}
+        with pytest.raises(SystemExit, match="not a mined prep"):
+            ablation.student_arm(m1, _e3_doc(tmp_path, M1_VOCAB, (M1, M2),
+                                             **extra))
+        ablation.ARMS[m1] = static
+    spec = ablation.student_arm(m1, _e3_doc(tmp_path, M1_VOCAB, (M1, M2),
+                                            mine=True))
+    assert spec["TOKEN_VOCAB"] == M1_VOCAB and spec["_mine"] is True
+    assert spec["_mined_tokens"] == (M1, M2)
+    # a T arm (no _mine) applies either (part 1's rule, unchanged)
+    ablation.student_arm(T[1], _e3_doc(tmp_path, M1_VOCAB, (M1, M2)))
+    # M2: a mined prep of M1, a student holding mined tokens
+    m2 = ablation.student_arm(MARMS[1], _e3_doc(
+        tmp_path, M2_VOCAB, (M3,), master_arm=m1, master_vocab=M1_VOCAB,
+        master_mined=(M1, M2), mine=True))
+    assert m2["_master_vocab"] == M1_VOCAB and m2["_mine"] is True
+    assert m2["_master_mined"] == (M1, M2) and m2["_mined_tokens"] == (M3,)
+
+
+def test_the_master_spec_of_a_mined_arm():
+    """M2's prep reads M1's snapshot: its spec is M1's arm with the student
+    keys (its mined tail declared) -- and M1's arm's _mine."""
+    m1 = _student_spec(MARMS[0], M1_VOCAB, _mined_tokens=(M1, M2))
+    assert distill.master_spec(MARMS[0], {"spec": m1}, "m") == m1
+    assert distill.discount_rule(m1) == "keep"
+    with pytest.raises(SystemExit, match="beyond the student keys"):
+        distill.master_spec(MARMS[0], {"spec": {**m1, "_mine": False}}, "m")
 
 
 # --------------------------------------------------------------------------

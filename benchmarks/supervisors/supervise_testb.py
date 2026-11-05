@@ -93,6 +93,28 @@ worktree (launch_testb2w.ps1, hand-off post_testb2w.py):
 For Test B2W read everything as for Test B2, with "w0-w2" / "W2" /
 launch_testb2w.ps1 / post_testb2w.py.
 
+E3 (Kai, 2026-11-05; CURRICULUM.md "Queued experiment (pre-registered) --
+E3", amendments E3-A1..A12): Test B2's chain with tokens MINED at both swaps
+-- TWO generations here, m1 and m2 (...-tokens-mined-m1 / -m2: T1 / T2 but
+for `_mine`, the prep's distill.py --mine), from its own run worktree:
+
+    python benchmarks/supervisors/supervise_testb.py m1 0   (.. m2 0)
+
+Its generation 0 is Test B2's T0 itself (E3-A1), EXTERNAL: the run
+mspacman-two-t0-s0-2026-10-29 in the frozen tree Y:\\SwitchPlayer-testb2-run
+(read-only; LINEAGES "external"). m1's wait (T0 complete and evaluated), its
+master gate (T0's last two deployed rows), its master (T0's final snapshot
+and own-play log, the prep's --master / --from-log as absolute paths) and
+its stop (target(m1) = round(100,000 x 2/3) less T0's final env steps) all
+read T0's files there; m2's master is M1 in this tree, its stop 100,000 less
+T0's and M1's final env steps. A mining lineage's rows check reward_max
+against its vocabulary's longest token (a mined token lasts up to 16 base
+steps, E3-A9: run_token_steps), every other lineage's against
+MAX_TOKEN_STEPS = 8 as before; its prep is a mined one (set_intact reads
+vocab.json's "mine") and its PREP line names the mined tokens and the
+dropped ones (nested tokens read as JSON lists). For E3 read the text below
+as for Test B2, with "m1, m2" / "M2" and T0 the frozen master.
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
 round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
@@ -228,6 +250,8 @@ RAMP_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
             "tokens-ramp")
 ADAM_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
             "tokens-adam")
+MINE_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-mined")
 # Test B2W's optimizer (CURRICULUM "Test B2W"): its lineage's "optim", BBF's
 # AdamW (configs/BBF.gin); every other lineage's quick() pins OPTIM_SGD,
 # EfficientZero's (the faithful arms'), so neither can drift unnoticed.
@@ -265,7 +289,12 @@ RAMP_GAMMA_TOL = 1e-12
 # alone; "ramps" the ramp knobs quick() pins (every other lineage: RAMP_OFF)
 # and ramp_alert checks. Test B2W (Kai 2026-11-04): "w" (W0-W2, Test B2's
 # lineage with BBF's AdamW); "optim" the optimizer knobs quick() pins (every
-# other lineage: OPTIM_SGD).
+# other lineage: OPTIM_SGD). E3 (Kai 2026-11-05): "m" (M1-M2, Test B2's
+# lineage with mining at both swaps); "first" its first generation run here
+# (1), its generation 0 the "external" run -- Test B2's T0 ("variant") in
+# its frozen "tree", read-only (E3-A1); "mine" the prep's --mine and the
+# arms' _mine; "twin" the lineage whose arms its arms equal but for those
+# (quick() pins it).
 LINEAGES = {
     "f": {"arm": FAST_ARM, "run": "mspacman-fast", "prep": "fast-prep",
           "generations": 5, "iterations": 60, "nominal": 30,
@@ -292,10 +321,26 @@ LINEAGES = {
           "generations": 3, "iterations": 100, "nominal": 50,
           "discounts": (0.997 ** 4,) * 3,
           "rule": "keep", "date": "2026-11-04", "optim": OPTIM_BBF},
+    "m": {"arm": MINE_ARM, "run": "mspacman-mined", "prep": "mined-prep",
+          "generations": 3, "first": 1, "iterations": 100, "nominal": 50,
+          "discounts": (0.997 ** 4,) * 3,
+          "rule": "keep", "date": "2026-11-05", "mine": True, "twin": "t",
+          "external": {"variant": "t0",
+                       "tree": r"Y:\SwitchPlayer-testb2-run"}},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
 TOTAL_ENV_STEPS = 100000
+
+
+def lineage_variant(letter, k):
+    """Lineage `letter`'s generation k: "<letter><k>" -- or, below its
+    "first" generation run here, its "external" run's variant (E3: generation
+    0 is Test B2's t0)."""
+    spec = LINEAGES[letter]
+    if k < spec.get("first", 0):
+        return spec["external"]["variant"]
+    return f"{letter}{k}"
 
 
 def configure(letter):
@@ -305,15 +350,22 @@ def configure(letter):
     global NOMINAL_ITERATIONS, DISCOUNTS, DISCOUNT_RULE, SEEDS, PREP_PREFIX
     spec = LINEAGES[letter]
     LINEAGE, GENERATIONS = letter, spec["generations"]
-    names = [f"{letter}{k}" for k in range(GENERATIONS)]
+    # E3: a lineage whose generation 0 is another lineage's run ("first" 1,
+    # "external") runs only generations first.. here; its generations are
+    # lineage_variant()'s (the external run's name for generation 0)
+    every = [lineage_variant(letter, k) for k in range(GENERATIONS)]
+    names = [f"{letter}{k}" for k in range(spec.get("first", 0),
+                                            GENERATIONS)]
     # Test C: a lineage that starts "after" another lineage's run binds that
-    # run's names too (its wait reads that run's files)
-    known = names + ([spec["after"]] if spec.get("after") else [])
+    # run's names too (its wait reads that run's files); E3: its external
+    # generation 0 likewise
+    known = names + ([spec["after"]] if spec.get("after") else []) + [
+        v for v in every if v not in names]
     VARIANTS = {v: f"{LINEAGES[v[0]]['arm']}-{v}" for v in known}
     RUNS = {v: f"{LINEAGES[v[0]]['run']}-{v}" for v in known}
     NAMES = {v: v.upper() for v in known}
     ITERATIONS, NOMINAL_ITERATIONS = spec["iterations"], spec["nominal"]
-    DISCOUNTS = dict(zip(names, spec["discounts"]))
+    DISCOUNTS = dict(zip(every, spec["discounts"]))
     DISCOUNT_RULE = spec["rule"]
     # the pre-registered seed and the runs' date
     SEEDS = {0: spec["date"]}
@@ -340,6 +392,11 @@ CURVE_ROWS = (1, 2, 3, 4)
 # 4-decimal rounding); a pace past which the cost is Kai's call; low host
 # commit.
 MAX_TOKEN_STEPS = 8
+# E3-A9: a mining lineage's bound is its run's vocabulary's longest token
+# (run_token_steps), at most MINED_TOKEN_STEPS -- a mined token lasts up to
+# 64 frames, 16 base steps (muzero.TOKEN_MINED_MAX_FRAMES); this bound when
+# its vocab.json cannot be read
+MINED_TOKEN_STEPS = 16
 REWARD_MAX_SLACK = 1e-4
 # A stored record reward past the reward support's edge (muzero.REWARD_CLIP
 # units) saturates the reward / value-prefix heads (the distillation step's
@@ -395,10 +452,10 @@ PREP_CHECKS = ("the value support (", "past the reward supports",
                # a kept discount past the cap
                "_discount_rule ", "past the cap")
 # Every suite supervise_gen2.py ran, plus this supervisor's, Test B's, Test
-# C's, Test C2's and Test B2W's.
+# C's, Test C2's, Test B2W's and E3's.
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
           "tests/test_testc.py", "tests/test_testc2.py",
-          "tests/test_testb2w.py",
+          "tests/test_testb2w.py", "tests/test_e3.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",
           "tests/test_supervise_gen1.py", "tests/test_gen1.py",
           "tests/test_pbn.py",
@@ -439,6 +496,11 @@ AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
            # an autocrlf tree)
            "benchmarks/probes/probe_prefix_bn.py",
            "benchmarks/probes/step0_prefix_bn/states.npz",
+           # E3's suite checks the prep's mining against E3a's probe (and
+           # the probe modules it imports)
+           "benchmarks/probes/probe_e3a_sequences.py",
+           "benchmarks/probes/probe_action_census.py",
+           "benchmarks/probes/probe_e1_equivalence.py",
            "benchmarks/supervisors/supervise_gen1.py",
            "benchmarks/supervisors/supervise_gen2.py",
            "benchmarks/supervisors/supervise_testb.py"] + SUITES
@@ -451,9 +513,25 @@ def gen(variant):
 
 def master_of(variant):
     """The variant whose final snapshot is `variant`'s master (F{k-1}'s);
-    None for f0 / t0 (from scratch)."""
+    None for f0 / t0 (from scratch). E3's m1: the external t0
+    (lineage_variant)."""
     k = gen(variant)
-    return f"{variant[0]}{k - 1}" if k else None
+    return lineage_variant(variant[0], k - 1) if k else None
+
+
+def is_external(variant):
+    """`variant` is the bound lineage's EXTERNAL run (E3: Test B2's t0 in
+    its frozen tree): its files are read there, never written."""
+    ext = LINEAGES[LINEAGE].get("external")
+    return bool(ext) and variant in (ext["variant"],)
+
+
+def tree_of(variant):
+    """The tree holding `variant`'s run folder and probe jsonls: REPO, or
+    the external run's frozen tree (E3-A1)."""
+    if is_external(variant):
+        return LINEAGES[LINEAGE]["external"]["tree"]
+    return REPO
 
 
 def is_student(variant):
@@ -478,10 +556,10 @@ def run_name(variant, seed):
 
 def paths(variant, seed):
     """(REL, BASE, JSONL, CKPT, DEATHS) of `variant` at `seed`: one folder
-    per run."""
+    per run (E3's external run: under its own tree, tree_of)."""
     arm = VARIANTS[variant]
     rel = f"benchmarks/results/{run_name(variant, seed)}"
-    base = os.path.join(REPO, *rel.split("/"))
+    base = os.path.join(tree_of(variant), *rel.split("/"))
     return (rel, base, os.path.join(base, f"ablation{TAG}.jsonl"),
             os.path.join(base, f"resume{TAG}-{arm}-seed{seed}.ckpt"),
             os.path.join(base, "deaths.log"))
@@ -505,6 +583,16 @@ def own_play_rel(variant, seed):
             f"-seed{seed}")
 
 
+def own_play_arg(variant, seed):
+    """The own-play log as the prep's --from-log names it (and its
+    vocab.json's "log_dir" records it): REPO-relative (own_play_rel), or
+    absolute for E3's external master in its frozen tree."""
+    rel = own_play_rel(variant, seed)
+    if is_external(variant):
+        return os.path.join(tree_of(variant), *rel.split("/"))
+    return rel
+
+
 def snapshot_path(variant, seed, it):
     """The run's weights snapshot at row `it` (ablation.save_weight_snapshot
     under the run folder)."""
@@ -513,10 +601,12 @@ def snapshot_path(variant, seed, it):
                         f"weights-iter{it:03d}.pth")
 
 
-def probe_path(probe_run, suffix):
+def probe_path(probe_run, suffix, tree=None):
     """An exact-eval probe jsonl in this tree (probe_exhaustive_eval files
-    its records under the snapshot's grandparent folder: the probe run)."""
-    return os.path.join(REPO, "benchmarks", "probes",
+    its records under the snapshot's grandparent folder: the probe run) --
+    or in `tree` (E3's external run's, tree_of)."""
+    return os.path.join(REPO if tree is None else tree, "benchmarks",
+                        "probes",
                         f"probe_exhaustive_eval-{probe_run}{suffix}.jsonl")
 
 
@@ -536,9 +626,11 @@ def stop_env_steps(variant, seed):
     env steps (final_row), so one generation's overshoot past its stop
     shortens the next instead of accumulating; F0's is target(f0).
     SystemExit "STOP UNKNOWN" while a predecessor is not complete, "STOP NOT
-    POSITIVE" when the lineage has spent its budget (Kai's call)."""
+    POSITIVE" when the lineage has spent its budget (Kai's call). E3: the
+    earlier generations start with the external T0 (lineage_variant), its
+    final row read in its frozen tree."""
     k = gen(variant)
-    earlier = [f"{variant[0]}{j}" for j in range(k)]
+    earlier = [lineage_variant(variant[0], j) for j in range(k)]
     spent = []
     for v in earlier:
         try:
@@ -643,8 +735,12 @@ def quick(variant, seed):
     step after its offline steps; Generation 2's audit r1 A-L1 / B-L2: an
     edit to the master's arm fails here, not as three failed preps).
     Test C: the lineage's "resets" knobs. Test C2: the lineage's "ramps"
-    knobs, every other lineage's RAMP_OFF. SystemExit while F{k-1} has no
-    final row (master_final): the preflight reports it."""
+    knobs, every other lineage's RAMP_OFF. E3: the mining lineage's arm is
+    its twin's (Test B2's T{k}) but for _mine and the master, the prep and
+    the mined-token build are this tree's -- and m1's master checks read
+    the external T0's REAL final snapshot in its frozen tree. SystemExit
+    while F{k-1} has no final row (master_final): the preflight reports
+    it."""
     arm = VARIANTS[variant]
     code = ("import sys; sys.path[:0] = ['.', 'experiments']; "
             "import muzero, ablation, muzero_vtree, distill; "
@@ -737,6 +833,32 @@ def quick(variant, seed):
              f"    _o = muzero.make_optimizer(ablation.build_networks(_sp)"
              f"['projector'].parameters())\n" + built)
     code += f"exec({block!r}); "
+    lin = LINEAGES[LINEAGE]
+    if lin.get("mine"):
+        # E3: the arm is its twin lineage's (Test B2's T{k}) but for _mine
+        # and the master, the prep can mine (--mine), the mined-token build
+        # (E3-A2 / A9's 16-step bound) is this tree's; the master's own
+        # _mine (M1's for m2; none for the external T0)
+        twin = f"{LINEAGES[lin['twin']]['arm']}-{lin['twin']}{gen(variant)}"
+        mm = master_of(variant)
+        code += ("assert spec.get('_mine') is True; "
+                 f"_t = ablation.ARMS[{twin!r}]; "
+                 "_skip = ('_master_arm', '_mine', '_doc'); "
+                 "assert {_k: _v for _k, _v in spec.items() if _k not in "
+                 "_skip} == {_k: _v for _k, _v in _t.items() if _k not in "
+                 "_skip}; "
+                 "assert '_mine' not in _t; "
+                 "assert hasattr(distill, 'mine_tokens') and "
+                 "hasattr(distill, 'mined_path_weights') and "
+                 "'mine' in distill.prep.__code__.co_varnames; "
+                 "assert hasattr(muzero, 'token_inputs') and "
+                 "hasattr(ablation, 'support_steps') and "
+                 "hasattr(ablation, 'declared_mined'); "
+                 "assert muzero.TOKEN_MINED_PER_SWAP == 8; "
+                 "assert muzero.TOKEN_MINED_MAX_FRAMES // "
+                 f"muzero.TOKEN_BASE_FRAMES == {MINED_TOKEN_STEPS}; "
+                 f"assert ablation.ARMS[{VARIANTS[mm]!r}].get('_mine') is "
+                 f"{None if is_external(mm) else True!r}; ")
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "
@@ -889,9 +1011,9 @@ def predecessor(variant, seed):
     rows = tuple(sorted(run_rows(m, seed)))
     if is_student(m):
         rows = (0,) + rows
-    probes = [(probe_path(run, s), rows) for s in ("-acting", "")]
+    probes = [(probe_path(run, s, tree_of(m)), rows) for s in ("-acting", "")]
     if is_student(m):
-        probes += [(probe_path(run + "-offline", s), CURVE_ROWS)
+        probes += [(probe_path(run + "-offline", s, tree_of(m)), CURVE_ROWS)
                    for s in ("-acting", "")]
     return (NAMES[m], ck, probes, os.path.join(base, "supervisor.log"),
             "supervise_testb.py", m, os.path.join(base, "ABANDONED"))
@@ -1061,7 +1183,7 @@ def master_files_missing(variant, seed):
     except SystemExit:
         return []
     out = [] if os.path.exists(snap) else [snap]
-    log = os.path.join(REPO, *own_play_rel(m, seed).split("/"))
+    log = os.path.join(tree_of(m), *own_play_rel(m, seed).split("/"))
     lack = [i for i in range(1, k + 1)
             if not os.path.exists(os.path.join(log, f"iter-{i:03d}.pkl"))]
     if lack:
@@ -1086,7 +1208,7 @@ def choose_master(variant, seed):
         raise SystemExit(master_abandoned_msg(variant))
     k, snap = master_final(variant, seed)
     last2 = sorted(run_rows(m, seed))[-2:]
-    acting = probe_path(run_name(m, seed), "-acting")
+    acting = probe_path(run_name(m, seed), "-acting", tree_of(m))
     rows = probe_rows(acting)
     if len(last2) < 2 or any(isinstance(rows.get(i), bool) or not isinstance(
             rows.get(i), (int, float)) for i in last2):
@@ -1209,7 +1331,7 @@ def set_intact(variant, seed):
     if doc.get("master_snapshot") != snap:
         return False, (f"vocab.json's master snapshot is "
                        f"{doc.get('master_snapshot')!r}, not {snap}")
-    log = own_play_rel(m, seed)
+    log = own_play_arg(m, seed)
     if doc.get("source") != "own-play log" or doc.get("log_dir") != log:
         return False, (f"vocab.json's source is {doc.get('source')!r} "
                        f"({doc.get('log_dir')!r}), not {name}'s own-play "
@@ -1226,6 +1348,12 @@ def set_intact(variant, seed):
         return False, (f"vocab.json's discount_rule is "
                        f"{doc.get('discount_rule', 'halve')!r}, not the "
                        f"lineage's {DISCOUNT_RULE!r}")
+    # E3: a mining lineage's prep is a mined one (distill.py --mine), every
+    # other lineage's not
+    mine = bool(LINEAGES[LINEAGE].get("mine"))
+    if (doc.get("mine") is True) != mine:
+        return False, (f"vocab.json's mine is {doc.get('mine')!r}, not the "
+                       f"lineage's {mine!r} (distill.py --mine)")
     # the snapshot's bytes too, not only its path and iteration: a fresh
     # restart of the master that ends at the same K would otherwise pass
     # (audit r1 B-L2)
@@ -1248,6 +1376,96 @@ def prep_log_tail(plog):
     200 characters, or ''."""
     lines = [l.strip() for l in lines_of(plog) if l.strip()]
     return lines[-1][:200] if lines else ""
+
+
+def prep_command(variant, seed, pick):
+    """The prep's command line: experiments/distill.py on the master
+    `pick` chose, from its own-play log (own_play_arg: E3's external T0's
+    as an absolute path) -- with --mine for a mining lineage (E3: its arms'
+    _mine, which quick() pins)."""
+    return ([PY, "experiments/distill.py", "--master", pick["snapshot"],
+             "--master-iterations", str(pick["iterations"]),
+             "--out", prep_rel(variant), "--seed", "0",
+             "--from-log", own_play_arg(master_of(variant), seed)]
+            + (["--mine"] if LINEAGES[LINEAGE].get("mine") else []))
+
+
+def json_token_steps(tok):
+    """A vocab.json token's (action, frames) steps: [a, f] -- a duration
+    token -- or [[a1, f1], [a2, f2], ...] -- a mined one (E3-A2) -- as a
+    list of int pairs. ValueError on anything else."""
+    if not isinstance(tok, list) or not tok:
+        raise ValueError(f"not a token: {tok!r}")
+    steps = tok if isinstance(tok[0], list) else [tok]
+    out = []
+    for s in steps:
+        if (not isinstance(s, list) or len(s) != 2
+                or any(type(x) is not int for x in s)):
+            raise ValueError(f"not a token step: {s!r}")
+        out.append((s[0], s[1]))
+    return out
+
+
+def json_token_key(tok):
+    """A vocab.json token as distill's shares key: "a,f" or "a1,f1;a2,f2"
+    (muzero.token_key)."""
+    return ";".join(f"{a},{f}" for a, f in json_token_steps(tok))
+
+
+def prep_doc(variant):
+    """The prep's vocab.json as a dict, or None (missing / unreadable)."""
+    try:
+        with open(os.path.join(prep_dir(variant), "vocab.json"),
+                  encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def run_token_steps(variant):
+    """E3-A9: the base steps one record of `variant`'s run can sum, the
+    bound row_alerts reads -- MAX_TOKEN_STEPS (8: a 32-frame token) for
+    every lineage that does not mine (bit for bit as ever); for a mining
+    lineage's student, its prep's vocabulary's longest token (vocab.json's
+    "vocab", nested mined tokens read as JSON lists), MINED_TOKEN_STEPS (16)
+    while that cannot be read."""
+    if not LINEAGES[LINEAGE].get("mine") or not is_student(variant):
+        return MAX_TOKEN_STEPS
+    doc = prep_doc(variant)
+    try:
+        vocab = doc["vocab"]
+        steps = max(sum(f for _, f in json_token_steps(t)) // 4
+                    for t in vocab)
+    except (TypeError, KeyError, ValueError):
+        return MINED_TOKEN_STEPS
+    return steps
+
+
+def prep_tokens_line(variant):
+    """E3's PREP line (read (2)): the mined prep's appended tokens (vocab.json
+    "mined": token, count, k, consistency, score), its vocabulary's size and
+    what the 1% rule dropped (a mined token of the master's among them: it
+    did not survive the swap) -- nested tokens read as JSON lists; a line
+    saying so when vocab.json cannot be read."""
+    doc = prep_doc(variant)
+    try:
+        mined = [(json_token_key(e["token"]), e["count"], e["k"],
+                  e["consistency"], e["score"]) for e in doc["mined"]]
+        vocab = [json_token_steps(t) for t in doc["vocab"]]
+        dropped = [json_token_key(t) for t in doc["dropped"]]
+        gone = [d for d, t in zip(dropped, doc["dropped"])
+                if isinstance(t[0], list)]
+        shown = "; ".join(f"{k} (count {n}, k {kk}, c {c:.3f}, score "
+                          f"{s:.1f})" for k, n, kk, c, s in mined)
+    except (TypeError, KeyError, ValueError, IndexError) as e:
+        return (f"MINED {variant}: vocab.json's mined tokens cannot be read "
+                f"({type(e).__name__}: {e})")
+    return (f"MINED {variant}: {len(mined)} tokens appended"
+            + (f": {shown}" if shown else "")
+            + f"; vocabulary {len(vocab)} slots; dropped {len(dropped)}"
+            + (f" (mined tokens among them: {', '.join(gone)})" if gone
+               else ""))
 
 
 def run_prep(variant, seed, env, redo_ok=True):
@@ -1318,6 +1536,8 @@ def run_prep(variant, seed, env, redo_ok=True):
         # counts. With no prep alive, its tmp files are stale.
         if prep_done(variant) and set_intact(variant, seed)[0]:
             print(f"PREP done (by an earlier prep): {prel}", flush=True)
+            if LINEAGES[LINEAGE].get("mine"):
+                print(prep_tokens_line(variant), flush=True)
             return True
         for name in os.listdir(pdir):
             if name.endswith(".tmp"):
@@ -1332,10 +1552,7 @@ def run_prep(variant, seed, env, redo_ok=True):
         plog = os.path.join(pdir, "prep.log")
         with open(plog, "ab") as log:
             p = subprocess.Popen(
-                [PY, "experiments/distill.py", "--master", pick["snapshot"],
-                 "--master-iterations", str(pick["iterations"]),
-                 "--out", prel, "--seed", "0",
-                 "--from-log", own_play_rel(master_of(variant), seed)],
+                prep_command(variant, seed, pick),
                 cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT,
                 creationflags=0x08000000)
             born, told = time.time(), 0.0
@@ -1354,6 +1571,8 @@ def run_prep(variant, seed, env, redo_ok=True):
             ok, why = set_intact(variant, seed)
             if ok:
                 print(f"PREP done (attempt {attempt}): {prel}", flush=True)
+                if LINEAGES[LINEAGE].get("mine"):
+                    print(prep_tokens_line(variant), flush=True)
                 return True
             print(f"PREP attempt {attempt}: {why}", flush=True)
         else:
@@ -1624,6 +1843,13 @@ class Rows:
                        r.get("tok_decisions_per_game"),
                        r.get("tok_duration_play_share"),
                        r.get("tok_duration_search_share")))
+            if "tok_mined_play_share" in r:
+                # E3-A10 read (2): each mined token's play and search share,
+                # the redundancy (search mass on overlapping mined tokens)
+                tok += (" | mined play %s  search %s  overlap %s" % (
+                    r.get("tok_mined_play_share"),
+                    r.get("tok_mined_search_share"),
+                    r.get("tok_mined_overlap_search_share")))
             # the rebuild's live reads (as PB's audit r1 B-N4): the search
             # targets' entropy (read (4)), the step-K (5) and step-1
             # value-prefix errors (eval-mode BN, the per-step sets)
@@ -1649,7 +1875,10 @@ class Rows:
                       r.get("reward_max"), tok, plastic, ramp_text(r), el,
                       per),
                   flush=True)
-            alerts = row_alerts(r, per, self.ceiling)
+            # (E3-A9: a mining lineage's bound is its vocabulary's longest
+            # token; every other's MAX_TOKEN_STEPS)
+            alerts = row_alerts(r, per, self.ceiling,
+                                run_token_steps(self.variant))
             reset = reset_alert(r, prior)
             if reset:
                 alerts.append(reset)
@@ -1960,14 +2189,17 @@ def ramp_text(r):
         ramp.get("cycle_steps"), trace, *steps)
 
 
-def row_alerts(r, per, ceiling):
+def row_alerts(r, per, ceiling, steps=None):
     """What a row shows that needs a human: a reward_ceiling other than the
     run's constant ceiling `ceiling` (the arm did not apply it, or the arm
     is not this one; None: a student's prep's vocab.json holds none to
     check against), a pace past PACE_ALERT_MIN min/iteration
     (pre-registered: Kai's call), a stored record reward past
     MAX_TOKEN_STEPS x the ceiling (the clip did not apply) or past the
-    reward support's edge (REWARD_SUPPORT_EDGE: saturated)."""
+    reward support's edge (REWARD_SUPPORT_EDGE: saturated). E3-A9: `steps`,
+    the run's bound in base steps (run_token_steps: a mining lineage's
+    vocabulary's longest token); None is MAX_TOKEN_STEPS, as ever."""
+    bound = MAX_TOKEN_STEPS if steps is None else steps
     out = []
     it, c = r.get("iteration"), r.get("reward_ceiling")
     if isinstance(it, int) and it >= 1:
@@ -1986,10 +2218,12 @@ def row_alerts(r, per, ceiling):
         pass
     m = r.get("reward_max")
     if (ceiling is not None and isinstance(m, (int, float))
-            and m > MAX_TOKEN_STEPS * ceiling + REWARD_MAX_SLACK):
-        out.append(f"reward_max {m} > {MAX_TOKEN_STEPS} x the ceiling "
-                   f"{ceiling:.4f} (a 32-frame token sums at most "
-                   f"{MAX_TOKEN_STEPS} base steps at the ceiling: the clip "
+            and m > bound * ceiling + REWARD_MAX_SLACK):
+        longest = ("a 32-frame token" if bound == MAX_TOKEN_STEPS
+                   else "the vocabulary's longest token")
+        out.append(f"reward_max {m} > {bound} x the ceiling "
+                   f"{ceiling:.4f} ({longest} sums at most "
+                   f"{bound} base steps at the ceiling: the clip "
                    f"did not apply)")
     if isinstance(m, (int, float)) and m > REWARD_SUPPORT_EDGE:
         out.append(f"reward_max {m} > {REWARD_SUPPORT_EDGE:g}, the reward "
@@ -2114,12 +2348,12 @@ def main(argv):
         return write_manifest()
     if argv and argv[0][:1] in LINEAGES:
         # the variant's lineage: Test B's f0-f4, Test B2's t0-t2, Test C's
-        # r0 / n0 or Test C2's a0
+        # r0 / n0, Test C2's a0, Test B2W's w0-w2 or E3's m1 / m2
         configure(argv[0][:1])
     if (len(argv) != 2 or argv[0] not in VARIANTS
             or not argv[1].isdigit() or int(argv[1]) not in SEEDS):
         every = [f"{c}{k}" for c, spec in LINEAGES.items()
-                 for k in range(spec["generations"])]
+                 for k in range(spec.get("first", 0), spec["generations"])]
         print(f"usage: supervise_testb.py <variant: {every}> "
               f"<seed: {sorted(SEEDS)}> | --write-manifest", flush=True)
         return 2

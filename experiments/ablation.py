@@ -1296,6 +1296,38 @@ for _k in range(1, 3):
     }
 del _k
 
+# E3 (Kai, 2026-11-05; CURRICULUM "E3", amendments E3-A1..A12): Test B2's
+# lineage with tokens MINED from the master's own play at both swaps. Its
+# generation 0 IS Test B2's T0 (E3-A1: the frozen run, reused), so only M1
+# and M2 are arms: T1 and T2 exactly, but for `_mine` (the prep runs with
+# distill.py --mine: the student's vocabulary appends mined tokens, E3-A3 ..
+# A6) and M2's master M1. The chain supervisor's lineage "m".
+MINE_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+            "tokens-mined")
+ARMS[MINE_ARM + "-m1"] = {
+    **ARMS[TWO_ARM + "-t1"],
+    "_master_arm": TWO_ARM + "-t0",
+    "_mine": True,
+    "_doc": "E3's generation M1: Test B2's T1 (...-tokens-two-t1) with "
+            "mining at the swap -- the distilled student of T0's final "
+            "snapshot (Test B2's own T0, reused: E3-A1) through Test B2's "
+            "swap, its prep (distill.py --mine) appending up to 8 tokens "
+            "mined from T0's own-play log after the 1% rule (E3-A3, A4), "
+            "relabeling T0's stretches that play them (A6), every target "
+            "under the path-product rule (A5); then T1's offline steps and "
+            "online play to its env-step stop. Run as TK.",
+}
+ARMS[MINE_ARM + "-m2"] = {
+    **ARMS[TWO_ARM + "-t2"],
+    "_master_arm": MINE_ARM + "-m1",
+    "_mine": True,
+    "_doc": "E3's generation M2: Test B2's T2 (...-tokens-two-t2) with "
+            "mining at the swap -- the distilled student of M1's final "
+            "snapshot, its prep (distill.py --mine) treating M1's mined "
+            "tokens as tokens (E3-A8) and appending tokens mined from M1's "
+            "own play. Run as TK.",
+}
+
 # Test B2W (Kai, 2026-11-04; pre-registered in CURRICULUM "Test B2W"): Test
 # B2's lineage with one change, the optimizer -- BBF's AdamW (configs/BBF.gin,
 # agents/spr_agent.py create_scaling_optimizer: lr 0.0001, eps 0.00015,
@@ -2699,12 +2731,16 @@ def student_arm(arm, path):
     and, when its master held mined tokens ("master_mined"),
     `_master_mined` beside `_master_vocab`; the ceiling's support check
     reads the vocabulary's longest token (E3-A9). A vocab.json without them
-    applies exactly as before."""
+    applies exactly as before. An arm with `_mine` (E3's M1 / M2) takes
+    only a mined prep's vocab.json (its "mine": distill.py --mine)."""
     spec = ARMS[arm]
     if spec.get("_student") not in ("distill", "fresh"):
         raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
                          f"arms only; '{arm}' is not one")
     vocab, sha, doc = load_student_doc(path, spec["TOKEN_VOCAB"])
+    if spec.get("_mine") and doc.get("mine") is not True:
+        raise SystemExit(f"{path}: not a mined prep (distill.py --mine), "
+                         f"but '{arm}' mines")
     mined = declared_mined(doc, "mined", path)
     master_mined = declared_mined(doc, "master_mined", path)
     master_vocab = student_master_vocab(spec, doc, path)
