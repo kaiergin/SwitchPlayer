@@ -789,6 +789,54 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Test B2W: Test B2's lineage with BBF's AdamW -- STOPPED in W1 by Kai, AdamW dropped (seed 0), 2026-11-05
+
+(Pre-registration: "Next experiment (pre-registered) -- Test B2W", below,
+with its amendments, audits and run notes.)
+DECISION: Kai 2026-11-05 07:30, at W1's row 35: "Is this worth
+continuing. I think we should probably just drop adam and move onto the
+next thing." Stopped at 07:32 (the supervisors w1 / w2 and W1's trainer by
+exact PID; no Ray process left); W1 and W2 ABANDONED at 07:33, so the
+hand-off ran W1's abandon pass over its snapshots. W2 never ran, so read
+(1) has no window and no pre-registered verdict.
+WHAT RAN: W0 complete (iteration 52, 33,592 env steps); the swap to W1
+(the prep from W0's own play); W1 to iteration 35 (25,573 of its 33,075
+env steps). 0 non-finite steps; no alert but the advisory memory ones.
+DEPLOYED / trainer-BN exact eval (T = Test B2's control at the same row):
+  W0 rows 5-final: 334 / 753 / 310 / 401 / 1327 / 612 / 980 / 431 / 694 /
+     739 / 630 (iteration 52); every row 655.5 (n 11) against T0's 709.1
+     (n 10): -53.6, band +-189.6 -> no different (read (3)'s W0 against
+     T0, descriptive). Far more volatile than T0 (adjacent swings up to
+     +-926; T0's largest drop -67).
+  W1 row 0 520 (T1 892), rows 5-30: 846 / 396 / 508 / 277 / 245 / 245
+     (T1 730 / 656 / 850 / 901 / 1045 / 1849): by row 20 at or below a
+     random policy (307), where it stayed.
+  W1's TRAINER-BN nets were degenerate from the offline phase on: exactly
+     333.3 at row 0, row 5 and three offline points, exactly 240 from row
+     10 -- a fixed policy whose score did not move as the weights did.
+     W0's trainer-BN ran far below its deployed throughout; T0's and T1's
+     tracked theirs.
+MECHANISM, as far as the logs show (one seed):
+  - Decisions collapsed to the shortest token. Frames per decision 16.9
+    at W0's row 5 -> 5-7 from row 10 (T0's recipe ~19-27); W1 4.3-6.3
+    (4-frame tokens 85-96% of play, 82-86% of the search mass).
+  - W0's prior never sharpened (policy_maxp 0.38-0.50, entropy rising to
+    2.1; T0's sharpened). The swap's prep then dropped 19 of 36 tokens --
+    nearly every 16- and 32-frame token -- and discarded 38% of the
+    master's search mass on them; W1's distillation set was 3.5x T1's
+    (W0 made ~3x the decisions).
+  - The birth search that labels new data runs on the trainer's nets in
+    eval mode (their BN running statistics); those were the degenerate
+    nets, so W1's new targets kept pushing toward 4-frame tokens.
+  - Not separated: AdamW's own effect in this stack against an
+    interaction of AdamW with our BN setup (BBF has no eval-mode birth
+    search). A CPU diagnostic on W1's snapshots (eval-mode running
+    statistics against the acting statistics on the same states) would
+    separate them; not run, as AdamW is dropped (Kai's call).
+DECISION AFTER (the pre-registration's NO DIFFERENT / WORSE branches):
+  EfficientZero's SGD stays in the base. E3 runs on Test B2's recipe. Next
+  (Kai: "the next thing"): E3a's tests and probe, then E3.
+
 ### Queued experiment (pre-registered) -- E3: tokens mined from the agent's own play, added at every swap, with E3a (does grouping by latents make sense?) first (Kai, 2026-11-04)
 
 DECISION: Kai 2026-11-04, with Test B2W ("plan out a queued test that
