@@ -1428,6 +1428,15 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   and the supervisors m1 (cmd pid 26884; STOP 33051, preflighting) and m2
   (cmd pid 13592; WAITING for M1). KEEP Y:\SwitchPlayer-testb2-run (T0 is
   generation 0; T1-T2 the control).
+  PAUSED 12:57 11-05 (before anything trained): m1's PREFLIGHT failed
+  (12:56) -- tests/test_bnrecal.py::test_run_one_snapshots_carry_the_
+  pipelines_acting_states, which passes alone in the run tree and passed
+  in the pre-launch pass: that pass ran each suite in its OWN pytest
+  process (run_suites_b2.sh), the preflight runs all 28 in ONE, so a
+  suite leaks state into it (not test_e3.py alone: test_e3 + the test in
+  one process pass). Stopped the m1 / m2 supervisors by exact pid (no
+  child was running); the hand-off left waiting. Diagnosis: the
+  preflight's own order in one process, run in the run tree.
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
