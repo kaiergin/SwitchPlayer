@@ -1257,6 +1257,42 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   (E3-A11) DECISION AFTER: (1) BETTER -> mining joins the swap; NO
       DIFFERENT -> Kai's call (with (3): longer decisions at the same
       score are a real-time gain); WORSE -> diagnose from (2).
+  BUILT, PART 1 (11-05, pre-audit; a build agent; nine suites pass, 703
+  tests: test_e3 67 new, test_tokens 72 (+1 CUDA skip), test_distill 58,
+  test_gen0 37, test_rgrow 72, test_pbn 30, test_e3a 55, test_testb 67,
+  test_supervise_testb 245): muzero's token helpers (token_is_mined,
+  token_steps, token_total_frames, token_inputs, canon_token, canon_vocab,
+  token_json, token_key; token_frames and token_edge_discounts by total
+  frames); ablation's stepwise play_token, token_gate, the bias cap, the
+  support check by the longest token, the vocabulary checks with a
+  declared mined tail, the mined row diagnostics; distill's mining (ported
+  from probe_e3a), E3-A5's targets (mined_path_weights, masked_targets),
+  relabeling (retokenize), the second swap, the `--mine` prep flag; a
+  slow real-env test of both swaps. Every existing arm, vocab.json,
+  snapshot and checkpoint bit for bit (parity tests).
+  (E3-A12) the build's judgment calls, now amendments: a token is mined
+      when its first element is itself a step (numpy ints stay duration
+      tokens); the candidate pool is every key (no top-32 cut), k the
+      standing spelling's decisions, only scores > 0 selected; an
+      occurrence ending at a game-ending life's last record counts but is
+      left out of c (E3a's stale-stack rule); E3-A5's prior uses the nets
+      the master's search ran with (its raw BN states; q came from them),
+      E3-A3's values and latents the acting states; E3-A5 and E3-A6 apply
+      to the tokens mined AT THIS SWAP -- the master's own mined tokens get
+      its q directly (it searched them) and are never relabeled; a k = 1
+      relabel fires only where a dropped token equals a new mined token in
+      inputs; spellings keep their form (duplicates judged by inputs); the
+      E3-A9 support check applies only to vocabularies holding a mined
+      token (duration-only ones keep the per-base-step check bit for bit);
+      mined tokens have their own row bucket; "overlap" (read (2)) = two
+      tokens agreeing on every base step they share, the played slot
+      excluded; at most 8 mined per swap is enforced on the student, not
+      on a master (its mined tokens may span swaps).
+  LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
+  is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
+  prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
+  reward), nested tokens in the supervisor's vocab.json readers, the run
+  tooling (hand-off, launcher, smoke, pre-launch check, scorer).
 
 ### Next experiment (pre-registered) -- Test B2W: Test B2's lineage with BBF's AdamW in place of EfficientZero's SGD (Kai, 2026-11-04)
 

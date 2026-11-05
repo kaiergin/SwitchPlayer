@@ -411,8 +411,23 @@ BN_RECAL_FRAMES = 4096
 # -- and value targets measure the TD horizon in frames. None = the plain
 # action space: every path unchanged. The vocabulary never changes during a
 # run (P3 swaps vocabularies only between generations).
+# Curriculum E3 (Kai, 2026-11-05; CURRICULUM "E3", E3-A2): a slot is either
+# a DURATION token, the (action, frames) int pair above, bit for bit, or a
+# MINED token, a tuple of >= 2 steps ((a1, f1), (a2, f2), ...), each step
+# an action held for a whole number of base steps, at most
+# TOKEN_MINED_MAX_FRAMES frames in all. A mined token is still one slot (its
+# own dynamics embedding row), one search edge and one decision: it plays
+# each base step with that step's action (token_inputs), its reward is the
+# sum over its base steps, its edge discounts DISCOUNT ** (total frames /
+# TOKEN_BASE_FRAMES) and its n-step targets count its total frames
+# (token_total_frames). The two kinds are told apart by the form of the
+# token's first element (token_is_mined); canon_token reads JSON lists.
 TOKEN_VOCAB = None
 TOKEN_BASE_FRAMES = 4
+# E3-A2 / E3-A4: a mined token's length cap (16 base steps) and the most
+# mined tokens one swap appends
+TOKEN_MINED_MAX_FRAMES = 64
+TOKEN_MINED_PER_SWAP = 8
 # Early long-token bias for prior acting under TOKEN_VOCAB: the sampling
 # weights are multiplied by (frames / TOKEN_BASE_FRAMES) ** b, b falling
 # linearly from TOKEN_LONG_BIAS at step 0 to 0 at TOKEN_LONG_BIAS_END of the
@@ -746,12 +761,85 @@ def prior_acting_temperature(training_steps):
     return t * PRIOR_ACT_TEMP_SCALE
 
 
+def _token_seq(x):
+    return isinstance(x, (list, tuple, np.ndarray))
+
+
+def token_is_mined(tok):
+    """E3: a MINED token (a tuple of (action, frames) steps) rather than a
+    duration token's (action, frames) pair -- told apart by the form of the
+    first element, never by its type of number."""
+    return _token_seq(tok[0])
+
+
+def token_steps(tok):
+    """A token's steps: ((a, f),) for a duration token, the mined token's own
+    steps otherwise."""
+    return tok if token_is_mined(tok) else (tok,)
+
+
+def token_total_frames(tok):
+    """Raw frames a token lasts: a duration token's frames, the sum of a mined
+    token's steps' frames."""
+    if token_is_mined(tok):
+        return sum(int(f) for _, f in tok)
+    return int(tok[1])
+
+
+def token_inputs(tok):
+    """(E3-A2, E3a's A13) a token's raw input per BASE step: each step (a, f)
+    is f / TOKEN_BASE_FRAMES base steps of action a. Two tokens with the same
+    inputs are one token."""
+    return tuple(int(a) for a, f in token_steps(tok)
+                 for _ in range(int(f) // TOKEN_BASE_FRAMES))
+
+
+def canon_token(tok):
+    """A token in its canonical form (E3-A2): a duration token as an (int,
+    int) tuple; a mined token as a tuple of such steps (JSON lists converted);
+    a one-step sequence collapses to its (a, f). TypeError / ValueError on
+    anything else."""
+    if not _token_seq(tok) or len(tok) == 0:
+        raise TypeError(f"not a token: {tok!r}")
+    if not _token_seq(tok[0]):
+        a, f = tok
+        return (int(a), int(f))
+    steps = []
+    for s in tok:
+        if not _token_seq(s) or len(s) == 0 or _token_seq(s[0]):
+            raise TypeError(f"not a token step: {s!r}")
+        a, f = s
+        steps.append((int(a), int(f)))
+    return steps[0] if len(steps) == 1 else tuple(steps)
+
+
+def canon_vocab(vocab):
+    """A vocabulary's tokens in canonical form (canon_token), as a tuple."""
+    if isinstance(vocab, (str, bytes)) or not _token_seq(vocab):
+        raise TypeError(f"not a vocabulary: {vocab!r}")
+    return tuple(canon_token(t) for t in vocab)
+
+
+def token_json(tok):
+    """A canonical token as JSON lists: [a, f] (list(t), as every duration
+    token was always written) or [[a1, f1], [a2, f2], ...]."""
+    if token_is_mined(tok):
+        return [[int(a), int(f)] for a, f in tok]
+    return [int(tok[0]), int(tok[1])]
+
+
+def token_key(tok):
+    """A token as a string key: "a,f" (the prep's shares keys, as always)
+    or "a1,f1;a2,f2;..." for a mined token."""
+    return ";".join(f"{int(a)},{int(f)}" for a, f in token_steps(tok))
+
+
 def token_frames(action):
-    """Raw frames one decision lasts: the token's under TOKEN_VOCAB, else
-    TOKEN_BASE_FRAMES."""
+    """Raw frames one decision lasts: the token's under TOKEN_VOCAB (a mined
+    token's TOTAL frames, E3-A2), else TOKEN_BASE_FRAMES."""
     if TOKEN_VOCAB is None:
         return TOKEN_BASE_FRAMES
-    return int(TOKEN_VOCAB[int(action)][1])
+    return token_total_frames(TOKEN_VOCAB[int(action)])
 
 
 def token_edge_discounts():
@@ -759,11 +847,13 @@ def token_edge_discounts():
     TOKEN_VOCAB (Python floats, as DISCOUNT), else None -- callers then keep
     their scalar discount untouched. A base-length token's discount is
     DISCOUNT exactly (x ** 1.0 == x), so a vocabulary of base-length tokens
-    reproduces the scalar arithmetic bit for bit."""
+    reproduces the scalar arithmetic bit for bit. A mined token's frames are
+    its total frames (E3-A2: gamma_frame ** total frames)."""
     if TOKEN_VOCAB is None:
         return None
     d = float(DISCOUNT)
-    return tuple(d ** (int(f) / TOKEN_BASE_FRAMES) for _, f in TOKEN_VOCAB)
+    return tuple(d ** (token_total_frames(t) / TOKEN_BASE_FRAMES)
+                 for t in TOKEN_VOCAB)
 
 
 def token_long_bias(training_steps):

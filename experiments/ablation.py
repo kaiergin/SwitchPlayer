@@ -2226,13 +2226,15 @@ def play_token(env, token, stack, inner=None):
     reward (REWARD_GROWTH clips per base step). A module function, not a
     Run method: the Ray actor's Run shell provides only env / searcher /
     env_steps (tests/test_ray_harness.py pins play_episode's self.*
-    surface)."""
-    act, frames = muzero.TOKEN_VOCAB[int(token)]
-    n = int(frames) // muzero.TOKEN_BASE_FRAMES
+    surface). E3 (E3-A2): a MINED token plays each base step with that
+    step's own action (muzero.token_inputs; a duration token's are its
+    action repeated, the same env.step calls as ever)."""
+    inputs = muzero.token_inputs(muzero.TOKEN_VOCAB[int(token)])
+    n = len(inputs)
     total, done = 0.0, 0
     pushed = None if INNER_FRAMES is None else []
     for i in range(n):
-        obs, reward, term, trunc, _ = env.step(int(act))
+        obs, reward, term, trunc, _ = env.step(int(inputs[i]))
         total += float(reward)
         if inner is not None:
             inner.append(float(reward))
@@ -2314,9 +2316,43 @@ def read_own_play(folder, last_iteration):
 
 def token_bias_weights(b):
     """TOKEN_LONG_BIAS sampling weights (frames / TOKEN_BASE_FRAMES) ** b per
-    TOKEN_VOCAB slot."""
-    return np.array([(int(f) / muzero.TOKEN_BASE_FRAMES) ** b
-                     for _, f in muzero.TOKEN_VOCAB], dtype=np.float64)
+    TOKEN_VOCAB slot. E3-A7: a MINED token's frames are capped at the
+    vocabulary's longest DURATION token's (32 frames on the token arms), so
+    length alone does not advantage it; a duration token's weight is
+    unchanged."""
+    vocab = muzero.TOKEN_VOCAB
+    cap = max((muzero.token_total_frames(t) for t in vocab
+               if not muzero.token_is_mined(t)), default=None)
+
+    def frames(t):
+        f = muzero.token_total_frames(t)
+        if muzero.token_is_mined(t) and cap is not None:
+            return min(f, cap)
+        return f
+
+    return np.array([(frames(t) / muzero.TOKEN_BASE_FRAMES) ** b
+                     for t in vocab], dtype=np.float64)
+
+
+def mined_overlap(vocab):
+    """E3-A10 read (2), the redundancy E3a predicts: None for a vocabulary
+    without MINED tokens; else an [A, A] 0/1 matrix whose row a marks the
+    mined tokens m != a whose per-base-step inputs OVERLAP token a's -- the
+    two agree on every base step they share (one's inputs a prefix of the
+    other's): the search children that begin by playing what a plays."""
+    if vocab is None or not any(muzero.token_is_mined(t) for t in vocab):
+        return None
+    inputs = [muzero.token_inputs(t) for t in vocab]
+    A = len(vocab)
+    out = np.zeros((A, A), dtype=np.float64)
+    for m, tok in enumerate(vocab):
+        if not muzero.token_is_mined(tok):
+            continue
+        for a in range(A):
+            k = min(len(inputs[a]), len(inputs[m]))
+            if a != m and inputs[a][:k] == inputs[m][:k]:
+                out[a, m] = 1.0
+    return out
 
 
 def token_gate(spec, use_ray, cpu_actor, ray_workers):
@@ -2350,14 +2386,27 @@ def token_gate(spec, use_ray, cpu_actor, ray_workers):
                          f"stack at --frameskip {base}; got {FRAMESKIP}")
     n_env = env_actions(ENV_NAME)
     for i, tok in enumerate(vocab):
-        a, f = tok
-        if not (isinstance(f, int) and f >= base and f % base == 0):
-            raise SystemExit(f"TOKEN_VOCAB[{i}] = {tok!r}: frames must be a "
-                             f"positive multiple of {base}")
-        if not (isinstance(a, int) and 0 <= a < n_env):
-            raise SystemExit(f"TOKEN_VOCAB[{i}] = {tok!r}: ALE action outside "
-                             f"{ENV_NAME}'s {n_env}")
-    if len(set(vocab)) != len(vocab):
+        # E3 (E3-A2): a mined token's every step is checked as a duration
+        # token is; it holds >= 2 steps and at most TOKEN_MINED_MAX_FRAMES
+        mined = muzero.token_is_mined(tok)
+        if mined and len(tok) < 2:
+            raise SystemExit(f"TOKEN_VOCAB[{i}] = {tok!r}: a mined token "
+                             f"holds at least two steps")
+        for a, f in (tok if mined else (tok,)):
+            if not (isinstance(f, int) and f >= base and f % base == 0):
+                raise SystemExit(f"TOKEN_VOCAB[{i}] = {tok!r}: frames must be "
+                                 f"a positive multiple of {base}")
+            if not (isinstance(a, int) and 0 <= a < n_env):
+                raise SystemExit(f"TOKEN_VOCAB[{i}] = {tok!r}: ALE action "
+                                 f"outside {ENV_NAME}'s {n_env}")
+        if mined and (muzero.token_total_frames(tok)
+                      > muzero.TOKEN_MINED_MAX_FRAMES):
+            raise SystemExit(f"TOKEN_VOCAB[{i}] = {tok!r}: a mined token of "
+                             f"{muzero.token_total_frames(tok)} frames (at "
+                             f"most {muzero.TOKEN_MINED_MAX_FRAMES})")
+    # E3-A2: two tokens with the same per-base-step inputs are one token (for
+    # duration tokens of whole base steps: the same as equal tokens)
+    if len({muzero.token_inputs(t) for t in vocab}) != len(vocab):
         raise SystemExit("TOKEN_VOCAB has duplicate tokens")
 
 
@@ -2405,22 +2454,41 @@ def reward_growth_gate(use_ray, cpu_actor, ray_workers):
         raise SystemExit(f"REWARD_GROWTH: REWARD_UNIT {muzero.REWARD_UNIT!r} "
                          f"is not {ENV_NAME}'s reward unit ({unit!r}; "
                          f"REWARD_UNITS)")
-    if not ceiling_fits_supports(hi):
+    steps = support_steps(muzero.TOKEN_VOCAB)
+    if not ceiling_fits_supports(hi, steps):
         raise SystemExit(f"REWARD_GROWTH_CEILING {hi!r} lies past the reward "
                          f"support (half-widths {muzero.REWARD_SUPPORT:.4g} "
                          f"per step, {muzero.VALUE_PREFIX_SUPPORT:.4g} per "
-                         f"{muzero.UNROLL_STEPS}-step prefix, h-space)")
+                         f"{muzero.UNROLL_STEPS}-step prefix, h-space)"
+                         + (f" for a record of {steps} base steps (the "
+                            f"vocabulary's longest token)" if steps > 1
+                            else ""))
 
 
-def ceiling_fits_supports(c):
+def ceiling_fits_supports(c, steps=1):
     """One base step's reward clipped at `c` fits the per-step reward
     support, and UNROLL_STEPS of them the value-prefix support (the head the
     paper arms train; a token's record sums several base steps -- a prefix
     past the support saturates, logged by reward_max per record). Also the
-    distillation prep's check on a student's ceiling (Test 2)."""
+    distillation prep's check on a student's ceiling (Test 2). E3-A9:
+    `steps`, a record's base steps -- support_steps: the vocabulary's
+    longest token (16 base steps) once it holds a mined token, 1 (the check
+    as it always was) otherwise."""
     sup = muzero.scalar_categorical.support_for
+    c = c * steps if steps != 1 else c
     return not (sup(c) > muzero.REWARD_SUPPORT
                 or sup(c * muzero.UNROLL_STEPS) > muzero.VALUE_PREFIX_SUPPORT)
+
+
+def support_steps(vocab):
+    """E3-A9: the base steps one record of `vocab` can sum -- its longest
+    token's, once the vocabulary holds a MINED token; 1 for every vocabulary
+    of duration tokens and for the plain action space (the support check
+    they always ran: their records were never bounded by token length)."""
+    if vocab is None or not any(muzero.token_is_mined(t) for t in vocab):
+        return 1
+    return max(muzero.token_total_frames(t) // muzero.TOKEN_BASE_FRAMES
+               for t in vocab)
 
 
 # -- curriculum P3: the distillation step's students (2026-10-21) -----------
@@ -2434,40 +2502,108 @@ def file_sha256(path):
     return h.hexdigest()
 
 
-def validate_student_vocab(vocab, master_vocab):
+def _canon_or_exit(vocab, what="student vocabulary"):
+    try:
+        return muzero.canon_vocab(vocab)
+    except (TypeError, ValueError):
+        raise SystemExit(f"{what}: not a list of [action, frames] pairs: "
+                         f"{vocab!r}")
+
+
+def validate_student_vocab(vocab, master_vocab, mined=None, max_mined=None):
     """A student vocabulary (curriculum P3, the 10-17 rule): the master's
     tokens minus the dropped ones, in the master's slot order, every
     TOKEN_BASE_FRAMES token kept (a dropped token is replayed as raw base
     steps), slot 0 unchanged (the placeholder action's token). Returns the
-    vocabulary as a tuple of (int, int) tuples; SystemExit otherwise."""
-    try:
-        vocab = tuple((int(a), int(f)) for a, f in vocab)
-    except (TypeError, ValueError):
-        raise SystemExit(f"student vocabulary: not a list of [action, "
-                         f"frames] pairs: {vocab!r}")
-    master = tuple(tuple(t) for t in master_vocab)
+    vocabulary as a tuple of canonical tokens (muzero.canon_token: (int, int)
+    tuples for duration tokens); SystemExit otherwise.
+
+    E3 (E3-A4, E3-A8): `mined`, the MINED tail vocab.json declares (its
+    "mined" tokens, in order; empty / None: the rule above, exactly). The
+    vocabulary is then the rule's kept tokens FOLLOWED by exactly that tail:
+    each a mined token (>= 2 steps of whole base steps, at most
+    TOKEN_MINED_MAX_FRAMES frames), at most `max_mined` of them (None: no
+    cap -- a vocabulary across several swaps), the slot count never past
+    the master's. A master's own mined tokens (the second swap) are tokens
+    of the master like any other. Whenever the vocabulary holds a mined
+    token, no two tokens may share their per-base-step inputs (E3-A2)."""
+    vocab = _canon_or_exit(vocab)
+    mined = _canon_or_exit(mined or (), "the declared mined tokens")
+    n_tail = len(mined)
+    if n_tail and (len(vocab) < n_tail
+                   or vocab[len(vocab) - n_tail:] != mined):
+        raise SystemExit(f"student vocabulary: its last {n_tail} tokens are "
+                         f"not the declared mined tokens {list(mined)}")
+    kept = vocab[:len(vocab) - n_tail]
+    master = _canon_or_exit(master_vocab, "master vocabulary")
     pos = {t: i for i, t in enumerate(master)}
-    if any(t not in pos for t in vocab):
+    if any(t not in pos for t in kept):
         raise SystemExit(f"student vocabulary: tokens outside the master's: "
-                         f"{[t for t in vocab if t not in pos]}")
-    order = [pos[t] for t in vocab]
+                         f"{[t for t in kept if t not in pos]}")
+    order = [pos[t] for t in kept]
     if order != sorted(set(order)):
         raise SystemExit("student vocabulary: not in the master's slot order "
                          "(or duplicated)")
-    base = [t for t in master if t[1] == muzero.TOKEN_BASE_FRAMES]
-    if any(t not in vocab for t in base):
+    base = [t for t in master if not muzero.token_is_mined(t)
+            and t[1] == muzero.TOKEN_BASE_FRAMES]
+    if any(t not in kept for t in base):
         raise SystemExit(f"student vocabulary drops a {muzero.TOKEN_BASE_FRAMES}"
-                         f"-frame token: {[t for t in base if t not in vocab]}")
-    if vocab[0] != master[0]:
-        raise SystemExit(f"student vocabulary: slot 0 is {vocab[0]!r}, not "
+                         f"-frame token: {[t for t in base if t not in kept]}")
+    if kept[0] != master[0]:
+        raise SystemExit(f"student vocabulary: slot 0 is {kept[0]!r}, not "
                          f"the master's {master[0]!r}")
+    if n_tail:
+        b = muzero.TOKEN_BASE_FRAMES
+        for t in mined:
+            if not muzero.token_is_mined(t):
+                raise SystemExit(f"student vocabulary: declared mined token "
+                                 f"{t!r} is a duration token")
+            if any(f < b or f % b for _, f in t):
+                raise SystemExit(f"student vocabulary: mined token {t!r}: "
+                                 f"steps must be whole {b}-frame base steps")
+            if muzero.token_total_frames(t) > muzero.TOKEN_MINED_MAX_FRAMES:
+                raise SystemExit(f"student vocabulary: mined token {t!r} "
+                                 f"lasts more than "
+                                 f"{muzero.TOKEN_MINED_MAX_FRAMES} frames")
+        if max_mined is not None and n_tail > max_mined:
+            raise SystemExit(f"student vocabulary: {n_tail} mined tokens (at "
+                             f"most {max_mined} per swap)")
+        if len(vocab) > len(master):
+            raise SystemExit(f"student vocabulary: {len(vocab)} slots, past "
+                             f"the master's {len(master)}")
+    if any(muzero.token_is_mined(t) for t in vocab):
+        inputs = [muzero.token_inputs(t) for t in vocab]
+        if len(set(inputs)) != len(inputs):
+            raise SystemExit("student vocabulary: two tokens with the same "
+                             "per-base-step inputs")
     return vocab
+
+
+def declared_mined(doc, key="mined", path="vocab.json"):
+    """E3 (E3-A4): the mined tokens a prep's vocab.json declares -- its
+    "mined" entries' tokens (the prep's own mined tail) or, with key
+    "master_mined", the master's mined tokens (the second swap) -- as
+    canonical tokens, in order; () when the key is absent."""
+    entries = doc.get(key)
+    if entries is None:
+        return ()
+    if not isinstance(entries, list):
+        raise SystemExit(f"{path}: '{key}' is not a list")
+    toks = [e.get("token") if isinstance(e, dict) else e for e in entries]
+    return _canon_or_exit(toks, f"{path}: '{key}'")
 
 
 def load_student_doc(path, master_vocab):
     """--token-vocab: the vocab.json experiments/distill.py wrote (its
     "vocab" list), validated against the arm's master vocabulary. Returns
-    (vocab, sha256 of the file, the parsed document) -- one read."""
+    (vocab, sha256 of the file, the parsed document) -- one read.
+
+    E3: the declared mined tail ("mined") is validated with it (at most
+    TOKEN_MINED_PER_SWAP). Against the arm's STATIC vocabulary, a student of
+    a master holding mined tokens ("master_mined", E3-A8) may also keep some
+    of the master's: its tail is then every mined token it holds, each
+    declared in "mined" or "master_mined" -- student_arm checks it exactly
+    against the master's own vocabulary."""
     import hashlib
     with open(path, "rb") as f:
         data = f.read()
@@ -2478,8 +2614,21 @@ def load_student_doc(path, master_vocab):
     if not isinstance(doc, dict) or "vocab" not in doc:
         raise SystemExit(f"{path}: no 'vocab' list (not a distill.py "
                          f"vocab.json)")
-    return (validate_student_vocab(doc["vocab"], master_vocab),
-            hashlib.sha256(data).hexdigest(), doc)
+    mined = declared_mined(doc, "mined", path)
+    master_mined = declared_mined(doc, "master_mined", path)
+    if master_mined:
+        vocab = _canon_or_exit(doc["vocab"])
+        tail = tuple(t for t in vocab if muzero.token_is_mined(t))
+        stray = [t for t in tail if t not in mined and t not in master_mined]
+        if stray:
+            raise SystemExit(f"{path}: mined tokens declared neither in "
+                             f"'mined' nor in 'master_mined': {stray}")
+        vocab = validate_student_vocab(vocab, master_vocab, mined=tail)
+    else:
+        vocab = validate_student_vocab(
+            doc["vocab"], master_vocab, mined=mined,
+            max_mined=muzero.TOKEN_MINED_PER_SWAP)
+    return vocab, hashlib.sha256(data).hexdigest(), doc
 
 
 def load_student_vocab(path, master_vocab):
@@ -2489,18 +2638,22 @@ def load_student_vocab(path, master_vocab):
     return vocab, sha, doc.get("set_sha256")
 
 
-def student_ceiling(doc, path):
+def student_ceiling(doc, path, steps=1):
     """Test 2: the student's constant reward ceiling the prep chose
     (vocab.json's "student_ceiling": the halved-clip rule) -- a finite
-    positive number that fits the reward supports."""
+    positive number that fits the reward supports (E3-A9: for a record of
+    `steps` base steps, support_steps of the student's vocabulary)."""
     c = doc.get("student_ceiling")
     if (isinstance(c, bool) or not isinstance(c, (int, float))
             or not math.isfinite(c) or c <= 0):
         raise SystemExit(f"{path}: no valid 'student_ceiling' ({c!r}) -- "
                          f"not a Test 2 prep's vocab.json")
-    if not ceiling_fits_supports(float(c)):
+    if not ceiling_fits_supports(float(c), steps):
         raise SystemExit(f"{path}: student_ceiling {c!r} lies past the "
-                         f"reward supports")
+                         f"reward supports"
+                         + (f" for a record of {steps} base steps (the "
+                            f"vocabulary's longest token)" if steps > 1
+                            else ""))
     return float(c)
 
 
@@ -2508,15 +2661,20 @@ def student_master_vocab(spec, doc, path):
     """The vocabulary a student's master played, when that master is itself
     a P3 student (generation 2, Kai 2026-10-27: DS2 ran a student
     vocabulary of TK's 36): the prep's recorded master_vocab, which must be
-    a student vocabulary of the arm's static TOKEN_VOCAB. None when the
-    master is not a student (G0 played the static vocabulary)."""
+    a student vocabulary of the arm's static TOKEN_VOCAB -- with, E3-A8, the
+    master's own mined tokens as its declared tail (vocab.json's
+    "master_mined"; no per-swap cap: they may come from several swaps).
+    None when the master is not a student (G0 played the static
+    vocabulary)."""
     master_arm = spec.get("_master_arm")
     if master_arm is None or ARMS.get(master_arm, {}).get("_student") is None:
         return None
     if "master_vocab" not in doc:
         raise SystemExit(f"{path}: no 'master_vocab' (a prep of a student "
                          f"master records the vocabulary it played)")
-    return validate_student_vocab(doc["master_vocab"], spec["TOKEN_VOCAB"])
+    return validate_student_vocab(doc["master_vocab"], spec["TOKEN_VOCAB"],
+                                  mined=declared_mined(doc, "master_mined",
+                                                       path))
 
 
 def student_arm(arm, path):
@@ -2533,19 +2691,38 @@ def student_arm(arm, path):
     of the master's (the prep's master_vocab, kept as `_master_vocab`).
     An arm with `_discount_from_prep` (Test B) takes the prep's
     student_discount, whose rule must be its master arm's (Test B2's
-    "keep": the master's own discount). Refuses a non-student arm."""
+    "keep": the master's own discount). Refuses a non-student arm.
+
+    E3 (E3-A4, E3-A8): a vocab.json declaring MINED tokens ("mined": the
+    prep's appended tail) gives the spec `_mined_tokens` (the tail, checked
+    exactly against the master's vocabulary, at most TOKEN_MINED_PER_SWAP)
+    and, when its master held mined tokens ("master_mined"),
+    `_master_mined` beside `_master_vocab`; the ceiling's support check
+    reads the vocabulary's longest token (E3-A9). A vocab.json without them
+    applies exactly as before."""
     spec = ARMS[arm]
     if spec.get("_student") not in ("distill", "fresh"):
         raise SystemExit(f"--token-vocab applies to the curriculum P3 student "
                          f"arms only; '{arm}' is not one")
     vocab, sha, doc = load_student_doc(path, spec["TOKEN_VOCAB"])
+    mined = declared_mined(doc, "mined", path)
+    master_mined = declared_mined(doc, "master_mined", path)
     master_vocab = student_master_vocab(spec, doc, path)
     if master_vocab is not None:
-        vocab = validate_student_vocab(vocab, master_vocab)
+        vocab = validate_student_vocab(
+            vocab, master_vocab, mined=mined,
+            max_mined=muzero.TOKEN_MINED_PER_SWAP if mined else None)
+    elif master_mined:
+        raise SystemExit(f"{path}: 'master_mined', though this student's "
+                         f"master {spec.get('_master_arm')!r} is no student")
     new = {**spec, "TOKEN_VOCAB": vocab, "_token_vocab_sha256": sha,
            "_vocab_set_sha256": doc.get("set_sha256")}
     if master_vocab is not None:
         new["_master_vocab"] = master_vocab
+    if mined:
+        new["_mined_tokens"] = mined
+    if master_mined:
+        new["_master_mined"] = master_mined
     if spec.get("_ceiling_from_prep"):
         for key in ("master_arm", "master_iterations"):
             want = spec.get(f"_{key}")
@@ -2559,7 +2736,7 @@ def student_arm(arm, path):
                 raise SystemExit(f"{path}: a prep of {key} "
                                  f"{doc.get(key)!r}, not this student's "
                                  f"{want!r}")
-        c = student_ceiling(doc, path)
+        c = student_ceiling(doc, path, support_steps(vocab))
         new.update({"REWARD_GROWTH_START": c, "REWARD_GROWTH_CEILING": c,
                     "_student_ceiling": c})
     if spec.get("_discount_from_prep"):
@@ -2661,7 +2838,9 @@ def student_gate(spec, distill_set, snapshot_weights):
                          "(row 0 and the offline curve are its snapshots)")
     import distill
     header = distill.read_header(distill_set)
-    if tuple(tuple(t) for t in header["vocab"]) != tuple(muzero.TOKEN_VOCAB):
+    # (E3: canonical tokens on both sides -- a mined token's JSON lists)
+    if _canon_or_exit(header["vocab"], f"{distill_set}: its vocab") != \
+            muzero.canon_vocab(muzero.TOKEN_VOCAB):
         raise SystemExit(f"{distill_set}: its student vocabulary differs "
                          f"from --token-vocab's")
     parent = ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
@@ -2669,8 +2848,9 @@ def student_gate(spec, distill_set, snapshot_weights):
     # generation 2: a student master played its own student vocabulary
     # (student_arm's `_master_vocab`, from the same prep's vocab.json)
     want = spec.get("_master_vocab")
-    if tuple(tuple(t) for t in header["master_vocab"]) != tuple(
-            tuple(t) for t in (want if want is not None else parent)):
+    if _canon_or_exit(header["master_vocab"],
+                      f"{distill_set}: its master_vocab") != \
+            muzero.canon_vocab(want if want is not None else parent):
         raise SystemExit(f"{distill_set}: recorded from a master vocabulary "
                          f"other than " + ("the student master's (its prep's "
                                            "master_vocab)" if want is not None
@@ -2716,7 +2896,8 @@ def student_expect(spec, distill_set):
     None for every other arm."""
     if spec.get("_student") is None:
         return None
-    out = {"token_vocab": [list(t) for t in muzero.TOKEN_VOCAB]}
+    # (token_json: [a, f] as ever; a mined token as nested lists)
+    out = {"token_vocab": [muzero.token_json(t) for t in muzero.TOKEN_VOCAB]}
     if spec.get("_ceiling_from_prep"):
         out["reward_ceiling"] = spec.get("_student_ceiling")
     if spec.get("_discount_from_prep"):
@@ -3474,6 +3655,14 @@ class Run:
         w["frames"] += int(frames)
         w["decisions"] += len(acted)
         w["games"] += 1
+        over = mined_overlap(muzero.TOKEN_VOCAB)
+        if over is not None:
+            # E3-A10 read (2), the REDUNDANCY: each record's search mass on
+            # the mined tokens whose inputs overlap the played token's
+            # (mined_overlap), summed over the window's decisions
+            tgt = np.stack([t["target_policy"] for t in acted])
+            w["overlap"] = w.get("overlap", 0.0) + float(
+                (tgt * over[act]).sum())
         self._tok_window = w
         # Cumulative decisions beside env_steps (base steps), checkpointed
         # with the other diag counters (audit r1 B-L2: the per-row window
@@ -4194,15 +4383,34 @@ class Run:
                                   for p, c in zip(tw["pay"], n)]
             share = tw["mass"] / tw["mass"].sum()
             errs["tok_search_share"] = [round(float(s), 4) for s in share]
-            durs = sorted({int(f) for _, f in vocab})
+            # E3: duration tokens by their frames; MINED tokens in a "mined"
+            # bucket of their own (absent without mined tokens), and each
+            # mined token's play / search share (E3-A10 read (2))
+            mined = [muzero.token_is_mined(t) for t in vocab]
+            frames = [muzero.token_total_frames(t) for t in vocab]
+            durs = sorted({f for f, m in zip(frames, mined) if not m})
             errs["tok_duration_play_share"] = {
-                str(d): round(float(sum(c for (_, f), c in zip(vocab, n)
-                                        if f == d) / n.sum()), 4)
+                str(d): round(float(sum(c for f, m, c in zip(frames, mined, n)
+                                        if not m and f == d) / n.sum()), 4)
                 for d in durs}
             errs["tok_duration_search_share"] = {
-                str(d): round(float(sum(s for (_, f), s in zip(vocab, share)
-                                        if f == d)), 4)
+                str(d): round(float(sum(s for f, m, s in zip(frames, mined,
+                                                             share)
+                                        if not m and f == d)), 4)
                 for d in durs}
+            if any(mined):
+                errs["tok_duration_play_share"]["mined"] = round(float(sum(
+                    c for m, c in zip(mined, n) if m) / n.sum()), 4)
+                errs["tok_duration_search_share"]["mined"] = round(float(sum(
+                    s for m, s in zip(mined, share) if m)), 4)
+                errs["tok_mined_play_share"] = {
+                    muzero.token_key(t): round(float(c / n.sum()), 4)
+                    for t, m, c in zip(vocab, mined, n) if m}
+                errs["tok_mined_search_share"] = {
+                    muzero.token_key(t): round(float(s), 4)
+                    for t, m, s in zip(vocab, mined, share) if m}
+                errs["tok_mined_overlap_search_share"] = round(
+                    tw.get("overlap", 0.0) / tw["decisions"], 4)
             errs["tok_frames_per_decision"] = round(
                 tw["frames"] / tw["decisions"], 3)
             # Per TRAJECTORY: a game on Pong, one LIFE on Ms. Pac-Man
