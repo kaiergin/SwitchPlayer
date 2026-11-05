@@ -1351,6 +1351,16 @@ from T0's recipe from row 10 on: frames per decision 16.9 -> 7.9 -> 7.2
 not yet tested: at BBF's lr 1e-4 the prior sharpens more slowly than
 under SGD at 0.2. Single rows, far inside the one-row band; the primary
 read is W2's [90k, end].
+W0 rows 25-45 (deployed / trainer-BN): 1,327 / 467, 612 / 391, 980 / 535,
+431 / 385 (row 45's evals pending at the pause); the final row iteration
+52 at 33,592 env steps. W0 COMPLETE 21:13 11-04 (rc 0, 33,301 s). Frames
+per decision 5.4-7.3 from row 25 on (4-frame tokens 59-86% of play);
+policy_maxp 0.38-0.41, the prior's entropy rising to 2.1 (T0's
+sharpened). PAUSED 21:20 EST 11-04 at Kai's request ("a couple hours"),
+between W0 and W1: the supervisors w1 (25812 / 25968) and w2 (29136 /
+29572) stopped by exact PID while w1 waited for W0's final evals; no
+trainer, prep or preflight child was running. The hand-off runs on
+(W0's final evals). Resume by rerunning launch_testb2w.ps1.
 
 ### RESULT -- Test C2: BBF's n-step and discount ramps on top of the resets, against C (seed 0), 2026-11-04
 
