@@ -842,6 +842,12 @@ BEYOND THE LETTER:
   visits split across equivalent children, slot use); variable-length
   "until the next decision point" tokens (absorbing corridor travel);
   back to E1 with diverse own play for an equivalence model first.
+DECISION: Kai 2026-11-05: "Let's go with 1 for now and backlog the other
+2 as possible things to try later" -> E3 MINES WITHOUT GROUPING (A8's
+fallback, taken despite the 65% duplicate rate; E3 measures the
+redundancy's cost). BACKLOGGED: variable-length "until the next decision
+point" tokens; E1 again on diverse own play (an equivalence model). Also
+still in the backlog: Test D (the swap trigger) and its offline D0.
 
 ### RESULT -- Test B2W: Test B2's lineage with BBF's AdamW -- STOPPED in W1 by Kai, AdamW dropped (seed 0), 2026-11-05
 
