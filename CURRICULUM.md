@@ -1383,6 +1383,37 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   outside the credited slots is reported as an overlap (still a stop);
   numpy's repr in the message; PREP_CHECKS pinned against hand-copied
   messages.
+  PRE-LAUNCH, 11-05 (code at 6ee611c1): ALL 28 SUITES PASS (11:16-11:35).
+  RUN TOOLING (scratchpad, from Test B2W's): post_teste3.py (+ checker),
+  launch_teste3.ps1, smoke_teste3.py, prep_dryrun_teste3.py (NEW: M1's
+  real prep on T0's real snapshot and own-play log, --out in the
+  scratchpad), prelaunch_teste3.py (requires the smoke's AND the dry
+  run's OK logs), score_teste3.py (+ checker). Tooling audits: r1 HIGH
+  (the smoke compared prep entries with tokens: could never pass) and
+  MEDIUMs (the scorer read a dropped-and-re-mined token as surviving; the
+  eval probes never run on a mined snapshot); r2 MEDIUM (the launcher's
+  path classes lost their backslash to a shell heredoc: its own tree's
+  processes never recognised); r3 MEDIUM (the dry run had no
+  provenance); r4 MEDIUM (the dry run crashed in a fresh run tree);
+  each fixed and re-audited.
+  SMOKE r1 (GPU, 11:37-11:56, 18 min): SMOKE OK at 6ee611c1 -- prep1 on a
+  tiny T0-arm master mined 4 (4 slots freed); M1 killed after its
+  iteration-2 checkpoint (mined tail in it) and resumed; prep2 from M1
+  dropped all four of M1's mined tokens (three played: split; one
+  unplayed) and mined 8 new; M2 played them (one at 32% of decisions);
+  both eval probes ran on M1's and M2's mined snapshots.
+  DRY RUN r1 of M1's REAL prep (GPU, 11:57-12:00, 3.8 min, peak 2.69 GB
+  host, 4.3 GB GPU): PREP DRY RUN OK at 6ee611c1; T0's run folder
+  unchanged. On T0's real play it MINED 8 (cap 8: 14 slots freed;
+  vocabulary 36 -> 30 slots), 6,297 records, 1,580 decisions relabeled:
+  by score 3,16x3 (48 frames of one action; count 219, c 0.156), 7,32x2
+  (64 frames; count 353, c 0.167), 7,32;5,16;0,16 (count 16, c 0.883),
+  5,16;0,16;7,32 (14, 0.952), 5,16x3 (36, 0.351), 7,32;3,32 (41, 0.562),
+  7,32;5,16;5,16 (22, 0.494), 5,16;5,16;7,32 (18, 0.501) -- the top two
+  by count are single-action holds LONGER than the 32-frame duration menu
+  (low consistency, chosen on count), the rest turn sequences with high
+  consistency; every mined token's target nonzero at some record (means
+  0.0004-0.060).
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
