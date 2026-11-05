@@ -1357,6 +1357,21 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   smoke_teste3.py counted as a trainer. Suites: test_e3 77, test_distill
   58, test_supervise_testb 265, test_tokens 72, test_testb 67, test_pbn
   30.
+  AUDIT r3 (fresh eyes on 143229b3, 11-05): nothing above LOW -- the
+  round-2 fixes correct and complete (within one slot the credited paths
+  are leaves of one prefix tree, so a genuine non-overlap cannot raise;
+  quick()'s spec comparison cannot fail spuriously: T0's arm block
+  unchanged since a8c83a58; nothing writes into the frozen tree). L: the
+  new overlap check let a NaN path weight through silently (the record
+  would fall back to a uniform target); NITs: disjointness rested only on
+  select_mined's prefix-freeness; a deterministic overlap would be retried
+  three times as a full prep; "unreadable" for incomplete frozen files.
+  FIXES r3: non-finite path weights raise; the overlap check written so a
+  NaN fails it; check_disjoint_paths (exact: no credited path a slot-prefix
+  of another) before any search; both errors in PREP_CHECKS (stop at once,
+  Kai's call); "unreadable or incomplete". Suites test_e3, test_distill,
+  test_supervise_testb, test_tokens pass; the new tests fail on the old
+  code.
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's

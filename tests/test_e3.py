@@ -1052,6 +1052,18 @@ def test_overlapping_paths_fail_loudly():
     with pytest.raises(ValueError, match="path products"):
         distill.masked_targets([q], V12, student, mined=[[1], [1]],
                                weights=[[0.5]])
+    # (audit r3) a NaN never passes: a non-finite path weight is named ...
+    for bad in (np.nan, np.inf, -np.inf):
+        with pytest.raises(ValueError,
+                           match="non-finite mined path weights at record 1"):
+            distill.masked_targets([q, q], V12, student, mined=[[1], [1]],
+                                   weights=[[0.5, 0.5], [bad, 0.5]])
+    # ... and a NaN q at a path's slot fails the overlap check, which is
+    # written as the negation of what must hold (a NaN compares False)
+    with pytest.raises(ValueError, match="overlapping mined paths at record 0"):
+        distill.masked_targets([np.array([0.0, np.nan, 0.0, 0.0, 0.0])], V12,
+                               student, mined=[[1], [1]],
+                               weights=[[0.5, 0.5]])
 
 
 # --------------------------------------------------------------------------
@@ -1531,6 +1543,49 @@ def test_the_preps_support_check_runs_without_mining_too():
         go(30.0, 0.0)                   # BIG kept: 30 x 16 = 480 per record
     assert BIG in go(20.0, 0.0)["vocab"]                # 320 fits
     assert BIG not in go(30.0, 0.01)["vocab"]           # never played
+
+
+def test_no_path_is_a_slot_prefix_of_another():
+    """(audit r3 NIT) E3-A13's structure, exactly and whatever the prior:
+    no path of master slots a slot-prefix of another (the same path twice
+    included), in any order; disjoint paths pass."""
+    distill.check_disjoint_paths([])
+    distill.check_disjoint_paths([(3, 2), (1, 1, 2), (4, 2), (5,), (2, 2)])
+    distill.check_disjoint_paths([(1, 2), (1, 3), (2, 1, 3), (2, 1, 4)])
+    for paths in ([(1,), (1, 2)], [(1, 2), (1,)], [(1, 1), (0, 4), (1, 1, 2)],
+                  [(3, 2), (4,), (3, 2)], [np.array([2, 2]), (2, 2, 0)]):
+        with pytest.raises(ValueError,
+                           match="overlapping mined paths: .* is a slot-prefix"):
+            distill.check_disjoint_paths(paths)
+
+
+def test_the_prep_checks_the_paths_structure_before_any_search(monkeypatch):
+    """(audit r3 NIT) distill_lives refuses spellings with a slot-prefix
+    among their paths before the master searches a record -- so before any
+    prior could hide it from masked_targets' numbers."""
+    rng = np.random.default_rng(5)
+    Q = rng.dirichlet(np.ones(len(VP)), NS)
+    P = np.stack([rng.dirichlet(np.ones(len(VP)), NS) for _ in range(2)])
+    run = _SRun(_SRep(), _SDyn(rng.integers(0, NS, (NS, len(VP)))),
+                _SPred(P, np.zeros((2, NS))), Q)
+    run._birth_search = lambda traj, term: pytest.fail("a record searched")
+    states = {"representation": {"mode": torch.tensor(0.0)},
+              "prediction": {"mode": torch.tensor(0.0)}}
+    real = distill.target_spellings
+
+    def overlapping(lives, master_vocab, tokens):
+        sp = real(lives, master_vocab, tokens)
+        assert sp[1] == [((4, 2), 3)]                # PB's, as in the core test
+        sp[1] = sp[1] + [((4,), 1)]                  # ... and a slot-prefix
+        return sp
+
+    monkeypatch.setattr(distill, "target_spellings", overlapping)
+    with pytest.raises(ValueError, match=r"overlapping mined paths: \(4,\) is "
+                                         r"a slot-prefix of \(4, 2\)"):
+        distill.distill_lives(run, _fake_lives(), VP, states, states,
+                              {"reward_unit": 10.0, "master_ceiling": 1.0,
+                               "student_ceiling": 5.0}, 0.9, drop_share=0.14,
+                              mine=True, log=lambda m: None)
 
 
 # --------------------------------------------------------------------------

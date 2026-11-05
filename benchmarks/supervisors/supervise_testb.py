@@ -452,7 +452,11 @@ PREP_CHECKS = ("the value support (", "past the reward supports",
                "own-play log ",
                # Test B2's discount rule (audit r3 NIT-1): an unknown rule,
                # a kept discount past the cap
-               "_discount_rule ", "past the cap")
+               "_discount_rule ", "past the cap",
+               # E3's target rule (audit r3 LOW/NIT): mined paths that
+               # overlap (structurally or in their numbers), non-finite
+               # path weights
+               "overlapping mined paths", "non-finite mined path weights")
 # Every suite supervise_gen2.py ran, plus this supervisor's, Test B's, Test
 # C's, Test C2's, Test B2W's and E3's.
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
@@ -1196,8 +1200,8 @@ def wait_external(variant, seed):
 def frozen_msg(m):
     """E3: what an unreadable or incomplete EXTERNAL master (Test B2's T0 in
     its frozen tree) calls for -- never a rerun of anything there."""
-    return (f"{NAMES[m]}'s frozen files in {tree_of(m)} are unreadable -- "
-            f"run nothing in that tree; Kai's call")
+    return (f"{NAMES[m]}'s frozen files in {tree_of(m)} are unreadable or "
+            f"incomplete -- run nothing in that tree; Kai's call")
 
 
 def master_files_missing(variant, seed):

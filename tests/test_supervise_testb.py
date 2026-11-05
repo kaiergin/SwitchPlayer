@@ -1724,7 +1724,13 @@ def test_a_failed_attempt_names_its_reason(sup, prep_env, monkeypatch,
     "SystemExit: own-play log x: no lives",
     # Test B2's discount rule (audit r3 NIT-1)
     "SystemExit: _discount_rule 'x' is not one of ('halve', 'keep')",
-    "SystemExit: a kept discount 0.998 past the cap 0.997"])
+    "SystemExit: a kept discount 0.998 past the cap 0.997",
+    # E3's target rule (audit r3): the structural and the numeric overlap
+    # checks, non-finite path weights
+    "ValueError: overlapping mined paths: (1,) is a slot-prefix of (1, 2)",
+    "ValueError: overlapping mined paths at record 3: path products sum to "
+    "1.5 at slot 2 (at most 1)",
+    "ValueError: non-finite mined path weights at record 0: [nan, 0.5]"])
 def test_a_deterministic_prep_check_stops_at_once(sup, prep_env, monkeypatch,
                                                   capsys, why):
     """Audit r1 B-L1: distill.py's deterministic refusals (A2's value
@@ -4869,8 +4875,8 @@ def test_an_external_master_alerts_name_its_frozen_tree(msup, monkeypatch,
     hand-off alive?"."""
     sup = msup
     ext = sup.LINEAGES["m"]["external"]["tree"]
-    frozen = (f"T0's frozen files in {ext} are unreadable -- run nothing in "
-              f"that tree; Kai's call")
+    frozen = (f"T0's frozen files in {ext} are unreadable or incomplete -- "
+              f"run nothing in that tree; Kai's call")
     monkeypatch.setattr(sup.time, "sleep", _bounded(lambda n: None, n=1))
     with pytest.raises(Stop):
         sup.wait_external("m1", 0)

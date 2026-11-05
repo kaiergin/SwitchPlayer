@@ -695,8 +695,10 @@ def target_spellings(lives, master_vocab, tokens):
     order), [(path of master slots, times logged)] -- the one-token spelling
     first, then the runs in first-occurrence order. Two spellings of the
     same inputs are never slot-prefixes of one another (the longer would
-    add inputs), and the tokens' inputs are prefix-free (select_mined): the
-    paths from any one slot are disjoint."""
+    add inputs), and the tokens' inputs are prefix-free (select_mined), so
+    no path is a slot-prefix of another: the paths from one slot are
+    disjoint events of the master's prior tree. distill_lives checks that
+    structure exactly (check_disjoint_paths), masked_targets its numbers."""
     master_vocab = muzero.canon_vocab(master_vocab)
     base = muzero.TOKEN_BASE_FRAMES
     want = {muzero.token_inputs(t): j for j, t in enumerate(tokens)}
@@ -724,6 +726,20 @@ def target_spellings(lives, master_vocab, tokens):
                     path = tuple(int(traj[x][1]) for x in range(i, e + 1))
                     out[j][path] = out[j].get(path, 0) + 1
     return [list(d.items()) for d in out]
+
+
+def check_disjoint_paths(paths):
+    """(E3-A13) The structure the target rule needs, exactly and whatever
+    the prior: no path (of master slots) is a slot-prefix of another, the
+    same path twice included -- so the paths from one first slot are
+    disjoint events. ValueError naming the two otherwise."""
+    paths = [tuple(int(s) for s in p) for p in paths]
+    for x in range(len(paths)):
+        for y in range(x + 1, len(paths)):
+            a, b = sorted((paths[x], paths[y]), key=len)
+            if b[:len(a)] == a:
+                raise ValueError(f"overlapping mined paths: {a} is a "
+                                 f"slot-prefix of {b}")
 
 
 # -- 3. re-tokenization -----------------------------------------------------------
@@ -832,9 +848,11 @@ def masked_targets(pols, master_vocab, student_vocab, mined=None,
     t1..tj-1) at record i, flat in that order (mined_path_weights; 1 for a
     one-token spelling). At EVERY record each mined token m gets P(m) = the
     SUM over its spellings of q(t1) x the spelling's product, each moved
-    from its own t1's slot -- the paths from one slot are disjoint (checked,
-    ValueError otherwise: their products sum to at most 1 + OVERLAP_TOL and
-    no slot goes below -OVERLAP_TOL x its q; the float residue is clamped);
+    from its own t1's slot -- the paths from one slot are disjoint (no path
+    a slot-prefix of another: distill_lives checks it, check_disjoint_paths;
+    here their numbers, ValueError otherwise: finite products summing to at
+    most 1 + OVERLAP_TOL per slot, no slot below -OVERLAP_TOL x its q, a
+    NaN failing too; the float residue is clamped);
     then the dropped tokens' mass is discarded
     and the rest renormalized, as above. A mined slot carries the master's
     own preference for the whole sequence everywhere, never a forced 0."""
@@ -868,6 +886,9 @@ def masked_targets(pols, master_vocab, student_vocab, mined=None,
         if len(w) != len(firsts):
             raise ValueError(f"{len(w)} path products for {len(firsts)} "
                              f"spellings")
+        if not np.all(np.isfinite(w)):
+            raise ValueError(f"non-finite mined path weights at record {i}: "
+                             f"{w.tolist()}")
         per_slot = np.zeros(len(full))
         np.add.at(per_slot, firsts, w)
         moved = full[firsts] * w
@@ -877,9 +898,10 @@ def masked_targets(pols, master_vocab, student_vocab, mined=None,
         # products sum to at most 1, so no slot goes below 0 -- one
         # tolerance for both, OVERLAP_TOL (relative to the slot's q for the
         # second), past float64 residue; a real overlap raises (also at a
-        # slot whose q is 0), only the residue is clamped
-        if (per_slot.max() > 1.0 + OVERLAP_TOL
-                or np.any(rest < -OVERLAP_TOL * full)):
+        # slot whose q is 0), only the residue is clamped; written as the
+        # negation of what must hold, so a NaN fails it too
+        if not (per_slot.max() <= 1.0 + OVERLAP_TOL
+                and np.all(rest >= -OVERLAP_TOL * full)):
             raise ValueError(f"overlapping mined paths at record {i}: path "
                              f"products sum to {per_slot.max()!r} at slot "
                              f"{int(per_slot.argmax())} (at most 1)")
@@ -1200,6 +1222,7 @@ def distill_lives(run, lives, master_vocab, raw_states, acting_states, clip,
     for c, sp in zip(chosen, spellings):
         c["target_spellings"] = sp
     paths = [p for sp in spellings for p, _n in sp]
+    check_disjoint_paths(paths)          # (structural; masked_targets: numeric)
     groups = [[p[0] for p, _n in sp] for sp in spellings] or None
     firsts = np.asarray([p[0] for p in paths], dtype=np.int64)
     owner = np.repeat(np.arange(len(chosen)),
