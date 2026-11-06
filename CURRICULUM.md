@@ -1597,6 +1597,18 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   5,16;5,16;7,32); the other 3 stay. The drop works as designed: those were
   M1's least-used mined tokens in play.
 
+  M2 rows 0 and 5 (deployed M2 / T2, trainer-BN M2 / T2): 0: 1115.3 / 1558.7,
+  1485.3 / 1207.0; 5: 1030.0 / 1517.0, 1204.7 / 1703.0 (3,611 env steps).
+  Offline phase, deployed M2 / T2: 1198 / 1655, 1425 / 1406, 1131 / 1391,
+  1111 / 1431. Deployed rows 0-5 average 1072.7 vs 1537.8: -465.2, just past
+  the band of 433.8 on two rows, so BELOW T2 so far (interim only; the read is
+  the window from 90k env steps on). Mined tokens are 33.6% of play at row 5
+  (M1: about 12-14%): 5,16 x4 alone is 10.4%, 7,32;7,32 8.6%. Memory: M2's
+  trainer peaks at 12.3 GB and 8.8 GB on the GPU at the start of online play,
+  above M1's 9.9 GB though its vocabulary is smaller (28 vs 30), so vocabulary
+  size alone does not set the peak; note for the memory budget after E3. Free
+  commit stays above 18.4 GB.
+
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
