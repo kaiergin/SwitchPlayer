@@ -1609,6 +1609,15 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   size alone does not set the peak; note for the memory budget after E3. Free
   commit stays above 18.4 GB.
 
+  M2 rows 10, 15, 20 (deployed M2 / T2, trainer-BN M2 / T2): 10: 1153.0 /
+  1468.0, 1086.7 / 1392.3 (6,920 env steps); 15: 1365.7 / 1457.0, 1228.3 /
+  1654.3 (10,347); 20: 1499.3 / 1482.3, 1396.3 / 1420.7 (14,209). M2 climbs
+  from below T2 to level with it on single rows, though rows 15 and 20 have
+  sd 846 and 935, so a few high games carry those means. Deployed rows 0-20
+  average 1232.7 vs 1496.6: -263.9, back inside the band of 274.4 (interim
+  only). Mined tokens rise to 37.9% of play at row 20: 5,16 x4 is 14.6%,
+  3,16;3,16;3,16 7.2%, 7,32;7,32 6.8%.
+
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
