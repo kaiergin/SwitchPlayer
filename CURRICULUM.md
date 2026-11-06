@@ -1579,13 +1579,23 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   M1 DONE 06:26 11-06: iteration 48, 116,000 train steps, 33,384 env steps,
   no death in 18,360 s after the resume (rc=0). Final row: deployed 1160.0
   (sd 219), trainer-BN 1208.3; T1's final row 46: 1314.0, 1259. All 11 rows,
-  deployed: 1084.5 vs T1 1130.4, -45.9, inside the band of 184.9, so M1 is no
+  deployed: 1084.5 vs T1 1130.4, -45.9, inside the band of 185.0, so M1 is no
   different from T1 at this level (descriptive; E3's read is M2's window from
   90k env steps on, against T2's 1629.5). The hand-off finished M1's evals at
   06:32 (11 + 11 rows, 2 read (5) rows, 4 + 4 offline rows; no failure).
   Memory after the pagefile change: free commit never below 19.9 GB, trainer
   peak 9.9 GB. m2's supervisor is past its wait and preflighting; M2's stop
   is 33,000 env steps (100,000 less 67,000).
+
+  M2 LAUNCHED 06:47 11-06 (fresh, attempt 1, pid 16124) after a clean
+  preflight. Master M1: iteration 48, deployed mean of its last two rows
+  1435.50, g 1.158. Mined 8 tokens: 5,16 x4 (262, c .090); 3,32;3,32 (237,
+  .118); 5,16;8,16;8,16 (26, .401); 8,16;8,16;5,16 (18, .514); 3,32;5,16;5,16
+  (49, .182); 8,16;5,16;8,16 (13, .618); 5,16;5,16;8,16 (11, .713);
+  5,16;5,16;3,32 (51, .153). Vocabulary 28 slots, 10 dropped, 5 of them M1's
+  mined tokens (7,32;5,16;0,16, 5,16;0,16;7,32, 7,32;3,32, 7,32;5,16;5,16,
+  5,16;5,16;7,32); the other 3 stay. The drop works as designed: those were
+  M1's least-used mined tokens in play.
 
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
