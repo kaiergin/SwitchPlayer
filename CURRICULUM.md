@@ -1626,6 +1626,18 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   5,16 x4 holds at 19.9%; 7,32;7,32 rises to 17.0%. Single-row sd stays high
   (822, 1115): M2 now mixes short and long games more than T2 did.
 
+  M2 rows 35 and 40 (deployed M2 / T2, trainer-BN M2 / T2): 35: 1439.3 /
+  1592.0, 1628.7 / 1587.3 (24,605 env steps, 91,605 in the lineage: the first
+  row in E3's window); 40: 1395.7 / 1687.7, 1375.7 / 1681.3 (28,852). Window
+  so far: deployed mean 1417.5 on two rows, against T2's 1629.5 (interim; the
+  score comes from score_teste3.py at the end). Deployed rows 0-40 average
+  1294.6 vs 1536.7: -242.1, past the band of 204.5. Mined tokens 43.9% and
+  46.3% of play; 5,16 x4 keeps rising, 22.3% and 23.6%. Memory: one
+  unexplained dip 13:47-14:01 (free commit 17 to 9 GB, GPU 5.4 to 10.5 GB,
+  back at the 14:01 checkpoint; Kai's Steam and Discord started 13:39, HD
+  Poker only at 14:02:50); not seen again. The watcher now logs the top commit
+  holders below 12 GB free.
+
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
