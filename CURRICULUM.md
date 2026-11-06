@@ -1493,6 +1493,12 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   kill ONLY the trainer (both pids) right after a checkpoint -- its
   supervisor resumes it in ~15 s (crash recovery, MAX_ATTEMPTS 40, no
   preflight); a fresh process starts small.
+  M1 PROBES (run 20:08-20:14 while the trainer was down): deployed
+  during distillation (offline 4k/8k/12k/16k) 874 / 880 / 735 / 911 [710
+  / 706 / 740 / 745]; deployed rows 0/5/10/15 821 / 898 / 869 / 959 [892 /
+  730 / 656 / 850], mean 887 vs 782 (+105; band 2x216.9xsqrt(1/4+1/4) =
+  307: no different yet); trainer-BN rows 714 / 950 / 765 / 817 [719 /
+  696 / 697 / 766]; deployed frames/decision 25.6-26.3 [22.0-23.2].
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
