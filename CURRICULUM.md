@@ -1466,6 +1466,18 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   -- the holds 3,16x3 5.4% and 7,32x2 5.8%, 5,16x3 3.0%, the turn
   sequences 0-0.4% of play (0.4-3.1% of search); H(pi) 1.15 [0.93],
   search/prior agreement 0.45 [0.58], KL(target||prior) 1.14 [0.76].
+  Iter 10 (7,104 env): trainer-BN 777.5 [611.2]; 29.4 frames/decision
+  [23.4]; mined 14.7% of play. Iter 15 (10,479 env): 1280.0 [947.5];
+  26.6 frames/decision [23.3]; mined 14.3% of play / 19.9% of search.
+  HOST MEMORY: commit free fell to ~2-2.5 GB during M1 (B2's probes all
+  started at >= 6.0 GB; C2's a0 ran rows 35-85 at 2.1-3.6 GB and
+  finished): the trainer's commit cycles ~7.4-9.4 GB within an
+  iteration (python total 12.4 -> 10.0 GB at the iter-15 boundary), not
+  a monotonic leak; RAM itself ~18 GB free -- the limit is the ~2.7 GB
+  pagefile. The hand-off's probes wait (>= 6 GB) and catch up after M1;
+  supervisor row ALERTs (< 4 GB) expected. Kai notified 19:44 (option:
+  a larger pagefile); a 1-min watcher would restart M1 from its
+  checkpoint below 1.5 GB.
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
