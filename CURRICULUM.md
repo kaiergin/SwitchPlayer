@@ -1499,6 +1499,15 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   730 / 656 / 850], mean 887 vs 782 (+105; band 2x216.9xsqrt(1/4+1/4) =
   307: no different yet); trainer-BN rows 714 / 950 / 765 / 817 [719 /
   696 / 697 / 766]; deployed frames/decision 25.6-26.3 [22.0-23.2].
+  20:24 11-05 m1 PREFLIGHT OK (second clean pass), M1 RESUMED after iter
+  16 (attempt 1 of the new supervisor, --resume; trainer pid 29972).
+  CORRECTION to the workaround: a resumed trainer does NOT start small --
+  its commit settles at ~7.9 GB within a minute (the first attempt's was
+  7.4 GB at 18:57) and spikes ~+2 GB at iteration boundaries (9.84 GB,
+  free 2.74 GB, at 20:33); a restart reclaims only the creep (~1.6 GB).
+  The trigger is therefore the BASELINE: restart (trainer only, right
+  after a checkpoint) once the best free commit over 5 min is < 2.5 GB;
+  watcher now polls every 30 s, emergency trainer-only kill < 1.0 GB.
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
