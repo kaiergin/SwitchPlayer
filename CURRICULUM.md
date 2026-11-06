@@ -789,6 +789,57 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- E3: tokens mined from the agent's own play at every swap, against Test B2's T1-T2 (seed 0), 2026-11-06
+
+(Pre-registration: "Queued experiment (pre-registered) -- E3", below, with
+amendments E3-A1..A13; the interim notes per generation and the memory
+pause are there. Reads E3-A10, from score_teste3.py, run 16:15 11-06 on the
+complete trees: no read PROVISIONAL, T's reads asserted against Test B2's
+RESULT on the same run.)
+RUN: M1 launched 15:46 11-05, paused 21:06-01:06 for the pagefile (below),
+done 06:26 11-06 (iteration 48, 33,384 env steps). M2 launched 06:47, done
+16:06 (iteration 46, 33,522 env steps; lineage 100,522). No capped game, no
+non-finite step, no failed eval.
+VERDICT, read (1): NO DIFFERENT. M2's deployed rows in [90k, end] (35, 40,
+45, 46: 1439.3, 1395.7, 1384.7, 1208.3) average 1357.0 against T2's 1629.5:
+-272.5, band +-306.7. Trainer-BN 1373.0 against 1605.25: -232.2, NO
+DIFFERENT. Mining did not raise the score. The point estimates sit below the
+control and the descriptive reads lean the same way: (4a) 60-80k WORSE (-248,
+band 232), 80k-end -219 (band 241); (4b) M2 against T2 over every row 1294.9
+vs 1552.9, -258.0, band 189.5, WORSE (descriptive). M1 against T1 over every
+row: 1084.5 vs 1130.4, -45.8, band 185.0, NO DIFFERENT. One seed per arm, and
+n 4 per window makes the primary band wide: this does not show the two equal.
+READ (3), decisions, the clearest effect: frames per decision M1 27.23 vs T1
+22.05; M2 36.04 vs T2 20.38. Decisions per second of play: M2 1.66 vs T2 2.94,
+44% fewer. T's rate rises across generations; M's falls.
+READ (2), tokens: mined tokens were 13.4% of M1's play and 41.4% of M2's.
+5,16 x4 alone is 17.4% of M2's play (16.4% of search), 7,32;7,32 9.1%,
+3,16 x3 6.2%, 3,32;3,32 4.6%. M1's 8 tokens: 3 SURVIVED the 1% rule
+(3,16 x3, 7,32;7,32, 5,16 x3), 5 DROPPED, none re-mined. The high-consistency
+tokens went unused: M1's three with c above .55 reached at most 0.3% of play,
+and M2's c above .5 at most 0.2%; the most used are the low-c repeats (c .09
+to .17). Redundancy (overlap search share) 3.6% in M1, 7.2% in M2.
+READ (4b), swaps and rates: rates M +11.6 / +17.6 / +7.0, T +11.6 / +24.5 /
++5.2 deployed per 1k env steps. Transfers M -240, -45; T -169, +245. Jumps M
+-20, -344; T -211, +133. M2 opens 443 below T2 at row 0 and ends the window
+272 below, so the gap came from the swap, not from M2's own training. But T2's
++245 is the outlier among the four swaps, so that gap may be T2's good start
+as much as M2's bad one.
+READ (4c-e): mechanism means close (gen 2 grad .165 / .176, value error 2.40 /
+2.18, maxp .63 / .66); prefix BN FIXED on every row read; largest adjacent
+drops M1 -551, M2 -187 (T1 -725, T2 -49). M2's games spread far wider than
+T2's: sd 760-1115 over rows 30-40 against 190-273.
+MEMORY: the pagefile change (Y: 16-32 GB, commit limit 47.8 GB) ended the
+trainer kills: no death in M1's last 30 iterations or in M2. M2's trainer
+peaked at 12.3 GB, above M1's 9.9, with the smaller vocabulary, so vocabulary
+alone does not set the peak. One dip stays unexplained (13:47-14:01 11-06, in
+the notes below). The memory budget stays on the list before any larger run.
+READING: as a score lever, mining failed here. As a decision lever it worked:
+the agent chose long mined tokens and made 44% fewer decisions, at a score
+this test cannot tell apart from the control's but which more likely sits
+below it. The real-time goal makes that trade worth a look, not a win. KEEP
+Y:\SwitchPlayer-teste3-run with the other trees. Next step is Kai's call.
+
 ### RESULT -- E3a: duplicate spellings are COMMON in strong play and latents do not group them (T2, seed 0), 2026-11-05
 
 (Pre-registration: E3a in "Queued experiment (pre-registered) -- E3",
