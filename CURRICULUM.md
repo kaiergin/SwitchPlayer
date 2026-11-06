@@ -1478,6 +1478,21 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   supervisor row ALERTs (< 4 GB) expected. Kai notified 19:44 (option:
   a larger pagefile); a 1-min watcher would restart M1 from its
   checkpoint below 1.5 GB.
+  20:07 11-05 MEMORY LEAK, NOT A CYCLE: the trainer's commit climbed
+  9.5 -> 10.4 -> 10.9 GB in a minute (free commit 1.89 -> 1.02 -> 0.45 GB);
+  its baseline had crept 7.4 (18:57) -> 9.0 (19:40) -> 9.5 GB (20:05).
+  B2's T1 (same supervisor, same 4 GB row alert) never alerted and ran
+  9.5 h in one attempt -- so the creep looks E3-specific (a mined-token
+  path in the trainer; not diagnosed: the audited files are frozen while
+  the run is live). 20:08 stopped m1's supervisor then its trainer by
+  exact pid (iter-16 checkpoint; the Ray cluster, a subtree of the
+  trainer, exited with it; free commit 19.9 GB); the hand-off's probe
+  backlog then ran. 20:09 launcher rerun: m1 RESUMING (preflight, then
+  --resume from iter 16); m2 and the hand-off skipped (running).
+  WORKAROUND for the rest of E3: when the trainer's commit nears ~9.5 GB,
+  kill ONLY the trainer (both pids) right after a checkpoint -- its
+  supervisor resumes it in ~15 s (crash recovery, MAX_ATTEMPTS 40, no
+  preflight); a fresh process starts small.
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
