@@ -1547,6 +1547,17 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   memory watcher stays on, with its emergency trainer-only kill below 1.5 GB
   free.
 
+  M1 back at work: preflight ok 01:22, trainer resumed after iteration 18,
+  no death since; free commit never below 19.9 GB, trainer peak 9.9 GB, so
+  the pagefile change holds. Rows 20 and 25, 30 games each (deployed M1 / T1,
+  trainer-BN M1 / T1): 20: 941.7 / 901.0, 990.7 / 1036.0 (13,513 env steps);
+  25: 1088.7 / 1045.3, 1023.7 / 1174.7 (16,775). Deployed rows 0-25 average
+  929.6 vs 845.8: +83.7, inside the band of 250.5, so no different so far
+  (interim only; E3's read is M2's window from 90k env steps on). At row 25
+  mined tokens are 14.3% of play and 17.4% of search; the two most used are
+  7,32;7,32 (6.2%) and 3,16;3,16;3,16 (4.2%); 7,32;5,16;0,16 and
+  7,32;5,16;5,16 are unused in play.
+
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
