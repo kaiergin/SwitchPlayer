@@ -1567,6 +1567,15 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   at these rows). Mined tokens fall to 11.5% of play at row 35 (14.3% at row
   25); 7,32;7,32 (5.8%) and 3,16;3,16;3,16 (3.6%) carry most of it.
 
+  M1 rows 40 and 45 (deployed M1 / T1, trainer-BN M1 / T1): 40: 1114.0 /
+  1667.7, 1195.0 / 1462.7 (28,080 env steps); 45: 1711.0 / 1405.7, 1387.0 /
+  1474.0 (31,462). Row 45's deployed sd is 1151, so a few high games carry
+  that mean. Deployed rows 0-45 average 1077.0 vs 1112.0: -35.0, inside the
+  band of 194.0, so no different (interim only). Trainer-BN still favours T1
+  on every row since 20. Mined tokens hold at 11.5% of play at row 45, nearly
+  all from 7,32;7,32 (5.9%) and 3,16;3,16;3,16 (3.6%); four of the eight are
+  unused in play at this row. No death since the resume.
+
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
