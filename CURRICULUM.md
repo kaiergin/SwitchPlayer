@@ -1508,6 +1508,16 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   The trigger is therefore the BASELINE: restart (trainer only, right
   after a checkpoint) once the best free commit over 5 min is < 2.5 GB;
   watcher now polls every 30 s, emergency trainer-only kill < 1.0 GB.
+  20:54 11-05 SPIKE, NOT CREEP: the resumed trainer sat at ~8.2 GB
+  (free 4.1 GB) after its iter-18 checkpoint, then jumped +2.6 GB to
+  10.95 GB within a minute (free 0.84 GB) -- the same ~10.9 GB peak as
+  20:07's -- and the watcher's EMERGENCY trainer-only kill fired (both
+  pids; lifetime 1,860 s). The supervisor logged DEATH (rc 4294967295,
+  deaths.log) and relaunched attempt 2 (--resume from iter 18; pid
+  11504) 20 s later, as designed. Watcher now: 10-s poll, trainer-only
+  kill below 1.5 GB free. Kai pushed again (a larger pagefile -- the
+  real fix -- or pause E3). The spike's source is under read-only
+  investigation (a periodic large CPU allocation in the trainer).
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
