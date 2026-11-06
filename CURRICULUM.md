@@ -1518,6 +1518,25 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   kill below 1.5 GB free. Kai pushed again (a larger pagefile -- the
   real fix -- or pause E3). The spike's source is under read-only
   investigation (a periodic large CPU allocation in the trainer).
+  21:05 11-05 THIRD SPIKE + CAUSE: attempt 2 (resumed after iter 18 at
+  20:54) spiked at 21:05 -- trainer commit 8.1 -> 10.18 GB while the
+  GPU's memory.used rose 5,875 -> 8,026 MiB (VRAM 12,282: not full, so
+  no sysmem fallback): the trainer's GPU allocations are charged 1:1 to
+  its HOST COMMIT (WDDM). A read-only code survey found no CPU path of
+  that size; the GPU candidates are the birth search's trees (64 roots x
+  (1 + A x 51) nodes; ~2.3 GB at A = 30 vs ~1.65 GB at T1's A = 22;
+  ablation.py:1040-1047 records a 3.0 GB peak at A = 36) and the
+  communal refresh forest (every 2 iterations, ~0.9-2.1 GB at A = 30).
+  Hence M1 (30 slots) spikes where T1 (22) did not. Emergency kill at
+  1.45 GB free after 690 s -- before attempt 2's first checkpoint (no
+  progress). PAUSED 21:06 11-05: m1's supervisor stopped by exact pid in
+  its pre-relaunch wait (no attempt 3; no M1 python or Ray process left;
+  free commit 21.2 GB); m2 (waiting) and the hand-off (idle) left
+  running. M1's state: the iter-18 checkpoint (11,134 + ~1,400 env
+  steps). RESUME needs host-commit headroom for the ~2.5 GB GPU spikes
+  on a ~4 GB-free baseline -- Kai's call: a larger pagefile (the
+  ~2.7 GB one makes the commit limit 34.4 GB), then rerun
+  launch_teste3.ps1 (m1 resumes from iter 18 after a preflight).
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
