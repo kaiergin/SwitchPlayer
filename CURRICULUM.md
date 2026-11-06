@@ -1537,6 +1537,16 @@ E3 -- the lineage with mined tokens (after B2W and E3a)
   on a ~4 GB-free baseline -- Kai's call: a larger pagefile (the
   ~2.7 GB one makes the commit limit 34.4 GB), then rerun
   launch_teste3.ps1 (m1 resumes from iter 18 after a preflight).
+  E3 RESUMED 01:06 11-06 (paused since 21:06 11-05). Kai enlarged the
+  pagefile and restarted the machine: Y: is now Custom 16384-32768 MB (C:
+  unchanged), the commit limit is 47.8 GB (was 34.4), 41.6 GB free at boot.
+  The restart ended M2's waiting supervisor and the hand-off, so the launcher
+  started all three (hand-off, m1, m2). m1 runs its preflight and resumes M1
+  from its iteration-18 checkpoint (12,377 env steps, 56,000 train steps);
+  landed probe rows are kept. No code or setting of the run changed. The
+  memory watcher stays on, with its emergency trainer-only kill below 1.5 GB
+  free.
+
   LEFT FOR PART 2: the supervisor's lineage (E3-A1: generation 1's master
   is T0 in Test B2's frozen tree), arms M1 / M2 (T1 / T2 plus mining: the
   prep's --mine), MAX_TOKEN_STEPS 16 for it (a 16-step mined token's
