@@ -467,7 +467,7 @@ def test_main_reports_a_generation_short_of_its_stop(psup):
 
 def _asserts_only(code):
     # the generated probe without its master's snapshot checks (no real
-    # snapshot exists here; smoke_testq.py runs them on real ones)
+    # snapshot exists here; the preflight runs them on the real ones)
     for cut in ("; _mb = distill.master_checks(", "; distill.master_checks("):
         if cut in code:
             return code[:code.index(cut)]
