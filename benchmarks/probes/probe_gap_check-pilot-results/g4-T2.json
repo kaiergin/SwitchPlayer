@@ -1,0 +1,13 @@
+{
+ "ok": true,
+ "reasons": [],
+ "stamp": {
+  "knobs": {
+   "games": 240,
+   "plain_games": 30,
+   "strata": 20,
+   "g6_bar": 30.0
+  },
+  "source": "bb23121c64eee7efea3054dba4106e13"
+ }
+}

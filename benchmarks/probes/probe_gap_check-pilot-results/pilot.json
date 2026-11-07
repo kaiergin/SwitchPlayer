@@ -1,0 +1,60 @@
+{
+ "verdict": "GO",
+ "reasons": [],
+ "smoke": false,
+ "knobs": {
+  "games": 240,
+  "plain_games": 30,
+  "strata": 20,
+  "g6_bar": 30.0
+ },
+ "effective": [
+  70.76167076167077
+ ],
+ "opening": 80,
+ "counts": {
+  "sampled": 1440,
+  "free": 315,
+  "merged": 4,
+  "kept": 1121,
+  "strata": 65,
+  "eligible": 49
+ },
+ "correlations": {
+  "T0": {
+   "1": 0.16453016169593246,
+   "4": -0.08733544723852639,
+   "8": -0.1985071919289607
+  },
+  "T2": {
+   "1": 0.22273132449013874,
+   "4": -0.03632580868245806,
+   "8": -0.2147010529277246
+  }
+ },
+ "null": -0.06666666666666667,
+ "rho_half": 0.7000000000000001,
+ "reliability": 0.8235294117647058,
+ "ended": {
+  "T0": {
+   "life": 938,
+   "cap": 22,
+   "delay": 0
+  },
+  "T2": {
+   "life": 930,
+   "cap": 30,
+   "delay": 0
+  }
+ },
+ "secs": 910,
+ "stamp": {
+  "knobs": {
+   "games": 240,
+   "plain_games": 30,
+   "strata": 20,
+   "g6_bar": 30.0
+  },
+  "source": "bb23121c64eee7efea3054dba4106e13"
+ }
+}

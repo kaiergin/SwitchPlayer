@@ -1300,6 +1300,19 @@ PILOT CODE 2026-11-07: built 4154944c; code audit 2 MEDIUM (the verdict wiring a
   pilot's (manual runs only); a relative --out breaks outside the tree root (an
   absolute one is used). For stage 2: the hash covers the probe file, so stage 2 must
   read the pilot's files without that check, or live in its own file.
+PILOT RESULT 2026-11-07 16:37-16:52 (912 s, CPU, Y:\SwitchPlayer-testg-run at 209314ad,
+  source hash bb23121c...): GO. G1 OK for both (30 games each replay the rows: T0 745.7,
+  T2 1699.0). G6 at the 80-move opening: 70.8 effective games (101 distinct scores; 65.5
+  counting the opening's reward), bar 30, no lengthening; no life lost in an opening;
+  T0's 240 main lines unclipped mean 727.0, median 660, range 170-2080. States: 1,440
+  sampled, 315 FREE, 4 merged, 1,121 kept, in 65 strata, 49 holding 3+. G4 OK for both.
+  Residual correlations (bar 0.3, null -0.067): T0 lag 1 +0.165, lag 4 -0.087, lag 8
+  -0.199; T2 lag 1 +0.223, lag 4 -0.036, lag 8 -0.215. G5 on the 60 states: rho_w of
+  the halves 0.70, Spearman-Brown 0.82 (pilot bar 0.3; the full sample's bar is 0.5).
+  Branches ended at a life's end 938 / 960 (T0) and 930 / 960 (T2), the rest at the
+  1,536-frame cap. Files: benchmarks/probes/probe_gap_check-pilot-results/ (the JSONs;
+  the pickles stay in the run tree). Next: stage 2, built in its own file so the
+  pilot's stamped files stay readable, with its audit loop before it runs.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
