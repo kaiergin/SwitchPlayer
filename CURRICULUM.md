@@ -903,7 +903,7 @@ BUILT AND AUDITED: distill.py (--mine-q, --env, held_ceiling,
   session scratchpad: post_testq.py, chain_testq.py, launch_testq.ps1,
   watch_loop_testq.ps1. The scorer (score_testq.py) comes during the run: it reads
   only and cannot touch it.
-LAUNCHED 2026-11-07 03:05 (WMI): chain q0, p1, q1, ... p8, q8 with its hand-off.
+LAUNCHED 2026-11-07 02:54 (WMI): chain q0, p1, q1, ... p8, q8 with its hand-off.
   Rerun launch_testq.ps1 after a pause or a reboot; it resumes. To pause, kill the
   supervisor and the trainer by exact pid (both pids of each); the chain stops by
   itself.
