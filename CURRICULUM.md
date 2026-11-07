@@ -789,6 +789,131 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test O: OptionZero's option head in place of the token vocabulary (Kai, 2026-11-07)
+
+DECISION: Kai 2026-11-07, pausing Test Q: "I think the idea is incomplete and we
+need to make some modifications to the algorithm before running such a long
+test". Kai then approved this order (Test O, then the future-state test, then
+learning from human play) and replacing the vocabulary rather than running the
+option head beside it. Mining is shelved: "We can come back to mining as I think
+the idea needs work".
+QUESTION: does OptionZero's design survive our regime, 100k env steps, no search
+during play, no search when deployed? Two parts: does a state-dependent guess of
+the next moves form at all, and does playing only its first move reach a deployed
+score at least level with the plain base and with the token vocabulary?
+WHY: exact move sequences rarely match (OptionZero's own predictions are 32%
+right by the sixth move, mean over games); E3a found 65% duplicate spellings and
+state-dependent equivalence, which a global vocabulary cannot hold. OptionZero has
+no vocabulary: the net proposes one option per state, so a node gains one edge
+(10 on Ms. Pac-Man's 9 moves, against 18-36 slots). The pieces built here are the
+ones Kai's future-state tokens need too: base-step replay, first-move play,
+variable-length jumps, one extra edge per node.
+REFERENCE, read 2026-11-07: paper arXiv 2502.16634, code rlglab/optionzero branch
+iclr2025, a383d66 (a local clone, data only, never run). Planning-only is the
+paper's Appendix C, n-l3, zero_disable_option_ratio = 1: mean human-normalized
+1008% against 923% no options and 1054% whole options; Ms. Pac-Man 4,762 / 3,696 /
+4,952; 3 runs, no error bars. Its scores are the last 100 training games under
+search with softmax selection, not greedy evals.
+ARMS: Ms. Pac-Man, seed 0, from scratch, one generation, no swaps, T0's recipe as
+C0 ran it (mspacman-long-n0: 0.997 per frame, sign clip held at ceiling 1,
+PREFIX_BN_PER_STEP, the prior-acting temperature schedule on env-step progress,
+50-simulation PUCT birth search, the refresh, the replay caps counted in base
+steps), to 100k env steps. Only the action design differs:
+  - O0: no vocabulary, the 9 moves at one base step (4 frames), no option edge.
+    The control for the option edge: without it a change from C0 could come from
+    losing the durations alone.
+  - OF: O0 plus the option head, L = 3 base steps (12 frames), first move only.
+    Play is unchanged from O0: the prior's first-move sample, a fresh decision
+    every base step. Options live in the birth search only.
+  - OW: OF's head with whole options played. SECOND STAGE: built after OF's read
+    and run if Kai still wants it then (see DEPARTURE 5).
+  - C0: already run, Y:\SwitchPlayer-testc-run (keep that tree), deployed [90k, end]
+    1262.4, n 4. No rerun.
+  Order O0, OF, then OW. One at a time. C0 took about 23 h; OF's birth search has
+  5.6x the positions and is to be measured.
+L = 3 BECAUSE: it is the only length with published first-move results. It is
+  shorter than the vocabulary's 32-frame tokens and well under the 64-frame cap
+  Kai kept, so OF may search less far than C0 in frames (read 5 measures it). If
+  options engage, L = 6 (24 frames) comes next as a separate registration.
+DESIGN, as OptionZero's CODE unless listed under DEPARTURES:
+  - Heads: L - 1 extra heads over the moves plus a stop class, zero weights, stop
+    bias 10; the policy head stays head 1. forward(with_options=False) leaves
+    every existing caller alone.
+  - Dominant option: the argmax chain, longest prefix with cumulative probability
+    above 0.5, length at least 2, else none.
+  - Tree: one option edge per node beside the primitives. Selection is primitive
+    PUCT, then, if the pick is the option's first move, option against the
+    primitive with the option's statistics taken out (mcts.cpp 300-325).
+    Placeholders along the option carry zero statistics; primitive statistics
+    include the option's; statistics are root-relative.
+  - Dynamics: one jump. Per-position action rows summed, padded with -1, so L = 1
+    equals today's state dict.
+  - Head targets, built at batch time so refreshed policies flow through
+    (base_env.h 318-372): head i's target puts pi(t+i)[m] on m = the top move at
+    t+i, the rest on stop; the chain stops at the first played move that missed
+    the top move; loss masked as getOptionLossScale.
+  - Jump training, OF: an unroll step jumps len(option) positions only where the
+    played moves match the suggested option (getStepLength), else one step.
+DEPARTURES, each forced or chosen, none silent:
+  1. No search in play, none deployed. The paper's agent searches at every move.
+     Options can only reach the deployed agent through the targets they shape.
+     This is the main thing Test O tests.
+  2. Eager expansion gives every child a value, so OptionZero's default Q is not
+     used.
+  3. The refresh keeps primitive edges only (OptionZero has no reanalysis). The
+     stored option suggestions come from the birth search.
+  4. Rewards sum undiscounted inside a jump, as tokens do (OptionZero discounts
+     them); the edge discount is 0.997 per frame as ever.
+  5. OW only: no search picks an option in play, so an option cannot be chosen the
+     paper's way. Registered proposal: sample the first move; if it is the dominant
+     option's first move, continue with probability from the tempered head, with
+     the heads' labels taken from the birth search's N(o) / N(a), not from the
+     sampled play, which would be self-referential. Reviewed again before OW is
+     built.
+  Left off for all arms: long-token bias, swaps, distillation, mining, reward
+  growth, own-play logs for the next generation. token_gate becomes option_gate.
+READS. Exact evals as ever: whole games, 30 noop starts, deployed acting states
+primary, trainer-BN beside it, unclipped.
+  (1) PRIMARY: OF against O0, deployed mean over rows in [90k, end]: BETTER / WORSE
+      / NO DIFFERENT on 2 x 216.9 x sqrt(1/n1 + 1/n2), the standing Ms. Pac-Man
+      band, so these sit beside every earlier result.
+  (2) OF against C0 and O0 against C0, same rule.
+  (3) ENGAGEMENT, the gate on read (1). Over the same rows: share of simulations
+      through an option edge, share of trees with one, share of unroll steps that
+      jump, mean suggested length. Under 5% of simulations = NOT ENGAGED, and read
+      (1) then says nothing about options, only that the head did not form in this
+      budget. Paper at L = 3: 28.9% of simulations, 91.4% of trees.
+  (4) Prediction accuracy by step, suggested against played, as the paper's Table
+      11 (75.6 / 82.0 / 60.9% mean over games), descriptive.
+  (5) Search reach in frames, mean and max depth, OF against O0 and C0; paper
+      14.5 to 20.7 mean moves at L = 3. Descriptive.
+  (6) Decisions per second, gradient steps per env step, replay bytes, wall clock.
+  (7) One seed per arm: the band in (1) is row spread, not seed spread. Each verdict
+      prints beside it +-47% of the control's mean, the seed-level band from EZ's
+      per-seed tables (2 x 16.6% x sqrt 2), descriptive unless Kai changes it.
+STOP RULES: non-finite steps, or free commit under the usual floor: stop and report.
+  Nothing else stops an arm. A NOT ENGAGED OF still finishes.
+MEMORY: stacks are copied whole per record, 84,672 bytes. At the 31,250 base-step
+  cap OF holds about 2.65 GB of replay against about 0.5 GB for C0. Lowest free
+  commit seen is 9.0 GB. Checked in the smoke before launch.
+BUILD ORDER: flags, gate and arms; network; option search and its tests; records,
+  unroll, targets and loss; diagnostics; O0 and OF run. OW and the exact-eval layout
+  hook after. About 950 lines; the search is about 500 of them, in a subclass so
+  v1 stays parity-pinned. OptionZero cannot serve as an oracle, and a tree bug gives
+  plausible targets, so the tree gets hand-built cases: two-stage choice, inclusive
+  counts, placeholder fill, stop-only heads reproducing v1 exactly. Audit loop as
+  ever, in a new run worktree, launched only with the audit closed. Test Q's tree is
+  untouched and resumable.
+NEXT, to be registered separately once Test O reads:
+  - Future-state test (Kai 2026-11-07): tokens as an ideal future state rather than
+    moves, "some sort of summation ... over some period of time". First question:
+    does knowing the future improve first-move prediction, on own play and on
+    Atari-HEAD's human Ms. Pac-Man games? An exploratory, unaudited read of E3a's
+    pairs: exact moves 0.69, summed moves 0.65-0.70, predicted landing 0.60, real
+    landing 0.999 (near true by construction). Open for Kai: is "ideal" the master's
+    actual future, or the best future by the student's own value?
+  - Human play training the proposal of futures.
+
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
 DECISION: Kai 2026-11-07, after E3 ("Sure we can run this test then move onto
