@@ -1094,48 +1094,63 @@ THE VALUE NETS, all alike: a small plain conv net (Nature DQN torso, separate fr
   Predicted gap g(s) = master minus twin, at the same discount and scale.
 STATES: the 30 noop-start games cannot supply them: they repeat with period 4 (T0's
   row at iteration 45: 9 distinct scores, 6.4 effective games), and moves do nothing
-  until about frame 266. So 120 games, each from a noop start, opening with 80 seeded
+  until about frame 266. So 240 games, each from a noop start, opening with 80 seeded
   random 4-frame moves on raw ALE, as Test O's read (8), then T0's deployed policy
-  (measured: 119 of 120 distinct states at 80 moves, no life lost). 6 states per game
-  at random after the opening, fixed seed: about 720 before drops. The opening's own
-  decisions are not sampled.
+  (measured: 119 of 120 distinct states at 80 moves, no life lost; only about 17 of
+  the 80 act). A pooled stack is carried through the opening, and base steps count
+  from the life's start, 80 included. 6 states per game at random after the opening,
+  fixed seed: about 1,440 before drops. The opening's own decisions are not sampled.
   DROPPED before any ranking, and counted: FREE states, where all 9 moves held for 32
   frames give identical frames (the census's token_census, nine (a, 32) entries):
-  nothing can be gained there. Identical stacks across games are merged. States whose
-  stack is in either net's training data are left out of the primary and printed
-  beside it.
-  STRATA, knowable at the decision: life index x base steps since the life began, cut
-  at T0's log quartiles (life 1: 80, 165, 257; life 2: 48, 108, 180; life 3: 38, 95,
-  146). In the logs these strata explain 59% of T0's return and 77% of T2's, which is
-  why every test below is inside them.
+  nothing can be gained there. Identical stacks across games are merged, keeping the
+  first. States whose stack is in either net's training data are left out of the
+  primary and printed beside it.
+  STRATA, knowable at the decision: life index x 20-base-step bins since the life
+  began. Quartile bins were too wide: inside them position still explained return
+  (rho_w of step against return -0.40 on T2) and a position-only world passed the
+  primary in simulation. In the logs life and time explain 59% of T0's return and 77%
+  of T2's, which is why every test below is inside strata. A stratum with one state
+  drops out of rho_w.
   CLUSTERS for every interval: games connected through shared stacks after the
   opening.
+PILOT, before any net trains and before g exists: 30 states, both players, all 16
+  delays. It sees G only, so it cannot bias the verdict. It measures the lag profile of
+  branch returns (are neighbouring delays independent?), G's spread inside strata, and
+  effective games. K, the stratum width and the state count are then set from it and
+  registered here before the nets train.
 REAL GAP, from each state's saved emulator state: K = 16 branches per player, T2's
   deployed policy and T0's, each to the life's end, capped at 1,536 frames (a weight of
   about 1% at 0.997), the first decision delayed by 0 to 15 NOOP frames, the same 16
-  delays for both players. Delays run on raw ALE, since env.step plays 4 frames, with
-  the stack held and rewards counted. One branch is exact for its state but not for
+  delays for both players. Delays run on raw ALE, since env.step plays 4 frames: a
+  pooled frame enters the stack every 4 delay frames, so the policy re-decides on a
+  stack at most 3 frames stale, delay rewards count with the first base step, and a
+  life lost during a delay ends the branch. One branch is exact for its state but not for
   "how much better is the master here": the game is chaotic (T2's same-phase games
   ended 1880, 790, 1880; within-position return SD about 2.4-3.1 clipped units, so K =
-  16 leaves noise SD about 1). G(s) = T2's mean return minus T0's, per discount and
+  16 leaves noise SD about 1 if branches are independent, which the pilot checks). G(s) = T2's mean return minus T0's, per discount and
   scale. Branches drive raw ALE as the census does, keeping rewards, or the wrapper's
   EpisodicLifeEnv.lives is reset after every restore; a test pins it. Saved states
   cross processes as ale_py.ALEState(bytes) with restoreState.
-STATISTIC: rho_w(x, y): inside each stratum, x and y become centred percentile ranks
-  (ties averaged); rho_w is their Pearson correlation pooled over all states. Position
-  is constant inside a stratum, so it cannot score.
+STATISTIC: rho_w(x, y): inside each stratum of n states, x and y become centred ranks
+  (r - 0.5) / n - 0.5, ties averaged; rho_w is their Pearson correlation pooled over
+  all states. Position is nearly constant inside a stratum, and the step baseline in
+  read (1) catches what is left.
 GATES, any failure makes the verdict VOID:
-  G1: 30 plain games each replay T0's row at iteration 45 and T2's at iteration 42.
+  G1: 30 plain games each replay T0's row at iteration 45 and T2's at iteration 42
+      (PROBE_THREADS 2, as the rows ran).
   G2: each net beats a constant (R2 > 0) on held-out lives at the primary head, AND
       works inside strata where it is used: the 95% lower bounds of rho_w(master net,
       T2's mean return) and rho_w(twin, T0's mean return) above 0.
   G3: mean G at the primary head above 0, lower bound above 0: T2 must really beat
       T0 from T0's own states.
   G4: a restored branch gives the same frames in a fresh process, in the project venv.
-  G5: G must be measurable inside strata: split-half reliability of rho_w (even against
-      odd delays, Spearman-Brown) at least 0.5 at the primary head (a judgment). Below
-      that, a failed read would say nothing.
-  G6: at least 30 clusters (a judgment). Fewer: lengthen the opening before reading.
+  G5: G must be measurable inside strata: split-half reliability of rho_w (delays
+      0-3 and 8-11 against 4-7 and 12-15, which balance phases and keep neighbours
+      apart; Spearman-Brown) at least 0.5 at the primary head (a judgment). Below that,
+      a failed read would say nothing. The lag profile prints beside it.
+  G6: at least 30 effective games, 1 / sum p^2 over the games' (score, length) pairs
+      (a judgment). Stack sharing alone almost cannot fail, since one pellet splits a
+      stack. Fewer: lengthen the opening before reading.
 READS. PRIMARY HEAD: 0.997 per frame, student's clip. Intervals resample clusters,
 10,000 draws.
   (1) PRIMARY. BASELINES needing no master: student prior entropy, twin value, T0's own
@@ -1143,7 +1158,9 @@ READS. PRIMARY HEAD: 0.997 per frame, student's clip. Intervals resample cluster
       the full sample. HOLDS if both: the 95% lower bound of rho_w(g, G) above 0, and
       the lower bound of rho_w(g, G) minus the best baseline's rho_w above 0, the best
       taken inside each draw. Else NOT SHOWN. Printed beside it: the ceiling, the square
-      root of G5's reliability. Kai's call either way.
+      root of G5's reliability. In simulation, power was about 44% at 600 states and
+      84% at 1,440 under stylised assumptions, so NOT SHOWN is weak evidence against
+      the gap. Kai's call either way.
   (2) Master alone: rho_w of the master value by itself. If it matches, the student's
       side adds nothing. Also rho_w(g, T2's return), rho_w(g, -T0's return), and
       rho_w(-T0's return, G) as a reference that cannot be deployed: T0's return is half
@@ -1162,11 +1179,13 @@ READS. PRIMARY HEAD: 0.997 per frame, student's clip. Intervals resample cluster
       gap (mean master return minus mean twin return in the stratum, from the logs, no
       frames) against G. Position alone may do well here; that is not what is tested.
   (7) Is there anything to find? The top and bottom fifths by g, ranked inside strata,
-      up to 120 states each. Every T0 slot as the first decision, then T0's deployed
-      policy, on two branches, delays 0 and 1. ROOM: the best slot chosen on delay 0,
-      scored on delay 1 against the deployed slot on delay 1, so a max over 36 chaotic
-      draws gains nothing from noise. Also mean slot minus deployed. SEARCH GAIN: the
-      top slot on delay 1 minus deployed, for the raw prior (one forward pass, which
+      up to 120 states each. T0's slots grouped by outcome (the census's classes, about
+      3.6 per decision), one slot per class as the first decision, then T0's deployed
+      policy, on delays 0-3 to choose and 8-11 to score, so selection noise cannot
+      inflate the score. ROOM: the class chosen, scored against the deployed slot's
+      class on the scoring delays; 0 when they match, ties to the deployed class. Also
+      mean class minus deployed. SEARCH GAIN: the top slot's class on the scoring delays
+      minus deployed, for the raw prior (one forward pass, which
       separates the raw and acting BN states) and for 50 and 200 simulations,
       muzero_vtree.VectorizedPUCT.search on the trainer's eval-mode BN as birth search
       runs it (snapshot_run in probe_prefix_bn.py; deep copies before the acting overlay;
@@ -1179,9 +1198,9 @@ LIMITS, stated now: one master, one student, one game, one seed. T2 descends fro
   states a little from T0's usual ones. Inside-strata tests can miss a gap that works
   by telling positions apart. The players are token-era, not Test O's. A HOLDS says the
   gap ranks states; it does not say effort changes training.
-COST: CPU only, under the lock. 4.75-6.88 ms per decision: the branches 2-3 h, read (7)
-  2-3 h, the nets a few hours, so it can run while Test O builds or trains, memory
-  allowing. Probe benchmarks/probes/probe_gap_check.py, tests/test_gap_check.py, audit
+COST: CPU only, under the lock. 4.75-6.88 ms per decision: the branches about 5 h, read
+  (7) about 1 h, the nets a few hours, so it can run while Test O builds or trains,
+  memory allowing. Probe benchmarks/probes/probe_gap_check.py, tests/test_gap_check.py, audit
   loop before it runs. Nothing touches the kept trees.
 NEXT: HOLDS, then a registered training run: per-position simulations, root noise
   and acting temperature set by the gap's rank among recent positions (Kai's general
@@ -1197,8 +1216,13 @@ AUDIT r2 2026-11-07: 4 HIGH (the forced openings ended before moves have any eff
   position alone; the top-fifth rule was nearly unsatisfiable), 7 MEDIUM. Rebuilt rather
   than patched: one statistic, rho_w, inside strata for the primary and the gates, K =
   16, the 80-move opening checked on raw ALE, read (7) cross-fitted. The position
-  baselines and the top-fifth rule are gone from the verdict, since position cannot
-  score inside a stratum.
+  baselines and the top-fifth rule are gone from the verdict.
+AUDIT r3 2026-11-07: 2 HIGH (position still scored inside quartile strata, so bins are
+  20 base steps; even and odd delays were not an independent split, so halves keep
+  neighbours apart), 4 MEDIUM (power, so 240 games; a held stack gave every delay the
+  same first token; the opening's stack and step count; G6 on effective games; read (7)
+  by outcome class), 3 LOW. Added the PILOT: noise and independence are measured before
+  the final numbers are fixed, blind to g.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
