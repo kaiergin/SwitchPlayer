@@ -840,6 +840,22 @@ this test cannot tell apart from the control's but which more likely sits
 below it. The real-time goal makes that trade worth a look, not a win. KEEP
 Y:\SwitchPlayer-teste3-run with the other trees. Next step is Kai's call.
 
+KAI 2026-11-06, after this RESULT: mining stays as a research line. Kai's
+reasons: it relates directly to the student-master algorithm for learning
+from play that is not the agent's own, and it should suit other games better
+than Ms. Pac-Man, where complex manoeuvres are scarce. Kai also asked whether
+mining longer tokens would help.
+ADDED READ (from the scorer's log; descriptive, not pre-registered), mined
+tokens split by kind:
+  - Single-action holds: 5 of the 16 tokens; 11.8% of M1's play, 40.1% of
+    M2's.
+  - Tokens with more than one action: 11 of the 16; 1.53% of M1's play, 1.35%
+    of M2's; the largest single share is 0.96%.
+So about 97% of M2's mined play was a longer hold, and E3 says little about
+multi-action sequences. On length: E3-A2 and E3-A3 limited a candidate to 2-4
+decisions and 64 frames, and 10 of the 16 tokens sit exactly at 64 frames, so
+the short tokens reflect that limit and are not a finding about the game.
+
 ### RESULT -- E3a: duplicate spellings are COMMON in strong play and latents do not group them (T2, seed 0), 2026-11-05
 
 (Pre-registration: E3a in "Queued experiment (pre-registered) -- E3",
