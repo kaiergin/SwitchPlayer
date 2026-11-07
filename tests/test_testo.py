@@ -609,7 +609,8 @@ def test_its_quick_probe_passes_and_its_asserts_bite(osup):
               f"{a}[{O0!r}]['OPTION_PRECHECK'] = False",
               f"{a}[{O0!r}]['TOKEN_LONG_BIAS'] = 0.5",
               f"{a}[{O0!r}]['MAX_REPLAY_TRANSITIONS'] = 1000",
-              f"{a}[{O0!r}]['VTREE_REFRESH_BATCH'] = 256",
+              f"{a}[{O0!r}]['VTREE_REFRESH_BATCH'] = 64",
+              f"{a}[{O0!r}]['VTREE_COMMUNAL_TRAJS'] = 1",
               f"{a}[{O0!r}]['_nominal_iterations'] = 50",
               f"{a}[{C0!r}]['OPTION_PRECHECK'] = True"]
     broken = [code.replace(anchor, b + "; " + anchor) for b in breaks]

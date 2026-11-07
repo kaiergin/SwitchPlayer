@@ -971,14 +971,18 @@ def quick(variant, seed):
                  "assert hasattr(distill, 'played_path_weights') and "
                  "'mine_q' in distill.prep.__code__.co_varnames; ")
     if plain:
-        # Test O: C0's arm but for the vocabulary, its bias, the own-play log
-        # and the pre-check; the flag off by default; the build this tree's
+        # Test O: C0's arm but for the vocabulary, its bias, the own-play log,
+        # the pre-check and the base's refresh shapes; the flag off by default;
+        # the build this tree's
         code += ("assert spec['OPTION_PRECHECK'] is True; "
                  "assert muzero.OPTION_PRECHECK is False; "
                  "assert spec['TOKEN_LONG_BIAS'] == 0.0; "
+                 "assert spec['VTREE_REFRESH_BATCH'] == 256; "
+                 "assert spec['VTREE_COMMUNAL_TRAJS'] == 8; "
                  f"_t = ablation.ARMS[{LONG_ARM + '-n0'!r}]; "
                  "_skip = ('TOKEN_VOCAB', 'TOKEN_LONG_BIAS', 'OWN_PLAY_LOG', "
-                 "'OPTION_PRECHECK', '_doc'); "
+                 "'OPTION_PRECHECK', 'VTREE_REFRESH_BATCH', "
+                 "'VTREE_COMMUNAL_TRAJS', '_doc'); "
                  "assert {_k: _v for _k, _v in spec.items() if _k not in "
                  "_skip} == {_k: _v for _k, _v in _t.items() if _k not in "
                  "_skip}; "
