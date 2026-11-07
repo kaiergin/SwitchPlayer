@@ -22,9 +22,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] /
 import ablation
 import distill
 import muzero
+import tests.test_supervise_testb
 from tests.test_e3 import MX, S6, V6, _plan_life
 from tests.test_prioract2 import restore_rngs  # noqa: F401
-from tests.test_supervise_testb import SUPERVISORS, _load
+from tests.test_supervise_testb import (SUPERVISORS, _finish, _load,  # noqa
+                                        _popen, _py_each, _write_prep,
+                                        real_sup, sup)
 from tests.test_testb import _pin
 
 Q = [f"{ablation.QT_ARM}-q{k}" for k in range(9)]
@@ -87,8 +90,7 @@ def test_a_played_path_outside_the_spellings_raises():
 
 
 def test_a_played_record_moves_its_first_slots_whole_mass():
-    # master tokens 0..2, student keeps 0 and 2, token 0 dropped? no: all
-    # kept; one mined token spelled (1, 2)
+    # three master tokens, all kept; one mined token spelled (1, 2)
     master = ((0, 4), (1, 4), (2, 4))
     student = master + (((1, 4), (2, 4)),)
     q = np.array([0.2, 0.6, 0.2])
@@ -151,12 +153,16 @@ def test_qbert_tokens_and_reward_unit():
         spec = ablation.ARMS[arm]
         assert spec["TOKEN_VOCAB"] == v and spec["REWARD_UNIT"] == 25.0
         assert spec["_ceiling_cap"] == 25.0
+        # Q-A7: per game, 4 lives
+        assert spec["MAX_REPLAY"] == 85 * 4
+        assert spec["POLICY_REFRESH_COUNT"] == 4 * 4
 
 
 def test_q0_is_t0_on_qbert():
     t0 = ablation.ARMS[ablation.TWO_ARM + "-t0"]
     q0 = ablation.ARMS[Q[0]]
-    skip = ("TOKEN_VOCAB", "REWARD_UNIT", "_ceiling_cap", "_doc")
+    skip = ("TOKEN_VOCAB", "REWARD_UNIT", "_ceiling_cap", "_doc",
+            "MAX_REPLAY", "POLICY_REFRESH_COUNT")
     assert {k: v for k, v in q0.items() if k not in skip} == \
         {k: v for k, v in t0.items() if k not in skip}
     assert "_student" not in q0
@@ -167,7 +173,8 @@ def test_students_are_t1_on_qbert_and_mined_is_control_plus_mining(k):
     t1 = ablation.ARMS[ablation.TWO_ARM + "-t1"]
     qt, qm = ablation.ARMS[Q[k]], ablation.ARMS[P[k]]
     skip = ("TOKEN_VOCAB", "REWARD_UNIT", "_ceiling_cap", "_doc",
-            "_master_arm", "_vocab_parent_arm")
+            "_master_arm", "_vocab_parent_arm", "MAX_REPLAY",
+            "POLICY_REFRESH_COUNT")
     assert {a: b for a, b in qt.items() if a not in skip} == \
         {a: b for a, b in t1.items() if a not in skip}
     skip = ("_master_arm", "_mine", "_mine_q", "_doc")
@@ -205,6 +212,30 @@ def test_a_mined_student_refuses_a_prep_without_the_rules(tmp_path,
     with pytest.raises(SystemExit, match="not a Test Q prep"):
         ablation.student_arm(P[1], _vocab_doc(tmp_path, mine=True,
                                               ceiling_cap=25.0))
+
+
+def test_a_student_refuses_a_ceiling_past_its_cap(tmp_path, monkeypatch):
+    monkeypatch.setitem(ablation.ARMS, Q[1], ablation.ARMS[Q[1]])
+    path = _vocab_doc(tmp_path, ceiling_cap=25.0, student_ceiling=40.0)
+    with pytest.raises(SystemExit, match="past .* cap"):
+        ablation.student_arm(Q[1], path)
+
+
+def test_mined_tokens_carry_through_three_swaps():
+    # kept, dropped and appended over three swaps: each student a student
+    # vocabulary of its master; a master's mined tail may span several swaps
+    v0 = ablation.QBERT_DURATION_TOKENS
+    m = [((1, 32), (a, 32)) for a in (2, 3, 4, 5)] + [((2, 32), (3, 32))]
+    s1 = tuple(t for t in v0 if t not in ((1, 8), (2, 8), (3, 8))) + (m[0], m[1])
+    s2 = tuple(t for t in s1 if t not in ((4, 8), m[1])) + (m[2], m[3])
+    s3 = tuple(t for t in s2 if t != m[0]) + (m[4],)
+    v = ablation.validate_student_vocab
+    assert v(s1, v0, mined=m[:2], max_mined=8) == muzero.canon_vocab(s1)
+    assert v(s2, s1, mined=m[2:4], max_mined=8) == muzero.canon_vocab(s2)
+    assert v(s3, s2, mined=m[4:], max_mined=8) == muzero.canon_vocab(s3)
+    # what each master played, against the static vocabulary
+    assert v(s2, v0, mined=(m[0], m[2], m[3])) == muzero.canon_vocab(s2)
+    assert v(s3, v0, mined=(m[2], m[3], m[4])) == muzero.canon_vocab(s3)
 
 
 # --------------------------------------------------------------------------
@@ -271,6 +302,162 @@ def test_the_prep_command_carries_the_rules_and_the_game(sq):
 
 def test_this_suite_is_a_preflight_suite(sq):
     assert "tests/test_testq.py" in sq.SUITES
+    assert "smoke_testq.py" in sq.SMOKE_SCRIPTS
+
+
+@pytest.fixture
+def psup(sup, monkeypatch):
+    # (_finish's exact-eval rows name the game; a row of another game does
+    # not count: test_another_games_eval_rows_do_not_count)
+    monkeypatch.setattr(tests.test_supervise_testb, "ENV_ID", QBERT)
+    sup.configure("p")
+    return sup
+
+
+RULES = {"holds_out": True, "played_paths": True}
+
+
+def test_q0_lives_in_this_tree_and_is_never_frozen(psup):
+    assert psup.tree_of("q0") == psup.REPO
+    assert "external" in psup.LINEAGES["p"]
+    assert "tree" not in psup.LINEAGES["p"]["external"]
+    assert psup.paths("q0", 0)[1].startswith(psup.REPO)
+    assert psup.own_play_arg("q0", 0).startswith(psup.REPO)
+    with pytest.raises(SystemExit, match="land them") as e:
+        _finish(psup, "q0", final=60, env=33400, evals=False)
+        psup.choose_master("p1", 0)
+    assert "frozen" not in str(e.value)
+
+
+def test_the_stops_stay_inside_each_lineage(psup):
+    sup = psup
+    _finish(sup, "q0", final=60, env=33400, evals=False, files=False)
+    assert sup.stop_env_steps("p1", 0) == 66667 - 33400
+    _finish(sup, "p1", final=55, env=33000, evals=False, files=False)
+    assert sup.stop_env_steps("p2", 0) == 100000 - 33400 - 33000
+    sup.configure("q")
+    assert sup.stop_env_steps("q1", 0) == 66667 - 33400
+    _finish(sup, "q1", final=55, env=32000, evals=False, files=False)
+    assert sup.stop_env_steps("q2", 0) == 100000 - 33400 - 32000
+
+
+@pytest.mark.parametrize("value, ok", [(327.0, False), (327.8, True),
+                                       (400.0, True)])
+def test_the_master_gate_is_qberts(psup, value, ok):
+    _finish(psup, "q0", final=60, env=33400, value=value)
+    if ok:
+        assert psup.choose_master("p1", 0)["which"] == "Q0"
+    else:
+        with pytest.raises(SystemExit, match="MASTER NEAR RANDOM"):
+            psup.choose_master("p1", 0)
+
+
+def test_another_games_eval_rows_do_not_count(psup, monkeypatch):
+    monkeypatch.setattr(tests.test_supervise_testb, "ENV_ID",
+                        "MsPacmanNoFrameskip-v4")
+    _finish(psup, "q0", final=60, env=33400, value=900.0)
+    with pytest.raises(SystemExit, match="are incomplete"):
+        psup.choose_master("p1", 0)
+
+
+def _p1_prep(sup, **doc):
+    _write_prep(sup, "p1", k=60, **{"log_dir": sup.own_play_arg("q0", 0),
+                                    "mine": True, "mine_rules": RULES,
+                                    "env": QBERT, "dropped": [], **doc})
+
+
+@pytest.mark.parametrize("change, why", [
+    ({}, ""), ({"mine_rules": None}, "mine_rules"),
+    ({"mine_rules": {"holds_out": True}}, "mine_rules"),
+    ({"env": "MsPacmanNoFrameskip-v4"}, "env"), ({"mine": None}, "mine")])
+def test_set_intact_reads_the_rules_and_the_game(psup, change, why):
+    _finish(psup, "q0", final=60, env=33400, evals=False)
+    _p1_prep(psup, **change)
+    ok, reason = psup.set_intact("p1", 0)
+    assert ok is (not why) and why in reason
+
+
+def test_a_control_prep_holds_no_rules(sup):
+    sup.configure("q")
+    _finish(sup, "q0", final=60, env=33400, evals=False)
+    _write_prep(sup, "q1", k=60, env=QBERT)
+    assert sup.set_intact("q1", 0)[0] is True
+    _write_prep(sup, "q1", k=60, env=QBERT, mine_rules=RULES)
+    assert sup.set_intact("q1", 0)[0] is False
+
+
+def _prep_env(sup, monkeypatch):
+    monkeypatch.setattr(sup, "wait_no_trainer", lambda *a: None)
+    monkeypatch.setattr(sup, "manifest_check", lambda: (True, ""))
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None)
+
+
+def test_the_first_mined_prep_stops_the_chain_when_it_mines_nothing(
+        psup, monkeypatch, capsys):
+    sup = psup
+    _finish(sup, "q0", final=60, env=33400, value=400.0)
+    _prep_env(sup, monkeypatch)
+    _popen(monkeypatch, sup, [(0, lambda: _p1_prep(sup, mined=[]))], [])
+    assert sup.run_prep("p1", 0, {}) is False
+    out = capsys.readouterr().out
+    assert "PREP FAILED: MASTER Q0'S PLAY MINED NO TOKEN" in out
+    line = [l for l in out.splitlines() if l.startswith("PREP FAILED")][0]
+    assert line.startswith(sup.KAIS_CALL_STOPS)
+    # a restart repeats the stop, from the finished prep
+    assert sup.run_prep("p1", 0, {}) is False
+
+
+def test_tokens_or_a_later_empty_prep_do_not_stop_the_chain(psup, monkeypatch):
+    sup = psup
+    _finish(sup, "q0", final=60, env=33400, value=400.0)
+    _prep_env(sup, monkeypatch)
+    tok = [[1, 32], [3, 32]]
+    mined = [{"token": tok, "count": 5, "k": 2, "consistency": 0.75,
+              "score": 3.75}]
+    _popen(monkeypatch, sup, [(0, lambda: _p1_prep(
+        sup, mined=mined, vocab=[[0, 4], [1, 4], tok]))], [])
+    assert sup.run_prep("p1", 0, {}) is True
+    _finish(sup, "p1", final=55, env=33000, value=400.0)
+    _popen(monkeypatch, sup, [(0, lambda: _write_prep(
+        sup, "p2", k=55, mine=True, mine_rules=RULES, env=QBERT, mined=[],
+        dropped=[]))], [])
+    assert sup.run_prep("p2", 0, {}) is True
+
+
+def test_a_generation_short_of_its_stop_at_the_cap_is_named(psup):
+    sup = psup
+    _finish(sup, "q0", final=sup.ITERATIONS, env=20000, evals=False,
+            files=False)
+    assert "--iterations cap 100" in sup.short_of_stop("q0", 0, 33333)
+    assert sup.short_of_stop("q0", 0, 20000) is None
+    _finish(sup, "p1", final=60, env=20000, evals=False, files=False)
+    assert sup.short_of_stop("p1", 0, 33333) is None
+
+
+def _asserts_only(code):
+    # the generated probe without its master's snapshot checks (no real
+    # snapshot exists here; smoke_testq.py runs them on real ones)
+    for cut in ("; _mb = distill.master_checks(", "; distill.master_checks("):
+        if cut in code:
+            return code[:code.index(cut)]
+    return code
+
+
+def test_the_quick_probes_hold_for_the_real_arms(sup):
+    sup.configure("q")
+    probes = [sup.quick("q0", 0)]
+    _finish(sup, "q0", final=60, env=33400, evals=False)
+    probes.append(sup.quick("q1", 0))
+    _finish(sup, "q7", final=60, env=33400, evals=False)
+    probes.append(sup.quick("q8", 0))
+    assert "spec['MAX_REPLAY'] == 340" in probes[0]
+    assert "len(spec['TOKEN_VOCAB']) == 24" in probes[0]
+    sup.configure("p")
+    probes.append(sup.quick("p1", 0))
+    assert "spec.get('_mine_q') is True" in probes[-1]
+    _finish(sup, "p1", final=60, env=33400, evals=False)
+    probes.append(sup.quick("p2", 0))
+    assert _py_each([_asserts_only(p) for p in probes]) == ["ok"] * 5
 
 
 # --------------------------------------------------------------------------
@@ -325,6 +512,19 @@ def test_a_mined_prep_on_real_qbert(monkeypatch, tmp_path,
         master = tmp_path / "weights-iter002.pth"
         torch.save(blob, master)
         out = tmp_path / "prep"
+        seen = {"played": [], "caps": []}
+        ppw, hc = distill.played_path_weights, distill.held_ceiling
+
+        def spy_paths(weights, played, paths):
+            seen["played"].append(dict(played))
+            return ppw(weights, played, paths)
+
+        def spy_cap(c1, c0, cap):
+            seen["caps"].append(cap)
+            return hc(c1, c0, cap)
+
+        monkeypatch.setattr(distill, "played_path_weights", spy_paths)
+        monkeypatch.setattr(distill, "held_ceiling", spy_cap)
         h = distill.prep(master, 2, out, log=lambda m: None,
                          from_log=tmp_path / "own-play", mine=True,
                          mine_q=True, env=QBERT, drop_share=0.03)
@@ -335,11 +535,15 @@ def test_a_mined_prep_on_real_qbert(monkeypatch, tmp_path,
     assert h["ceiling_cap"] == 25.0 and h["student_ceiling"] <= 25.0
     assert h["reward_unit"] == 25.0
     assert h["mining"]["hold"] >= 1
+    assert h["mined"]
     for e in h["mined"]:
         assert len(set(e["inputs"])) > 1 and e["frames"] <= 64
     doc = json.loads((out / "vocab.json").read_text())
     assert doc["mine_rules"] == h["mine_rules"]
-    # a played record's target is at least its product's
+    # Q-A2 and Q-A5 ran in the prep itself: every relabeled record went
+    # through played_path_weights, and the cap reached the ceiling rule
+    assert sum(len(p) for p in seen["played"]) == sum(h["relabeled"].values())
+    assert seen["played"] and seen["caps"] == [25.0]
     _hh, lives = distill.read_set(out / "set.pkl")
     S = len(h["vocab"])
     n_kept = S - len(h["mined"])
@@ -349,6 +553,9 @@ def test_a_mined_prep_on_real_qbert(monkeypatch, tmp_path,
     # the arm takes the prep, its ceiling and its vocabulary
     ablation.student_arm(P[1], str(out / "vocab.json"))
     spec = ablation.ARMS[P[1]]
+    # ... and the gate takes its set, from Q*bert's static vocabulary
+    with ablation.arm_config(P[1]) as live:
+        ablation.student_gate(live, str(out / "set.pkl"), True)
     assert spec["REWARD_GROWTH_START"] == h["student_ceiling"]
     assert muzero.canon_vocab(spec["TOKEN_VOCAB"]) == \
         muzero.canon_vocab(h["vocab"])

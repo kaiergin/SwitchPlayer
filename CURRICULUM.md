@@ -837,6 +837,16 @@ AMENDMENTS against E3 (everything else in E3-A2 to E3-A13 stands):
       a 150-step life. The iteration cannot be set in env steps without
       changing the collection loop, so the ratio will drift as lives lengthen;
       it is reported per generation (read (4)), and both lineages share it.
+      OFFPOLICY_DECAY_STEPS is sized from the nominal 50 iterations and keyed
+      to gradient steps, so a generation of about 80 iterations ages its data
+      sooner per env step than the recipe; both lineages share that too. At
+      random-play lives a generation needs about 80 of its 100 iterations;
+      a generation that hits the cap short of its stop is an ALERT.
+  (Q-A7) PER-GAME KNOBS: MAX_REPLAY 340 and POLICY_REFRESH_COUNT 16, the Ms.
+      Pac-Man port's own rule (the two per-trajectory knobs stay per GAME; a
+      Q*bert game is 4 lives, so Pong's 85 and 4 times 4). Left at Ms. Pac-Man's
+      255 and 12, the 31,250-step cap would not bind at random-play lives and
+      about a third of a master's lives would never reach its student.
 READS, fixed now:
   (1) PRIMARY, Kai's prediction: multi-action mined tokens' share of QM's
       deployed play, per generation. HOLDS if the mean over QM6-QM8 is at least
@@ -861,7 +871,8 @@ READS, fixed now:
 STOP RULES: every master must clear 327.8 (twice Q*bert's published random
   163.9; uniform random tokens scored 207 here) over its last two deployed
   rows, or the chain stops as Kai's call. If QM1's prep mines no
-  multi-action token, the chain stops as Kai's call. One seed per arm, so read
+  token (every mined token is multi-action under Q-A1), the chain stops before
+  QM1 trains, as Kai's call. One seed per arm, so read
   (3) is a weak read, as in E3.
 MEMORY BUDGET (owed before any further mined run), from E3's commit trend:
   trainer median 8.0 GB in M1 and M2, first fifth against last fifth 8.37 to

@@ -342,7 +342,7 @@ LINEAGES = {
                        "tree": r"Y:\SwitchPlayer-testb2-run"}},
     # Test Q: "game" (GAMES; none: Ms. Pac-Man), "total_env_steps" (none:
     # 100,000), "mine_q" (the prep's --mine-q), and "live" on an external
-    # run that is not frozen (q0, in this very tree)
+    # run that is not frozen: q0, in this very tree (tree_of: REPO)
     "q": {"arm": QT_ARM, "run": "qbert-two", "prep": "qbert-two-prep",
           "generations": 9, "iterations": 100, "nominal": 50,
           "discounts": (0.997 ** 4,) * 9,
@@ -354,26 +354,30 @@ LINEAGES = {
           "rule": "keep", "date": "2026-11-07", "game": "qbert",
           "total_env_steps": 300000, "mine": True, "mine_q": True,
           "twin": "q",
-          "external": {"variant": "q0", "live": True,
-                       "tree": r"Y:\SwitchPlayer-testq-run"}},
+          "external": {"variant": "q0", "live": True}},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
+# (configure() binds it: a lineage's "total_env_steps", else 100,000)
 TOTAL_ENV_STEPS = 100000
 # Per game (a lineage's "game"; none: Ms. Pac-Man). near_random: the master
 # gate, Test 1's NEAR RANDOM rule -- Ms. Pac-Man's g = (score - 307.3) / 973.9
 # below 0.2 over its last two deployed rows; Q*bert's twice its random score
-# (CURRICULUM "Test Q"). lives: --episodes-per-iter (a random life is 89 base
-# steps on Q*bert, 204 on Ms. Pac-Man).
+# (CURRICULUM "Test Q"; its g_human is the published human score, so its g is
+# for display only). lives: --episodes-per-iter (a random life is 89 base
+# steps on Q*bert, 204 on Ms. Pac-Man). max_replay: the arms' MAX_REPLAY
+# (Q-A7).
 GAMES = {
     "mspacman": {"env": "MsPacmanNoFrameskip-v4",
                  "tag": "-mspacmannoframeskip-skip4",
                  "g_random": 307.3, "g_human": 973.9, "near_random": 502.08,
-                 "reward_unit": 10.0, "tokens": 36, "lives": 3},
+                 "reward_unit": 10.0, "tokens": 36, "lives": 3,
+                 "max_replay": 255},
     "qbert": {"env": "QbertNoFrameskip-v4",
               "tag": "-qbertnoframeskip-skip4",
               "g_random": 163.9, "g_human": 13455.0, "near_random": 327.8,
-              "reward_unit": 25.0, "tokens": 24, "lives": 5},
+              "reward_unit": 25.0, "tokens": 24, "lives": 5,
+              "max_replay": 340},
 }
 
 
@@ -393,13 +397,14 @@ def configure(letter):
     global LINEAGE, GENERATIONS, VARIANTS, RUNS, NAMES, ITERATIONS
     global NOMINAL_ITERATIONS, DISCOUNTS, DISCOUNT_RULE, SEEDS, PREP_PREFIX
     global ENV_ID, TAG, G_RANDOM, G_HUMAN, NEAR_RANDOM, REWARD_UNIT, N_TOKENS
-    global EPISODES_PER_ITER, TOTAL_ENV_STEPS
+    global EPISODES_PER_ITER, TOTAL_ENV_STEPS, MAX_REPLAY
     spec = LINEAGES[letter]
     game = GAMES[spec.get("game", "mspacman")]
     ENV_ID, TAG = game["env"], game["tag"]
     G_RANDOM, G_HUMAN = game["g_random"], game["g_human"]
     NEAR_RANDOM, REWARD_UNIT = game["near_random"], game["reward_unit"]
     N_TOKENS, EPISODES_PER_ITER = game["tokens"], game["lives"]
+    MAX_REPLAY = game["max_replay"]
     TOTAL_ENV_STEPS = spec.get("total_env_steps", 100000)
     LINEAGE, GENERATIONS = letter, spec["generations"]
     # E3: a lineage whose generation 0 is another lineage's run ("first" 1,
@@ -589,9 +594,9 @@ def is_frozen(variant):
 
 
 def tree_of(variant):
-    """The tree holding `variant`'s run folder and probe jsonls: REPO, or
+    """(Test Q: a "live" external run, q0, is this tree's own.) The tree holding `variant`'s run folder and probe jsonls: REPO, or
     the external run's frozen tree (E3-A1)."""
-    if is_external(variant):
+    if is_frozen(variant):
         return LINEAGES[LINEAGE]["external"]["tree"]
     return REPO
 
@@ -818,7 +823,7 @@ def quick(variant, seed):
             "assert spec['REWARD_GROWTH'] is True and "
             f"spec['REWARD_UNIT'] == {REWARD_UNIT}; "
             "assert spec['BN_RECAL_ACTING'] is True; "
-            "assert spec['MAX_REPLAY'] == 255; "
+            f"assert spec['MAX_REPLAY'] == {MAX_REPLAY}; "
             f"assert len(spec['TOKEN_VOCAB']) == {N_TOKENS}; "
             "assert hasattr(ablation, 'OwnPlayLog') and "
             "hasattr(ablation, 'read_own_play') and "
@@ -1577,11 +1582,38 @@ def mined_alerts(variant):
 
 
 def print_mined(variant):
-    """E3: the MINED line and its ALERTs, for a mining lineage's prep."""
-    if LINEAGES[LINEAGE].get("mine"):
+    """E3: the MINED line and its ALERTs, for a mining lineage's prep.
+    Returns whether the run may go on: False (printed as PREP FAILED: MASTER
+    ..., Kai's call) on Test Q's stop rule, its mined lineage's first prep
+    appending no token -- before that generation trains."""
+    lin = LINEAGES[LINEAGE]
+    if lin.get("mine"):
         print(prep_tokens_line(variant), flush=True)
         for alert in mined_alerts(variant):
             print(f"ALERT: {alert}", flush=True)
+    doc = prep_doc(variant)
+    if (lin.get("mine_q") and gen(variant) == lin.get("first", 0)
+            and doc is not None and not doc.get("mined")):
+        print(f"PREP FAILED: MASTER {NAMES[master_of(variant)]}'S PLAY MINED "
+              f"NO TOKEN: {NAMES[variant]} does not train -- the chain stops "
+              f"(Test Q's stop rule, Kai's call)", flush=True)
+        return False
+    return True
+
+
+def short_of_stop(variant, seed, stop):
+    """Why a complete generation fell short of its env-step stop, or None:
+    one that reached the --iterations cap first (Q*bert's short lives leave
+    little headroom) leaves its env-keyed schedules unfinished, and the next
+    stop grows by what it missed."""
+    try:
+        k, env = final_row(variant, seed)
+    except SystemExit:
+        return None
+    if k >= ITERATIONS and env < stop:
+        return (f"{NAMES[variant]} reached the --iterations cap {ITERATIONS} "
+                f"at {env} env steps, short of its stop {stop}")
+    return None
 
 
 def prep_tokens_line(variant):
@@ -1639,8 +1671,7 @@ def run_prep(variant, seed, env, redo_ok=True):
                 pdir, "master.json")) is None
             if ok and not pick_bad:
                 # (audit r2) on a restart too: the MINED line (E3)
-                print_mined(variant)
-                return True
+                return print_mined(variant)
             if k < 2:
                 time.sleep(60)
         if pick_bad:
@@ -1680,8 +1711,7 @@ def run_prep(variant, seed, env, redo_ok=True):
         # counts. With no prep alive, its tmp files are stale.
         if prep_done(variant) and set_intact(variant, seed)[0]:
             print(f"PREP done (by an earlier prep): {prel}", flush=True)
-            print_mined(variant)
-            return True
+            return print_mined(variant)
         for name in os.listdir(pdir):
             if name.endswith(".tmp"):
                 try:
@@ -1714,8 +1744,7 @@ def run_prep(variant, seed, env, redo_ok=True):
             ok, why = set_intact(variant, seed)
             if ok:
                 print(f"PREP done (attempt {attempt}): {prel}", flush=True)
-                print_mined(variant)
-                return True
+                return print_mined(variant)
             print(f"PREP attempt {attempt}: {why}", flush=True)
         else:
             tail = prep_log_tail(plog)
@@ -1825,7 +1854,7 @@ TRAINER_MODULES = ("ablation", "distill", "experiments.ablation",
 # started by hand beside one waits it out like any trainer (Test B2W's
 # smoke too, and E3's, smoke_teste3.py)
 SMOKE_SCRIPTS = ("smoke_testc.py", "smoke_testc2.py", "smoke_testb2w.py",
-                 "smoke_teste3.py")
+                 "smoke_teste3.py", "smoke_testq.py")
 
 
 def is_trainer(cmd):
@@ -2692,6 +2721,9 @@ def main(argv):
         lifetime = time.time() - born
         snapshot(deaths_log, variant, seed, attempt, rc, lifetime)
         if completed():
+            short = short_of_stop(variant, seed, stop)
+            if short:
+                print(f"ALERT: {short}", flush=True)
             print(f"RUN COMPLETE {variant} s{seed}", flush=True)
             return 0
         deaths.append(time.time())

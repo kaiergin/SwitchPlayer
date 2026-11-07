@@ -1335,7 +1335,9 @@ ARMS[MINE_ARM + "-m2"] = {
 # mining at every swap under Q-A1 and Q-A2 (`_mine_q`: the prep's --mine-q),
 # QM1's master Q0 itself. Every arm holds `_ceiling_cap` 25 units (Q-A5).
 # `_vocab_parent_arm`: the arm whose static vocabulary a first student's
-# master played (Ms. Pac-Man's TK otherwise).
+# master played (Ms. Pac-Man's TK otherwise). The two per-trajectory knobs
+# stay per GAME, the Ms. Pac-Man port's rule (Q-A7): a Q*bert game is 4 lives,
+# so Pong's MAX_REPLAY 85 and POLICY_REFRESH_COUNT 4 become 340 and 16.
 QBERT_DURATION_TOKENS = tuple((a, f) for a in range(6)
                               for f in (4, 8, 16, 32))
 QT_ARM = "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-qbert-tokens-two"
@@ -1343,7 +1345,8 @@ QM_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-qbert-tokens-"
           "mined")
 QBERT_GENERATIONS = 9
 QBERT_KNOBS = {"TOKEN_VOCAB": QBERT_DURATION_TOKENS, "REWARD_UNIT": 25.0,
-               "_ceiling_cap": 25.0}
+               "_ceiling_cap": 25.0, "MAX_REPLAY": 340,
+               "POLICY_REFRESH_COUNT": 16}
 ARMS[QT_ARM + "-q0"] = {
     **ARMS[TWO_ARM + "-t0"],
     **QBERT_KNOBS,
@@ -1351,7 +1354,8 @@ ARMS[QT_ARM + "-q0"] = {
             "Q*bert -- from scratch at the sign clip, 24 duration tokens, "
             "REWARD_UNIT 25, to its env-step stop, its own play logged for "
             "the first students' distillation sets; shared by the control "
-            "and the mined lineage. Run as TK on QbertNoFrameskip-v4.",
+            "and the mined lineage. Run as TK on QbertNoFrameskip-v4, at "
+            "5 lives per iteration (Q-A6).",
 }
 for _k in range(1, QBERT_GENERATIONS):
     ARMS[f"{QT_ARM}-q{_k}"] = {
@@ -1362,7 +1366,8 @@ for _k in range(1, QBERT_GENERATIONS):
         "_doc": f"Test Q's QT{_k}: T1's recipe on Q*bert, the distilled "
                 f"student of {'Q0' if _k == 1 else f'QT{_k - 1}'}'s final "
                 f"snapshot, no mining; its ceiling held at 25 units (Q-A5). "
-                f"Run as TK on QbertNoFrameskip-v4.",
+                f"Run as TK on QbertNoFrameskip-v4, at 5 lives per iteration "
+                f"(Q-A6).",
     }
     ARMS[f"{QM_ARM}-p{_k}"] = {
         **ARMS[TWO_ARM + "-t1"],
@@ -1375,7 +1380,8 @@ for _k in range(1, QBERT_GENERATIONS):
                 f"--mine --mine-q), the distilled student of "
                 f"{'Q0' if _k == 1 else f'QM{_k - 1}'}'s final snapshot, "
                 f"holds out of the mined slots (Q-A1), played paths certain "
-                f"in the targets (Q-A2). Run as TK on QbertNoFrameskip-v4.",
+                f"in the targets (Q-A2). Run as TK on QbertNoFrameskip-v4, at "
+                f"5 lives per iteration (Q-A6).",
     }
 del _k
 
@@ -2825,6 +2831,9 @@ def student_arm(arm, path):
                                  f"{doc.get(key)!r}, not this student's "
                                  f"{want!r}")
         c = student_ceiling(doc, path, support_steps(vocab))
+        if cap is not None and c > cap:
+            raise SystemExit(f"{path}: student_ceiling {c!r} is past "
+                             f"'{arm}''s cap {cap!r} (Q-A5)")
         new.update({"REWARD_GROWTH_START": c, "REWARD_GROWTH_CEILING": c,
                     "_student_ceiling": c})
     if spec.get("_discount_from_prep"):
@@ -2943,7 +2952,9 @@ def student_gate(spec, distill_set, snapshot_weights):
         raise SystemExit(f"{distill_set}: recorded from a master vocabulary "
                          f"other than " + ("the student master's (its prep's "
                                            "master_vocab)" if want is not None
-                                           else "the TK arm's"))
+                                           else "the "
+                                           + spec.get("_vocab_parent_arm",
+                                                      "TK") + " arm's"))
     want = spec.get("_vocab_set_sha256")
     if not want or file_sha256(distill_set) != want:
         raise SystemExit(f"{distill_set}: not the set --token-vocab's "

@@ -4135,7 +4135,8 @@ def test_a_smoke_counts_as_a_trainer(sup, monkeypatch, capsys):
     one waits. Test B2W's smoke (smoke_testb2w.py) too, and E3's
     (smoke_teste3.py: its parent and its "child" trainers)."""
     assert sup.SMOKE_SCRIPTS == ("smoke_testc.py", "smoke_testc2.py",
-                                 "smoke_testb2w.py", "smoke_teste3.py")
+                                 "smoke_testb2w.py", "smoke_teste3.py",
+                                 "smoke_testq.py")
     procs = [
         (1, ["py", "-u", "C:" + chr(92) + "sp" + chr(92) + "smoke_testc2.py",
              "C:/sp/smoke_testc2_r2"]),
