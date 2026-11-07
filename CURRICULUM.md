@@ -877,6 +877,17 @@ OPEN, for Kai: the decision cost in the search (a tie-breaker for tokens, in
 place of removing the discount), the run length, and whether this goes ahead
 of the swap-count curve. Nothing pre-registered yet.
 
+KAI 2026-11-07, later: "Sure we can run this test then move onto mining other
+players' gameplay". So the next test is mining on Q*bert over long training,
+with two-hop tokens (the 64-frame cap holds two 30-frame hops), then mining
+other players' gameplay. Taken with that answer, as offered: 300k env steps, and
+ahead of the swap-count curve. The decision cost in the search is BACKLOGGED.
+Q*bert timing (emulator, one seed, from the top of the pyramid): a hop is 30
+frames; a second input during a hop is ignored; each new cube scores +25;
+holding one direction gives 5 hops, then a life is lost off the edge.
+Before the run: the memory budget, then the target-weighting fix and holds kept
+out of the mined slots, pre-registered and audited as usual.
+
 ### RESULT -- E3a: duplicate spellings are COMMON in strong play and latents do not group them (T2, seed 0), 2026-11-05
 
 (Pre-registration: E3a in "Queued experiment (pre-registered) -- E3",
