@@ -856,6 +856,27 @@ multi-action sequences. On length: E3-A2 and E3-A3 limited a candidate to 2-4
 decisions and 64 frames, and 10 of the 16 tokens sit exactly at 64 frames, so
 the short tokens reflect that limit and are not a finding about the game.
 
+KAI 2026-11-07: the 64-frame cap on mined tokens STAYS. Kai's reasoning:
+chained in the tree search, tokens already reach past a second in some
+directions. Kai expects mining to pay off over long training, well past 100k
+env steps, as play converges and chosen paths become more deterministic, so
+that mined tokens are used consistently. The offline study of longer tokens
+is therefore dropped.
+READS SO FAR on that expectation (descriptive, existing logs, not
+pre-registered):
+  - The prior's top-choice probability on behaviour data (beh_prior_maxp) ended
+    the generations at 0.566 (T0), 0.606 (T1), 0.556 (T2), 0.564 (M1), 0.545
+    (M2): no rise through 100k env steps. It can under-read path determinism,
+    since one path has many spellings (E3a: 65% duplicates).
+  - Distinct mining candidates per counted run fell from 0.306 (T0's play,
+    1238 / 4040) to 0.213 (M1's play, 516 / 2427), a small sign of play
+    narrowing; two points only, and holds dominate them.
+  - TKX, the only long run, ended worse and plateaued, but it predates the
+    prefix-BN fix and the swap-only clip, so it is not a fair test.
+OPEN, for Kai: the decision cost in the search (a tie-breaker for tokens, in
+place of removing the discount), the run length, and whether this goes ahead
+of the swap-count curve. Nothing pre-registered yet.
+
 ### RESULT -- E3a: duplicate spellings are COMMON in strong play and latents do not group them (T2, seed 0), 2026-11-05
 
 (Pre-registration: E3a in "Queued experiment (pre-registered) -- E3",
