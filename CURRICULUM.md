@@ -830,7 +830,9 @@ steps), to 100k env steps. Only the action design differs:
   - OH: OF with the option edge OFF in the birth search: the same heads, the same
     suggestions (taken from the head at the root) and the same jump training. OF
     minus O0 is a bundle of search edge, auxiliary loss and jump training; OF minus
-    OH is the edge alone. Run only if read (1) is BETTER or WORSE.
+    OH is the edge alone. Run unless read (3) says NO INFLUENCE, where OF and OH
+    match by construction; a NO DIFFERENT can hide an edge and an auxiliary effect
+    that cancel.
   - OW: OF's head with whole options played. SECOND STAGE: built after OF's read
     and run if Kai still wants it then (see DEPARTURE 5).
   - C0: already run, Y:\SwitchPlayer-testc-run (keep that tree), deployed [90k, end]
@@ -853,20 +855,23 @@ DESIGN, as OptionZero's CODE unless listed under DEPARTURES:
     in the shared loss, not detached (train.py 158-165, 275).
   - Dominant option, the CODE's rule, not the paper's (zero_actor.cpp 368-381):
     each head's argmax in turn, ending at the first stop; length at least 2, else
-    none. There is no 0.5 threshold and no product: the heads' targets already
-    make them cumulative. Its prior is the last head's probability; the primitives
-    share 1 minus it (zero_actor.cpp 395-396).
+    none. There is no 0.5 threshold in the code. Its prior p(o) is the last head's
+    probability (zero_actor.cpp 395-396); 1 - p(o) is one scalar used only in the
+    option-against-primitive choice (mcts.cpp 306, 322), and primitive PUCT keeps
+    its own priors (mcts.cpp 336).
   - Tree: one option edge per node beside the primitives. Selection is primitive
     PUCT, then, if the pick is the option's first move, option against the
     primitive with the option's statistics taken out (mcts.cpp 300-325).
-    Placeholders along the option carry zero statistics; primitive statistics
-    include the option's; statistics are root-relative.
+    Placeholders along the option start at zero, then take visits and value like
+    any node (mcts.cpp 205-208, 282-287); primitive statistics include the option's;
+    statistics are root-relative. No option noise at the root in first-move mode
+    (zero_actor.cpp 265; the paper's A.1 describes whole-option runs).
   - Dynamics: one jump. Per-position action rows summed, padded with -1, so L = 1
     equals today's state dict.
   - Head targets, built at batch time so refreshed policies flow through
-    (base_env.h 318-372). Counting the policy as head 0: head i's target puts
-    pi(t+i)[m] on m, the rest on stop, where m is the NETWORK's top move at t+i,
-    PMAX, not pi's. PMAX is a per-record prior argmax, rewritten from the learner's
+    (base_env.h 318-372, with DEPARTURE 7's change). Counting the policy as head 0:
+    head i's target puts the product of pi(t+j)[m_j], j = 1..i, on m_i, the rest on
+    stop, where m_j is the NETWORK's top move at t+j, PMAX, not pi's. PMAX is a per-record prior argmax, rewritten from the learner's
     own output at every sample, root and unrolled latents alike (train.py 223, 274;
     data_loader.cpp 282-298). On the first miss of a played move against m, the
     rest of the chain is stop; loss masked as getOptionLossScale.
@@ -874,10 +879,11 @@ DESIGN, as OptionZero's CODE unless listed under DEPARTURES:
     where the played moves match the suggested option (getStepLength), else one
     step. The match stops before the closing record, whose action is a placeholder;
     the truncated-root limit counts the positions a window really spans, up to 15.
-  - Prefix BN (the class of artifact PB fixed): a jump row carries about 3 steps'
-    reward, so per-step statistics key on EDGE count and not on LSTM step, with one
-    uniform step in train mode. Position rows 2..L start at zero. The prefix probe
-    runs on jump rows, and jump rows' consistency and prefix error are logged.
+  - Prefix BN: one jump is one LSTM call, so the per-step sets already key on edge
+    count, and jump and single rows pool in set k in train and eval alike: no
+    PB-type mismatch, no change. Position rows 2..L start at zero. The prefix probe
+    runs on jump rows; jump share per edge, jump rows' consistency and prefix error
+    are logged.
 DEPARTURES, each forced or chosen, none silent:
   1. No search in play, none deployed. The paper's agent searches at every move.
      Options reach the deployed agent through the targets they shape AND through
@@ -901,6 +907,12 @@ DEPARTURES, each forced or chosen, none silent:
      built.
   6. Trajectories are per life, so heads learn to stop at a life's end; OptionZero's
      records run through a life loss.
+  7. Head targets carry an explicit product. OptionZero samples play from visits at
+     temperature 1, so a hit has probability about pi[m] and a sampled chain's mass
+     falls off by itself. Our play samples a sharpened prior (T 0.125 late; mean
+     pi[played] 0.53-0.68 in C0), where hits are near certain, so without the product
+     the later heads would carry pi alone, not the paper's cumulative omega. Hit rate
+     is logged beside mean pi[m].
   Left off for all arms: long-token bias, swaps, distillation, mining, reward
   growth, own-play logs for the next generation. token_gate becomes option_gate.
 READS. Exact evals as ever: whole games, 30 noop starts, deployed acting states
@@ -909,22 +921,32 @@ primary, trainer-BN beside it, unclipped.
       / NO DIFFERENT on 2 x 216.9 x sqrt(1/n1 + 1/n2), the standing Ms. Pac-Man
       band, so these sit beside every earlier result. At n 4 the band is about
       +-307, close to the paper's whole gain on this game scaled to our level (+29%:
-      about +365 on 1262). So NO DIFFERENT is INCONCLUSIVE, never "level": a second
-      seed of both arms comes before any keep or drop. If BETTER or WORSE, OH runs,
-      and OF against OH, same rule, says how much is the edge.
+      about +365 on 1262, less on O0's level if it sits lower; the plain twin was 649
+      at 53k). So every one-seed verdict is PROVISIONAL, and NO DIFFERENT is
+      INCONCLUSIVE, never "level". OF against OH, same rule, says how much is the edge.
+      SECOND SEED, only if read (3) shows influence: O0 and OF again at seed 1 (about
+      66 h). TWO-SEED RULE: KEEP if OF beats O0 on both seeds and the pooled gap clears
+      2 x 216.9 x sqrt(1/n1 + 1/n2) on the pooled rows (about +-217); DROP if it loses
+      on both and clears it; otherwise UNRESOLVED, Kai's call. Two seeds are still
+      thin: the seed-level bands in (7) stay about the size of the effect.
   (2) OF against C0 and O0 against C0, same rule. Not a clean action-design
-      contrast: read (6) prints what else moved.
-  (3) INFLUENCE, the gate on read (1). Every row, 256 sampled birth roots are
-      searched twice from one net and one noise draw, option edge on and off: KL
-      between the two visit targets and the share whose top move flips. Over rows in
-      [90k, end]: under 5% of roots flip = NO INFLUENCE (the 5% is a judgment, not
-      derived), and read (1) then says nothing about the edge. The cause is named:
-      NO OPTIONS (suggestions in under 5% of trees), NEVER SELECTED (options in
-      trees, edge under 1% of simulations) or NO CHANGE (selected, targets the
-      same). Use is printed beside it: simulations through an option edge, trees
-      with one, unroll steps that jump, mean suggested length, sampled birth-target
-      share. The paper's 28.9% and 91.4% are whole-option runs; planning-only use
-      is unpublished.
+      contrast: read (6) prints what else moved. Replacing the vocabulary stays a
+      choice: if OF beats O0 but reads WORSE than C0, it goes to Kai, not into the base.
+  (3) INFLUENCE, the gate on read (1). Every row, 256 sampled birth roots, on one
+      pinned net with one noise draw and tie-break (noise_override, tie_break), are
+      searched three ways: ON, the real option; OFF, no edge; PLACEBO, an edge with the
+      same first move and prior and a random tail, the floor for what any edge does
+      to a search with near-tied roots (within 2 visits in about 5% of stored 50-sim
+      targets). Against OFF: KL between visit targets, and the share of roots whose top
+      move flips, ties counted as no flip; also the signed shift on the option's first
+      move. Over rows in [90k, end], resampling roots: INFLUENCE if ON's KL or flip
+      share exceeds PLACEBO's with a 95% lower bound above 0; else NO INFLUENCE, and
+      read (1) then says nothing about the edge. The cause, first match: NO OPTIONS
+      (under 5% of sampled trees hold an option edge at any node), NEVER SELECTED
+      (under 1% of simulations use one), else NO CHANGE. The 5% and 1% are judgments.
+      Use is printed beside it: simulations through an option edge, trees with one,
+      unroll steps that jump, mean suggested length, sampled birth-target share. The
+      paper's 28.9% and 91.4% are whole-option runs; planning-only use is unpublished.
   (4) STATE DEPENDENCE. Prediction accuracy by step, suggested against played, as
       the paper's Table 11 (whole-option, 75.6 / 82.0 / 60.9% mean over games),
       beside two baselines a head must beat to be more than persistence: repeat the
@@ -945,13 +967,18 @@ primary, trainer-BN beside it, unclipped.
       the control's mean: +-47% (2 x 16.6% x sqrt 2, median of the 25 games with
       non-zero spread) and Ms. Pac-Man's own +-35% (12.5%, three seeds). Descriptive
       unless Kai changes it.
+  (8) VARIED-START EVAL. The 30 noop starts repeat with period 4 and are about 5-7
+      effective games (C0's last rows 4.8-6.7). So each window row of O0, OF and C0's
+      snapshots is also scored on 30 games with seeded random first 6 decisions, the
+      same seeds for all, paired. Its row spread is printed beside the standing band.
+      Descriptive unless Kai makes it primary.
 STOP RULES: non-finite steps, or free commit under the usual floor: stop and report.
   Nothing else stops an arm. A NO INFLUENCE OF still finishes.
 MEMORY: stacks are copied whole per record, 84,672 bytes. At the 31,250 base-step
   cap OF holds about 2.65 GB of replay against about 0.5 GB for C0. Lowest free
   commit seen is 9.0 GB. Checked in the smoke before launch.
 BUILD ORDER: flags, gate and arms; network; option search and its tests; records,
-  unroll, targets and loss; diagnostics and the on/off root probe; the exact-eval
+  unroll, targets and loss; diagnostics and the three-way root probe; the exact-eval
   layout hook; O0 and OF run. OW after. About 1,000 lines; the search is about 500
   of them, in a subclass so v1 stays parity-pinned. OptionZero cannot serve as an
   oracle, and a tree bug gives plausible targets, so the tree gets hand-built cases:
@@ -976,6 +1003,12 @@ AUDIT r1 2026-11-07, this registration, before any code: 2 HIGH (OF minus O0 was
   is inconclusive; read (2)'s confounds; jump rows and prefix BN; read (5) needed a
   probe), 6 LOW, all taken in above. The 16.6% was rechecked: median over the 25
   games with non-zero spread.
+AUDIT r2 2026-11-07: 1 HIGH (flips can be tie noise, so read (3) gained the PLACEBO
+  and KL), 4 MEDIUM (cumulative heads assumed temperature-1 play, DEPARTURE 7; two tree
+  lines misread the code; OH's trigger; one-seed verdicts are provisional, with a
+  two-seed rule gated on read 3), 3 LOW (r1's prefix BN change was a no-op, so removed;
+  no option noise pinned; a rule for OF beating O0 but trailing C0). Read (8) added for
+  the noop-start finding from Test G's audit.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
