@@ -829,6 +829,14 @@ AMENDMENTS against E3 (everything else in E3-A2 to E3-A13 stands):
       the chain; Q*bert's level bonuses would get there within a few swaps. BOTH
       lineages hold the ceiling at 25 units (625 points) at most, so the clip
       does not differ by arm.
+  (Q-A6) LIVES PER ITERATION: 5, not the recipe's 3 (--episodes-per-iter).
+      Measured under uniform random tokens, a life lasts 89 base steps on
+      Q*bert and 204 on Ms. Pac-Man, so 3 lives would give about 270 env steps
+      per iteration against T0's 645-715, and more gradient steps per env step
+      than the recipe's 2.9. 5 lives gives 445 at random play and about 750 at
+      a 150-step life. The iteration cannot be set in env steps without
+      changing the collection loop, so the ratio will drift as lives lengthen;
+      it is reported per generation (read (4)), and both lineages share it.
 READS, fixed now:
   (1) PRIMARY, Kai's prediction: multi-action mined tokens' share of QM's
       deployed play, per generation. HOLDS if the mean over QM6-QM8 is at least
@@ -846,11 +854,13 @@ READS, fixed now:
       on 2 x sigma x sqrt(1/n1 + 1/n2), sigma from QT's own rows by the general
       rule (1.4826 x the median absolute adjacent difference / sqrt 2): 216.9
       is Ms. Pac-Man's and does not carry over.
-  (4) Decisions per second, both lineages, per generation.
+  (4) Decisions per second and gradient steps per env step, both lineages,
+      per generation.
   (5) Descriptive only: whether QT climbs across swaps. There is no no-swap twin,
       so this cannot show that swaps help on Q*bert.
-STOP RULES: Q0 must clear 328 (twice Q*bert's random 163.9) over its last two
-  deployed rows, or the chain stops as Kai's call. If QM1's prep mines no
+STOP RULES: every master must clear 327.8 (twice Q*bert's published random
+  163.9; uniform random tokens scored 207 here) over its last two deployed
+  rows, or the chain stops as Kai's call. If QM1's prep mines no
   multi-action token, the chain stops as Kai's call. One seed per arm, so read
   (3) is a weak read, as in E3.
 MEMORY BUDGET (owed before any further mined run), from E3's commit trend:

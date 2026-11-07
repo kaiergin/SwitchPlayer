@@ -57,12 +57,21 @@ and replayed as their base steps, each with its own action. Without
 --mine and without a master's mined tokens every step above is unchanged,
 bit for bit.
 
+Test Q (Kai 2026-11-07; CURRICULUM "Test Q", Q-A1, Q-A2, Q-A5), --mine-q with
+--mine: a candidate whose inputs are all one action is not eligible (a hold
+is a longer duration token, not a sequence); at a record relabeled as a mined
+token the spelling the master actually played gets path weight 1, and every
+other path from that first slot 0 (played_path_weights). A master arm with
+`_ceiling_cap` holds the student's ceiling at that cap. --env names the game
+(default Ms. Pac-Man). Without them every step is unchanged, bit for bit.
+
 The student run (ablation.py --distill-set) reads set.pkl with read_set and
 pre-fills its replay through Run.paper_targets (ablation.distill_prefill).
 
 Usage:
   python experiments/distill.py --master SNAPSHOT.pth --master-iterations N
       --out DIR [--seed 0] [--base-steps 31250] [--from-log DIR] [--mine]
+      [--mine-q] [--env ENV_ID]
 """
 import argparse
 import contextlib
@@ -240,6 +249,14 @@ def halved_ceiling(mags, c0):
     lo = m[j - 1] if j else 0.0
     c = min(max((want - prefix[j]) / (n - j), lo), m[j])
     return float(max(c, c0))
+
+
+def held_ceiling(c1, c0, cap):
+    """(Test Q, Q-A5) The halved-rule ceiling `c1` held at `cap` (None: no
+    cap), never below the master's own `c0`: (ceiling, capped)."""
+    if cap is None or c1 <= float(cap):
+        return float(c1), False
+    return max(float(cap), float(c0)), True
 
 
 # -- 2c. Test B: the student's discount, the value support, the own-play log ------
@@ -424,14 +441,15 @@ def spelling(spellings):
 
 def mine_candidates(lives, vocab, high, student_vocab,
                     max_length=muzero.TOKEN_MINED_MAX_FRAMES,
-                    sizes=MINE_RUN_SIZES):
+                    sizes=MINE_RUN_SIZES, holds_out=False):
     """(E3-A3) The candidates from the master's lives ({"slots", "full",
     "offset"}: slot per decision, whether it played its full frames, its
     first decision's index in the log), in log order; `high` the log indices
     of the high-half decisions. Counts every run whose FIRST decision is
     high, whose decisions all played in full and whose length is at most
     `max_length`, by its raw INPUTS; dropped: a key equal in inputs to a
-    token of `student_vocab` (the vocabulary after the 1% rule). Every key
+    token of `student_vocab` (the vocabulary after the 1% rule); with
+    `holds_out` (Test Q, Q-A1), a key of one action alone. Every key
     is a candidate (no count cut: the score ranks them, E3-A3), in count
     order, ties by first occurrence. Returns (candidates [{"id", "inputs",
     "key" (the spelling), "length", "n" (the spelling's decisions), "count",
@@ -453,6 +471,8 @@ def mine_candidates(lives, vocab, high, student_vocab,
                 stats["cut_short"] += 1
             elif length > max_length:
                 stats["over_length"] += 1
+            elif holds_out and len(set(inputs)) == 1:
+                stats["hold"] += 1
             elif inputs in taken:
                 dropped[inputs] = dropped.get(inputs, 0) + 1
                 stats["vocab_equal"] += 1
@@ -559,7 +579,7 @@ def stack_latents_values(run, stacks, batch=MINE_BATCH, latents=True):
 
 
 def mine_tokens(run, lives, master_vocab, student_vocab, cap, unit, ceiling,
-                discount, batch=MINE_BATCH):
+                discount, batch=MINE_BATCH, holds_out=False):
     """(E3-A3, E3-A4) Mining on the master's own play (`lives`, as record /
     log_lives give them), its nets carrying the ACTING states (the caller's
     set_rep_pred). The advantage of a decision: its discounted return (the
@@ -608,7 +628,8 @@ def mine_tokens(run, lives, master_vocab, student_vocab, cap, unit, ceiling,
     adv = rets - vals
     high, threshold = high_half(adv)
     cands, dropped, stats = mine_candidates(infos, master_vocab, high,
-                                            student_vocab)
+                                            student_vocab,
+                                            holds_out=holds_out)
     # the second pass: the latents of the counted runs' start / end stacks
     need = {}
     for c in cands:
@@ -762,7 +783,7 @@ def _relabel_match(traj, master_vocab, i, mined, max_steps):
 
 
 def retokenize(traj, inner, master_vocab, student_vocab, mined=None,
-               stats=None):
+               stats=None, played=None):
     """One recorded life in the student's vocabulary: 3-field records
     (stack, student slot, raw reward tuple entering the record) and the
     final record (stack, 0, its incoming tuple). A kept token stays one
@@ -785,7 +806,8 @@ def retokenize(traj, inner, master_vocab, student_vocab, mined=None,
     base step clipped). The interior stacks leave the set. `stats` (a dict)
     counts the relabels: "records" {slot: n}, "decisions" (master
     decisions replaced) -- and "split", the dropped-token decisions split,
-    "split_extra" the records their splits added."""
+    "split_extra" the records their splits added. `played` (Test Q, a dict):
+    filled with {record index: the master slots that record replaced}."""
     student_vocab = muzero.canon_vocab(student_vocab)
     master_vocab = muzero.canon_vocab(master_vocab)
     index = {t: i for i, t in enumerate(student_vocab)}
@@ -799,6 +821,9 @@ def retokenize(traj, inner, master_vocab, student_vocab, mined=None,
             if match is not None:
                 k, slot = match
                 out.append((traj[i][0], slot, incoming))
+                if played is not None:
+                    played[len(out) - 1] = tuple(int(traj[j][1])
+                                                 for j in range(i, i + k))
                 incoming = tuple(r for j in range(i, i + k)
                                  for r in traj[j + 1][2])
                 if stats is not None:
@@ -954,6 +979,26 @@ def mined_path_weights(nets, stacks, paths, device, batch=MINE_BATCH):
     finally:
         for n, m in zip((rep, dyn, pred), modes):
             n.train(m)
+    return out
+
+
+def played_path_weights(weights, played, paths):
+    """(Test Q, Q-A2) `weights` [records, paths] with each relabeled
+    record's own path certain: at a record of `played` ({record index:
+    master slots}), the path the master played gets weight 1 and every
+    other path from that first slot 0, so its first slot's whole mass moves
+    to the mined token; every other record keeps E3-A5's product. A copy;
+    ValueError for a played path that is not in `paths`."""
+    out = np.array(weights, dtype=np.float64, copy=True)
+    paths = [tuple(int(s) for s in p) for p in paths]
+    for rec, path in played.items():
+        path = tuple(int(s) for s in path)
+        if path not in paths:
+            raise ValueError(f"record {rec} played {path}, which is no "
+                             f"spelling of a mined token")
+        for j, p in enumerate(paths):
+            if p[0] == path[0]:
+                out[rec, j] = 1.0 if p == path else 0.0
     return out
 
 
@@ -1155,7 +1200,7 @@ def master_checks(master, master_iterations):
 # -- steps 2-4 on the master's lives --------------------------------------------------
 def distill_lives(run, lives, master_vocab, raw_states, acting_states, clip,
                   discount, drop_share=DROP_SHARE, mine=False, log=print,
-                  t0=None):
+                  t0=None, mine_q=False):
     """Steps 2-4 (module docstring) on the master's `lives` (record /
     log_lives), the prep's core: the 1% rule; with `mine` (E3), mining on
     the master's ACTING states (its deployed values and latents; `clip`'s
@@ -1189,7 +1234,7 @@ def distill_lives(run, lives, master_vocab, raw_states, acting_states, clip,
         cap = min(muzero.TOKEN_MINED_PER_SWAP, len(dropped))
         chosen, mining = mine_tokens(
             run, lives, master_vocab, vocab, cap, clip["reward_unit"],
-            clip["master_ceiling"], discount)
+            clip["master_ceiling"], discount, holds_out=mine_q)
         vocab = vocab + tuple(c["token"] for c in chosen)
         ablation.validate_student_vocab(
             vocab, master_vocab, mined=tuple(c["token"] for c in chosen),
@@ -1237,8 +1282,9 @@ def distill_lives(run, lives, master_vocab, raw_states, acting_states, clip,
     out_lives, records, net_extra, fallbacks = [], 0, 0, 0
     gone_mass = []
     for life in lives:
+        played = {} if mine_q else None
         recs = retokenize(life["traj"], life["inner"], master_vocab, vocab,
-                          mined=relabel, stats=rstats)
+                          mined=relabel, stats=rstats, played=played)
         pols, vals = master_search(run, recs, life["terminated"])
         weights = None
         n_s = len(recs) - (1 if life["terminated"] else 0)
@@ -1248,6 +1294,8 @@ def distill_lives(run, lives, master_vocab, raw_states, acting_states, clip,
             # records' stacks
             weights = mined_path_weights(nets, [r[0] for r in recs], paths,
                                          run.trainer.device)
+            if played:
+                weights = played_path_weights(weights, played, paths)
             for i in range(n_s):
                 moved = np.asarray(pols[i], dtype=np.float64)[firsts] \
                     * weights[i]
@@ -1343,7 +1391,8 @@ def mined_header(got):
 
 # -- the prep ---------------------------------------------------------------------
 def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
-         drop_share=DROP_SHARE, log=print, from_log=None, mine=False):
+         drop_share=DROP_SHARE, log=print, from_log=None, mine=False,
+         mine_q=False, env=ENV):
     """Steps 1-5 (module docstring) for one master snapshot; returns the
     header written. `from_log` (Test B): the master's own-play log folder
     (ablation.OwnPlayLog, iterations 1..master_iterations) replaces the
@@ -1352,15 +1401,21 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
     to the student's vocabulary, its stretches relabeled, every target
     under E3-A5 (module docstring); the header then carries "mine",
     "mined", "mining", "relabeled" and "target_rule". A master holding
-    mined tokens adds "master_mined" (E3-A8)."""
+    mined tokens adds "master_mined" (E3-A8). `mine_q` (Test Q, --mine-q,
+    only with `mine`): Q-A1 and Q-A2; the header carries "mine_rules". A
+    master spec with `_ceiling_cap` (Q-A5) holds the student's ceiling at
+    that cap; the header then carries "ceiling_cap" and "ceiling_capped".
+    `env`: the game's id (--env)."""
     import ablation
+    if mine_q and not mine:
+        raise SystemExit("--mine-q needs --mine")
     t0 = time.time()
     out = pathlib.Path(out)
     out.mkdir(parents=True, exist_ok=True)
     blob, arm, mspec, offline = master_checks(master, master_iterations)
     master_vocab = muzero.canon_vocab(mspec["TOKEN_VOCAB"])
     ablation.ENV_NAME, ablation.FRAMESKIP, ablation.EPISODE_CAP = \
-        ENV, FRAMESKIP, EPISODE_CAP
+        env, FRAMESKIP, EPISODE_CAP
     with installed(arm, mspec), ablation.arm_config(arm) as spec, \
             ablation._run_length_globals(master_iterations, TRAIN_STEPS), \
             ablation.token_actions():
@@ -1399,6 +1454,8 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                 c0 = float(muzero.reward_ceiling(run.trainer.training_steps))
                 mags = reward_magnitudes(lives, unit)
                 c1 = halved_ceiling(mags, c0)
+                cap = mspec.get("_ceiling_cap")
+                c1, capped = held_ceiling(c1, c0, cap)
                 if not ablation.ceiling_fits_supports(c1):
                     raise SystemExit(f"the halved-clip ceiling {c1!r} lies "
                                      f"past the reward supports")
@@ -1421,6 +1478,9 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
                         np.mean(mags > c1)) if len(mags) else 0.0, 6),
                     "reward_steps": int(len(earned)),
                     "reward_units": round(float(mags.sum()), 3)}
+                if cap is not None:
+                    clip.update({"ceiling_cap": float(cap),
+                                 "ceiling_capped": bool(capped)})
                 log(f"student clip: the master's ceiling {c0:g} removes "
                     f"{clip['clip_share_master']:.3f} of {mags.sum():.0f} "
                     f"reward units; the student's ceiling {c1:.4g} removes "
@@ -1457,13 +1517,13 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
             got = distill_lives(run, lives, master_vocab, raw_states,
                                 blob["acting_states"], clip,
                                 float(muzero.DISCOUNT), drop_share=drop_share,
-                                mine=mine, log=log, t0=t0)
+                                mine=mine, log=log, t0=t0, mine_q=mine_q)
         finally:
             run.env.close()
     vocab, dropped, shares, counts = (got["vocab"], got["dropped"],
                                       got["shares"], got["counts"])
     header = {
-        "format": FORMAT, "env": ENV, "seed": seed,
+        "format": FORMAT, "env": env, "seed": seed,
         "master_snapshot": str(master), "master_arm": arm,
         "master_sha256": ablation.file_sha256(master),
         "master_iterations": master_iterations,
@@ -1498,6 +1558,8 @@ def prep(master, master_iterations, out, seed=0, base_steps=BASE_STEPS,
         header["master_mined"] = [muzero.token_json(t) for t in master_mined]
     if mine:
         header.update(mined_header(got))
+    if mine_q:
+        header["mine_rules"] = {"holds_out": True, "played_paths": True}
     write_set(out / "set.pkl", header, got["out_lives"])
     doc = {k: v for k, v in header.items()}
     doc["set_sha256"] = ablation.file_sha256(out / "set.pkl")
@@ -1520,11 +1582,15 @@ def main(argv=None):
     ap.add_argument("--from-log", default=None, metavar="DIR")
     # E3: mine tokens from the master's play and append them (E3-A3..A6)
     ap.add_argument("--mine", action="store_true")
+    # Test Q: Q-A1 and Q-A2 on top of --mine; the game
+    ap.add_argument("--mine-q", action="store_true")
+    ap.add_argument("--env", default=ENV)
     args = ap.parse_args(argv)
     prep(args.master, args.master_iterations, args.out, seed=args.seed,
          base_steps=args.base_steps,
          log=lambda m: print(time.strftime("%m-%d %H:%M ") + m, flush=True),
-         from_log=args.from_log, mine=args.mine)
+         from_log=args.from_log, mine=args.mine, mine_q=args.mine_q,
+         env=args.env)
 
 
 if __name__ == "__main__":

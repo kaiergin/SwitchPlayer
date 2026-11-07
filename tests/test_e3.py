@@ -1612,10 +1612,10 @@ def test_the_mined_arms_are_t1_and_t2_but_for_mining():
     assert ablation.ARMS[MARMS[0]]["_master_arm"] == T[0]
     assert ablation.ARMS[MARMS[1]]["_master_arm"] == MARMS[0]
     # T0 is generation 0 of both lineages (E3-A1): no M0 arm; no other arm
-    # mines
+    # mines but Test Q's (its own suite pins those)
     assert MINE_ARM + "-m0" not in ablation.ARMS
     assert {n for n, s in ablation.ARMS.items()
-            if s.get("_mine")} == set(MARMS)
+            if s.get("_mine") and not s.get("_mine_q")} == set(MARMS)
     with ablation.arm_config(MARMS[0]):
         assert muzero.DISCOUNT == G              # the T arms' constant
 

@@ -1328,6 +1328,57 @@ ARMS[MINE_ARM + "-m2"] = {
             "own play. Run as TK.",
 }
 
+# Test Q (Kai, 2026-11-07; pre-registered in CURRICULUM "Test Q"): Test B2's
+# recipe on Q*bert, nine generations of ~33,333 env steps. Q0 (q0) is T0 on
+# Q*bert's 24 duration tokens at its reward unit (25: one new cube); the
+# control QT1-QT8 (q1-q8) are T1's recipe; QM1-QM8 (p1-p8) are the same plus
+# mining at every swap under Q-A1 and Q-A2 (`_mine_q`: the prep's --mine-q),
+# QM1's master Q0 itself. Every arm holds `_ceiling_cap` 25 units (Q-A5).
+# `_vocab_parent_arm`: the arm whose static vocabulary a first student's
+# master played (Ms. Pac-Man's TK otherwise).
+QBERT_DURATION_TOKENS = tuple((a, f) for a in range(6)
+                              for f in (4, 8, 16, 32))
+QT_ARM = "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-qbert-tokens-two"
+QM_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-qbert-tokens-"
+          "mined")
+QBERT_GENERATIONS = 9
+QBERT_KNOBS = {"TOKEN_VOCAB": QBERT_DURATION_TOKENS, "REWARD_UNIT": 25.0,
+               "_ceiling_cap": 25.0}
+ARMS[QT_ARM + "-q0"] = {
+    **ARMS[TWO_ARM + "-t0"],
+    **QBERT_KNOBS,
+    "_doc": "Test Q's Q0: Test B2's T0 (...-mspacman-tokens-two-t0) on "
+            "Q*bert -- from scratch at the sign clip, 24 duration tokens, "
+            "REWARD_UNIT 25, to its env-step stop, its own play logged for "
+            "the first students' distillation sets; shared by the control "
+            "and the mined lineage. Run as TK on QbertNoFrameskip-v4.",
+}
+for _k in range(1, QBERT_GENERATIONS):
+    ARMS[f"{QT_ARM}-q{_k}"] = {
+        **ARMS[TWO_ARM + "-t1"],
+        **QBERT_KNOBS,
+        "_vocab_parent_arm": QT_ARM + "-q0",
+        "_master_arm": f"{QT_ARM}-q{_k - 1}",
+        "_doc": f"Test Q's QT{_k}: T1's recipe on Q*bert, the distilled "
+                f"student of {'Q0' if _k == 1 else f'QT{_k - 1}'}'s final "
+                f"snapshot, no mining; its ceiling held at 25 units (Q-A5). "
+                f"Run as TK on QbertNoFrameskip-v4.",
+    }
+    ARMS[f"{QM_ARM}-p{_k}"] = {
+        **ARMS[TWO_ARM + "-t1"],
+        **QBERT_KNOBS,
+        "_vocab_parent_arm": QT_ARM + "-q0",
+        "_master_arm": (QT_ARM + "-q0" if _k == 1 else f"{QM_ARM}-p{_k - 1}"),
+        "_mine": True,
+        "_mine_q": True,
+        "_doc": f"Test Q's QM{_k}: QT{_k} plus mining at the swap (distill.py "
+                f"--mine --mine-q), the distilled student of "
+                f"{'Q0' if _k == 1 else f'QM{_k - 1}'}'s final snapshot, "
+                f"holds out of the mined slots (Q-A1), played paths certain "
+                f"in the targets (Q-A2). Run as TK on QbertNoFrameskip-v4.",
+    }
+del _k
+
 # Test B2W (Kai, 2026-11-04; pre-registered in CURRICULUM "Test B2W"): Test
 # B2's lineage with one change, the optimizer -- BBF's AdamW (configs/BBF.gin,
 # agents/spr_agent.py create_scaling_optimizer: lr 0.0001, eps 0.00015,
@@ -2444,7 +2495,8 @@ def token_gate(spec, use_ray, cpu_actor, ray_workers):
 # smallest positive raw reward, so that ceiling 1 is the sign clip. A game
 # missing here is refused (audit r1 A-NIT2: Pong's +-1 at unit 10 would
 # silently store +-0.1).
-REWARD_UNITS = {"mspacman": 10.0, "mspacmannoframeskip": 10.0}
+REWARD_UNITS = {"mspacman": 10.0, "mspacmannoframeskip": 10.0,
+                "qbert": 25.0, "qbertnoframeskip": 25.0}
 
 
 def reward_growth_gate(use_ray, cpu_actor, ray_workers):
@@ -2732,6 +2784,15 @@ def student_arm(arm, path):
     if spec.get("_mine") and doc.get("mine") is not True:
         raise SystemExit(f"{path}: not a mined prep (distill.py --mine), "
                          f"but '{arm}' mines")
+    if spec.get("_mine_q") and doc.get("mine_rules") != {
+            "holds_out": True, "played_paths": True}:
+        raise SystemExit(f"{path}: not a Test Q prep (distill.py --mine-q), "
+                         f"but '{arm}' mines under Q-A1 and Q-A2")
+    cap = spec.get("_ceiling_cap")
+    if cap is not None and doc.get("ceiling_cap") != cap:
+        raise SystemExit(f"{path}: its ceiling_cap "
+                         f"{doc.get('ceiling_cap')!r} is not '{arm}''s "
+                         f"{cap!r} (Q-A5)")
     mined = declared_mined(doc, "mined", path)
     master_mined = declared_mined(doc, "master_mined", path)
     master_vocab = student_master_vocab(spec, doc, path)
@@ -2870,8 +2931,9 @@ def student_gate(spec, distill_set, snapshot_weights):
             muzero.canon_vocab(muzero.TOKEN_VOCAB):
         raise SystemExit(f"{distill_set}: its student vocabulary differs "
                          f"from --token-vocab's")
-    parent = ARMS["effzero-repro-faithful-prioract-noredo-temp05-bnrecal-"
-                  "mspacman-tokens-rgrow"]["TOKEN_VOCAB"]
+    parent = ARMS[spec.get("_vocab_parent_arm",
+                           "effzero-repro-faithful-prioract-noredo-temp05-"
+                           "bnrecal-mspacman-tokens-rgrow")]["TOKEN_VOCAB"]
     # generation 2: a student master played its own student vocabulary
     # (student_arm's `_master_vocab`, from the same prep's vocab.json)
     want = spec.get("_master_vocab")

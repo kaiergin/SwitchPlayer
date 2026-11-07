@@ -115,6 +115,15 @@ vocab.json's "mine") and its PREP line names the mined tokens and the
 dropped ones (nested tokens read as JSON lists). For E3 read the text below
 as for Test B2, with "m1, m2" / "M2" and T0 the frozen master.
 
+Test Q (Kai 2026-11-07; CURRICULUM "Test Q"): two lineages on Q*bert, nine
+generations each to 300,000 env steps (GAMES: its env, reward unit, 24 tokens,
+5 lives per iteration, its near-random bar). "q" is the control (q0 = Q0, then
+q1-q8 = QT1-QT8); "p" is the mined one (p1-p8 = QM1-QM8), its generation 0 q0
+in THIS tree (LINEAGES "external", "live": not frozen, so its waits alert as a
+predecessor's do). The prep runs --mine --mine-q --env. The generations
+interleave (q0, p1, q1, p2, q2, ...): the launcher's chain script runs one
+supervisor at a time, in that order; nothing here orders the two lineages.
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
 round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
@@ -252,6 +261,10 @@ ADAM_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
             "tokens-adam")
 MINE_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
             "tokens-mined")
+QT_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-qbert-tokens-"
+          "two")
+QM_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-qbert-tokens-"
+          "mined")
 # Test B2W's optimizer (CURRICULUM "Test B2W"): its lineage's "optim", BBF's
 # AdamW (configs/BBF.gin); every other lineage's quick() pins OPTIM_SGD,
 # EfficientZero's (the faithful arms'), so neither can drift unnoticed.
@@ -327,10 +340,41 @@ LINEAGES = {
           "rule": "keep", "date": "2026-11-05", "mine": True, "twin": "t",
           "external": {"variant": "t0",
                        "tree": r"Y:\SwitchPlayer-testb2-run"}},
+    # Test Q: "game" (GAMES; none: Ms. Pac-Man), "total_env_steps" (none:
+    # 100,000), "mine_q" (the prep's --mine-q), and "live" on an external
+    # run that is not frozen (q0, in this very tree)
+    "q": {"arm": QT_ARM, "run": "qbert-two", "prep": "qbert-two-prep",
+          "generations": 9, "iterations": 100, "nominal": 50,
+          "discounts": (0.997 ** 4,) * 9,
+          "rule": "keep", "date": "2026-11-07", "game": "qbert",
+          "total_env_steps": 300000},
+    "p": {"arm": QM_ARM, "run": "qbert-mined", "prep": "qbert-mined-prep",
+          "generations": 9, "first": 1, "iterations": 100, "nominal": 50,
+          "discounts": (0.997 ** 4,) * 9,
+          "rule": "keep", "date": "2026-11-07", "game": "qbert",
+          "total_env_steps": 300000, "mine": True, "mine_q": True,
+          "twin": "q",
+          "external": {"variant": "q0", "live": True,
+                       "tree": r"Y:\SwitchPlayer-testq-run"}},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
 TOTAL_ENV_STEPS = 100000
+# Per game (a lineage's "game"; none: Ms. Pac-Man). near_random: the master
+# gate, Test 1's NEAR RANDOM rule -- Ms. Pac-Man's g = (score - 307.3) / 973.9
+# below 0.2 over its last two deployed rows; Q*bert's twice its random score
+# (CURRICULUM "Test Q"). lives: --episodes-per-iter (a random life is 89 base
+# steps on Q*bert, 204 on Ms. Pac-Man).
+GAMES = {
+    "mspacman": {"env": "MsPacmanNoFrameskip-v4",
+                 "tag": "-mspacmannoframeskip-skip4",
+                 "g_random": 307.3, "g_human": 973.9, "near_random": 502.08,
+                 "reward_unit": 10.0, "tokens": 36, "lives": 3},
+    "qbert": {"env": "QbertNoFrameskip-v4",
+              "tag": "-qbertnoframeskip-skip4",
+              "g_random": 163.9, "g_human": 13455.0, "near_random": 327.8,
+              "reward_unit": 25.0, "tokens": 24, "lives": 5},
+}
 
 
 def lineage_variant(letter, k):
@@ -348,7 +392,15 @@ def configure(letter):
     the module loads as Test B's ("f"); main() binds its variant's."""
     global LINEAGE, GENERATIONS, VARIANTS, RUNS, NAMES, ITERATIONS
     global NOMINAL_ITERATIONS, DISCOUNTS, DISCOUNT_RULE, SEEDS, PREP_PREFIX
+    global ENV_ID, TAG, G_RANDOM, G_HUMAN, NEAR_RANDOM, REWARD_UNIT, N_TOKENS
+    global EPISODES_PER_ITER, TOTAL_ENV_STEPS
     spec = LINEAGES[letter]
+    game = GAMES[spec.get("game", "mspacman")]
+    ENV_ID, TAG = game["env"], game["tag"]
+    G_RANDOM, G_HUMAN = game["g_random"], game["g_human"]
+    NEAR_RANDOM, REWARD_UNIT = game["near_random"], game["reward_unit"]
+    N_TOKENS, EPISODES_PER_ITER = game["tokens"], game["lives"]
+    TOTAL_ENV_STEPS = spec.get("total_env_steps", 100000)
     LINEAGE, GENERATIONS = letter, spec["generations"]
     # E3: a lineage whose generation 0 is another lineage's run ("first" 1,
     # "external") runs only generations first.. here; its generations are
@@ -419,17 +471,12 @@ PREP_RETRY_S = 900
 # attempts each cost the ~1.5 h offline phase until its first checkpoint.
 NO_PROGRESS_DEATHS = 3
 STALL_MIN_S = 300
-# Test 1's NEAR RANDOM rule on the master: g = (score - 307.3) / 973.9 (Ms.
-# Pac-Man's random and human scores) below 0.2 over its last two deployed
-# rows. NEAR_RANDOM_TOL only absorbs float noise in the 2-row mean (the
-# probe's 3-decimal means put a genuinely lower one >= 5e-4 below).
-G_RANDOM, G_HUMAN = 307.3, 973.9
-NEAR_RANDOM = 502.08             # = 307.3 + 0.2 x 973.9
+# NEAR_RANDOM_TOL only absorbs float noise in the 2-row mean (the probe's
+# 3-decimal means put a genuinely lower one >= 5e-4 below); the bar itself is
+# GAMES' near_random (configure()).
 NEAR_RANDOM_TOL = 1e-6
 
 MODE = ["--ray", "--cpu-actor"]
-ENV_ID = "MsPacmanNoFrameskip-v4"
-TAG = "-mspacmannoframeskip-skip4"        # ablation's TAG for ENV_ID, skip 4
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 # The shared interpreter lives in the main tree (worktrees have no .venv).
@@ -462,6 +509,7 @@ PREP_CHECKS = ("the value support (", "past the reward supports",
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
           "tests/test_testc.py", "tests/test_testc2.py",
           "tests/test_testb2w.py", "tests/test_e3.py",
+          "tests/test_testq.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",
           "tests/test_supervise_gen1.py", "tests/test_gen1.py",
           "tests/test_pbn.py",
@@ -530,6 +578,14 @@ def is_external(variant):
     its frozen tree): its files are read there, never written."""
     ext = LINEAGES[LINEAGE].get("external")
     return bool(ext) and variant in (ext["variant"],)
+
+
+def is_frozen(variant):
+    """`variant` is an external run nothing here may rerun (E3's T0; Test
+    Q's q0 is external but "live": this tree's own, its waits as any
+    predecessor's)."""
+    return is_external(variant) and not LINEAGES[LINEAGE]["external"].get(
+        "live")
 
 
 def tree_of(variant):
@@ -673,7 +729,8 @@ def command(variant, seed, stop=None):
             "--iterations", str(ITERATIONS), "--train-steps",
             str(TRAIN_STEPS), "--eval-every", "5",
             "--env", ENV_ID, "--frameskip", "4", "--episode-cap", "3000",
-            "--episodes-per-iter", "3", "--checkpoint-every", "2",
+            "--episodes-per-iter", str(EPISODES_PER_ITER),
+            "--checkpoint-every", "2",
             "--snapshot-weights"] + MODE + extra
 
 
@@ -759,10 +816,10 @@ def quick(variant, seed):
             "assert muzero.SCHEDULE_ENV_TARGET is None; "
             "assert muzero.OWN_PLAY_LOG is False; "
             "assert spec['REWARD_GROWTH'] is True and "
-            "spec['REWARD_UNIT'] == 10.0; "
+            f"spec['REWARD_UNIT'] == {REWARD_UNIT}; "
             "assert spec['BN_RECAL_ACTING'] is True; "
             "assert spec['MAX_REPLAY'] == 255; "
-            "assert len(spec['TOKEN_VOCAB']) == 36; "
+            f"assert len(spec['TOKEN_VOCAB']) == {N_TOKENS}; "
             "assert hasattr(ablation, 'OwnPlayLog') and "
             "hasattr(ablation, 'read_own_play') and "
             "hasattr(ablation, 'env_stop_gate') and "
@@ -849,7 +906,7 @@ def quick(variant, seed):
         mm = master_of(variant)
         code += ("assert spec.get('_mine') is True; "
                  f"_t = ablation.ARMS[{twin!r}]; "
-                 "_skip = ('_master_arm', '_mine', '_doc'); "
+                 "_skip = ('_master_arm', '_mine', '_mine_q', '_doc'); "
                  "assert {_k: _v for _k, _v in spec.items() if _k not in "
                  "_skip} == {_k: _v for _k, _v in _t.items() if _k not in "
                  "_skip}; "
@@ -866,6 +923,17 @@ def quick(variant, seed):
                  f"muzero.TOKEN_BASE_FRAMES == {MINED_TOKEN_STEPS}; "
                  f"assert ablation.ARMS[{VARIANTS[mm]!r}].get('_mine') is "
                  f"{None if is_external(mm) else True!r}; ")
+    if lin.get("game") == "qbert":
+        # Test Q: the ceiling held (Q-A5), the prep names the game; the
+        # mined lineage's prep runs Q-A1 and Q-A2
+        code += ("assert spec['_ceiling_cap'] == 25.0; "
+                 "assert 'env' in distill.prep.__code__.co_varnames; "
+                 f"assert ablation.REWARD_UNITS['qbertnoframeskip'] == "
+                 f"{REWARD_UNIT}; ")
+    if lin.get("mine_q"):
+        code += ("assert spec.get('_mine_q') is True; "
+                 "assert hasattr(distill, 'played_path_weights') and "
+                 "'mine_q' in distill.prep.__code__.co_varnames; ")
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "
@@ -1168,7 +1236,7 @@ def wait_external(variant, seed):
             print(f"WAITING for {name} before {variant} s{seed} "
                   f"[{polls // 60} h]: missing " + "; ".join(missing)[:400],
                   flush=True)
-            if is_external(upstream(variant)):
+            if is_frozen(upstream(variant)):
                 # E3's frozen T0: nothing here may be rerun or relaunched
                 print(f"ALERT: {frozen_msg(upstream(variant))}", flush=True)
                 first = False
@@ -1248,20 +1316,22 @@ def choose_master(variant, seed):
             rows.get(i), (int, float)) for i in last2):
         raise SystemExit(f"{name}'s last two deployed rows {last2} are "
                          f"incomplete in {acting} -- "
-                         + (frozen_msg(m) if is_external(m)
+                         + (frozen_msg(m) if is_frozen(m)
                             else "land them (its hand-off) first"))
     mean = sum(rows[i] for i in last2) / 2
     g = (mean - G_RANDOM) / G_HUMAN
     if mean < NEAR_RANDOM - NEAR_RANDOM_TOL:
         raise SystemExit(f"MASTER NEAR RANDOM: {name}'s deployed mean over "
                          f"its last two rows {last2} is {mean:.2f} < "
-                         f"{NEAR_RANDOM} (g {g:.3f} < 0.2) -- the chain stops "
+                         f"{NEAR_RANDOM} (g {g:.3f} < "
+                         f"{(NEAR_RANDOM - G_RANDOM) / G_HUMAN:.3g}) -- the "
+                         f"chain stops "
                          f"before {NAMES[variant]} (Kai's call)")
     gone = master_files_missing(variant, seed)
     if gone:
         raise SystemExit(f"{name}'s master files are missing: "
                          f"{'; '.join(gone)}"
-                         + (f" -- {frozen_msg(m)}" if is_external(m) else ""))
+                         + (f" -- {frozen_msg(m)}" if is_frozen(m) else ""))
     return {"which": name, "snapshot": snap, "iterations": k,
             "master_mean_last2": mean}
 
@@ -1390,6 +1460,17 @@ def set_intact(variant, seed):
     if (doc.get("mine") is True) != mine:
         return False, (f"vocab.json's mine is {doc.get('mine')!r}, not the "
                        f"lineage's {mine!r} (distill.py --mine)")
+    # Test Q: Q-A1 and Q-A2 in the mined lineage's prep, in nobody else's;
+    # the prep's game is the lineage's
+    rules = ({"holds_out": True, "played_paths": True}
+             if LINEAGES[LINEAGE].get("mine_q") else None)
+    if doc.get("mine_rules") != rules:
+        return False, (f"vocab.json's mine_rules are "
+                       f"{doc.get('mine_rules')!r}, not the lineage's "
+                       f"{rules!r} (distill.py --mine-q)")
+    if doc.get("env", ENV_ID) != ENV_ID:
+        return False, (f"vocab.json's env is {doc.get('env')!r}, not the "
+                       f"lineage's {ENV_ID!r}")
     # the snapshot's bytes too, not only its path and iteration: a fresh
     # restart of the master that ends at the same K would otherwise pass
     # (audit r1 B-L2)
@@ -1418,12 +1499,14 @@ def prep_command(variant, seed, pick):
     """The prep's command line: experiments/distill.py on the master
     `pick` chose, from its own-play log (own_play_arg: E3's external T0's
     as an absolute path) -- with --mine for a mining lineage (E3: its arms'
-    _mine, which quick() pins)."""
+    _mine, which quick() pins), --mine-q and --env for Test Q's."""
     return ([PY, "experiments/distill.py", "--master", pick["snapshot"],
              "--master-iterations", str(pick["iterations"]),
              "--out", prep_rel(variant), "--seed", "0",
              "--from-log", own_play_arg(master_of(variant), seed)]
-            + (["--mine"] if LINEAGES[LINEAGE].get("mine") else []))
+            + (["--mine"] if LINEAGES[LINEAGE].get("mine") else [])
+            + (["--mine-q"] if LINEAGES[LINEAGE].get("mine_q") else [])
+            + (["--env", ENV_ID] if LINEAGES[LINEAGE].get("game") else []))
 
 
 def json_token_steps(tok):
