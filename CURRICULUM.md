@@ -1124,11 +1124,14 @@ STATES: the 30 noop-start games cannot supply them: they repeat with period 4 (T
   drops out of rho_w.
   CLUSTERS for every interval: games connected through shared stacks after the
   opening.
-PILOT, before any net trains and before g exists: 30 states, both players, all 16
-  delays. It sees G only, so it cannot bias the verdict. It measures the lag profile of
-  branch returns (are neighbouring delays independent?), G's spread inside strata, and
-  effective games. K, the stratum width and the state count are then set from it and
-  registered here before the nets train.
+PILOT, a go or no-go before any net trains and before g exists, so it cannot bias the
+  verdict: all 240 main lines are played, and 60 states, 3 in each of 20 strata, get
+  both players' 16 delays. It STOPS the test, Kai's call, if: effective games fall
+  short (G6); the correlation of branch returns across states at delay lag 1, 4 or 8
+  exceeds 0.3 (a judgment; neighbours and the 4-frame phase are the risks); or G5's
+  reliability, projected from the pilot's spread inside strata, is under 0.5. Nothing
+  else moves: strata stay 20 wide, K stays 16. Only G6 may be answered by lengthening
+  the opening, since no G or g exists on the main lines yet.
 REAL GAP, from each state's saved emulator state: K = 16 branches per player, T2's
   deployed policy and T0's, each to the life's end, capped at 1,536 frames (a weight of
   about 1% at 0.997), the first decision delayed by 0 to 15 NOOP frames, the same 16
@@ -1146,24 +1149,26 @@ STATISTIC: rho_w(x, y): inside each stratum of n states, x and y become centred 
   (r - 0.5) / n - 0.5, ties averaged; rho_w is their Pearson correlation pooled over
   all states. Position is nearly constant inside a stratum, and the step baseline in
   read (1) catches what is left.
-GATES, any failure makes the verdict VOID:
+GATES. G1 and G3-G6 are read before g is opened. Any failure: VOID, reported, Kai's
+call, no retuning and no rerun with g in hand.
   G1: 30 plain games each replay T0's row at iteration 45 and T2's at iteration 42
       (PROBE_THREADS 2, as the rows ran).
-  G2: each net beats a constant (R2 > 0) on held-out lives at the primary head, AND
-      works inside strata where it is used: the 95% lower bounds of rho_w(master net,
-      T2's mean return) and rho_w(twin, T0's mean return) above 0.
+  G2: each net beats a constant (R2 > 0) on held-out lives at the primary head, or the
+      verdict is VOID. Inside strata, where they are used: if a 95% lower bound of
+      rho_w(master net, T2's mean return) or rho_w(twin, T0's mean return) is not above
+      0, the verdict is NOT SHOWN, since nets that cannot rank states answer the question.
   G3: mean G at the primary head above 0, lower bound above 0: T2 must really beat
       T0 from T0's own states.
   G4: a restored branch gives the same frames in a fresh process, in the project venv.
   G5: G must be measurable inside strata: split-half reliability of rho_w (delays
-      0-3 and 8-11 against 4-7 and 12-15, which balance phases and keep neighbours
-      apart; Spearman-Brown) at least 0.5 at the primary head (a judgment). Below that,
+      0-7 against 8-15, which keeps neighbours and the 4-frame phase mostly inside a
+      half; Spearman-Brown) at least 0.5 at the primary head (a judgment). Below that,
       a failed read would say nothing. The lag profile prints beside it.
-  G6: at least 30 effective games, 1 / sum p^2 over the games' (score, length) pairs
-      (a judgment). Stack sharing alone almost cannot fail, since one pellet splits a
-      stack. Fewer: lengthen the opening before reading.
+  G6: at least 30 effective games, 1 / sum p^2 over the 240 games' scores, at the pilot
+      (a judgment). On score alone, since near-repeats differ by a base step in length;
+      stack sharing cannot catch them either, as one pellet splits a stack.
 READS. PRIMARY HEAD: 0.997 per frame, student's clip. Intervals resample clusters,
-10,000 draws.
+10,000 draws, ranks recomputed inside each draw.
   (1) PRIMARY. BASELINES needing no master: student prior entropy, twin value, T0's own
       value head, base steps since the life began. Each is oriented once by its sign on
       the full sample. HOLDS if both: the 95% lower bound of rho_w(g, G) above 0, and
@@ -1190,17 +1195,20 @@ READS. PRIMARY HEAD: 0.997 per frame, student's clip. Intervals resample cluster
       gap (mean master return minus mean twin return in the stratum, from the logs, no
       frames) against G. Position alone may do well here; that is not what is tested.
   (7) Is there anything to find? The top and bottom fifths by g, ranked inside strata,
-      up to 120 states each. T0's slots grouped by outcome (the census's classes, about
-      3.6 per decision), one slot per class as the first decision, then T0's deployed
-      policy, on delays 0-3 to choose and 8-11 to score, so selection noise cannot
-      inflate the score. ROOM: the class chosen, scored against the deployed slot's
-      class on the scoring delays; 0 when they match, ties to the deployed class. Also
+      120 states each, drawn at random with a fixed seed. T0's slots grouped by outcome
+      at s (the census's classes, about 3.6 per decision), each class played as its
+      highest acting-prior slot, so the deployed slot stands for its class. The slot is
+      played at s, the delay comes after it, then T0's deployed policy, on delays 0-3
+      to choose and 8-11 to score, so selection noise cannot inflate the score. ROOM:
+      the class chosen, scored against the deployed class on the scoring delays; 0 when
+      they match, ties to the deployed class, then to the lowest slot. Also
       mean class minus deployed. SEARCH GAIN: the top slot's class on the scoring delays
       minus deployed, for the raw prior (one forward pass, which
       separates the raw and acting BN states) and for 50 and 200 simulations,
       muzero_vtree.VectorizedPUCT.search on the trainer's eval-mode BN as birth search
       runs it (snapshot_run in probe_prefix_bn.py; deep copies before the acting overlay;
-      chunked at 200; noise and ties seeded). One decision only, so a lower bound on what
+      8 roots a chunk at 200 simulations, about 133 MB of latents a root; noise and ties
+      seeded). One decision only, so a lower bound on what
       search does. Top against bottom fifth, with intervals. Descriptive. This is the
       first look at Kai's question, whether exploration or search makes a difference.
 LIMITS, stated now: one master, one student, one game, one seed. T2 descends from
@@ -1213,7 +1221,7 @@ COST: CPU only, under the lock. 4.75-6.88 ms per decision: the branches about 5 
   (7) about 1 h, the nets a few hours, so it can run while Test O builds or trains,
   memory allowing. Probe benchmarks/probes/probe_gap_check.py, tests/test_gap_check.py, audit
   loop before it runs. Nothing touches the kept trees.
-NEXT: HOLDS, then a registered training run: per-position simulations, root noise
+NEXT: VOID or NOT SHOWN, Kai's call. HOLDS, then a registered training run: per-position simulations, root noise
   and acting temperature set by the gap's rank among recent positions (Kai's general
   rules, rather than P3's ratio, whose |V_m| nears zero at short horizons), T2 as
   master, then Atari-HEAD's human Ms. Pac-Man games. A proposed split, not in P3: a
@@ -1234,6 +1242,11 @@ AUDIT r3 2026-11-07: 2 HIGH (position still scored inside quartile strata, so bi
   same first token; the opening's stack and step count; G6 on effective games; read (7)
   by outcome class), 3 LOW. Added the PILOT: noise and independence are measured before
   the final numbers are fixed, blind to g.
+AUDIT r4 2026-11-07: 1 HIGH (G6 on (score, length) could not fail, so score alone), 6
+  MEDIUM (the pilot is now a go or no-go with registered stops on all 240 main lines, and
+  sets nothing else; the split is 0-7 against 8-15; gates are read before g is opened and
+  every outcome has an end; read (7)'s slot, delay order and class representative
+  pinned), LOWs taken in.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
