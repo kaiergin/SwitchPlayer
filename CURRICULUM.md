@@ -1146,11 +1146,12 @@ STATES: the 30 noop-start games cannot supply them: they repeat with period 4 (T
   opening.
 PILOT, a go or no-go before any net trains and before g exists, so it cannot bias the
   verdict. First all 240 main lines are played and G6 read: if it fails, the opening
-  is lengthened once and all 240 replayed, since no G or g exists yet; a second failure
-  is VOID. Then 60 states, 3 in each of 20 strata drawn with a fixed seed among strata
-  holding at least 3, get both players' 16 delays. It STOPS the test, Kai's call, if any
-  of six correlations exceeds 0.3 (a judgment; neighbours and the 4-frame phase are
-  the risks): the residuals (a branch minus its state's 16-delay mean, primary head,
+  is lengthened once, to 100 moves (no life lost at 100 on raw ALE; if one is, the game
+  plays on), and all 240 replayed, since no G or g exists yet; a second failure is VOID.
+  Then 60 states, 3 in each of 20 strata drawn with a fixed seed among strata holding at
+  least 3 after drops (fewer than 20 such strata is VOID), get both players' 16 delays.
+  It STOPS the test, Kai's call, if any of six Pearson correlations exceeds 0.3 (a
+  judgment; neighbours and the 4-frame phase are the risks): the residuals (a branch minus its state's 16-delay mean, primary head,
   pooled over delay pairs; null -1/15, printed) at delay lag 1, 4 or 8, for each player.
   It also stops if G5's Spearman-Brown reliability on the 60 states is under 0.3: a
   lower bar than the full sample's 0.5, since 60 states read low and noisy (a true 0.6
@@ -1279,6 +1280,8 @@ AUDIT r5 2026-11-07, a closing check: no HIGH, 2 MEDIUM (the pilot's statistics,
   LOW, taken in. Every path reached an end state.
 AUDIT r6 2026-11-07, a check of r5's change: 2 MEDIUM (the pilot's reliability bar was
   too high for 60 states; G6's lengthening had no cap), 2 LOW, taken in.
+AUDIT r7 2026-11-07, a check of r6's change: 1 MEDIUM (the lengthening's length), 2 LOW,
+  taken in.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
