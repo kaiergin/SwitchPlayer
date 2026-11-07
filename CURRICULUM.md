@@ -911,11 +911,12 @@ DEPARTURES, each forced or chosen, none silent:
   2. Eager expansion gives every child a value, so OptionZero's default Q is not
      used. The option's landing is evaluated in its node's expansion wave, as a tenth
      row, where OptionZero evaluates it on first crossing; a zero-visit option and a
-     zero-visit primitive both use r + d x value. A landing can have two in-edges, the
-     jump and a primitive row, and can already exist below a crossed ancestor (repeats
-     make this common). So the jump's r, d and value sit on the holder, the node's own
-     belong to its primitive edge, and the first evaluation keeps the latent, as
-     OptionZero evaluates a node once. The tree tests include this case.
+     zero-visit primitive both use r + d x value. A landing can have two or more
+     in-edges, jumps and a primitive row, and can already exist below a crossed ancestor
+     (repeats make this common). So the jump's r, d and value sit on the holder, the
+     node's own belong to its primitive edge, and the first evaluation keeps the latent,
+     policy row, prefix state and root-relative total, as OptionZero evaluates a node
+     once. The tree tests include this case.
   3. The refresh keeps primitive edges only (OptionZero has no reanalysis). The
      stored option suggestions come from the birth search. About half of the
      records may carry primitive-only targets by mid-run, so the sampled share of
@@ -1018,12 +1019,16 @@ STOP RULES: non-finite steps, or free commit under the usual floor: stop and rep
 MEMORY: stacks are copied whole per record, 84,672 bytes. At the 31,250 base-step
   cap OF holds about 2.65 GB of replay against about 0.5 GB for C0. Lowest free
   commit seen is 9.0 GB. Checked in the smoke before launch.
-BUILD ORDER: flags, gate and arms; network; option search and its tests; records,
-  unroll, targets and loss; diagnostics and the on/off root probe; the exact-eval
-  layout hook; O0 and OF run. OW after. About 1,000 lines; the search is about 500
+BUILD ORDER: O0 FIRST. O0 needs only its flags, gate and arm and the pre-check's live
+  logging, so it is built, audited and launched alone, from its own run worktree. The
+  pre-check decides whether options can form at all, so the option code is built during
+  O0's run, and is not built further if the pre-check goes to Kai and Kai declines.
+  Then: network; option search and its tests; records, unroll, targets and loss;
+  diagnostics and the on/off root probe; the exact-eval layout hook; OF runs. Flag off,
+  the option code must leave O0's path unchanged. OW after. About 1,000 lines; the search is about 500
   of them, in a subclass so v1 stays parity-pinned. OptionZero cannot serve as an
   oracle, and a tree bug gives plausible targets, so the tree gets hand-built cases:
-  two-stage choice, inclusive counts, placeholder fill, stop-only heads matching v1
+  two-stage choice, inclusive counts, placeholder fill, shared landing, stop-only heads matching v1
   to float tolerance, not bit for bit, since statistics are root-relative. Audit
   loop as ever, in a new run worktree, launched only with the audit closed. Test Q's
   tree is untouched and resumable.
@@ -1071,6 +1076,8 @@ AUDIT r6 2026-11-07, a closing check: no HIGH, 1 MEDIUM (a zero-visit option's v
   undefined, now DEPARTURE 2), 3 LOW, taken in. Every path reached an end state.
 AUDIT r7 2026-11-07, a check of r6's change: 1 MEDIUM (a landing's two in-edges, pinned
   in DEPARTURE 2), 2 LOW, taken in.
+AUDIT r8 2026-11-07: nothing above LOW; 3 LOW taken in. The registration's audit loop is
+  CLOSED. BUILD ORDER then changed to launch O0 first, sequence only.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
