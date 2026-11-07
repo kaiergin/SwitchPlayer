@@ -848,6 +848,28 @@ AMENDMENTS against E3 (everything else in E3-A2 to E3-A13 stands):
       255 and 12, about a third of a master's lives at random-play length would
       never reach its student; at 340 about 9% still would not, and the
       31,250-step cap binds from about 92 steps a life.
+  (Q-A8) HOW READ (1) IS MEASURED, added 2026-11-07 during Q0, before any QM row
+      exists. Writing the scorer showed the run does not log what read (1) names:
+      the exact evals keep each game's return, base steps and decisions, not its
+      tokens, and the rows' tok_mined_play_share counts own play (the behaviour
+      policy at its temperature), not the deployed prior argmax. So a read-only
+      replay, probe_deployed_tokens.py, plays each snapshot's 30 noop-start games
+      again with the run tree's code and counts the slots. It does not touch the
+      run. Greedy play is deterministic per noop count, so a replayed row counts
+      only if all 30 games equal the logged ones exactly (all 8 of Q0's rows so far
+      did, 30 of 30, and all 11 of E3's M2) and those games are still the deployed
+      row's. The share is decisions in multi-action mined slots over all
+      decisions, pooled over a generation's deployed rows, row 0 included; the
+      thresholds are unchanged. The frame share and the own-play share are printed
+      beside it, descriptive. Read (3)'s window keeps a generation's final row
+      even when the stop lands it a little past 300k, as in E3. Read (3)'s sigma:
+      adjacent deployed rows inside a generation only, over all QT's generations,
+      Q0 and row 0 included, so a swap's jump is not read as noise. The rule
+      registered above gives a much tighter band than 216.9: on E3's T rows it
+      gives 67.4 (65, 187 and 44 by generation), because 216.9 is the plain SD of
+      a twin's rows, trend included. So each generation's own sigma, and the
+      verdict on the largest, are printed beside the registered verdict,
+      descriptive, and the registered rule stands unless Kai changes it.
 READS, fixed now:
   (1) PRIMARY, Kai's prediction: multi-action mined tokens' share of QM's
       deployed play, per generation. HOLDS if the mean over QM6-QM8 is at least
@@ -907,6 +929,24 @@ LAUNCHED 2026-11-07 02:54 (WMI): chain q0, p1, q1, ... p8, q8 with its hand-off.
   Rerun launch_testq.ps1 after a pause or a reboot; it resumes. To pause, kill the
   supervisor and the trainer by exact pid (both pids of each); the chain stops by
   itself.
+SCORER BUILT AND AUDITED 2026-11-07, during Q0: session scratchpad score_testq.py
+  (+ check_score_testq.py, SCORE CHECK OK) and probe_deployed_tokens.py (Q-A8).
+  Neither touches the run. Audit loop: r1 no HIGH, MEDIUMs (a stale or foreign
+  replay row could reach a clean verdict; read (2) missed re-mining across swaps;
+  the check left key reads unpinned), r2 one MEDIUM (a relative TOKENS_OUT landed
+  in the wrong folder; visible, no wrong number), r3 nothing above LOW. Real data:
+  all 8 of Q0's rows and all 11 of E3's M2 replayed 30 of 30, slots equal the prep
+  order, and through an adapter the scorer reproduced E3's RESULT numbers. An
+  oracle held fate() and read_swaps over 300 random 8-swap chains through the real
+  student_vocabulary. E3's M2 deployed: 38.4% mined, 1.32% multi-action, against
+  41.4% and 1.35% in own play, so the two measures sit close there.
+  Accepted LOWs: "prefix BN MISSING" always prints (the hand-off never runs that
+  probe; Test Q does not register it); the "final" maxp is the last row's short
+  window, so read the mean beside it; a scorer holding the ablation jsonl open
+  could fail a resume's os.replace (milliseconds; do not leave it running over a
+  resume); the probe takes any matching row where the scorer reads the last; a
+  torn tail in a replay file keeps read (1) PROVISIONAL until it is cleaned; a
+  stale PROBE_ENV reads as "0 deployed rows".
 
 ### RESULT -- E3: tokens mined from the agent's own play at every swap, against Test B2's T1-T2 (seed 0), 2026-11-06
 
