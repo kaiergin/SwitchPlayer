@@ -9,9 +9,14 @@ hand example, delay rewards in the first base step; and, on the real game with n
 snapshot, the raw frames against MaxAndSkipEnv, the loop against Run.play_game,
 the stale-lives hazard in both directions, delays, the frame cap, a branch against
 its raw replay and across a fresh process, a delay-0 branch against the main line
-it left, the check that catches one that left it, the refusals. In a subprocess:
-importing the probe changes nothing process-wide, and (slow, needing the snapshots)
-a whole small pilot on T0 and T2."""
+it left, the check that catches one that left it, the refusals. The verdict's
+wiring: G5 reads G and each player's lags its own returns, every VOID and STOP
+route of pilot() on stubbed pass files, the pass stamps, and each pass in-process
+on the real game with a stand-in policy (FREE, the states' keys against the
+recorded steps, G1's two paths, G4's checks). In a subprocess: importing the probe
+changes nothing process-wide, and (slow, needing the snapshots) a whole small pilot
+on T0 and T2, its verdict recomputed from its pickles."""
+import contextlib
 import hashlib
 import inspect
 import json
@@ -19,6 +24,7 @@ import os
 import pathlib
 import pickle
 import random
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -237,6 +243,13 @@ def test_the_reliability_bar_stops_it():
     assert verdict == "STOP" and "G5" in reasons[0]
 
 
+def test_the_lag_bar_is_one_sided():
+    """The registration stops on a correlation that EXCEEDS 0.3: residuals
+    that oppose each other stop nothing."""
+    c = {"T0": {1: -0.31, 4: -0.9, 8: -1.0}, "T2": {1: -0.5, 4: 0.0, 8: -0.31}}
+    assert gc.pilot_verdict(c, 0.9) == ("GO", [])
+
+
 def test_undefined_is_never_go():
     c = {p: dict(v) for p, v in GOOD.items()}
     c["T2"][4] = None
@@ -261,6 +274,44 @@ def test_the_pilot_read_end_to_end():
     out = gc.pilot_read(t0, t2, keys)
     assert out["verdict"] == "STOP"
     assert any("T0 lag 4" in r for r in out["reasons"])
+
+
+KEYS60 = [(0, k) for k in range(20) for _ in range(3)]
+
+
+def test_a_level_both_players_share_is_no_gap():
+    """Both players carry one large level per state, so G is noise. G5 must
+    read G: either side alone, or their sum, reads the level and passes."""
+    rng = np.random.default_rng(5)
+    level = rng.normal(0, 30, size=(60, 1))
+    t0 = level + rng.normal(size=(60, 16))
+    t2 = level + rng.normal(size=(60, 16))
+    out = gc.pilot_read(t0, t2, KEYS60)
+    assert out["verdict"] == "STOP"
+    assert len(out["reasons"]) == 1 and "G5" in out["reasons"][0]
+    assert gc.split_half(t2, KEYS60)[1] > 0.9
+    assert gc.split_half(t2 + t0, KEYS60)[1] > 0.9
+
+
+def test_levels_that_oppose_are_a_gap():
+    """The mirror: their sum holds nothing, and G holds it all."""
+    rng = np.random.default_rng(6)
+    level = rng.normal(0, 30, size=(60, 1))
+    out = gc.pilot_read(-level + rng.normal(size=(60, 16)),
+                        level + rng.normal(size=(60, 16)), KEYS60)
+    assert out["verdict"] == "GO" and out["reliability"] > 0.9
+
+
+def test_a_phase_in_t2_alone_is_named_for_t2():
+    rng = np.random.default_rng(7)
+    level = rng.normal(0, 3, size=(60, 1))
+    t0 = rng.normal(size=(60, 16))
+    t2 = level + np.tile([3.0, 0, 0, 0], 4) + rng.normal(0, .5, size=(60, 16))
+    out = gc.pilot_read(t0, t2, KEYS60)
+    assert out["verdict"] == "STOP"
+    assert any("T2 lag 4" in r for r in out["reasons"])
+    assert all(r.startswith("T2") for r in out["reasons"])
+    assert out["correlations"]["T2"][4] > 0.3 > out["correlations"]["T0"][4]
 
 
 # --------------------------------------------------------------------------
@@ -362,6 +413,8 @@ def test_every_draw_is_deterministic():
     assert gc.opening_moves(0, 5) == [6, 6, 0, 4, 8]
     assert gc.draw_game_states(0, 100) == [13, 29, 41, 58, 74, 85]
     assert gc.g4_delays(6) == [14, 12, 2, 0, 13, 1]
+    assert gc.draw_pilot(keys)[0][:15] == [0, 1, 2, 4, 5, 6, 7, 8, 10, 12, 15, 16,
+                                           32, 33, 35]
 
 
 def test_a_games_draw_takes_six_distinct_decisions():
@@ -501,6 +554,37 @@ def test_raw_frames_pool_as_max_and_skip(env):
         total += r
         assert not lost
     assert np.array_equal(raw, wrapper) and total == reward
+
+
+class ScriptedAle:
+    """An emulator whose game ends at `over_at` frames with its lives unchanged,
+    which Ms. Pac-Man never shows (lives fall to 0 as it ends)."""
+
+    def __init__(self, over_at):
+        self.t, self.over_at = 0, over_at
+
+    def act(self, action):
+        self.t += 1
+        return 1.0
+
+    def lives(self):
+        return 1
+
+    def game_over(self):
+        return self.t >= self.over_at
+
+    def getScreenRGB(self):
+        return np.zeros((210, 160, 3), dtype=np.uint8)
+
+
+def test_a_game_over_alone_ends_the_frames():
+    stack = np.zeros((12, 84, 84), dtype=np.uint8)
+    ale = ScriptedAle(3)
+    _, reward, lost = gc.raw_frames(ale, 0, 8, stack)
+    assert lost and ale.t == 3 and reward == 3
+    ale = ScriptedAle(3)
+    assert gc.raw_frames(ale, 0, 8, stack, stop=False)[2] is False
+    assert ale.t == 8
 
 
 def test_a_delay_pushes_a_frame_every_four_frames(env):
@@ -864,8 +948,8 @@ def test_a_snapshot_that_is_not_the_player_is_refused():
 def test_files_write_whole(tmp_path):
     gc.write(tmp_path / "a.json", {"x": 1})
     gc.write(tmp_path / "b.pkl", {"y": b"z"})
-    assert gc.read(tmp_path / "a.json") == {"x": 1}
-    assert gc.read(tmp_path / "b.pkl") == {"y": b"z"}
+    assert gc.read(tmp_path / "a.json")["x"] == 1
+    assert gc.read(tmp_path / "b.pkl")["y"] == b"z"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["a.json", "b.pkl"]
 
 
@@ -876,10 +960,525 @@ def test_a_finished_pilot_is_never_overwritten(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# pilot()'s routes, on stubbed pass files
+# --------------------------------------------------------------------------
+def table_of(returns):
+    """A pass's branches with these primary returns: one base step each, under
+    the clip's ceiling, so a return x is 10 x raw points."""
+    return [[{"rewards": [10.0 * float(x)], "ended": "life"} for x in row]
+            for row in returns]
+
+
+class Passes:
+    """Stands in for run_stage: writes each pass's file as the real pass would,
+    from canned results, and logs the calls. `die_at`: that call fails as a
+    pass that crashed."""
+
+    def __init__(self, t0, t2):
+        self.t0, self.t2, self.calls, self.die_at = t0, t2, [], None
+        self.g1 = {"T0": [], "T2": []}           # reasons; none is ok
+        self.g4 = {"T0": [], "T2": []}
+        self.effective = {80: 40.0, 100: 40.0}
+        self.chosen = list(range(60))
+
+    def __call__(self, out, stage, *args):
+        call = " ".join((stage, *args))
+        self.calls.append(call)
+        # the longest route is every pass with one lengthening: past it, a
+        # route that never ends fails here instead of hanging
+        assert len(self.calls) <= len(ALL_PASSES) + 2, self.calls
+        if call == self.die_at:
+            raise SystemExit(f"pass {call}: rc 1")
+        if stage in ("g1", "g4"):
+            reasons = getattr(self, stage)[args[1]]
+            gc.write(out / f"{stage}-{args[1]}.json",
+                     {"ok": not reasons, "reasons": reasons})
+        elif stage == "main":
+            gc.write(gc.main_files(out, int(args[1]))[0],
+                     {"effective": self.effective[int(args[1])]})
+        elif stage == "select":
+            gc.write(out / "select.pkl",
+                     {"opening": int(args[1]), "kept": [{}] * 60,
+                      "keys": KEYS60, "chosen": self.chosen,
+                      "counts": {"eligible": 7}})
+        else:
+            table = table_of(self.t0 if args[1] == "T0" else self.t2)
+            gc.write(out / f"branches-{args[1]}.pkl", {"table": table})
+
+
+def returns(shared=False, phase=False):
+    """(t0, t2) inside the clip's ceiling. By default T2's level per state is
+    T2's alone, which G5 reads as a gap; `shared` gives T0 the same level;
+    `phase` gives T2 a period of 4 delays."""
+    rng = np.random.default_rng(8)
+    level = rng.uniform(0, .6, size=(60, 1))
+    t0 = (level if shared else 0) + rng.uniform(0, .2, size=(60, 16))
+    t2 = level + rng.uniform(0, .2, size=(60, 16))
+    if phase:
+        t2 = level + np.tile([.3, 0, 0, 0], 4) + rng.uniform(0, .02,
+                                                             size=(60, 16))
+    return t0, t2
+
+
+ALL_PASSES = ["g1 --player T0", "g1 --player T2", "main --opening 80",
+              "select --opening 80", "branches --player T0",
+              "branches --player T2", "g4 --player T0", "g4 --player T2"]
+
+
+@pytest.fixture
+def stub(monkeypatch):
+    def build(**kw):
+        passes = Passes(*returns(**kw))
+        monkeypatch.setattr(gc, "run_stage", passes)
+        return passes
+
+    monkeypatch.setattr(gc, "snapshot", lambda name: None)
+    return build
+
+
+def test_the_route_to_go(stub, tmp_path, capsys):
+    passes = stub()
+    rec = gc.pilot(tmp_path)
+    assert passes.calls == ALL_PASSES
+    assert rec["verdict"] == "GO" and rec["reasons"] == []
+    assert rec["opening"] == 80 and rec["effective"] == [40.0]
+    assert gc.read(tmp_path / "pilot.json")["verdict"] == "GO"
+    assert "PILOT: GO" in capsys.readouterr().out
+
+
+def test_each_side_reaches_its_own_place_in_the_read(stub, tmp_path, capsys):
+    """pilot() against pilot_read on the same tables, T0 and T2 apart."""
+    passes = stub()
+    rec = gc.pilot(tmp_path)
+    want = gc.pilot_read(passes.t0, passes.t2, KEYS60)
+    assert rec["reliability"] == pytest.approx(want["reliability"])
+    assert rec["rho_half"] == pytest.approx(want["rho_half"])
+    for name in ("T0", "T2"):
+        for lag in gc.LAGS:
+            assert rec["correlations"][name][lag] == pytest.approx(
+                want["correlations"][name][lag])
+    assert rec["null"] == pytest.approx(-1 / 15)
+    out = capsys.readouterr().out
+    assert out.count("residual correlation") == 6
+    assert "null -0.0667" in out and "G5:" in out
+
+
+@pytest.mark.parametrize("name", ["T0", "T2"])
+def test_a_g1_failure_is_void(stub, tmp_path, name, capsys):
+    passes = stub()
+    passes.g1[name] = ["game 3 differs"]
+    rec = gc.pilot(tmp_path)
+    assert rec["verdict"] == "VOID"
+    assert rec["reasons"] == [f"G1 {name}: game 3 differs"]
+    assert "main --opening 80" not in passes.calls
+    assert ("g1 --player T2" in passes.calls) == (name == "T2")
+    assert "PILOT: VOID" in capsys.readouterr().out
+
+
+def g6_reads(monkeypatch):
+    """G6's reads, failing on a third: a route that never ends stops here
+    rather than hanging (once a pass file exists, no pass is called)."""
+    reads, real = [], gc.g6_next
+
+    def counted(effective):
+        reads.append(list(effective))
+        assert len(reads) <= 2, reads
+        return real(effective)
+
+    monkeypatch.setattr(gc, "g6_next", counted)
+    return reads
+
+
+def test_g6_lengthens_once_and_goes_on_at_100(stub, tmp_path, monkeypatch):
+    passes = stub()
+    passes.effective[80] = 12.0
+    reads = g6_reads(monkeypatch)
+    rec = gc.pilot(tmp_path)
+    assert reads == [[12.0], [12.0, 40.0]]
+    assert rec["verdict"] == "GO"
+    assert passes.calls == [*ALL_PASSES[:3], "main --opening 100",
+                            "select --opening 100", *ALL_PASSES[4:]]
+    assert rec["opening"] == 100 and rec["effective"] == [12.0, 40.0]
+
+
+def test_a_second_g6_failure_is_void(stub, tmp_path, monkeypatch):
+    passes = stub()
+    passes.effective = {80: 12.0, 100: 29.0}
+    reads = g6_reads(monkeypatch)
+    rec = gc.pilot(tmp_path)
+    assert reads == [[12.0], [12.0, 29.0]]
+    assert rec["verdict"] == "VOID" and rec["reasons"][0].startswith("G6: 29.0")
+    assert passes.calls == [*ALL_PASSES[:3], "main --opening 100"]
+
+
+def test_too_few_strata_is_void(stub, tmp_path):
+    passes = stub()
+    passes.chosen = None
+    rec = gc.pilot(tmp_path)
+    assert rec["verdict"] == "VOID"
+    assert rec["reasons"] == ["7 strata hold 3 states, 20 needed"]
+    assert passes.calls == ALL_PASSES[:4]
+
+
+@pytest.mark.parametrize("name", ["T0", "T2"])
+def test_a_g4_failure_is_void(stub, tmp_path, name):
+    passes = stub()
+    passes.g4[name] = ["state 4: raw frames"]
+    rec = gc.pilot(tmp_path)
+    assert rec["verdict"] == "VOID"
+    assert rec["reasons"] == [f"G4 {name}: state 4: raw frames"]
+    assert "correlations" not in rec
+
+
+def test_a_lag_stops_it_by_name(stub, tmp_path, capsys):
+    stub(phase=True)
+    rec = gc.pilot(tmp_path)
+    assert rec["verdict"] == "STOP"
+    assert any("T2 lag 4" in r for r in rec["reasons"])
+    assert not any(r.startswith("T0") for r in rec["reasons"])
+    assert "PILOT: STOP (T2 lag" in capsys.readouterr().out
+
+
+def test_g5_stops_it(stub, tmp_path):
+    stub(shared=True)
+    rec = gc.pilot(tmp_path)
+    assert rec["verdict"] == "STOP"
+    assert len(rec["reasons"]) == 1 and "G5" in rec["reasons"][0]
+
+
+def test_a_stopped_pilot_resumes_where_it_stopped(stub, tmp_path):
+    passes = stub()
+    passes.die_at = "branches --player T2"
+    with pytest.raises(SystemExit, match="rc 1"):
+        gc.pilot(tmp_path)
+    assert not (tmp_path / "pilot.json").exists()
+    assert passes.calls == ALL_PASSES[:6]
+    passes.calls, passes.die_at = [], None
+    assert gc.pilot(tmp_path)["verdict"] == "GO"
+    assert passes.calls == ALL_PASSES[5:]
+
+
+def test_a_crashed_pass_stops_the_pilot(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=3))
+    with pytest.raises(SystemExit, match="rc 3"):
+        gc.run_stage(tmp_path, "g1", "--player", "T0")
+
+
+# the stamps ------------------------------------------------------------------
+def _partial(stub, tmp_path):
+    """Every pass file of a pilot, with no pilot.json to stop a second one."""
+    stub()
+    gc.pilot(tmp_path)
+    (tmp_path / "pilot.json").unlink()
+
+
+@pytest.mark.parametrize("knob, value", [("GAMES", 241), ("PLAIN_GAMES", 29),
+                                         ("N_STRATA", 19), ("G6_BAR", 31.0)])
+def test_a_pass_from_other_knobs_is_refused(stub, tmp_path, monkeypatch, knob,
+                                            value):
+    _partial(stub, tmp_path)
+    monkeypatch.setattr(gc, knob, value)
+    with pytest.raises(SystemExit, match="never mixed"):
+        gc.pilot(tmp_path)
+    assert not (tmp_path / "pilot.json").exists()
+
+
+def test_a_pass_from_other_source_is_refused(stub, tmp_path, monkeypatch):
+    _partial(stub, tmp_path)
+    monkeypatch.setattr(gc, "SOURCE", "another build")
+    with pytest.raises(SystemExit, match="never mixed"):
+        gc.pilot(tmp_path)
+
+
+@pytest.mark.parametrize("name", ["g1-T0.json", "g4-T2.json", "main-080.json",
+                                  "select.pkl", "branches-T0.pkl"])
+def test_every_pass_file_is_checked_alone(stub, tmp_path, name):
+    """One stale file among good ones is enough."""
+    _partial(stub, tmp_path)
+    path = tmp_path / name
+    if path.suffix == ".json":
+        obj = json.loads(path.read_text())
+        obj["stamp"]["source"] = "stale"
+        path.write_text(json.dumps(obj))
+    else:
+        with open(path, "rb") as f:
+            obj = pickle.load(f)
+        obj["stamp"]["source"] = "stale"
+        with open(path, "wb") as f:
+            pickle.dump(obj, f)
+    with pytest.raises(SystemExit, match=name.replace(".", "[.]")):
+        gc.pilot(tmp_path)
+
+
+def test_a_file_with_no_stamp_is_refused(tmp_path):
+    (tmp_path / "old.json").write_text('{"ok": true}')
+    with pytest.raises(SystemExit, match="never mixed"):
+        gc.read(tmp_path / "old.json")
+
+
+def test_the_source_hash_covers_the_play_path(tmp_path):
+    names = {p.name for p in gc.SOURCES}
+    assert {"probe_gap_check.py", "ablation.py", "muzero.py",
+            "atari_wrappers.py", "EpisodicLifeEnv.py"} <= names
+    assert all(p.is_file() for p in gc.SOURCES)
+    assert gc.SOURCE == gc.source_hash()
+    a, b = tmp_path / "a.py", tmp_path / "b.py"
+    a.write_text("x = 1")
+    b.write_text("y = 2")
+    before = gc.source_hash((a, b))
+    assert before == gc.source_hash((a, b))
+    b.write_text("y = 3")
+    assert gc.source_hash((a, b)) != before
+
+
+# --------------------------------------------------------------------------
+# the passes themselves, on the real game with a stand-in policy
+# --------------------------------------------------------------------------
+@contextlib.contextmanager
+def stand_in(name):
+    env = gc.raw_env()
+    try:
+        yield SimpleNamespace(env=env, searcher=SimpleNamespace(
+            network_manager=SimpleNamespace(initial_inference=inference)))
+    finally:
+        env.close()
+
+
+def small_passes(mp):
+    """The stand-in and the knobs the in-process passes run and read under."""
+    mp.setattr(muzero, "TOKEN_VOCAB", VOCAB)
+    mp.setattr(gc, "player", stand_in)
+    mp.setattr(gc, "GAMES", 8)
+    mp.setattr(gc, "N_STRATA", 2)
+
+
+@pytest.fixture(scope="module")
+def built(tmp_path_factory):
+    """main, select, branches and g4 in this process: everything but the nets.
+    Built once; its patches end here, so no later test inherits them."""
+    out = tmp_path_factory.mktemp("pipeline")
+    with pytest.MonkeyPatch.context() as mp:
+        small_passes(mp)
+        gc.stage_main(out, 80)
+        gc.stage_select(out, 80)
+        for name in gc.PLAYERS:
+            gc.stage_branches(out, name)
+            gc.stage_g4(out, name)
+    return out
+
+
+@pytest.fixture
+def pipeline(built, monkeypatch):
+    small_passes(monkeypatch)
+    return built
+
+
+def test_each_sampled_state_is_the_decision_it_names(pipeline):
+    data = gc.read(gc.main_files(pipeline, 80)[1])
+    assert len(data["states"]) == 6 * 8
+    for s in data["states"]:
+        g, i = data["games"][s["game"]], s["decision"]
+        assert s["steps"] == g["steps"][i] and s["life"] == g["life"][i]
+        assert pc._digest(s["stack"].tobytes()) == g["digests"][i]
+    for g in data["games"]:
+        assert [s["decision"] for s in data["states"]
+                if s["game"] == g["game"]] == gc.draw_game_states(
+                    g["game"], g["decisions"])
+    assert len({s["steps"] for s in data["states"]}) > 8
+
+
+def test_the_strata_read_the_recorded_steps(pipeline):
+    games = gc.read(gc.main_files(pipeline, 80)[1])["games"]
+    sel = gc.read(pipeline / "select.pkl")
+    assert sel["keys"] and len(sel["keys"]) == len(sel["kept"])
+    for s, key in zip(sel["kept"], sel["keys"]):
+        g, i = games[s["game"]], s["decision"]
+        assert key == (g["life"][i], g["steps"][i] // 20)
+    assert len({k[1] for k in sel["keys"]}) > 2
+    assert len({k[0] for k in sel["keys"]}) > 1
+    assert len(sel["chosen"]) == 6
+
+
+def test_clean_passes_read_clean(pipeline):
+    for name in gc.PLAYERS:
+        assert gc.read(pipeline / f"g4-{name}.json")["ok"]
+        table = gc.read(pipeline / f"branches-{name}.pkl")["table"]
+        assert len(table) == 6 and all(len(row) == 16 for row in table)
+
+
+def _tampered(pipeline, tmp_path):
+    out = tmp_path / "pass"
+    shutil.copytree(pipeline, out)
+    return out
+
+
+def test_g4_catches_a_main_line_the_branches_left(pipeline, tmp_path):
+    out = _tampered(pipeline, tmp_path)
+    path = gc.main_files(out, 80)[1]
+    data = gc.read(path)
+    s = gc.chosen_states(out)[0][0]
+    game = data["games"][s["game"]]
+    life = game["life"][s["decision"]]
+    game["rewards"][life] = [r + 10.0 for r in game["rewards"][life]]
+    gc.write(path, data)
+    gc.stage_g4(out, "T0")
+    g4 = gc.read(out / "g4-T0.json")
+    assert not g4["ok"] and "main line" in g4["reasons"][0]
+    # T2 never played the main line, so it is not held to it
+    gc.stage_g4(out, "T2")
+    assert gc.read(out / "g4-T2.json")["ok"]
+
+
+def test_g4_catches_a_branch_that_does_not_repeat(pipeline, tmp_path):
+    out = _tampered(pipeline, tmp_path)
+    path = out / "branches-T2.pkl"
+    data = gc.read(path)
+    checked = gc.g4_delays(len(data["table"]))
+    data["table"][0][checked[0]]["rewards"][0] += 10.0
+    data["table"][1][checked[1]]["replay"] = b"other frames"
+    data["table"][2][checked[2]]["tokens"] = [99]
+    gc.write(path, data)
+    gc.stage_g4(out, "T2")
+    g4 = gc.read(out / "g4-T2.json")
+    assert not g4["ok"] and len(g4["reasons"]) == 3
+    assert "rewards" in g4["reasons"][0]
+    assert "raw frames" in g4["reasons"][1]
+    assert "tokens" in g4["reasons"][2]
+
+
+def test_g4_carries_the_branch_pass_own_failures(pipeline, tmp_path):
+    out = _tampered(pipeline, tmp_path)
+    path = out / "branches-T2.pkl"
+    data = gc.read(path)
+    data["reasons"] = ["state 3 delay 2: the raw replay ended elsewhere"]
+    gc.write(path, data)
+    gc.stage_g4(out, "T2")
+    assert gc.read(out / "g4-T2.json")["reasons"] == data["reasons"]
+
+
+def test_select_drops_free_states_on_the_real_game(env, monkeypatch, tmp_path):
+    """FREE on real frames: a state before moves act (about frame 266) against
+    states past it. The first copy of a stack is the one that stays."""
+    u = env.unwrapped
+    ale, noop = u.ale, u._action_set[0]
+
+    def early(frames):
+        u.reset(seed=gc.EVAL_SEED)
+        u.reset()
+        for _ in range(frames):
+            ale.act(noop)
+        return ale.cloneState()
+
+    def entry(game, state, stack, steps):
+        return {"game": game, "decision": 0, "life": 0, "steps": steps,
+                "state": state.serialize(), "stack": stack}
+
+    blank = np.zeros((12, 84, 84), dtype=np.uint8)
+    live = [state_after(env, f) for f in (40, 44, 48)]
+    states = [entry(0, early(5), blank + 1, 10),
+              entry(1, *live[0], 120), entry(2, *live[1], 121),
+              entry(3, early(100), blank + 2, 11),
+              entry(4, *live[2], 122), entry(5, *live[0], 123)]
+    monkeypatch.setattr(gc, "N_STRATA", 1)
+    gc.write(gc.main_files(tmp_path, 80)[1],
+             {"opening": 80, "games": [], "states": states})
+    gc.stage_select(tmp_path, 80)
+    sel = gc.read(tmp_path / "select.pkl")
+    assert [s["game"] for s in sel["kept"]] == [1, 2, 4]
+    assert sel["kept"][0]["merged"] == [5]
+    assert sel["counts"] == {"sampled": 6, "free": 2, "merged": 1, "kept": 3,
+                             "strata": 1, "eligible": 1}
+    assert sel["keys"] == [(0, 6)] * 3 and sel["chosen"] == [0, 1, 2]
+
+
+def test_too_few_states_leave_the_draw_empty(env, monkeypatch, tmp_path):
+    """select's own record of the VOID route: no draw, the count kept."""
+    state, stack = state_after(env, 40)
+    gc.write(gc.main_files(tmp_path, 80)[1], {"opening": 80, "games": [], "states": [
+        {"game": 0, "decision": 0, "life": 0, "steps": 120,
+         "state": state.serialize(), "stack": stack}]})
+    gc.stage_select(tmp_path, 80)
+    sel = gc.read(tmp_path / "select.pkl")
+    assert sel["chosen"] is None and sel["counts"]["eligible"] == 0
+
+
+def test_g6_reads_the_score_alone(monkeypatch, tmp_path):
+    """Every game one score, every opening's reward different: 1 effective
+    game, and 5 only with the opening's reward."""
+    @contextlib.contextmanager
+    def nobody(name):
+        yield SimpleNamespace(env=None, searcher=SimpleNamespace(
+            network_manager=None))
+
+    def game(env, decide, g, moves):
+        n = 9
+        rec = {"game": g, "life": [0] * n, "steps": [80 + 4 * i for i in range(n)],
+               "score": 100.0, "opening_reward": 10.0 * g, "length": 116,
+               "lost_in_opening": 0, "decisions": n, "terminated": True}
+        return rec, [(b"state", np.zeros((12, 84, 84), dtype=np.uint8))] * n
+
+    monkeypatch.setattr(gc, "GAMES", 5)
+    monkeypatch.setattr(gc, "player", nobody)
+    monkeypatch.setattr(gc, "main_game", game)
+    gc.stage_main(tmp_path, 80)
+    summary = gc.read(gc.main_files(tmp_path, 80)[0])
+    assert summary["effective"] == pytest.approx(1)
+    assert summary["effective_with_opening"] == pytest.approx(5)
+    assert summary["scores"] == [100.0] * 5
+    states = gc.read(gc.main_files(tmp_path, 80)[1])["states"]
+    assert all(s["steps"] == 80 + 4 * s["decision"] for s in states)
+
+
+def _g1(monkeypatch, env, tmp_path):
+    games = {n: list(gc.plain_game(env, decide, n)) for n in (1, 2)}
+    row = {"games": {str(n): g for n, g in games.items()}, "exact_mean": 0.0}
+    pe = SimpleNamespace(play=lambda run, n: tuple(games[n]))
+    monkeypatch.setitem(sys.modules, "probe_exhaustive_eval", pe)
+    monkeypatch.setattr(gc, "PLAIN_GAMES", 2)
+    monkeypatch.setattr(gc, "player", stand_in)
+    monkeypatch.setattr(gc, "snapshot", lambda name: pathlib.Path("x"))
+    monkeypatch.setattr(pc, "exact_eval_row", lambda path: row)
+    return games, pe
+
+
+def test_g1_passes_when_both_paths_are_the_row(env, vocab, monkeypatch,
+                                               tmp_path):
+    _g1(monkeypatch, env, tmp_path)
+    gc.stage_g1(tmp_path, "T0")
+    g1 = gc.read(tmp_path / "g1-T0.json")
+    assert g1["ok"] and g1["reasons"] == [] and len(g1["games"]) == 2
+
+
+def test_g1_fails_on_the_exact_evals_replay(env, vocab, monkeypatch, tmp_path):
+    games, pe = _g1(monkeypatch, env, tmp_path)
+    pe.play = lambda run, n: (games[n][0] + 10, *games[n][1:])
+    gc.stage_g1(tmp_path, "T2")
+    g1 = gc.read(tmp_path / "g1-T2.json")
+    assert not g1["ok"] and len(g1["reasons"]) == 2
+    assert g1["reasons"][0].startswith("game 1 ")
+
+
+def test_g1_fails_on_the_probes_own_loop(env, vocab, monkeypatch, tmp_path):
+    _g1(monkeypatch, env, tmp_path)
+    monkeypatch.setattr(gc, "plain_game", lambda *a: (1.0, 1, True, 1))
+    gc.stage_g1(tmp_path, "T0")
+    g1 = gc.read(tmp_path / "g1-T0.json")
+    assert not g1["ok"] and "the probe's loop" in g1["reasons"][0]
+
+
+def test_g1_refuses_without_a_row(env, vocab, monkeypatch, tmp_path):
+    _g1(monkeypatch, env, tmp_path)
+    monkeypatch.setattr(pc, "exact_eval_row", lambda path: None)
+    with pytest.raises(SystemExit, match="exact-eval row"):
+        gc.stage_g1(tmp_path, "T0")
+
+
+# --------------------------------------------------------------------------
 # end to end: a small pilot on the real players
 # --------------------------------------------------------------------------
 @pytest.mark.slow
-def test_a_small_pilot_on_the_real_players(tmp_path):
+def test_a_small_pilot_on_the_real_players(tmp_path, monkeypatch):
     try:
         for name in gc.PLAYERS:
             gc.snapshot(name)
@@ -899,9 +1498,36 @@ def test_a_small_pilot_on_the_real_players(tmp_path):
         g1 = json.loads((tmp_path / f"g1-{name}.json").read_text())
         assert g1["ok"] and g1["threads"] == 2, g1["reasons"]
         assert json.loads((tmp_path / f"g4-{name}.json").read_text())["ok"]
+    # this process reads the passes under the knobs that made them
+    for knob, value in (("GAMES", 24), ("PLAIN_GAMES", 3), ("N_STRATA", 2),
+                        ("G6_BAR", 2.0)):
+        monkeypatch.setattr(gc, knob, value)
     sel = gc.read(tmp_path / "select.pkl")
     assert len(sel["chosen"]) == 6
     table = {n: gc.read(tmp_path / f"branches-{n}.pkl") for n in gc.PLAYERS}
     assert all(len(table[n]["table"]) == 6 for n in gc.PLAYERS)
     assert all(len(row) == 16 for n in gc.PLAYERS for row in table[n]["table"])
-    assert set(rec["correlations"]) == {"T0", "T2"}
+    # the verdict, recomputed from the pickles
+    want = gc.pilot_read(gc.primary_returns(table["T0"]["table"]),
+                         gc.primary_returns(table["T2"]["table"]),
+                         gc.chosen_states(tmp_path)[1])
+    assert rec["verdict"] == want["verdict"]
+    assert rec["reasons"] == want["reasons"]
+    assert rec["reliability"] == want["reliability"]
+    assert rec["rho_half"] == want["rho_half"]
+    assert rec["correlations"] == {
+        n: {str(lag): r for lag, r in v.items()}
+        for n, v in want["correlations"].items()}
+    # the states' keys against the steps the main lines recorded
+    main = gc.read(gc.main_files(tmp_path, rec["opening"])[1])
+    for s, key in zip(sel["kept"], sel["keys"]):
+        g, i = main["games"][s["game"]], s["decision"]
+        assert s["steps"] == g["steps"][i] and s["life"] == g["life"][i]
+        assert key == gc.stratum(g["life"][i], g["steps"][i])
+    assert min(s["steps"] for s in sel["kept"] if s["life"] == 0) >= 80
+    # FREE states exist on real play (26 of 144 here), and G6 reads the score
+    assert 0 < sel["counts"]["free"] < sel["counts"]["sampled"]
+    summary = gc.read(gc.main_files(tmp_path, rec["opening"])[0])
+    assert summary["effective"] == gc.effective_games(
+        [g["score"] for g in main["games"]])
+    assert rec["effective"][-1] == summary["effective"]

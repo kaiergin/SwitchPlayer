@@ -12,7 +12,9 @@ so each player gets its own arm context in its own process, and saved states mov
 between them as ale_py.ALEState(bytes) with restoreState.
 
 THE PASSES, each a fresh process (`pilot` runs them in order and stops at the
-first VOID; a pass whose output exists is reused, so a stopped pilot resumes):
+first VOID; a pass whose output exists is reused, so a stopped pilot resumes, but
+every file carries a stamp of the knobs and a hash of the play path's source, and
+one made by anything else is refused rather than mixed in):
   g1 T0, g1 T2: G1. The 30 plain games, against the snapshot's exact-eval row
       (probe_exhaustive_eval.play, the deployed acting states, PROBE_THREADS 2 as
       the rows ran). Each game is also played through this probe's own loop, which
@@ -88,6 +90,7 @@ if __name__ == "__main__":
     os.environ["PROBE_THREADS"] = "2"           # as the rows ran
 import argparse
 import contextlib
+import hashlib
 import json
 import pathlib
 import pickle
@@ -139,6 +142,21 @@ PLAIN_GAMES = int(os.environ.get("GAP_PLAIN_GAMES") or 30)
 N_STRATA = int(os.environ.get("GAP_STRATA") or 20)
 G6_BAR = float(os.environ.get("GAP_G6_BAR") or 30)
 SMOKE = GAMES != 240 or PLAIN_GAMES != 30 or N_STRATA != 20 or G6_BAR != 30
+# What a pass's numbers depend on: this probe and the code it plays through.
+SOURCES = (pathlib.Path(__file__).resolve(), HERE / "probe_action_census.py",
+           HERE / "probe_e3a_sequences.py", HERE / "probe_exhaustive_eval.py",
+           ROOT / "experiments" / "ablation.py", ROOT / "muzero.py",
+           ROOT / "atari_wrappers.py", ROOT / "EpisodicLifeEnv.py")
+
+
+def source_hash(paths=SOURCES):
+    h = hashlib.blake2b(digest_size=16)
+    for path in paths:
+        h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+SOURCE = source_hash()                       # as this process imported them
 
 
 # --------------------------------------------------------------------------
@@ -623,8 +641,19 @@ def player(name):
             run.env.close()
 
 
+def knobs():
+    return {"games": GAMES, "plain_games": PLAIN_GAMES, "strata": N_STRATA,
+            "g6_bar": G6_BAR}
+
+
+def stamp():
+    """What made a pass's file: the knobs and the source."""
+    return {"knobs": knobs(), "source": SOURCE}
+
+
 def write(path, obj):
     """Whole or not at all, so a stopped pass leaves nothing to reuse."""
+    obj = {**obj, "stamp": stamp()}
     tmp = path.with_name(path.name + ".tmp")
     if path.suffix == ".json":
         tmp.write_text(json.dumps(obj, indent=1))
@@ -635,10 +664,17 @@ def write(path, obj):
 
 
 def read(path):
+    """A pass's file, refused unless this run would have written it: existing
+    is not enough to be reused."""
     if path.suffix == ".json":
-        return json.loads(path.read_text())
-    with open(path, "rb") as f:
-        return pickle.load(f)
+        obj = json.loads(path.read_text())
+    else:
+        with open(path, "rb") as f:
+            obj = pickle.load(f)
+    if obj.get("stamp") != stamp():
+        raise SystemExit(f"{path} was made by {obj.get('stamp')}, this run is "
+                         f"{stamp()}: move it aside, passes are never mixed")
+    return obj
 
 
 def main_files(out, opening):
@@ -819,8 +855,7 @@ def pilot(out):
                          f"overwritten (move it aside first)")
     for name in PLAYERS:
         snapshot(name)
-    fields = {"knobs": {"games": GAMES, "plain_games": PLAIN_GAMES,
-                        "strata": N_STRATA, "g6_bar": G6_BAR}}
+    fields = {"knobs": knobs()}
     t0 = time.time()
     for name in PLAYERS:
         if not (out / f"g1-{name}.json").exists():
