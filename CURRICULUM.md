@@ -914,6 +914,98 @@ NEXT, to be registered separately once Test O reads:
     actual future, or the best future by the student's own value?
   - Human play training the proposal of futures.
 
+### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
+
+DECISION: Kai 2026-11-07, on what a master gives a student: a separate network,
+"trained only from gameplay of another user", predicting the master's expected
+future reward at several discounts, "not ever guessing moves or dynamics". The
+student uses it only to decide how much to explore and search, and ignores a
+master that is worse than its own estimate at a state. That is P3 and P4 above,
+designed and never built. Kai on proposing moves: "We can explore having master
+propose moves later but I'd like to see if exploration/search makes any
+difference". So the master sets EFFORT ONLY. Offline check first, registered now.
+QUESTION: on a weaker player's own states, does the gap between a master value
+net and a student value net, both trained only on frames and rewards, rank the
+states by how much better the master really does from them, better than signals
+that need no master? And do the states it ranks highest hold more for exploration
+or search to find?
+No RL training. The emulator measures outcomes only: no branch feeds a net (the
+E line's rule). The real test of effort is a later training run, registered once
+this reads.
+PLAYERS, Test B2's lineage, seed 0, tree Y:\SwitchPlayer-testb2-run (read only):
+  - MASTER: T2. Its own-play log stands in for another player's recording: 126
+    lives, 33,021 base steps, raw reward 66,850. Moves are never read. Real
+    outcomes use T2's final snapshot, iteration 42, deployed 1699.
+  - STUDENT: T0 at iteration 45, deployed 746, the last row of T0's plateau. T0's
+    final row (1062) stands alone and is not used. Its own-play log, 141 lives,
+    33,616 base steps, raw reward 34,430, trains the twin.
+THE VALUE NETS, all arms alike: a small plain conv net (Nature DQN torso, separate
+  from the agent's trunk) on the logged 12 x 84 x 84 stacks, at base-step
+  resolution, rebuilt from each life's records and inner frames. Eight outputs: four
+  discounts (0.997, 0.99, 0.98, 0.95 per frame, half-lives about 231, 69, 34, 14
+  frames) on two reward scales, the student's clip (T0's ceiling 1, per base step,
+  REWARD_UNIT 10) and raw. Target: the measured discounted return to the end of the
+  life, from the logged rewards, no bootstrap (P5c's hazard). Three seeds each,
+  averaged; 80 / 20 split by life, early stop on the held-out lives.
+  - MASTER NET: T2's log only.
+  - TWIN: T0's log only, the same net and targets, so both sides of the gap are
+    measured returns (the guard against an optimistic bootstrapped value).
+  Predicted gap g(s) = master minus twin, at the same discount and scale.
+STATES: T0's 30 deployed games at iteration 45, replayed exactly (noop starts 1-30,
+  as probe_exhaustive_eval), 30 decisions per game at random, fixed seed, N = 900.
+  Neither net trains on these games.
+REAL GAP, from each state's saved emulator state: T2's deployed policy and T0's
+  deployed policy each play on to the life's end, capped at 1,536 frames (a weight
+  of about 1% at 0.997). Real gap G(s) = T2's return minus T0's, per discount and
+  scale. Play is deterministic per state, so one branch each is exact.
+GATES, any failure makes the verdict VOID:
+  G1: all 30 games equal T0's deployed exact-eval row at iteration 45.
+  G2: on held-out lives, master net and twin each beat a constant (R2 > 0) at the
+      primary head.
+  G3: mean G(s) at the primary head above 0, game-bootstrap 95% lower bound above
+      0: T2 must really beat T0 from T0's own states.
+  G4: a replayed branch gives the same frames from the same saved state.
+READS. PRIMARY HEAD: 0.997 per frame, student's clip. Confidence intervals resample
+the 30 games (10,000 draws).
+  (1) PRIMARY: Spearman rho between g(s) and G(s). Baselines needing NO master:
+      student prior entropy, twin value, T0's own value head, decisions into the
+      life. HOLDS if all three: rho's 95% lower bound above 0; the 95% lower bound
+      of rho minus the best baseline's |rho| above 0; and the fifth of states with
+      the highest g holds at least 30% of the summed positive G (chance 20%; the
+      30% is a judgment, 1.5x the chance share). Else NOT SHOWN. Kai's call either
+      way.
+  (2) Master net alone against the gap: rho of the master value by itself. If it
+      matches, the student's side adds nothing. Descriptive.
+  (3) The twin's worth: rho with T0's own bootstrapped value in place of the twin.
+      Descriptive.
+  (4) Ignoring a worse master: at states with g <= 0, mean G and the share with
+      G <= 0, against the rest. Descriptive, given at least 30 such states.
+  (5) Horizons: rho per discount, and how far the four gaps agree with each other,
+      since Kai's multi-discount heads only earn their place if they differ. The
+      raw scale beside the clip. Descriptive.
+  (6) Is there anything to find? In the top and bottom fifths by g, up to 120 states
+      each: every T0 slot as the first decision, then T0's deployed policy.
+      ROOM = best slot's real return minus the deployed return, what exploration
+      could reach in one decision. SEARCH GAIN = the real return of the most-visited
+      slot under T0's 50- and 200-simulation search, minus the deployed return. Top
+      against bottom fifth, with intervals. Descriptive. This is the first look at
+      Kai's question, whether exploration or search makes a difference.
+LIMITS, stated now: one master, one student, one game, one seed. T2 descends from
+  T0, so they are closer than two real players. T2's log is play at temperature
+  while its real outcomes are deployed play. The players are token-era, not Test
+  O's. Read (6) changes one decision. A HOLDS says the gap ranks states; it does not
+  say effort changes training.
+COST: CPU only, under the lock, a few hours in all, so it can run while Test O
+  builds or trains, memory allowing. Probe benchmarks/probes/probe_gap_check.py,
+  tests/test_gap_check.py, audit loop before it runs. Nothing touches the kept
+  trees.
+NEXT: HOLDS, then a registered training run: per-position simulations, root noise
+  and acting temperature set by the gap's rank among recent positions (Kai's general
+  rules, rather than P3's ratio, whose |V_m| nears zero at short horizons), T2 as
+  master, then Atari-HEAD's human Ms. Pac-Man games. A proposed split, not in P3: a
+  gap at short horizons spends simulations, a gap only at long horizons, past the
+  tree's reach, raises exploration.
+
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
 DECISION: Kai 2026-11-07, after E3 ("Sure we can run this test then move onto
