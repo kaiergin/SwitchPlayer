@@ -888,6 +888,25 @@ MEMORY BUDGET (owed before any further mined run), from E3's commit trend:
   stays on (kill at 1 GB free, holders logged below 12 GB). Disk about 1.8 GB a
   generation, about 31 GB in all, 691 GB free.
 COST: 17 generations at about 10 h, about 7 days, with pauses on request.
+BUILT AND AUDITED: distill.py (--mine-q, --env, held_ceiling,
+  played_path_weights), the arms, supervise_testb.py's GAMES and lineages q / p,
+  tests/test_testq.py. Audit loop: code r1 (A: one HIGH, two arm lists left out of
+  test_pbn / test_harness, and MEDIUMs: Ms. Pac-Man's replay and refresh knobs,
+  so Q-A7; the stop rule unenforced; Q-A2's wiring unpinned; B: nothing above
+  LOW), code r2 nothing above LOW (25 mutants), tooling r1 nothing above LOW (all
+  17 runs simulated through a crash, a pause and a reboot-like stop), r3
+  confirmation nothing above LOW. Accepted LOWs: the cap ALERT on main's normal
+  completion path only; the stop reads vocab.json once; run_locked.sh's lock
+  survives a hard kill. A's oracle held the target rule over 8 swaps.
+  29 suites pass at ae6204a4, GPU smoke OK r3 at ae6204a4, manifest 5424be62,
+  prelaunch OK. Run tree Y:\SwitchPlayer-testq-run at 5424be62. Tooling in the
+  session scratchpad: post_testq.py, chain_testq.py, launch_testq.ps1,
+  watch_loop_testq.ps1. The scorer (score_testq.py) comes during the run: it reads
+  only and cannot touch it.
+LAUNCHED 2026-11-07 03:05 (WMI): chain q0, p1, q1, ... p8, q8 with its hand-off.
+  Rerun launch_testq.ps1 after a pause or a reboot; it resumes. To pause, kill the
+  supervisor and the trainer by exact pid (both pids of each); the chain stops by
+  itself.
 
 ### RESULT -- E3: tokens mined from the agent's own play at every swap, against Test B2's T1-T2 (seed 0), 2026-11-06
 
