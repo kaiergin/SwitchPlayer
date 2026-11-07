@@ -530,6 +530,12 @@ SCHEDULE_ENV_STEPS = 0
 # (play_token's, at raw-step resolution) for the trainer's own-play log, the
 # next generation's distillation set. False = off (bit for bit).
 OWN_PLAY_LOG = False
+# Test O (Kai, 2026-11-07; CURRICULUM "Test O", O0 PRE-CHECK): the plain arm's
+# live read of whether options could form at all. The birth search also takes
+# each acted position's argmax through the learner's nets, and each row logs
+# the shares of positions able to hold a length-2 and a length-3 option
+# (ablation.option_precheck_counts). False = off (bit for bit).
+OPTION_PRECHECK = False
 
 
 def schedule_steps(training_steps):

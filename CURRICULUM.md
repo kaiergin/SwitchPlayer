@@ -838,6 +838,11 @@ steps), to 100k env steps. Only the action design differs:
     and run if Kai still wants it then (see DEPARTURE 5).
   - C0: already run, Y:\SwitchPlayer-testc-run (keep that tree), deployed [90k, end]
     1262.4, n 4. No rerun.
+  COMPUTE KNOBS, O0 and OF alike: VTREE_REFRESH_BATCH 256 and VTREE_COMMUNAL_TRAJS 8,
+  the base's, as the plain twin ran. C0's 64 / 1 was a 36-slot memory workaround, and
+  at about 5x the positions it would about double an iteration. Batch shapes change
+  float numerics only (about 4% of roots flip visit counts), not the search; read (6)
+  lists it.
   Order O0, the pre-check, OF, OH if called for, seed 1 if called for, then OW. One
   at a time. C0 took 23.6 h; the
   plain twin's pace implies about 33 h for O0. OF's birth search and the refresh
@@ -851,7 +856,8 @@ O0 PRE-CHECK, before OF runs: an option of length 2 forms only where head 1's ta
   PMAX, since _birth_priors is the actor's recalibrated net in this recipe), over all
   acted positions, counting only those where the played move equals m, and for length
   3 where the next played move does too (base_env.h 396-397). No replay survives a run,
-  so the shares are logged live. Over rows in [90k, end]: under 5% able to hold a
+  so the shares are logged live. Pooled over the counts of rows in [90k, end]: under 5%
+  able to hold a
   length-2 option refers OF to Kai before it runs: options may not form here. If Kai
   declines, Test O ends at O0. One-sided: a pass proves little, since the head fits a
   mean.
@@ -1077,7 +1083,8 @@ AUDIT r6 2026-11-07, a closing check: no HIGH, 1 MEDIUM (a zero-visit option's v
 AUDIT r7 2026-11-07, a check of r6's change: 1 MEDIUM (a landing's two in-edges, pinned
   in DEPARTURE 2), 2 LOW, taken in.
 AUDIT r8 2026-11-07: nothing above LOW; 3 LOW taken in. The registration's audit loop is
-  CLOSED. BUILD ORDER then changed to launch O0 first, sequence only.
+  CLOSED. BUILD ORDER then changed to launch O0 first, sequence only. After the O0 build:
+  the compute knobs above, and the pre-check pooled over counts.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
@@ -1282,6 +1289,8 @@ AUDIT r6 2026-11-07, a check of r5's change: 2 MEDIUM (the pilot's reliability b
   too high for 60 states; G6's lengthening had no cap), 2 LOW, taken in.
 AUDIT r7 2026-11-07, a check of r6's change: 1 MEDIUM (the lengthening's length), 2 LOW,
   taken in.
+AUDIT r8 2026-11-07, a check of the pilot's text: nothing above LOW. The registration's
+  audit loop is CLOSED.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 

@@ -124,6 +124,24 @@ predecessor's do). The prep runs --mine --mine-q --env. The generations
 interleave (q0, p1, q1, p2, q2, ...): the launcher's chain script runs one
 supervisor at a time, in that order; nothing here orders the two lineages.
 
+TEST O (Kai, 2026-11-07; CURRICULUM.md "Next experiment (pre-registered) --
+Test O: OptionZero's option head in place of the token vocabulary"): one
+one-run lineage, o0 (...-mspacman-plain-o0: C0's recipe with no vocabulary, the
+9 moves at one base step, no own-play log, the O0 pre-check in its rows), from
+scratch to 100,000 env steps (--iterations 300 around a planned 150), ALONE: no
+"after", no prep, no master (C0, Test C's n0, is already run). From its own run
+worktree (launch_testo.ps1, hand-off post_testo.py):
+
+    python benchmarks/supervisors/supervise_testb.py o0 0
+
+For Test O read the text below as for Test C2, with "one" / "o0" / "O0" /
+launch_testo.ps1 / post_testo.py. Its lineage is "plain": quick() pins the arm
+to C0's but for those knobs, a record is one base step (run_token_steps: the
+reward_max alert bites at the ceiling itself), each EVAL line prints the
+pre-check's shares where a token run prints its token diagnostics, and a row
+without them is an ALERT (precheck_alert: no replay survives a run, so they
+cannot be rebuilt afterwards).
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
 round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
@@ -265,6 +283,8 @@ QT_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-qbert-tokens-"
           "two")
 QM_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-qbert-tokens-"
           "mined")
+PLAIN_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+             "plain")
 # Test B2W's optimizer (CURRICULUM "Test B2W"): its lineage's "optim", BBF's
 # AdamW (configs/BBF.gin); every other lineage's quick() pins OPTIM_SGD,
 # EfficientZero's (the faithful arms'), so neither can drift unnoticed.
@@ -355,6 +375,13 @@ LINEAGES = {
           "total_env_steps": 300000, "mine": True, "mine_q": True,
           "twin": "q",
           "external": {"variant": "q0", "live": True}},
+    # Test O: "plain" (no vocabulary: quick(), run_token_steps, the EVAL
+    # line); n0's pattern without its "after", alone like a0
+    "o": {"arm": PLAIN_ARM, "run": "mspacman-plain", "prep": None,
+          "generations": 1, "iterations": 300, "nominal": 150,
+          "discounts": (0.997 ** 4,), "rule": "keep",
+          "date": "2026-11-07", "resets": {"RESET_EVERY_STEPS": 0},
+          "plain": True},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
@@ -510,11 +537,11 @@ PREP_CHECKS = ("the value support (", "past the reward supports",
                # path weights
                "overlapping mined paths", "non-finite mined path weights")
 # Every suite supervise_gen2.py ran, plus this supervisor's, Test B's, Test
-# C's, Test C2's, Test B2W's and E3's.
+# C's, Test C2's, Test B2W's, E3's, Test Q's and Test O's.
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
           "tests/test_testc.py", "tests/test_testc2.py",
           "tests/test_testb2w.py", "tests/test_e3.py",
-          "tests/test_testq.py",
+          "tests/test_testq.py", "tests/test_testo.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",
           "tests/test_supervise_gen1.py", "tests/test_gen1.py",
           "tests/test_pbn.py",
@@ -807,15 +834,17 @@ def quick(variant, seed):
     knobs, every other lineage's RAMP_OFF. E3: the mining lineage's arm is
     its twin's (Test B2's T{k}) but for _mine and the master, the prep and
     the mined-token build are this tree's -- and m1's master checks read
-    the external T0's REAL final snapshot in its frozen tree. SystemExit
-    while F{k-1} has no final row (master_final): the preflight reports
-    it."""
+    the external T0's REAL final snapshot in its frozen tree. Test O: a
+    "plain" lineage's arm has no vocabulary and no own-play log, and is C0's
+    but for those and the pre-check. SystemExit while F{k-1} has no final row
+    (master_final): the preflight reports it."""
     arm = VARIANTS[variant]
+    plain = LINEAGES[LINEAGE].get("plain")
     code = ("import sys; sys.path[:0] = ['.', 'experiments']; "
             "import muzero, ablation, muzero_vtree, distill; "
             f"spec = ablation.ARMS[{arm!r}]; "
             "assert spec['PREFIX_BN_PER_STEP'] is True; "
-            "assert spec['OWN_PLAY_LOG'] is True; "
+            f"assert spec['OWN_PLAY_LOG'] is {not plain}; "
             "assert spec['_env_stop'] is True; "
             f"assert spec['_nominal_iterations'] == {NOMINAL_ITERATIONS}; "
             "assert muzero.PREFIX_BN_PER_STEP is False; "
@@ -825,8 +854,9 @@ def quick(variant, seed):
             f"spec['REWARD_UNIT'] == {REWARD_UNIT}; "
             "assert spec['BN_RECAL_ACTING'] is True; "
             f"assert spec['MAX_REPLAY'] == {MAX_REPLAY}; "
-            f"assert len(spec['TOKEN_VOCAB']) == {N_TOKENS}; "
-            "assert hasattr(ablation, 'OwnPlayLog') and "
+            + ("assert spec['TOKEN_VOCAB'] is None; " if plain else
+               f"assert len(spec['TOKEN_VOCAB']) == {N_TOKENS}; ")
+            + "assert hasattr(ablation, 'OwnPlayLog') and "
             "hasattr(ablation, 'read_own_play') and "
             "hasattr(ablation, 'env_stop_gate') and "
             "hasattr(ablation, 'env_schedule') and "
@@ -940,6 +970,21 @@ def quick(variant, seed):
         code += ("assert spec.get('_mine_q') is True; "
                  "assert hasattr(distill, 'played_path_weights') and "
                  "'mine_q' in distill.prep.__code__.co_varnames; ")
+    if plain:
+        # Test O: C0's arm but for the vocabulary, its bias, the own-play log
+        # and the pre-check; the flag off by default; the build this tree's
+        code += ("assert spec['OPTION_PRECHECK'] is True; "
+                 "assert muzero.OPTION_PRECHECK is False; "
+                 "assert spec['TOKEN_LONG_BIAS'] == 0.0; "
+                 f"_t = ablation.ARMS[{LONG_ARM + '-n0'!r}]; "
+                 "_skip = ('TOKEN_VOCAB', 'TOKEN_LONG_BIAS', 'OWN_PLAY_LOG', "
+                 "'OPTION_PRECHECK', '_doc'); "
+                 "assert {_k: _v for _k, _v in spec.items() if _k not in "
+                 "_skip} == {_k: _v for _k, _v in _t.items() if _k not in "
+                 "_skip}; "
+                 "assert 'OPTION_PRECHECK' not in _t; "
+                 "assert hasattr(ablation, 'option_gate') and "
+                 "hasattr(ablation, 'option_precheck_counts'); ")
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "
@@ -1555,7 +1600,10 @@ def run_token_steps(variant):
     lineage's student, its prep's vocabulary's longest token in base steps
     of BASE_FRAMES (vocab.json's "vocab", nested mined tokens read as JSON
     lists), at most MINED_TOKEN_STEPS (16) -- and that cap while the
-    vocabulary cannot be read."""
+    vocabulary cannot be read. Test O: 1 for a "plain" lineage, whose record
+    is one base step."""
+    if LINEAGES[LINEAGE].get("plain"):
+        return 1
     if not LINEAGES[LINEAGE].get("mine") or not is_student(variant):
         return MAX_TOKEN_STEPS
     doc = prep_doc(variant)
@@ -2024,6 +2072,13 @@ class Rows:
                     r.get("tok_mined_play_share"),
                     r.get("tok_mined_search_share"),
                     r.get("tok_mined_overlap_search_share")))
+            if LINEAGES[LINEAGE].get("plain"):
+                # Test O: no tokens; the O0 pre-check's read instead
+                tok = (" | hold2 %s  hold3 %s  pi[m] %s  pi[played] %s  hit "
+                       "%s  positions %s" % (
+                           r.get("pc_hold2_share"), r.get("pc_hold3_share"),
+                           r.get("pc_pi_m"), r.get("pc_pi_played"),
+                           r.get("pc_hit_rate"), r.get("pc_positions")))
             # the rebuild's live reads (as PB's audit r1 B-N4): the search
             # targets' entropy (read (4)), the step-K (5) and step-1
             # value-prefix errors (eval-mode BN, the per-step sets)
@@ -2059,6 +2114,9 @@ class Rows:
             ramp = ramp_alert(r, prior)
             if ramp:
                 alerts.append(ramp)
+            precheck = precheck_alert(r)
+            if precheck:
+                alerts.append(precheck)
             for alert in alerts:
                 print(f"ALERT: {self.variant} s{self.seed} row "
                       f"{r.get('iteration')}: {alert}", flush=True)
@@ -2394,6 +2452,7 @@ def row_alerts(r, per, ceiling, steps=None):
     if (ceiling is not None and isinstance(m, (int, float))
             and m > bound * ceiling + REWARD_MAX_SLACK):
         longest = ("a 32-frame token" if bound == MAX_TOKEN_STEPS
+                   else "a plain record" if bound == 1
                    else "the vocabulary's longest token")
         out.append(f"reward_max {m} > {bound} x the ceiling "
                    f"{ceiling:.4f} ({longest} sums at most "
@@ -2403,6 +2462,18 @@ def row_alerts(r, per, ceiling, steps=None):
         out.append(f"reward_max {m} > {REWARD_SUPPORT_EDGE:g}, the reward "
                    f"support's edge (the reward heads saturate)")
     return out
+
+
+def precheck_alert(r):
+    """Test O: a "plain" lineage's row with no pre-check shares, else None.
+    No replay survives a run, so a row that lost them cannot be rebuilt."""
+    if not LINEAGES[LINEAGE].get("plain"):
+        return None
+    n = r.get("pc_positions")
+    if type(n) is int and n > 0:
+        return None
+    return (f"pc_positions {n!r}: this row carries no pre-check shares, and "
+            f"they cannot be rebuilt after the run")
 
 
 def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
@@ -2522,7 +2593,7 @@ def main(argv):
         return write_manifest()
     if argv and argv[0][:1] in LINEAGES:
         # the variant's lineage: Test B's f0-f4, Test B2's t0-t2, Test C's
-        # r0 / n0, Test C2's a0, Test B2W's w0-w2 or E3's m1 / m2
+        # r0 / n0, Test C2's a0, Test B2W's w0-w2, E3's m1 / m2 or Test O's o0
         configure(argv[0][:1])
     if (len(argv) != 2 or argv[0] not in VARIANTS
             or not argv[1].isdigit() or int(argv[1]) not in SEEDS):

@@ -544,20 +544,22 @@ def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g2sup):
         assert (ROOT / rel).exists(), rel
     assert len(set(sup.AUDITED)) == len(sup.AUDITED)
     assert set(sup.SUITES) <= set(sup.AUDITED)
-    assert len(set(sup.SUITES)) == len(sup.SUITES) == 29
+    assert len(set(sup.SUITES)) == len(sup.SUITES) == 30
     # every suite supervise_gen2.py ran, after this supervisor's, Test B's,
-    # Test C's, Test C2's, Test B2W's, E3's and Test Q's (first: -x stops on
-    # them before the slow suites)
-    assert sup.SUITES[:7] == ["tests/test_supervise_testb.py",
+    # Test C's, Test C2's, Test B2W's, E3's, Test Q's and Test O's (first: -x
+    # stops on them before the slow suites)
+    assert sup.SUITES[:8] == ["tests/test_supervise_testb.py",
                               "tests/test_testb.py", "tests/test_testc.py",
                               "tests/test_testc2.py", "tests/test_testb2w.py",
-                              "tests/test_e3.py", "tests/test_testq.py"]
-    assert sup.SUITES[7:] == g2sup.SUITES
+                              "tests/test_e3.py", "tests/test_testq.py",
+                              "tests/test_testo.py"]
+    assert sup.SUITES[8:] == g2sup.SUITES
     assert set(g2sup.AUDITED) <= set(sup.AUDITED)
     assert set(sup.AUDITED) - set(g2sup.AUDITED) == {
         "tests/test_supervise_testb.py", "tests/test_testb.py",
         "tests/test_testc.py", "tests/test_testc2.py",
         "tests/test_testb2w.py", "tests/test_e3.py", "tests/test_testq.py",
+        "tests/test_testo.py",
         # E3's suite reads E3a's probe (and the probes it imports)
         "benchmarks/probes/probe_e3a_sequences.py",
         "benchmarks/probes/probe_action_census.py",
@@ -682,7 +684,7 @@ def test_supervisor_refuses_bad_arguments(sup, monkeypatch, capsys):
     assert ("usage: supervise_testb.py <variant: ['f0', 'f1', 'f2', 'f3', "
             "'f4', 't0', 't1', 't2', 'r0', 'n0', 'a0', 'w0', 'w1', 'w2', "
             "'m1', 'm2', 'q0', 'q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7', "
-            "'q8', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8']> "
+            "'q8', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'o0']> "
             "<seed: [0]>") in out
 
 
@@ -2340,7 +2342,7 @@ def test_f0_runs_preflight_then_each_launch_guarded_without_a_prep(
     assert sup.main(["f0", "0"]) == 1                 # 5 quick deaths
     out = capsys.readouterr().out
     assert "CRASH LOOP" in out
-    assert ("preflight ok (manifest + quick probe + 29 suites); starting f0 "
+    assert ("preflight ok (manifest + quick probe + 30 suites); starting f0 "
             f"s0 ({F[0]}, --stop-env-steps 20000, at most 60 iterations)") \
         in out
     # no wait, no prep, no prep integrity: f0 has none
@@ -2893,7 +2895,8 @@ LINEAGE_NAMES = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES",
 
 def test_test_b2s_lineage_and_test_bs_unchanged(real_sup):
     sup = real_sup
-    assert set(sup.LINEAGES) == {"f", "t", "r", "n", "a", "w", "m", "q", "p"}
+    assert set(sup.LINEAGES) == {"f", "t", "r", "n", "a", "w", "m", "q", "p",
+                                 "o"}
     assert sup.TOTAL_ENV_STEPS == 100000
     loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
     assert loaded["LINEAGE"] == "f"         # the module loads as Test B's

@@ -1491,6 +1491,39 @@ ARMS[RAMP_ARM + "-a0"] = {
             "read neither. Run as TK.",
 }
 
+# Test O (Kai, 2026-11-07; pre-registered in CURRICULUM "Test O: OptionZero's
+# option head in place of the token vocabulary"): O0, the control for the
+# option edge -- C0's recipe with no vocabulary, the 9 moves at one base step,
+# the plain search, from scratch to 100,000 env steps (planned length 150
+# iterations, C0's; the schedules follow env-step progress). No next
+# generation reads its play, so its own-play log is off; the long-token bias
+# is off too, inert without a vocabulary, as the registration leaves it for
+# every arm. Its rows carry the O0 PRE-CHECK (OPTION_PRECHECK). The variant
+# suffix is the chain supervisor's (lineage "o").
+PLAIN_ARM = ("effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-"
+             "plain")
+ARMS[PLAIN_ARM + "-o0"] = {
+    **ARMS[LONG_ARM + "-n0"],
+    "TOKEN_VOCAB": None,
+    "TOKEN_LONG_BIAS": 0.0,
+    "OWN_PLAY_LOG": False,
+    "OPTION_PRECHECK": True,
+    # Compute knobs only: TK's 64 / 1 was a 36-slot memory workaround; at 9
+    # moves the base's shapes fit, as RG ran them, and 64 / 1 would about
+    # double the iteration. Float numerics only (CURRICULUM TK's note).
+    "VTREE_REFRESH_BATCH": 256,
+    "VTREE_COMMUNAL_TRAJS": 8,
+    "_doc": "Test O's O0: Test C's control C0 (...-tokens-long-n0) with no "
+            "vocabulary -- Ms. Pac-Man's 9 moves at one base step (4 frames), "
+            "the plain search, no option edge -- from scratch at the sign "
+            "clip, PREFIX_BN_PER_STEP, DISCOUNT 0.997^4 per base step, to its "
+            "env-step stop (--stop-env-steps 100000), the within-run "
+            "schedules following its env-step progress (planned length 150 "
+            "iterations); no reset, no swap, no own-play log; the dormant-"
+            "unit and first-layer filter diagnostics in every row, and the "
+            "O0 pre-check's shares (OPTION_PRECHECK). Run as TK.",
+}
+
 # PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
 # BatchNorm statistics on the token arm", after Step 0 (iii)): TK with the
 # value-prefix head's BatchNorms keeping one set of running statistics per
@@ -2495,6 +2528,73 @@ def token_gate(spec, use_ray, cpu_actor, ray_workers):
     # duration tokens of whole base steps: the same as equal tokens)
     if len({muzero.token_inputs(t) for t in vocab}) != len(vocab):
         raise SystemExit("TOKEN_VOCAB has duplicate tokens")
+
+
+def option_gate(spec, use_ray, cpu_actor, ray_workers):
+    """Test O (CURRICULUM: "token_gate becomes option_gate"): an arm under
+    OPTION_PRECHECK has no vocabulary, so token_gate passes it unchecked; this
+    holds it to the same path instead -- policy-only acting with birth
+    search, paper targets through the target model, the vectorized communal
+    refresh, TD value targets, the paper wrapper stack at the base skip,
+    --ray --cpu-actor without a worker pool -- with the env's whole action
+    space, one move per base step. Refuses at startup -- before any
+    --overwrite deletion. Off: returns at once."""
+    if not muzero.OPTION_PRECHECK:
+        return
+    if muzero.TOKEN_VOCAB is not None:
+        raise SystemExit("OPTION_PRECHECK reads plain moves, one per base "
+                         "step: it refuses a TOKEN_VOCAB")
+    base = int(muzero.TOKEN_BASE_FRAMES)
+    need = {"PAPER_TARGETS": True, "BIRTH_SEARCH": True,
+            "USE_TARGET_MODEL": True, "REFRESH_VTREE": True,
+            "USE_ATARI_WRAPPERS": True, "USE_SEARCH_ACTING": False,
+            "USE_GUMBEL_SEARCH": False, "ACTOR_GUMBEL_SEARCH": False,
+            "REFRESH_OFFLOAD": False, "REFRESH_SATURATE": False,
+            "ASYNC_LOOP": False, "VALUE_TARGET_MODE": "td"}
+    bad = [f"{k}={getattr(muzero, k)!r}" for k, v in need.items()
+           if getattr(muzero, k) != v]
+    if bad:
+        raise SystemExit("OPTION_PRECHECK runs only on the tested path "
+                         f"(policy-only acting + birth search, paper "
+                         f"targets, vectorized refresh); got {', '.join(bad)}")
+    if not (use_ray and cpu_actor) or ray_workers:
+        raise SystemExit("OPTION_PRECHECK runs with --ray --cpu-actor (no "
+                         "--ray-workers pool)")
+    if FRAMESKIP != base:
+        raise SystemExit(f"OPTION_PRECHECK plays one move per step of the "
+                         f"wrapper stack at --frameskip {base}; got "
+                         f"{FRAMESKIP}")
+    n_env = env_actions(ENV_NAME)
+    if ACTIONS != n_env:
+        raise SystemExit(f"OPTION_PRECHECK plays {ENV_NAME}'s whole action "
+                         f"space ({n_env} moves); got {ACTIONS}")
+
+
+def option_precheck_counts(pi, played, m):
+    """Test O's pre-check (CURRICULUM "O0 PRE-CHECK") over one life's acted
+    positions: pi [n, A] the birth targets, played [n] the moves played, m
+    [n] the argmax of the learner's nets. Returns the sums a row adds up:
+      n          every acted position: the denominator, as registered;
+      hold2      positions t with played[t] == m[t] and pi[t+1][m[t+1]] >
+                 0.5: able to hold a length-2 option;
+      hold3      those with also played[t+1] == m[t+1] and pi[t+1][m[t+1]] x
+                 pi[t+2][m[t+2]] > 0.5: able to hold a length-3 option;
+      pi_m, pi_played, hit   the sums of pi[t][m[t]], pi[t][played[t]] and
+                 played[t] == m[t].
+    A LIFE'S END: t+1 and t+2 must be acted positions of this life. The
+    closing record counts as terminal, as in the registered head targets
+    (getOptionPolicy: past the last action every head is stop), whether the
+    life ended or the cap cut it, though a cut life's closing record carries
+    a search. So the last acted position can hold no option and the one
+    before it no length-3 option: both stay in n and count in neither."""
+    at = np.arange(len(played))
+    pm = pi[at, m]
+    hit = played == m
+    two = hit[:-1] & (pm[1:] > 0.5)
+    three = two[:-1] & hit[1:-1] & (pm[1:-1] * pm[2:] > 0.5)
+    return {"n": len(played), "hold2": int(two.sum()),
+            "hold3": int(three.sum()), "pi_m": float(pm.sum()),
+            "pi_played": float(pi[at, played].sum()), "hit": int(hit.sum())}
 
 
 # REWARD_GROWTH's REWARD_UNIT per game (env_tag_fragment of the env id): the
@@ -3581,6 +3681,8 @@ class Run:
             # search-acting actor (SEARCH_ACT_BIRTH_TARGETS) did not sample
             # the prior, so they are not recorded.
             self._note_behaviour(out[:-1], born)
+            if muzero.OPTION_PRECHECK:
+                self._note_precheck(out[:-1])
         pols = [t["target_policy"] for t in out if t["has_policy_target"]]
         # Unreachable-empty from every current caller (play_episode always
         # yields >= 1 policy-carrying record; cap 0 keeps its greedy tail
@@ -3616,7 +3718,11 @@ class Run:
         prior_nets: the representation / prediction the actor SAMPLED from,
         when they differ from `nets` (BN_RECAL_ACTING: recalibrated BN
         statistics; the search keeps `nets`, as it runs the prediction head
-        at depths > 0) -- only the logged behaviour prior uses them."""
+        at depths > 0) -- only the logged behaviour prior uses them.
+
+        OPTION_PRECHECK: also self._birth_pmax, each acted position's argmax
+        through `nets` -- the learner's, the ones this search runs -- never
+        prior_nets (Test O's m, as OF's PMAX)."""
         import muzero_vtree
         t0 = time.time()
         if nets is None:
@@ -3659,7 +3765,7 @@ class Run:
             # initial_inference), for the behaviour diagnostics
             # paper_targets logs (round-2 design audit; bnrecal r1 M1).
             pn = prior_nets or nets
-            priors = []
+            priors, pmax = [], []
             with torch.no_grad():
                 for w0 in range(0, n_acted, batch):
                     x = torch.tensor(
@@ -3668,8 +3774,14 @@ class Run:
                         dtype=torch.float32, device=self.trainer.device) / 255.0
                     logits, _, _ = pn["prediction"](pn["representation"](x))
                     priors.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
+                    if muzero.OPTION_PRECHECK:
+                        own, _, _ = nets["prediction"](nets["representation"](x))
+                        pmax.append(own.float().argmax(dim=1).cpu().numpy())
             self._birth_priors = (np.concatenate(priors) if priors
                                   else np.zeros((0, ACTIONS)))
+            if muzero.OPTION_PRECHECK:
+                self._birth_pmax = (np.concatenate(pmax) if pmax
+                                    else np.zeros(0, dtype=np.int64))
         finally:
             for k, n in nets.items():
                 n.train(modes[k])
@@ -3727,6 +3839,21 @@ class Run:
             w["counts"], np.bincount(act, minlength=ACTIONS))]
         w["Ts"] = sorted(set(w.get("Ts", [])) | {T})
         self._beh_window = w
+
+    def _note_precheck(self, acted):
+        """Test O's O0 pre-check, accumulated per row like _beh_window: a
+        life's option_precheck_counts, from its acted records (the birth
+        targets, _note_behaviour's tgt) and the learner's argmax
+        (self._birth_pmax, this life's _birth_search). Emitted and reset by
+        _merge_row_stats. Not checkpointed: a resume loses the window's
+        positions so far, which pc_positions shows."""
+        if not acted:
+            return
+        tgt = np.stack([t["target_policy"] for t in acted])
+        act = np.array([int(t["action"]) for t in acted])
+        got = option_precheck_counts(tgt, act, self._birth_pmax)
+        w = getattr(self, "_pc_window", None) or {}
+        self._pc_window = {k: w.get(k, 0) + v for k, v in got.items()}
 
     def _note_tokens(self, out, z0s):
         """TOKEN_VOCAB row diagnostics (P2a read 4), accumulated per row
@@ -4518,6 +4645,22 @@ class Run:
             errs["tok_decisions_per_game"] = round(
                 tw["decisions"] / tw["games"], 1)
             self._tok_window = None
+        pw = getattr(self, "_pc_window", None)
+        if pw and pw["n"]:
+            # Test O's O0 pre-check: the shares of the row's acted positions
+            # able to hold a length-2 and a length-3 option, their counts (a
+            # read over several rows pools them) and the means beside them.
+            # Per-row window, not checkpointed (like _beh_window).
+            n = pw["n"]
+            errs["pc_positions"] = n
+            errs["pc_hold2"] = pw["hold2"]
+            errs["pc_hold3"] = pw["hold3"]
+            errs["pc_hold2_share"] = round(pw["hold2"] / n, 4)
+            errs["pc_hold3_share"] = round(pw["hold3"] / n, 4)
+            errs["pc_pi_m"] = round(pw["pi_m"] / n, 4)
+            errs["pc_pi_played"] = round(pw["pi_played"] / n, 4)
+            errs["pc_hit_rate"] = round(pw["hit"] / n, 4)
+            self._pc_window = None
         if muzero.TOKEN_VOCAB is not None:
             tot = getattr(self, "_tok_totals", None)
             if tot:
@@ -6150,6 +6293,7 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         birth_search_gate()
         sve_gate()
         token_gate(spec, use_ray, cpu_actor, ray_workers)
+        option_gate(spec, use_ray, cpu_actor, ray_workers)
         reward_growth_gate(use_ray, cpu_actor, ray_workers)
         student_gate(spec, distill_set, snapshot_weights)
         env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations,
