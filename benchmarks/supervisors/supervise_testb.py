@@ -1908,7 +1908,7 @@ TRAINER_MODULES = ("ablation", "distill", "experiments.ablation",
 # started by hand beside one waits it out like any trainer (Test B2W's
 # smoke too, and E3's, smoke_teste3.py)
 SMOKE_SCRIPTS = ("smoke_testc.py", "smoke_testc2.py", "smoke_testb2w.py",
-                 "smoke_teste3.py", "smoke_testq.py")
+                 "smoke_teste3.py", "smoke_testq.py", "smoke_testo.py")
 
 
 def is_trainer(cmd):

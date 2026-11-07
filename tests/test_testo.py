@@ -31,6 +31,8 @@ ENV_ID = "MsPacmanNoFrameskip-v4"
 A = 9
 PC_FIELDS = {"pc_positions", "pc_hold2", "pc_hold3", "pc_hold2_share",
              "pc_hold3_share", "pc_pi_m", "pc_pi_played", "pc_hit_rate"}
+# read (6)'s buffer size, a token arm's fields, on O0 too
+REPLAY_FIELDS = {"replay_trajs", "replay_records", "replay_base_steps"}
 # C0's knobs O0 changes (_doc apart); every other key is C0's
 DIFFERENT = {"TOKEN_VOCAB", "TOKEN_LONG_BIAS", "OWN_PLAY_LOG",
              "OPTION_PRECHECK", "VTREE_REFRESH_BATCH", "VTREE_COMMUNAL_TRAJS"}
@@ -477,6 +479,20 @@ def test_m_comes_in_the_searchs_chunks(in_arm, monkeypatch):
     assert run._birth_pmax.tolist() == list(moves)
 
 
+def test_the_row_holds_the_buffers_size_in_records_and_base_steps(
+        in_arm, monkeypatch):
+    spec = in_arm()
+    _engine(monkeypatch, list(PI))
+    run = _stub_run(spec)
+    for _ in range(2):
+        run.replay.append(run.paper_targets(_life(PLAYED), True, born_step=0,
+                                            birth_nets=_nets(M)))
+    row = {}
+    run._merge_row_stats(row)
+    assert {k: row[k] for k in REPLAY_FIELDS} == {
+        "replay_trajs": 2, "replay_records": 10, "replay_base_steps": 10}
+
+
 def test_a_row_serializes(in_arm, monkeypatch):
     spec = in_arm()
     _engine(monkeypatch, list(PI))
@@ -503,7 +519,7 @@ def test_the_flag_off_takes_no_forward_and_writes_no_field(in_arm, monkeypatch):
     assert not hasattr(run, "_pc_window")
     row = {}
     run._merge_row_stats(row)
-    assert not PC_FIELDS & set(row)
+    assert not (PC_FIELDS | REPLAY_FIELDS) & set(row)
     assert "beh_act_prob" in row and len(out) == 5
 
 
@@ -534,8 +550,9 @@ def test_the_flag_changes_no_target_no_stream_and_no_other_field(
         assert np.array_equal(a["target_policy"], b["target_policy"])
         assert a["root_value"] == b["root_value"]
         assert a["priority"] == b["priority"]
-    assert PC_FIELDS <= set(on[1]) and not PC_FIELDS & set(off[1])
-    keep = {k: v for k, v in on[1].items() if k not in PC_FIELDS
+    extra = PC_FIELDS | REPLAY_FIELDS
+    assert extra <= set(on[1]) and not extra & set(off[1])
+    keep = {k: v for k, v in on[1].items() if k not in extra
             and k != "birth_search_s_last"}
     assert keep == {k: v for k, v in off[1].items()
                     if k != "birth_search_s_last"}
@@ -715,6 +732,8 @@ def test_run_one_writes_the_shares_into_each_row(monkeypatch, tmp_path,
     for r in rows:
         assert PC_FIELDS <= set(r) and r["pc_positions"] == 8
         assert 0 <= r["pc_hold3_share"] <= r["pc_hold2_share"] <= 1
+        assert r["replay_records"] == r["replay_base_steps"] > 0
+        assert r["replay_trajs"] == r["iteration"]
         assert r["reward_ceiling"] == 1.0 and r["reward_max"] <= 1.0
         assert not any(k.startswith("tok_") for k in r)
         assert r["beh_action_counts"] and len(r["beh_action_counts"]) == A

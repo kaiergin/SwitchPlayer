@@ -2585,8 +2585,9 @@ def option_precheck_counts(pi, played, m):
     closing record counts as terminal, as in the registered head targets
     (getOptionPolicy: past the last action every head is stop), whether the
     life ended or the cap cut it, though a cut life's closing record carries
-    a search. So the last acted position can hold no option and the one
-    before it no length-3 option: both stay in n and count in neither."""
+    a search. So the last acted position counts in neither hold2 nor hold3,
+    the one before it can count in hold2 but not in hold3, and both stay in
+    n."""
     at = np.arange(len(played))
     pm = pi[at, m]
     hit = played == m
@@ -4665,9 +4666,11 @@ class Run:
             tot = getattr(self, "_tok_totals", None)
             if tot:
                 errs.update(tot)
+        if muzero.TOKEN_VOCAB is not None or muzero.OPTION_PRECHECK:
             # The buffer's size in trajectories, records and base steps
             # (audit r1 B-M1: the transition cap counts base steps under
-            # tokens; these show what it holds).
+            # tokens; these show what it holds). Test O: on O0 too, for read
+            # (6) against C0; its records are base steps.
             replay = getattr(self, "replay", None) or []
             errs["replay_trajs"] = len(replay)
             errs["replay_records"] = int(sum(len(t) for t in replay))
