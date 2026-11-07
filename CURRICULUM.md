@@ -1085,6 +1085,19 @@ AUDIT r7 2026-11-07, a check of r6's change: 1 MEDIUM (a landing's two in-edges,
 AUDIT r8 2026-11-07: nothing above LOW; 3 LOW taken in. The registration's audit loop is
   CLOSED. BUILD ORDER then changed to launch O0 first, sequence only. After the O0 build:
   the compute knobs above, and the pre-check pooled over counts.
+O0 CODE 2026-11-07: built 7c8faac6 + a67b970f; code audit no HIGH, 1 MEDIUM (no memory
+  smoke existed), fixed in aede7e14 and the scratchpad's smoke_testo.py; re-audit of
+  that round: nothing above LOW, the loop CLOSED. The first GPU smoke (15:18) died at
+  13 s on the smoke's own bug, during Kai's view_switch session; rerun after Kai cleared
+  the GPU, 17:32 at 548eeebe (audited files as aede7e14): SMOKE OK. Peaks: GPU 7,698 MiB
+  of 12,282 (birth; baseline 1,293), allocated 2.98 GB, reserved 6.07 GB; trainer commit
+  11.75 GB; lowest free commit 23.6 GB (alone). Replay at the cap, 31,127 records;
+  train 0.36 s a step; birth 350 positions 2.0 s; refresh 3,006 positions 64.5 s;
+  checkpoint 2.59 GB, 16 s. Its LOWs: the smoke's commit gate (4 GB) is loose against
+  the 9.0 GB floor (by hand, about 13-14 GB free projected with Ray, 6-7 GB in an E3-like
+  dip); reserved GPU memory fell from 6.07 to 3.52 GB during the refresh, maybe an
+  allocator retry, not logged; GPU headroom about 4.6 GB, so a GPU-heavy app on the host
+  can push O0 out of memory. All 30 suites pass in the build tree (1,291 s).
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
