@@ -1139,12 +1139,16 @@ STATES: the 30 noop-start games cannot supply them: they repeat with period 4 (T
   opening.
 PILOT, a go or no-go before any net trains and before g exists, so it cannot bias the
   verdict. First all 240 main lines are played and G6 read: if it fails, the opening
-  may be lengthened, since no G or g exists yet. Then 60 states, 3 in each of 20
-  strata, get both players' 16 delays. It STOPS the test, Kai's call, if the residuals
-  (a branch minus its state's 16-delay mean, per player, primary head, pooled over
-  delay pairs) correlate above 0.3 at delay lag 1, 4 or 8 (a judgment; neighbours and
-  the 4-frame phase are the risks), or G5's split-half, computed on the 60 states, is
-  under 0.5. Nothing else moves: strata stay 20 wide, K stays 16.
+  is lengthened once and all 240 replayed, since no G or g exists yet; a second failure
+  is VOID. Then 60 states, 3 in each of 20 strata drawn with a fixed seed among strata
+  holding at least 3, get both players' 16 delays. It STOPS the test, Kai's call, if any
+  of six correlations exceeds 0.3 (a judgment; neighbours and the 4-frame phase are
+  the risks): the residuals (a branch minus its state's 16-delay mean, primary head,
+  pooled over delay pairs; null -1/15, printed) at delay lag 1, 4 or 8, for each player.
+  It also stops if G5's Spearman-Brown reliability on the 60 states is under 0.3: a
+  lower bar than the full sample's 0.5, since 60 states read low and noisy (a true 0.6
+  would miss 0.5 about half the time). Nothing else moves: strata stay 20 wide, K stays
+  16.
 REAL GAP, from each state's saved emulator state: K = 16 branches per player, T2's
   deployed policy and T0's, each to the life's end, capped at 1,536 frames (a weight of
   about 1% at 0.997), the first decision delayed by 0 to 15 NOOP frames, the same 16
@@ -1163,7 +1167,8 @@ STATISTIC: rho_w(x, y): inside each stratum of n states, x and y become centred 
   all states. Position is nearly constant inside a stratum, and the step baseline in
   read (1) catches what is left.
 GATES. G1 and G3-G6 are read before g is opened. Any failure: VOID, reported, Kai's
-call, no retuning and no rerun with g in hand.
+call, no retuning and no rerun with g in hand. The pilot's one lengthening of the
+opening, for G6, is the only exception.
   G1: 30 plain games each replay T0's row at iteration 45 and T2's at iteration 42
       (PROBE_THREADS 2, as the rows ran).
   G2: each net beats a constant (R2 > 0) on held-out lives at the primary head, or the
@@ -1265,6 +1270,8 @@ AUDIT r4 2026-11-07: 1 HIGH (G6 on (score, length) could not fail, so score alon
 AUDIT r5 2026-11-07, a closing check: no HIGH, 2 MEDIUM (the pilot's statistics, now on
   residuals and computed on the 60 states; the nets' loss, now standardised per head), 4
   LOW, taken in. Every path reached an end state.
+AUDIT r6 2026-11-07, a check of r5's change: 2 MEDIUM (the pilot's reliability bar was
+  too high for 60 states; G6's lengthening had no cap), 2 LOW, taken in.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
