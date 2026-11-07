@@ -799,9 +799,10 @@ shelved: "We can come back to mining as I think
 the idea needs work".
 QUESTION: does OptionZero's design survive our regime, 100k env steps, no search
 during play, no search when deployed? Two parts: does a state-dependent guess of
-the next moves form and change what the search decides, and does playing only its
-first move change the deployed score against the plain base and the token
-vocabulary? One seed per arm cannot show two arms level: see read (1).
+the next moves form and get used by the search (how far it changes the search is
+printed, not judged), and does playing only its first move change the deployed score
+against the plain base and the token vocabulary? One seed per arm cannot show two
+arms level: see read (1).
 WHY: exact move sequences rarely match (OptionZero's own predictions are 32%
 right by the sixth move, mean over games); E3a found 65% duplicate spellings and
 state-dependent equivalence, which a global vocabulary cannot hold. OptionZero has
@@ -845,14 +846,15 @@ O0 PRE-CHECK, before OF runs: an option of length 2 forms only where head 1's ta
   puts more on the move than on stop, so where pi[m] at the next position is above
   0.5; length 3 needs the product above 0.5 too. Plain 9-move arms are flat: RG's rows
   25-90, to 56k env steps, pi[played] 0.31-0.34, prior max 0.37-0.42. So O0 logs both
-  shares per row, from its birth targets and birth priors (_note_behaviour's tgt,
-  _birth_priors; m = the argmax of the birth prior, the net the birth search used),
-  counting only positions where the played move equals m, and for length 3 where the
-  next played move does too (base_env.h 396-397). No replay survives a run, so the
-  shares are logged live. Over rows in [90k, end]: under 5% able to hold a length-2
-  option refers OF to Kai before it runs: options may not form here. One-sided: a pass
-  proves little, since the head fits a mean. Read (3)'s thresholds may be reset here,
-  registered before OF starts.
+  shares per row, from its birth targets (_note_behaviour's tgt;
+  m = the argmax of one forward through the learner's nets in _birth_search, as OF's
+  PMAX, since _birth_priors is the actor's recalibrated net in this recipe), over all
+  acted positions, counting only those where the played move equals m, and for length
+  3 where the next played move does too (base_env.h 396-397). No replay survives a run,
+  so the shares are logged live. Over rows in [90k, end]: under 5% able to hold a
+  length-2 option refers OF to Kai before it runs: options may not form here. If Kai
+  declines, Test O ends at O0. One-sided: a pass proves little, since the head fits a
+  mean.
 L = 3 BECAUSE: it is the only length with published first-move results, and Kai
   2026-11-07: "I'm fine with keeping very small options like 3 moves deep ... it's
   what has already been eplored by others so it's probably going to be more
@@ -939,26 +941,30 @@ primary, trainer-BN beside it, unclipped.
       +-307, close to the paper's whole gain on this game scaled to our level (+29%:
       about +365 on 1262, less on O0's level if it sits lower; the plain twin was 649
       at 53k). So every one-seed verdict is PROVISIONAL, and NO DIFFERENT is
-      INCONCLUSIVE, never "level". OF against OH, same rule, says how much is the edge.
+      INCONCLUSIVE, never "level".
       SECOND SEED: O0 and OF again at seed 1 (about 66 h if OF costs O0's time, OH
       apart), if read (3) says ENGAGED or read (1) reads BETTER, since the heads train
-      the shared net whether or not the edge is used. Otherwise Test O ends there:
-      OPTIONS DID NOT FORM, Kai's call. TWO-SEED RULE, on the sign of each seed's
+      the shared net whether or not the edge is used. Otherwise Test O ends there, on
+      read (3)'s own label, Kai's call. TWO-SEED RULE, on the sign of each seed's
       window-mean gap and the pooled gap: KEEP if OF is ahead on both and the pooled gap
       clears 2 x sqrt(s^2 + 216.9^2 (1/n1 + 1/n2)), n the pooled rows, s = 12.5% of O0's
       pooled mean (Ms. Pac-Man's seed SD; about +-271 at 649, +-383 at 1262, n 8); DROP
       if behind on both and it clears; otherwise UNRESOLVED, Kai's call. KEEP means OF
-      over O0. If OH matches OF, the gain is the heads and jump training, not the edge,
-      and what enters the base is Kai's call. Entering the base also passes read (2).
+      over O0; without ENGAGED it is an auxiliary gain from the heads and jump training,
+      Kai's call. OF against OH, same band, one seed, stays PROVISIONAL: OF BETTER, the
+      edge helps; WORSE, it hurts, Kai's call; NO DIFFERENT, EDGE UNRESOLVED, not "no
+      effect", since a real edge could read that way at this band. OH joins seed 1 only
+      if Kai asks. Entering the base also passes read (2).
   (2) OF against C0 and O0 against C0, same rule. Not a clean action-design
       contrast: read (6) prints what else moved. Replacing the vocabulary stays a
       choice: if OF beats O0 but reads WORSE than C0, it goes to Kai, not into the base.
       C0 has seed 0 only, so this stays a one-seed read.
-  (3) ENGAGEMENT, over rows in [90k, end]. First match: NO OPTIONS (under 0.5% of nodes
-      hold an option), NEVER SELECTED (under 1% of simulations use one), else ENGAGED.
-      The 0.5% and 1% are judgments, reset at the O0 pre-check if they sit wrongly.
-      Under the first two, read (1) says nothing about the edge. ENGAGED says only that
-      the edge is in use: whether it matters is OF against OH, in score.
+  (3) ENGAGEMENT, over rows in [90k, end], from the live birth searches only, no refresh,
+      pooled over the rows. First match: NO OPTIONS (under 0.5% of expanded nodes hold an
+      option, placeholders excluded), NEVER SELECTED (under 1% of simulations cross an
+      option edge), else ENGAGED. The 0.5% and 1% are judgments. Under the first two,
+      read (1) says nothing about the edge. ENGAGED says only that the edge is in use:
+      whether it matters is OF against OH, in score.
       Printed beside it, descriptive: every row, 256 random birth roots, on one pinned
       net with one noise draw, tie-break "first" and the same subclass, searched with
       the edge on and off, so any difference is the edge's doing. Jensen-Shannon
@@ -995,7 +1001,8 @@ primary, trainer-BN beside it, unclipped.
       games that open with 80 seeded random 4-frame moves, below the token layer
       (`fixed` in probe_exhaustive_eval.py, 4 raw steps a move), the same list for every
       arm, then the arm's deployed policy. Noops 1 + s % 30, seeds 0-29; the opening's
-      reward is excluded and lives asserted at 3. Measured on raw ALE: 6 such moves give
+      reward is excluded, lives asserted at 3, and a pooled stack carried through the
+      opening, since `fixed` tiles one raw frame. Measured on raw ALE: 6 such moves give
       30 distinct states of 120 (the noop count alone), 80 give 119 of 120, no life lost.
       One path, true pairing. Its row spread is printed beside the standing band.
       Descriptive unless Kai makes it primary.
@@ -1049,6 +1056,10 @@ AUDIT r4 2026-11-07: 1 HIGH (the PLACEBO's label followed donor supply, since Ms
   patched: read (3) now only says whether the edge is in use, the on/off comparison is
   descriptive, the PLACEBO is gone, and OH, in score, is what says whether the edge
   matters.
+AUDIT r5 2026-11-07: 1 HIGH ("OH matches OF" read a band-limited NO DIFFERENT as no edge,
+  so that outcome is EDGE UNRESOLVED and every case has an end state), 2 MEDIUM (read
+  (3)'s rates pinned to live birth searches and expanded nodes; the pre-check's m comes
+  from the learner's net), 3 LOW.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
