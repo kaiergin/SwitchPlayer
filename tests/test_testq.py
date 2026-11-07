@@ -193,7 +193,9 @@ def _vocab_doc(tmp_path, **kw):
            "master_vocab": [list(t) for t in v],
            "dropped": [list(t) for t in v[-2:]], "student_ceiling": 2.0,
            "master_arm": Q[0], "master_iterations": 50,
-           "student_discount": 0.997 ** 4, "discount_rule": "keep",
+           "student_discount": ablation.ARMS[Q[0]]["DISCOUNT"],
+           "master_discount": ablation.ARMS[Q[0]]["DISCOUNT"],
+           "discount_rule": "keep",
            "set_sha256": "x", **kw}
     path = tmp_path / "vocab.json"
     path.write_text(json.dumps(doc))
@@ -219,6 +221,14 @@ def test_a_student_refuses_a_ceiling_past_its_cap(tmp_path, monkeypatch):
     path = _vocab_doc(tmp_path, ceiling_cap=25.0, student_ceiling=40.0)
     with pytest.raises(SystemExit, match="past .* cap"):
         ablation.student_arm(Q[1], path)
+
+
+def test_a_ceiling_exactly_at_the_cap_is_taken(tmp_path, monkeypatch):
+    # (every capped prep writes exactly the cap)
+    monkeypatch.setitem(ablation.ARMS, Q[1], ablation.ARMS[Q[1]])
+    ablation.student_arm(Q[1], _vocab_doc(tmp_path, ceiling_cap=25.0,
+                                          student_ceiling=25.0))
+    assert ablation.ARMS[Q[1]]["REWARD_GROWTH_START"] == 25.0
 
 
 def test_mined_tokens_carry_through_three_swaps():
@@ -407,6 +417,20 @@ def test_the_first_mined_prep_stops_the_chain_when_it_mines_nothing(
     assert sup.run_prep("p1", 0, {}) is False
 
 
+def test_an_orphan_preps_empty_result_stops_the_chain_too(psup, monkeypatch,
+                                                         capsys):
+    # the prep finished while the guard waited: nothing is started, and its
+    # result still answers to the stop
+    sup = psup
+    _finish(sup, "q0", final=60, env=33400, value=400.0)
+    _prep_env(sup, monkeypatch)
+    monkeypatch.setattr(sup, "wait_no_trainer",
+                        lambda *a: _p1_prep(sup, mined=[]))
+    _popen(monkeypatch, sup, [], [])
+    assert sup.run_prep("p1", 0, {}) is False
+    assert "MINED NO TOKEN" in capsys.readouterr().out
+
+
 def test_tokens_or_a_later_empty_prep_do_not_stop_the_chain(psup, monkeypatch):
     sup = psup
     _finish(sup, "q0", final=60, env=33400, value=400.0)
@@ -432,6 +456,13 @@ def test_a_generation_short_of_its_stop_at_the_cap_is_named(psup):
     assert sup.short_of_stop("q0", 0, 20000) is None
     _finish(sup, "p1", final=60, env=20000, evals=False, files=False)
     assert sup.short_of_stop("p1", 0, 33333) is None
+
+
+def test_main_reports_a_generation_short_of_its_stop(psup):
+    import inspect
+    src = inspect.getsource(psup.main)
+    assert "short = short_of_stop(variant, seed, stop)" in src
+    assert 'print(f"ALERT: {short}", flush=True)' in src
 
 
 def _asserts_only(code):

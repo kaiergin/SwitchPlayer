@@ -845,8 +845,9 @@ AMENDMENTS against E3 (everything else in E3-A2 to E3-A13 stands):
   (Q-A7) PER-GAME KNOBS: MAX_REPLAY 340 and POLICY_REFRESH_COUNT 16, the Ms.
       Pac-Man port's own rule (the two per-trajectory knobs stay per GAME; a
       Q*bert game is 4 lives, so Pong's 85 and 4 times 4). Left at Ms. Pac-Man's
-      255 and 12, the 31,250-step cap would not bind at random-play lives and
-      about a third of a master's lives would never reach its student.
+      255 and 12, about a third of a master's lives at random-play length would
+      never reach its student; at 340 about 9% still would not, and the
+      31,250-step cap binds from about 92 steps a life.
 READS, fixed now:
   (1) PRIMARY, Kai's prediction: multi-action mined tokens' share of QM's
       deployed play, per generation. HOLDS if the mean over QM6-QM8 is at least

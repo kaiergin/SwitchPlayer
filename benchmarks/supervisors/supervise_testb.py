@@ -594,8 +594,9 @@ def is_frozen(variant):
 
 
 def tree_of(variant):
-    """(Test Q: a "live" external run, q0, is this tree's own.) The tree holding `variant`'s run folder and probe jsonls: REPO, or
-    the external run's frozen tree (E3-A1)."""
+    """The tree holding `variant`'s run folder and probe jsonls: REPO, or
+    the external run's frozen tree (E3-A1). (Test Q: a "live" external run, q0, is this
+    tree's own.)"""
     if is_frozen(variant):
         return LINEAGES[LINEAGE]["external"]["tree"]
     return REPO
@@ -1646,7 +1647,8 @@ def run_prep(variant, seed, env, redo_ok=True):
     """A student's prep, once (vocab.json is its completion signal): the
     master gate and its pick in master.json, then experiments/distill.py
     --from-log F{k-1}'s own-play log up to PREP_ATTEMPTS times. Returns True
-    when the prep is done. A done prep that does not check out intact is
+    when the prep is done (a finished prep can still return False: Test Q's
+    stop rule, print_mined). A done prep that does not check out intact is
     retried for a few minutes (a transient lock), then -- only when
     `redo_ok` (this run was never LAUNCHED: nothing is bound to the set
     yet) -- moved aside and redone; once launched it is NEVER redone, nor
