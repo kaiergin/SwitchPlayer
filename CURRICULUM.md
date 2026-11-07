@@ -947,6 +947,17 @@ SCORER BUILT AND AUDITED 2026-11-07, during Q0: session scratchpad score_testq.p
   resume); the probe takes any matching row where the scorer reads the last; a
   torn tail in a replay file keeps read (1) PROVISIONAL until it is cleaned; a
   stale PROBE_ENV reads as "0 deployed rows".
+PAUSED 2026-11-07 11:58 by Kai, during Q0 (last scored row iteration 55, 25,890 env
+  steps; checkpoint 11:56; deployed rows 5-55: 196.7, 230.8, 224.2, 225.8, 233.3,
+  274.2, 297.5, 276.7, 309.2, 282.5, 284.2). Supervisor and trainer killed by exact
+  pid; the chain logged its ALERT and exited; launch_testq.ps1 resumes. Kai: "the
+  idea is incomplete and we need to make some modifications to the algorithm before
+  running such a long test". No score read exists. The read (3) band question
+  (registered row band against a seed-level band of +-47%) is left open.
+  Direction under discussion, nothing registered yet: play only a token's first
+  move and keep tokens as jumps in the search; tokens as guessed move sequences
+  rather than fixed ones, so outside play can train them; OptionZero
+  (arXiv 2502.16634, code rlglab/optionzero) as the base for both.
 
 ### RESULT -- E3: tokens mined from the agent's own play at every swap, against Test B2's T1-T2 (seed 0), 2026-11-06
 
