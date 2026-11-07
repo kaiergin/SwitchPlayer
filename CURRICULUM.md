@@ -789,6 +789,84 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
+
+DECISION: Kai 2026-11-07, after E3 ("Sure we can run this test then move onto
+mining other players' gameplay"). Kai's prediction: mining pays off over long
+training, because real convergence makes chosen paths more deterministic, so
+mined tokens get used consistently. E3 could not test that: 100k env steps on a
+game with few manoeuvres, and 97% of M2's mined play was single-action holds.
+QUESTION: on a game with real manoeuvres, does the share of play held by
+multi-action mined tokens rise as training goes on, and does the score follow?
+GAME: QbertNoFrameskip-v4, frameskip 4, episode cap 3000 per life (TK's
+  settings). 6 actions, so 24 duration tokens (each action at 4, 8, 16, 32
+  frames; nothing removed by hand, the 1% rule does that). REWARD_UNIT 25 (one
+  new cube). A hop is 30 frames, so a 64-frame token holds two hops.
+LINEAGES, seed 0, Test B2's recipe throughout (EfficientZero's SGD, constant
+  discount 0.997 per frame, 20,000 offline steps per student, generations of
+  33,333 env steps, clip loosened only at swaps by the halved rule):
+  - Q0: from scratch at the sign clip, to 33,333 env steps. Shared by both.
+  - QT1-QT8: the control. Distilled students, no mining.
+  - QM1-QM8: the same plus mining at every swap, with Q-A1 and Q-A2 below.
+  Each lineage ends at 300,000 env steps: 9 generations, 8 swaps. They run one
+  at a time and INTERLEAVED (Q0, QM1, QT1, QM2, QT2, ...), so a stop at any
+  point leaves a fair pair.
+AMENDMENTS against E3 (everything else in E3-A2 to E3-A13 stands):
+  (Q-A1) HOLDS OUT: a candidate whose inputs are all one action is not
+      eligible (counted in the mining record as a hold). A hold is a longer
+      duration token, not a sequence. The rule is game-agnostic.
+  (Q-A2) PLAYED PATHS (the target fix): at a record relabeled as a mined token,
+      the spelling the master actually played gets path weight 1 in place of
+      its prior product, and every other path from that first slot gets 0
+      there. Everywhere else E3-A5's product stands. In E3 such records gave
+      M2's multi-action tokens only 4-17% of the target, and all 5 of M1's
+      were dropped at the next swap while all 3 of its holds survived.
+  (Q-A3) THE CAP STAYS (Kai): 64 frames, runs of 2-4 decisions.
+  (Q-A4) MINING AT EVERY SWAP, the 1% rule unchanged: a dropped token can be
+      mined again once play settles.
+  (Q-A5) THE CEILING: a mined token's record sums up to 16 base steps, so a
+      ceiling above 25 units (400 / 16) fails the supports check and would stop
+      the chain; Q*bert's level bonuses would get there within a few swaps. BOTH
+      lineages hold the ceiling at 25 units (625 points) at most, so the clip
+      does not differ by arm.
+READS, fixed now:
+  (1) PRIMARY, Kai's prediction: multi-action mined tokens' share of QM's
+      deployed play, per generation. HOLDS if the mean over QM6-QM8 is at least
+      5% of play AND at least twice the mean over QM1-QM3. Otherwise NOT SHOWN.
+      Thresholds are mine; Kai can change them before launch.
+  (1b) The same, counting only tokens of at least 60 frames (long enough for two
+      hops). Inputs during a hop are ignored, so a short multi-action token can
+      really be one hop. Descriptive; the 60 frames is for this read only, no
+      rule uses it.
+  (2) Settling: beh_prior_maxp per generation in both lineages; distinct
+      candidates per counted run at each swap; multi-action tokens kept by the
+      1% rule at each swap, and how many are mined again.
+  (3) Score: QM against QT over the deployed rows in [270k, 300k] env steps,
+      unclipped whole games, trainer-BN beside it. BETTER / WORSE / NO DIFFERENT
+      on 2 x sigma x sqrt(1/n1 + 1/n2), sigma from QT's own rows by the general
+      rule (1.4826 x the median absolute adjacent difference / sqrt 2): 216.9
+      is Ms. Pac-Man's and does not carry over.
+  (4) Decisions per second, both lineages, per generation.
+  (5) Descriptive only: whether QT climbs across swaps. There is no no-swap twin,
+      so this cannot show that swaps help on Q*bert.
+STOP RULES: Q0 must clear 328 (twice Q*bert's random 163.9) over its last two
+  deployed rows, or the chain stops as Kai's call. If QM1's prep mines no
+  multi-action token, the chain stops as Kai's call. One seed per arm, so read
+  (3) is a weak read, as in E3.
+MEMORY BUDGET (owed before any further mined run), from E3's commit trend:
+  trainer median 8.0 GB in M1 and M2, first fifth against last fifth 8.37 to
+  7.81 and 8.10 to 7.94, so no growth within a generation; peak 12.33 GB, GPU
+  10.3 GB. Each generation is a new process, so 300k does not raise the
+  footprint, and 24 tokens is fewer than 36 (though vocabulary alone does not
+  set the peak). The 13:47 dip sat inside M2's iteration 35 (own-play logs 13:46
+  and 14:01): GPU +5 GB, free commit -8.8 GB, the trainer's own commit under 9.6
+  GB, all recovered as that iteration ended. So it was tied to the run, not to
+  Kai's apps; what inside the iteration caused it is still unknown. It did not
+  recur. Against a 47.8 GB limit the lowest free commit was 9.0 GB. The watch
+  stays on (kill at 1 GB free, holders logged below 12 GB). Disk about 1.8 GB a
+  generation, about 31 GB in all, 691 GB free.
+COST: 17 generations at about 10 h, about 7 days, with pauses on request.
+
 ### RESULT -- E3: tokens mined from the agent's own play at every swap, against Test B2's T1-T2 (seed 0), 2026-11-06
 
 (Pre-registration: "Queued experiment (pre-registered) -- E3", below, with
