@@ -1326,6 +1326,17 @@ PILOT RESULT 2026-11-07 16:37-16:52 (912 s, CPU, Y:\SwitchPlayer-testg-run at 20
   1,536-frame cap. Files: benchmarks/probes/probe_gap_check-pilot-results/ (the JSONs;
   the pickles stay in the run tree). Next: stage 2, built in its own file so the
   pilot's stamped files stay readable, with its audit loop before it runs.
+STAGE 2a CODE 2026-11-07 (branch test-g, cfa6d3e7, probe_gap_stage2a.py): G on every kept
+  state and the gates needing only branches (G3, G5, G4). Fresh-eyes audit: nothing
+  above LOW, the loop CLOSED; on the pilot's 60 states it reproduces pilot.json exactly.
+  Choices the text left open, all judged defensible: G3 and G5 use all 1,121 kept states
+  (if the primary later leaves many out for training overlap, G5 is also reported on the
+  primary's sample); delay rewards join the first base step before its clip; the discount
+  clock starts at the first base step, common to both players; clusters join games through
+  main-line decision stacks (190 clusters, the largest 12 games and 58 states); an
+  undefined G5 is VOID. Runs from its own frozen tree Y:\SwitchPlayer-testg2a-run at
+  cfa6d3e7, reading the pilot's files from Y:\SwitchPlayer-testg-run. Measured cost about
+  2 h, not the 5 h estimated.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
