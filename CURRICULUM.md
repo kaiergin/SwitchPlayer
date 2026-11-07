@@ -1291,6 +1291,15 @@ AUDIT r7 2026-11-07, a check of r6's change: 1 MEDIUM (the lengthening's length)
   taken in.
 AUDIT r8 2026-11-07, a check of the pilot's text: nothing above LOW. The registration's
   audit loop is CLOSED.
+PILOT CODE 2026-11-07: built 4154944c; code audit 2 MEDIUM (the verdict wiring and the
+  VOID / STOP routes were untested), 2 LOW, fixed 209314ad; re-audit: nothing above LOW,
+  the loop CLOSED. Its LOWs: the source hash leaves out networks.py and
+  scalar_categorical.py, and any save to a hashed file during the pilot refuses its
+  files (both moot: the pilot runs from its own frozen worktree,
+  Y:\SwitchPlayer-testg-run at 209314ad); select's opening is not checked against the
+  pilot's (manual runs only); a relative --out breaks outside the tree root (an
+  absolute one is used). For stage 2: the hash covers the probe file, so stage 2 must
+  read the pilot's files without that check, or live in its own file.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
