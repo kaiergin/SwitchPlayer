@@ -1100,8 +1100,10 @@ THE VALUE NETS, all alike: a small plain conv net (Nature DQN torso, separate fr
   0.98, 0.95 per frame, half-lives about 231, 69, 34, 14 frames) on two reward scales,
   the student's clip (T0's ceiling 1, per base step, REWARD_UNIT 10) and raw. Target:
   the measured discounted return to the end of the life, from the logged rewards, no
-  bootstrap (P5c's hazard). Three seeds each, averaged. 80 / 20 split of lives,
-  stratified by life index, early stop on the held-out lives. A held-out stack whose
+  bootstrap (P5c's hazard). Targets standardised per head and heads weighted equally,
+  since raw targets have 15-22x the clipped heads' SD; outputs de-standardised before
+  g. Three seeds each, averaged. 80 / 20 split of lives, stratified by life index, early
+  stop on the primary head's held-out loss. A held-out stack whose
   hash is in the training set is left out of the held-out score: the first 75-175 base
   steps of first lives repeat byte for byte.
   - MASTER NET: T2's log only.
@@ -1124,19 +1126,19 @@ STATES: the 30 noop-start games cannot supply them: they repeat with period 4 (T
   STRATA, knowable at the decision: life index x 20-base-step bins since the life
   began. Quartile bins were too wide: inside them position still explained return
   (rho_w of step against return -0.40 on T2) and a position-only world passed the
-  primary in simulation. In the logs life and time explain 59% of T0's return and 77%
-  of T2's, which is why every test below is inside strata. A stratum with one state
+  primary in simulation. In the logs these strata explain 66% of T0's clipped return
+  and 84% of T2's, which is why every test below is inside them. A stratum with one state
   drops out of rho_w.
   CLUSTERS for every interval: games connected through shared stacks after the
   opening.
 PILOT, a go or no-go before any net trains and before g exists, so it cannot bias the
-  verdict: all 240 main lines are played, and 60 states, 3 in each of 20 strata, get
-  both players' 16 delays. It STOPS the test, Kai's call, if: effective games fall
-  short (G6); the correlation of branch returns across states at delay lag 1, 4 or 8
-  exceeds 0.3 (a judgment; neighbours and the 4-frame phase are the risks); or G5's
-  reliability, projected from the pilot's spread inside strata, is under 0.5. Nothing
-  else moves: strata stay 20 wide, K stays 16. Only G6 may be answered by lengthening
-  the opening, since no G or g exists on the main lines yet.
+  verdict. First all 240 main lines are played and G6 read: if it fails, the opening
+  may be lengthened, since no G or g exists yet. Then 60 states, 3 in each of 20
+  strata, get both players' 16 delays. It STOPS the test, Kai's call, if the residuals
+  (a branch minus its state's 16-delay mean, per player, primary head, pooled over
+  delay pairs) correlate above 0.3 at delay lag 1, 4 or 8 (a judgment; neighbours and
+  the 4-frame phase are the risks), or G5's split-half, computed on the 60 states, is
+  under 0.5. Nothing else moves: strata stay 20 wide, K stays 16.
 REAL GAP, from each state's saved emulator state: K = 16 branches per player, T2's
   deployed policy and T0's, each to the life's end, capped at 1,536 frames (a weight of
   about 1% at 0.997), the first decision delayed by 0 to 15 NOOP frames, the same 16
@@ -1166,22 +1168,24 @@ call, no retuning and no rerun with g in hand.
       T0 from T0's own states.
   G4: a restored branch gives the same frames in a fresh process, in the project venv.
   G5: G must be measurable inside strata: split-half reliability of rho_w (delays
-      0-7 against 8-15, which keeps neighbours and the 4-frame phase mostly inside a
-      half; Spearman-Brown) at least 0.5 at the primary head (a judgment). Below that,
+      0-7 against 8-15, which keeps most lag-1 and lag-4 pairs inside a half;
+      Spearman-Brown) at least 0.5 at the primary head (a judgment). Below that,
       a failed read would say nothing. The lag profile prints beside it.
   G6: at least 30 effective games, 1 / sum p^2 over the 240 games' scores, at the pilot
       (a judgment). On score alone, since near-repeats differ by a base step in length;
       stack sharing cannot catch them either, as one pellet splits a stack.
-READS. PRIMARY HEAD: 0.997 per frame, student's clip. Intervals resample clusters,
-10,000 draws, ranks recomputed inside each draw.
-  (1) PRIMARY. BASELINES needing no master: student prior entropy, twin value, T0's own
-      value head, base steps since the life began. Each is oriented once by its sign on
-      the full sample. HOLDS if both: the 95% lower bound of rho_w(g, G) above 0, and
+READS. PRIMARY HEAD: 0.997 per frame, student's clip. Intervals are two-sided 95%
+percentile intervals resampling clusters, 10,000 draws, ranks recomputed inside each
+draw.
+  (1) PRIMARY. BASELINES needing no master: student prior entropy (acting BN states,
+      temperature 1), twin value, T0's own value head, base steps since the life began.
+      Each is oriented once by its sign on the full sample. HOLDS if G2's inside-strata
+      clause passed and both: the 95% lower bound of rho_w(g, G) above 0, and
       the lower bound of rho_w(g, G) minus the best baseline's rho_w above 0, the best
       taken inside each draw. Else NOT SHOWN. Printed beside it: the ceiling, the square
       root of G5's reliability. In simulation, power was about 44% at 600 states and
       84% at 1,440 under stylised assumptions, so NOT SHOWN is weak evidence against
-      the gap. Kai's call either way.
+      the gap.
   (2) Master alone: rho_w of the master value by itself. If it matches, the student's
       side adds nothing. Also rho_w(g, T2's return), rho_w(g, -T0's return), and
       rho_w(-T0's return, G) as a reference that cannot be deployed: T0's return is half
@@ -1252,6 +1256,9 @@ AUDIT r4 2026-11-07: 1 HIGH (G6 on (score, length) could not fail, so score alon
   sets nothing else; the split is 0-7 against 8-15; gates are read before g is opened and
   every outcome has an end; read (7)'s slot, delay order and class representative
   pinned), LOWs taken in.
+AUDIT r5 2026-11-07, a closing check: no HIGH, 2 MEDIUM (the pilot's statistics, now on
+  residuals and computed on the 60 states; the nets' loss, now standardised per head), 4
+  LOW, taken in. Every path reached an end state.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
