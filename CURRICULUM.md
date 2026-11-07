@@ -909,7 +909,9 @@ DEPARTURES, each forced or chosen, none silent:
      policy target moves only as far as the option changes Q during selection. This
      is the main thing Test O tests.
   2. Eager expansion gives every child a value, so OptionZero's default Q is not
-     used.
+     used. The option's landing is evaluated in its node's expansion wave, as a tenth
+     row, where OptionZero evaluates it on first crossing; a zero-visit option and a
+     zero-visit primitive both use r + d x value.
   3. The refresh keeps primitive edges only (OptionZero has no reanalysis). The
      stored option suggestions come from the birth search. About half of the
      records may carry primitive-only targets by mid-run, so the sampled share of
@@ -931,7 +933,7 @@ DEPARTURES, each forced or chosen, none silent:
      alone, not the paper's cumulative omega. Raw pi gates head 1, so the product acts
      from head 2 on. In the first half, at T 0.5, the cut and the product partly
      double-count. Hit rate is logged beside mean pi[m].
-  Left off for all arms: long-token bias, swaps, distillation, mining, reward
+  Left off for all arms: long-token bias, swaps, distillation, mining, ceiling
   growth, own-play logs for the next generation. token_gate becomes option_gate.
 READS. Exact evals as ever: whole games, 30 noop starts, deployed acting states
 primary, trainer-BN beside it, unclipped.
@@ -954,7 +956,8 @@ primary, trainer-BN beside it, unclipped.
       Kai's call. OF against OH, same band, one seed, stays PROVISIONAL: OF BETTER, the
       edge helps; WORSE, it hurts, Kai's call; NO DIFFERENT, EDGE UNRESOLVED, not "no
       effect", since a real edge could read that way at this band. OH joins seed 1 only
-      if Kai asks. Entering the base also passes read (2).
+      if Kai asks. Seed 0's labels govern; seed 1's are printed. Entering the base also
+      needs read (2) not WORSE.
   (2) OF against C0 and O0 against C0, same rule. Not a clean action-design
       contrast: read (6) prints what else moved. Replacing the vocabulary stays a
       choice: if OF beats O0 but reads WORSE than C0, it goes to Kai, not into the base.
@@ -1060,6 +1063,8 @@ AUDIT r5 2026-11-07: 1 HIGH ("OH matches OF" read a band-limited NO DIFFERENT as
   so that outcome is EDGE UNRESOLVED and every case has an end state), 2 MEDIUM (read
   (3)'s rates pinned to live birth searches and expanded nodes; the pre-check's m comes
   from the learner's net), 3 LOW.
+AUDIT r6 2026-11-07, a closing check: no HIGH, 1 MEDIUM (a zero-visit option's value was
+  undefined, now DEPARTURE 2), 3 LOW, taken in. Every path reached an end state.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
