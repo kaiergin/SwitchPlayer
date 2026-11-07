@@ -911,7 +911,11 @@ DEPARTURES, each forced or chosen, none silent:
   2. Eager expansion gives every child a value, so OptionZero's default Q is not
      used. The option's landing is evaluated in its node's expansion wave, as a tenth
      row, where OptionZero evaluates it on first crossing; a zero-visit option and a
-     zero-visit primitive both use r + d x value.
+     zero-visit primitive both use r + d x value. A landing can have two in-edges, the
+     jump and a primitive row, and can already exist below a crossed ancestor (repeats
+     make this common). So the jump's r, d and value sit on the holder, the node's own
+     belong to its primitive edge, and the first evaluation keeps the latent, as
+     OptionZero evaluates a node once. The tree tests include this case.
   3. The refresh keeps primitive edges only (OptionZero has no reanalysis). The
      stored option suggestions come from the birth search. About half of the
      records may carry primitive-only targets by mid-run, so the sampled share of
@@ -956,8 +960,8 @@ primary, trainer-BN beside it, unclipped.
       Kai's call. OF against OH, same band, one seed, stays PROVISIONAL: OF BETTER, the
       edge helps; WORSE, it hurts, Kai's call; NO DIFFERENT, EDGE UNRESOLVED, not "no
       effect", since a real edge could read that way at this band. OH joins seed 1 only
-      if Kai asks. Seed 0's labels govern; seed 1's are printed. Entering the base also
-      needs read (2) not WORSE.
+      if Kai asks. Seed 0's read (3) and OF-against-OH labels govern; seed 1's are
+      printed. Entering the base also needs OF against C0 not WORSE.
   (2) OF against C0 and O0 against C0, same rule. Not a clean action-design
       contrast: read (6) prints what else moved. Replacing the vocabulary stays a
       choice: if OF beats O0 but reads WORSE than C0, it goes to Kai, not into the base.
@@ -1065,6 +1069,8 @@ AUDIT r5 2026-11-07: 1 HIGH ("OH matches OF" read a band-limited NO DIFFERENT as
   from the learner's net), 3 LOW.
 AUDIT r6 2026-11-07, a closing check: no HIGH, 1 MEDIUM (a zero-visit option's value was
   undefined, now DEPARTURE 2), 3 LOW, taken in. Every path reached an end state.
+AUDIT r7 2026-11-07, a check of r6's change: 1 MEDIUM (a landing's two in-edges, pinned
+  in DEPARTURE 2), 2 LOW, taken in.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
