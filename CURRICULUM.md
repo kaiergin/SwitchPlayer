@@ -1003,7 +1003,15 @@ primary, trainer-BN beside it, unclipped.
       OF; left in decisions, since prefix_bn_steps pins the horizon to the unroll),
       beh_H_act (temperature is applied per decision, and a decision is now 4
       frames), refresh positions, replay bytes, decisions per second, wall clock.
-      The TD horizon is already held in frames.
+      The TD horizon is already held in frames. Its off-policy shortening is not:
+      OFFPOLICY_DECAY_STEPS is sized from the nominal 150 iterations (0.3 x 150 x
+      2,000 = 90,000 gradient steps) and keyed to gradient steps, in every arm and
+      C0. C0 collected about 737 env steps an iteration (136 iterations to 100k), so
+      its 31,250-step replay spans about 42 iterations and its oldest records sit
+      just under 90,000 steps old, a horizon of 10 throughout; O0 collects about
+      578 (rows to 60), so its replay spans about 54 iterations, the oldest sixth
+      or so runs at 9, and it needs about 173 iterations to reach 100k. Printed,
+      not corrected (O0 code audit, a LOW).
   (7) One seed per arm: the band in (1) is row spread, not seed spread. Each verdict
       prints beside it the seed-level bands from EZ's per-seed tables, as shares of
       the control's mean: +-47% (2 x 16.6% x sqrt 2, median of the 25 games with
