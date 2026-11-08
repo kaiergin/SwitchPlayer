@@ -1173,6 +1173,52 @@ OPTION CODE, stage 3 (records, unroll, targets and loss; the birth search on the
   refused for option arms, read (3)'s counts accumulated across lives, the hit rate as
   DEPARTURE 7 defines it (the batch mask share is not it), a train step on a fallback
   window in the tests, one docstring's wording, the manifest rewrite.
+OPTION CODE, stage 4a (the OF and OH arms, the gate, per-row option diagnostics and the
+  on/off root probe), 2026-11-08, f659e832: OF = O0 + OPTION_LENGTH 3, OH = OF + OPTION_EDGE
+  False (pinned); OPTION_PRECHECK stays on in both, so the three arms' pre-check shares
+  compare. The gate admits option arms only on the tested path, with TRAIN_PREFETCH off,
+  "embed" actions and no vocabulary. Row fields opt_*, option arms only: read (3)'s counts
+  from the live birth searches (the cut life's greedy tail included, one root per cut
+  life), logged as integers so the pooled [90k, end] verdict computes exactly; the on/off
+  probe (256 roots per row, the smallest keys of a pinned generator, uniform without
+  replacement; the learner's eval-mode nets at row time; one Dirichlet draw from its own
+  generator shared by both searches; tie-break "first"; about 4 s a row on the GPU by
+  estimate); DEPARTURE 7's hit rate on the birth PMAX (the pre-check's m) beside mean
+  pi[m]; DEPARTURE 3's birth-target share (a record with no refreshed_step: the refresh
+  replaces every acted target before stamping); read (4)'s accuracy by step with its
+  baselines and the per-step played histograms; train-step means; the prefix panel split
+  by row kind; read (6)'s missing cheap items. The option window is checkpointed (about
+  22 MB). Flag off, an O0 life, row, step hook and checkpoint head are pinned against
+  git b4e4d807.
+  HOW TO READ, from the audit: read (4)'s step 1 is the option's first move, head 0's
+  argmax, so step-1 accuracy is DEPARTURE 7's hit rate restricted to positions holding an
+  option; the extra heads are judged from step 2. Read (4) is unconditional per step
+  (as the paper's D.4) and leaves out t = 0 of each life (under 1% of positions). Pool the
+  marginal baseline through the per-step histograms, not the per-row modes. A flip
+  counts when the two searches' top sets are disjoint. The probe carries CUDA batch-shape
+  wobble (no same-shape control). After a resume the first row's pc_* fields cover the
+  post-resume lives only (the pre-check window is not checkpointed) while opt_* cover the
+  whole row: compare the two hit rates through their own counts. Read (6)'s gradient
+  uses per record is recomputed per arm, since C0's records are tokens.
+  CODE AUDIT r1 (two auditors): no HIGH; 1 MEDIUM: read (4)'s repeat baseline predicted
+  played[t-1] at every step, so heads that only copy head 0 beat it at steps 2 and 3
+  (1.0 / 0.607 / 0.336 against 0.607 / 0.336 / 0.186 on a constructed case), crediting
+  head 0's state dependence to the later heads, unrecoverable after the run. Fixed by
+  logging two more baselines at the same positions: per-step persistence (the move just
+  before step j's position) and the option's own first move repeated, which a copy head
+  equals exactly. LOWs taken in: the gate also refuses the knobs left off for all arms
+  (ceiling growth, not REWARD_GROWTH itself, which O0's recipe runs at a constant ceiling
+  1); the non-finite step count matches the step window; firmer no-drift pins; step-1
+  prefix fields for one-step first edges. Fixes 4bc29f28.
+  HOW TO READ the baselines: repeat (played[t-1]) and first-move-repeated use only what is
+  known at t, and are the bars a head must beat; per-step persistence (the move just before
+  step j's position) uses moves played after t, so at steps 2 and 3 it sits near the play's
+  own stickiness (high once play is sharpened at T 0.125), and scoring below it is not
+  evidence against state dependence.
+  CODE AUDIT r2, a fresh check of the fixes: nothing above LOW; the stage 4a loop is
+  CLOSED. Left for stage 4b: the O0 no-drift pin still shares spec, reset_log and
+  held_ships between its two runs by reference; one docstring counts three predictors
+  where there are five.
   A third MEDIUM is a CONSEQUENCE OF DEPARTURE 2, KEPT as registered: a zero-visit option
   and its first move's primitive both score r + d x value with no exploration bonus at
   the first visit, so an option can be crossed on its node's first visit, and p(o) plays
