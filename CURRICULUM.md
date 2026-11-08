@@ -1375,6 +1375,18 @@ NETS CODE 2026-11-07 (test-g, probe_gap_nets.py): built 2e9c9b6d; code audit: th
   nothing above LOW, the loop CLOSED. The 31% of the master's held-out stacks left out of
   the early-stopping score are all prefixes of held first lives (69-285 each); not a bug.
   Trained from its own frozen tree, Y:\SwitchPlayer-testg-nets-run at 19272300.
+NETS RESULT 2026-11-07 20:54-21:14 (1,193 s, CPU): G2 FIRST CLAUSE PASS. Held-out R2 at the
+  primary head, seed-averaged, on all held-out stacks: master 0.899 (24 lives, 5,723
+  stacks), twin 0.606 (27 lives, 7,035), late twin 0.842 (descriptive). Without the shared
+  openings (descriptive): master 0.724, twin -0.169, late 0.127. So under the text as first
+  written the twin would have VOIDED the test: the amendment, made before training on the
+  audit's simulation (a position table at <= 0 in 26% of splits), decided this gate. Read
+  plainly, the twin predicts worse than a constant on T0's held-out states past the shared
+  opening; whether it still ranks states inside strata is G2's inside clause, read next on
+  the experiment's states. Best epochs: master 6, 7, 3; twin 6, 3, 8; late 1, 1, 4 (of 30;
+  none at the cap). Held-out primary loss (standardised): master 0.11-0.12, twin 0.43-0.49,
+  late 0.14-0.16. Peak memory 1.6 GB. g2.json in benchmarks/probes/probe_gap_nets-results/
+  (b2c19dca; this note follows it).
 STAGE 2b CODE (test-g, bedd1e7b, probe_gap_stage2b.py): the nets on the kept states, G2's
   inside clause, the baselines and reads (1)-(6); read (7) later. Fresh-eyes audit:
   nothing above LOW, the loop CLOSED. Its LOWs: no finiteness check on the nets', value
