@@ -3033,10 +3033,31 @@ class TrainingHelper:
         "rewards": (B, unroll_steps+1) floats,
         "target_policy": (B, unroll_steps+1, action_space) probabilities,
         "target_value": (B, unroll_steps+1) floats.
+
+        Test O stage 3, nets with option heads (option_length L > 1): the
+        paper builder's option batch -- "actions" (B, K, L) jump rows, -1
+        padded and validated on the host (the dynamics call skips its
+        check); "option_target" (B, K+1, L-1, A+1), "option_scale" (B, K+1,
+        L-1), "pmax_refs". Each unroll edge is ONE dynamics call and ONE
+        value-prefix LSTM call (step = i, so jump and single rows pool in
+        prefix-BN set i); the prediction runs with its option heads at every
+        position, and the option loss (_option_loss: cross-entropy per extra
+        head, masked, averaged over the L - 1 heads, OptionZero's
+        calculate_loss 158-165) joins that position's loss at scale 1, not
+        detached (train.py 275). Each position's argmax of the policy logits
+        is written back to its record's PMAX after the step
+        (muzero_option_targets.write_pmax). self._option_last holds the
+        batch's option loss (a detached device scalar: OptionZero's
+        loss_option, step 0 plus the unrolled steps / K), the masked share
+        and the per-edge jump share (host floats). L = 1: none of this
+        runs.
         """
         # Determine the number of unroll steps from the batch.
         unroll_steps = batch["actions"].shape[1]
-        
+        # Test O stage 3: the option path (the nets carry option heads)
+        opt_L = int(getattr(self.prediction, "option_length", 1))
+        oin = self._option_inputs(batch, opt_L) if opt_L > 1 else None
+
         # Convert inputs to tensors and move them to the appropriate device.
         obs = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device) / 255.0
         if USE_AUGMENTATION:
@@ -3095,8 +3116,12 @@ class TrainingHelper:
         # ---------------------
         init_obs = obs[:, 0]
         latent = self.representation(init_obs)
-        policy_logits, decoded_v0, value_logits = self.prediction(latent)
-        
+        if oin is None:
+            policy_logits, decoded_v0, value_logits = self.prediction(latent)
+        else:
+            policy_logits, decoded_v0, value_logits, option_logits = \
+                self.prediction(latent, with_options=True)
+
         converted_target_rewards = scalar_categorical.scalar_to_categorical_batch(
             rewards, self.dynamics.support_size, self.dynamics.num_bins, self.device,
             transform=USE_H_TRANSFORM)
@@ -3130,6 +3155,10 @@ class TrainingHelper:
         ramp_vterms = [value_loss_0.detach()] if RAMP_STEPS else None
         step0_loss = (POLICY_LOSS_WEIGHT * policy_loss_0
                       + VALUE_LOSS_WEIGHT * value_loss_0)
+        if oin is not None:
+            # Test O: the extra heads' loss at the root, scale 1
+            step0_loss = step0_loss + self._option_loss(
+                oin, 0, option_logits, policy_logits, is_weights, unroll_steps)
         if EFFZERO_LOSS_SCALING:
             # EfficientZero scales the whole loss, step 0 included, by 1/K.
             step0_loss = scale_gradient(step0_loss, 1.0 / unroll_steps)
@@ -3140,7 +3169,13 @@ class TrainingHelper:
         # ---------------------
         for i in range(1, unroll_steps + 1):
             # Use the action from the previous step to roll forward the latent state.
-            latent, _, reward_logits = self.dynamics(latent, actions[:, i - 1])
+            if oin is None:
+                latent, _, reward_logits = self.dynamics(latent, actions[:, i - 1])
+            else:
+                # Test O: one call per edge, a jump's [B, L] rows summed;
+                # the rows were validated on the host (finish_batch_paper)
+                latent, _, reward_logits = self.dynamics(
+                    latent, actions[:, i - 1], check_jump=False)
             if EFFZERO_LOSS_SCALING:
                 # EfficientZero's hidden_state hook: halves ALL gradient into
                 # this latent, this step's heads included (the per-step reward
@@ -3178,7 +3213,11 @@ class TrainingHelper:
                 latent, prefix_state, step=i)
             prefix_loss = wmean(-torch.sum(converted_target_prefix[:, i, :] * F.log_softmax(prefix_logits, dim=1), dim=1))
 
-            policy_logits, _, value_logits = self.prediction(latent)
+            if oin is None:
+                policy_logits, _, value_logits = self.prediction(latent)
+            else:
+                policy_logits, _, value_logits, option_logits = \
+                    self.prediction(latent, with_options=True)
 
             # Loss for policy prediction, over the positions that have one.
             # Only the POLICY is masked here, and deliberately: a padded position
@@ -3198,6 +3237,11 @@ class TrainingHelper:
                          + POLICY_LOSS_WEIGHT * policy_loss
                          + VALUE_LOSS_WEIGHT * value_loss
                          + CONSISTENCY_LOSS_WEIGHT * latent_loss)
+            if oin is not None:
+                # Test O: the extra heads' loss at this position, scale 1
+                step_loss = step_loss + self._option_loss(
+                    oin, i, option_logits, policy_logits, is_weights,
+                    unroll_steps)
 
             # Each unroll step contributes 1/K of the gradient, so the total does
             # not scale with how far the unroll runs.
@@ -3218,6 +3262,13 @@ class TrainingHelper:
         # (the PER writeback, total_loss.item()) leave it computed
         ramp_vmean = (torch.stack(ramp_vterms).mean()
                       if ramp_vterms is not None else None)
+        if oin is not None:
+            # Test O: the batch's option numbers, for the diagnostics stage
+            # (the loss stays a device scalar: no new sync here)
+            self._option_last = {"option_loss": oin["loss"].detach(),
+                                 "option_mask_share": oin["mask_share"],
+                                 "option_jump_share": oin["jump_share"],
+                                 "option_span_mean": oin["span_mean"]}
 
         # Backpropagate the total loss.
         total_loss.backward()
@@ -3264,12 +3315,84 @@ class TrainingHelper:
                         - target_value[:, 0]).abs().cpu().numpy()
             for ref, e in zip(batch["sample_refs"], errs):
                 ref["priority"] = float(e) + PER_EPS
+        if oin is not None:
+            # Test O: the PMAX rewrite (updateMax). After the priority
+            # writeback's sync (paper batches always carry sample_refs), so
+            # this small copy waits on nothing; a skipped non-finite step
+            # (above) writes none, as it writes no priority
+            import muzero_option_targets as mot
+            mot.write_pmax(batch["pmax_refs"],
+                           torch.stack(oin["argmax"]).cpu().numpy())
 
         # (loss, pre-clip grad norm TENSOR) for harness diagnostics; the norm
         # stays on-device so arms that never read it pay no sync.
         self._last_step = (total_loss.item(), grad_norm)
         self._note_ramp_step(ramp_vmean, batch)
         return self._last_step[0]
+
+    def _option_inputs(self, batch, option_length):
+        """Test O stage 3: train_step's option inputs (nets with option
+        heads). Refuses a batch without the paper builder's option fields
+        (a plain-builder batch, or one built for another L) rather than
+        training the heads on nothing. Returns the device targets / masks,
+        an empty argmax list _option_loss fills, and the host-side shares
+        (from the batch arrays: no device work): mask_share = the share of
+        (row, position, head) loss terms masked (scale 0: the move played at
+        the position missed its PMAX), jump_share[i] = the share of rows
+        whose edge i + 1 jumps (span > 1), span_mean = base steps a window
+        spans, on average."""
+        if "option_target" not in batch:
+            raise ValueError(
+                f"nets with option heads (option_length {option_length}) "
+                "train on the paper builder's option batch (PAPER_TARGETS); "
+                "this batch carries no option targets")
+        dyn_l = int(getattr(self.dynamics, "option_length", 1))
+        acts = np.asarray(batch["actions"])
+        if (int(batch["option_length"]) != option_length
+                or dyn_l != option_length or acts.ndim != 3
+                or acts.shape[2] != option_length):
+            raise ValueError(
+                f"an option batch of length {batch['option_length']} (actions "
+                f"{acts.shape}) for heads of length {option_length} and a "
+                f"dynamics net of length {dyn_l}")
+        scale = np.asarray(batch["option_scale"])
+        spans = np.asarray(batch["option_span"])
+        return {
+            "target": torch.tensor(batch["option_target"],
+                                   dtype=torch.float32, device=self.device),
+            "scale": torch.tensor(scale, dtype=torch.float32,
+                                  device=self.device),
+            "argmax": [], "loss": None,
+            "mask_share": float((scale == 0).mean()),
+            "jump_share": [float(x) for x in (spans > 1).mean(axis=0)],
+            "span_mean": float(spans.sum(axis=1).mean())}
+
+    def _option_loss(self, oin, i, option_logits, policy_logits, is_weights,
+                     unroll_steps):
+        """Test O stage 3: the extra heads' loss at unroll position i --
+        OptionZero's calculate_loss (train.py 158-165): per head h = 1..L-1
+        the cross-entropy of its target against log_softmax of its logits,
+        times the sample's PER weight and the head's loss mask
+        (getOptionLossScale), MEANED over the batch (masked terms count as
+        zeros), summed over the heads and divided by L - 1. Returned at
+        scale 1 for the caller's position loss (train.py 275), not detached.
+        Also keeps the position's argmax of the policy logits (detached; the
+        PMAX rewrite, train.py 223 / 244) and adds the position's term to
+        the reported loss (step 0 plus the unrolled positions / K, as
+        OptionZero's loss_option)."""
+        oin["argmax"].append(policy_logits.detach().argmax(dim=1))
+        L = option_logits.shape[1]
+        logp = F.log_softmax(option_logits[:, 1:], dim=2)       # [B, L-1, A+1]
+        ce = -(oin["target"][:, i] * logp).sum(dim=2) * oin["scale"][:, i]
+        loss = 0.0
+        for h in range(L - 1):
+            per = ce[:, h]
+            loss = loss + (per.mean() if is_weights is None
+                           else (per * is_weights).mean())
+        loss = loss / (L - 1)
+        rep = loss.detach() if i == 0 else loss.detach() / unroll_steps
+        oin["loss"] = rep if oin["loss"] is None else oin["loss"] + rep
+        return loss
 
     def _note_ramp_step(self, vmean, batch):
         """Test C2 (RAMP_STEPS; ablation.note_ramp_window reads it after the
@@ -3397,11 +3520,29 @@ class TrainingHelper:
         weights, and value targets computed NOW from stored rewards + stored
         root values under the age-adjusted horizon (EfficientZero 4.3).
         Policy targets are the recorded acting-search policies -- every real
-        position carries one."""
+        position carries one.
+
+        Test O stage 3 (nets with option heads, option_length L > 1;
+        muzero_option_targets): each unroll edge JUMPS len(option) positions
+        where the moves played match the stored root suggestion
+        (getStepLength), else one; obs, policy / value targets, masks and
+        bootstraps are taken at the positions the window really visits; an
+        edge's reward is the undiscounted sum of the rewards it enters
+        (DEPARTURE 4), so the value-prefix target sums them too; actions
+        are [K, L] rows, -1 padded; a truncated life's roots are those whose
+        window really fits (truncated_roots). Adds the option heads' targets
+        and loss masks at every window position (head_targets, PMAX read
+        now), the spans, and the records each position's argmax is written
+        back to (train_step). L = 1: none of this runs."""
         # Pure CPU half (safe on a prefetch worker): no CUDA, no target-net
         # access, no replay mutation. `training_steps` is explicit so a
         # prefetched batch i uses base + i like the serial loop would.
         ts = self.training_steps if training_steps is None else training_steps
+        # Test O: the nets' option length (the search reads L the same way)
+        opt_L = int(getattr(getattr(self, "prediction", None),
+                            "option_length", 1))
+        if opt_L > 1:
+            import muzero_option_targets as mot
         trajectories = list(replay_buffer)
         roots, priorities = [], []
         for traj in trajectories:
@@ -3414,6 +3555,13 @@ class TrainingHelper:
             limit = min(len(traj), max(1, len(traj) - 1))
             if traj[-1].get("truncated") and len(traj) > unroll_steps:
                 limit = len(traj) - unroll_steps
+                if opt_L > 1:
+                    # Test O: the positions a window really spans (up to
+                    # K x L), counted per root
+                    for idx in mot.truncated_roots(traj, unroll_steps, opt_L):
+                        roots.append((traj, idx))
+                        priorities.append(traj[idx].get("priority", PER_EPS))
+                    continue
             for idx in range(limit):
                 roots.append((traj, idx))
                 priorities.append(traj[idx].get("priority", PER_EPS))
@@ -3467,6 +3615,13 @@ class TrainingHelper:
         batch_obs, batch_actions, batch_rewards = [], [], []
         batch_policy, batch_value, batch_has, refs = [], [], [], []
         batch_real = []
+        if opt_L > 1:
+            # Test O: the extra heads' targets / loss masks at every window
+            # position, the edges' spans, the PMAX write-back records
+            opt_tgt = np.zeros((len(chosen), unroll_steps + 1, opt_L - 1,
+                                action_space + 1))
+            opt_scale = np.ones((len(chosen), unroll_steps + 1, opt_L - 1))
+            opt_spans, opt_refs = [], []
         for flat in chosen:
             traj, start = roots[flat]
             refs.append(traj[start])
@@ -3481,15 +3636,29 @@ class TrainingHelper:
             obs, actions, rewards = [], [], []
             pols, vals, has = [], [], []
             real = []
+            if opt_L > 1:
+                # Test O: the window's positions (getStepLength jumps)
+                wpos, wspan = mot.window(traj, start, unroll_steps)
+                row = len(batch_value)
+                opt_spans.append(wspan)
+                opt_refs.append([mot.pmax_ref(traj, p) for p in wpos])
             for step in range(unroll_steps + 1):
-                pos = start + step
+                pos = wpos[step] if opt_L > 1 else start + step
+                if opt_L > 1:
+                    mot.head_targets(traj, pos, opt_L, action_space,
+                                     opt_tgt[row, step], opt_scale[row, step])
                 # A real position (not padding past the trajectory's end):
                 # EfficientZero's mask_batch, for CONSISTENCY_MASK_PADDING.
                 real.append(pos < L)
                 if pos < L:
                     t = traj[pos]
                     obs.append(t["obs"])
-                    rewards.append(t["reward"])
+                    if opt_L > 1 and step > 0:
+                        # Test O: the edge's rewards, undiscounted
+                        rewards.append(mot.jump_reward(traj, wpos[step - 1],
+                                                       pos))
+                    else:
+                        rewards.append(t["reward"])
                     pols.append(t["target_policy"])
                     if use_tm:
                         rsum, g, tail = paper_value_parts(traj, pos, horizon, DISCOUNT)
@@ -3510,7 +3679,11 @@ class TrainingHelper:
                         sve.append((len(batch_value), step, traj, pos,
                                     float(t["root_value"]), max(0, ts - vstep)))
                     if step < unroll_steps:
-                        actions.append(t["action"])
+                        if opt_L > 1:
+                            actions.append(mot.jump_row(traj, pos,
+                                                        wspan[step], opt_L))
+                        else:
+                            actions.append(t["action"])
                 else:
                     t = traj[-1]
                     obs.append(t["obs"])
@@ -3530,7 +3703,8 @@ class TrainingHelper:
                         vals.append(t["root_value"] if t.get("truncated") else 0.0)
                     has.append(False)
                     if step < unroll_steps:
-                        actions.append(0)
+                        actions.append(mot.pad_row(opt_L) if opt_L > 1
+                                       else 0)
             batch_obs.append(obs)
             batch_actions.append(actions)
             batch_rewards.append(rewards)
@@ -3539,11 +3713,16 @@ class TrainingHelper:
             batch_has.append(has)
             batch_real.append(real)
 
-        return {"pending": pending, "weights": weights, "refs": refs,
-                "sve": (sve, n_real, buf_frac) if mixed else None,
-                "use_tm": use_tm, "obs": batch_obs, "actions": batch_actions,
-                "rewards": batch_rewards, "policy": batch_policy,
-                "value": batch_value, "has": batch_has, "real": batch_real}
+        out = {"pending": pending, "weights": weights, "refs": refs,
+               "sve": (sve, n_real, buf_frac) if mixed else None,
+               "use_tm": use_tm, "obs": batch_obs, "actions": batch_actions,
+               "rewards": batch_rewards, "policy": batch_policy,
+               "value": batch_value, "has": batch_has, "real": batch_real}
+        if opt_L > 1:
+            out["option"] = {"length": opt_L, "target": opt_tgt,
+                             "scale": opt_scale, "spans": opt_spans,
+                             "refs": opt_refs}
+        return out
 
     def finish_batch_paper(self, a):
         """Main-thread half: the target-model bootstrap forward (CUDA,
@@ -3628,7 +3807,7 @@ class TrainingHelper:
                 batch_value[row][step] = sv
             self._sve_window = w
 
-        return {
+        out = {
             "obs": np.array(batch_obs),
             "actions": np.array(batch_actions),
             "rewards": np.array(batch_rewards),
@@ -3639,6 +3818,20 @@ class TrainingHelper:
             "is_weights": weights.astype(np.float32),
             "sample_refs": refs,
         }
+        opt = a.get("option")
+        if opt is not None:
+            # Test O stage 3 (assemble_batch_paper's option fields). The
+            # [B, K, L] edge rows are checked HERE, on the host, before the
+            # forward (whose dynamics call skips its own check, so a
+            # training step carries no sync for it).
+            import muzero_option_targets as mot
+            mot.validate_jump_rows(out["actions"], opt["target"].shape[-1] - 1)
+            out["option_length"] = opt["length"]
+            out["option_target"] = opt["target"]
+            out["option_scale"] = opt["scale"]
+            out["option_span"] = np.array(opt["spans"], dtype=np.int64)
+            out["pmax_refs"] = opt["refs"]
+        return out
 
     def prepare_batch_paper(self, replay_buffer, batch_size, unroll_steps, action_space):
         return self.finish_batch_paper(self.assemble_batch_paper(

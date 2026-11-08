@@ -2541,16 +2541,17 @@ def option_gate(spec, use_ray, cpu_actor, ray_workers):
     --overwrite deletion. Off: returns at once.
 
     Every arm, first: OPTION_LENGTH > 1 (or OPTION_EDGE False) is refused
-    until Test O stage 3 wires a consumer -- the birth search, the refresh,
-    the unroll and the loss all still run the plain path, so such an arm
-    would run silently as O0 (audit r1 of the stage-1-2 build). The stage
-    that wires the option arms lifts this."""
+    until Test O stage 4 adds the option arms, their gate (the tested path,
+    TRAIN_PREFETCH off) and their diagnostics (audit r1 of the stage-1-2
+    build: no such arm may run before every piece exists). Stage 3 wired
+    the birth search, the records, the unroll, the head targets and the
+    loss; stage 4 lifts this."""
     if int(muzero.OPTION_LENGTH) != 1 or muzero.OPTION_EDGE is not True:
         raise SystemExit(
             f"OPTION_LENGTH {muzero.OPTION_LENGTH!r} / OPTION_EDGE "
             f"{muzero.OPTION_EDGE!r}: the option arms are not wired yet (Test "
-            "O stage 3: birth search, refresh, unroll and loss still run the "
-            "plain path); only OPTION_LENGTH 1 with OPTION_EDGE True runs")
+            "O stage 4: the arms, their gate and their diagnostics); only "
+            "OPTION_LENGTH 1 with OPTION_EDGE True runs")
     if not muzero.OPTION_PRECHECK:
         return
     if muzero.TOKEN_VOCAB is not None:
@@ -2608,6 +2609,27 @@ def option_precheck_counts(pi, played, m):
     return {"n": len(played), "hold2": int(two.sum()),
             "hold3": int(three.sum()), "pi_m": float(pm.sum()),
             "pi_played": float(pi[at, played].sum()), "hit": int(hit.sum())}
+
+
+# Test O stage 3: the option search's per-root counters a birth search sums
+# (muzero_vtree_options' info dict; the diagnostics stage reads the sums)
+OPTION_COUNT_SUMS = ("expanded_nodes", "expanded_with_option",
+                     "option_len_hist", "simulations", "sims_crossing_option",
+                     "crossed_len_hist", "leaf_depth_sum")
+
+
+def option_search_counts(acc, info):
+    """Add one option-search call's info (muzero_vtree_options) to `acc`
+    in place: the per-root counters summed over its roots (the length
+    histograms per length), leaf_depth_max their max, "roots" the roots
+    searched. Read (3)'s rates are ratios of these sums."""
+    for k in OPTION_COUNT_SUMS:
+        v = np.asarray(info[k]).sum(axis=0)
+        acc[k] = acc[k] + v if k in acc else v
+    m = int(np.asarray(info["leaf_depth_max"]).max(initial=0))
+    acc["leaf_depth_max"] = max(acc.get("leaf_depth_max", 0), m)
+    acc["roots"] = acc.get("roots", 0) + len(info["root_pmax"])
+    return acc
 
 
 # REWARD_GROWTH's REWARD_UNIT per game (env_tag_fragment of the env id): the
@@ -3681,6 +3703,16 @@ class Run:
                 # for SVE's sve_value_age diagnostic.
                 out[-1]["root_value_step"] = born
         out[-1]["truncated"] = not terminated
+        if birth and int(muzero.OPTION_LENGTH) > 1:
+            # Test O stage 3: each ACTED record's root suggestion and PMAX
+            # from this life's birth search (_birth_search); the closing
+            # record carries neither (terminal: nothing reads them there).
+            # The refresh never writes them (DEPARTURE 3).
+            got = self._birth_options
+            self._birth_options = None
+            for i in range(len(out) - 1):
+                out[i]["root_option"] = got["root_option"][i]
+                out[i]["pmax"] = got["pmax"][i]
         z0s = []
         for idx, t in enumerate(out):
             z0 = muzero.paper_value_target(out, idx, muzero.TD_STEPS,
@@ -3735,7 +3767,22 @@ class Run:
 
         OPTION_PRECHECK: also self._birth_pmax, each acted position's argmax
         through `nets` -- the learner's, the ones this search runs -- never
-        prior_nets (Test O's m, as OF's PMAX)."""
+        prior_nets (Test O's m, as OF's PMAX).
+
+        OPTION_LENGTH > 1 (Test O stage 3): the same search on the option
+        engine (muzero_vtree_options.VectorizedOptionPUCT, a v1 subclass:
+        the same arguments and returns) with option_edge = OPTION_EDGE (OF
+        True; OH False: the same heads and root suggestions, no edge), on
+        every acted position and a cut life's tail alike. Play is
+        untouched (DEPARTURE 1). Also self._birth_options, per ACTED
+        position, for paper_targets' records: "root_option" (the root's
+        dominant option, an interned L-tuple, -1 padded; OptionZero's OP1)
+        and "pmax" (the root's head-0 argmax through `nets`, the learner's:
+        zero_actor.cpp 306's p_max_id_, the PMAX tag 164); and
+        self._birth_option_counts, the life's search counters summed
+        (option_search_counts; for the diagnostics stage, not logged). The
+        nets must carry heads of OPTION_LENGTH. OPTION_LENGTH 1: v1, the
+        call above, unchanged."""
         import muzero_vtree
         t0 = time.time()
         if nets is None:
@@ -3743,36 +3790,81 @@ class Run:
                     "dynamics": self.trainer.dynamics,
                     "prediction": self.trainer.prediction,
                     "value_prefix": self.trainer.value_prefix}
+        opt_L = int(muzero.OPTION_LENGTH)
+        if opt_L > 1:
+            import muzero_vtree_options
+            have = int(getattr(nets["prediction"], "option_length", 1))
+            if have != opt_L:
+                raise ValueError(
+                    f"OPTION_LENGTH {opt_L}: the birth search's nets carry "
+                    f"option heads of length {have}")
+            opt_kw = {"option_edge": bool(muzero.OPTION_EDGE),
+                      "return_info": True}
         modes = {k: n.training for k, n in nets.items()}
         for n in nets.values():
             n.eval()
         try:
-            engine = muzero_vtree.VectorizedPUCT(nets, ACTIONS,
-                                                 self.trainer.device)
+            if opt_L > 1:
+                engine = muzero_vtree_options.VectorizedOptionPUCT(
+                    nets, ACTIONS, self.trainer.device)
+            else:
+                engine = muzero_vtree.VectorizedPUCT(nets, ACTIONS,
+                                                     self.trainer.device)
             n_acted = len(traj) - 1
             pols = [None] * len(traj)
             vals = [0.0] * len(traj)
             batch = max(1, int(muzero.VTREE_REFRESH_BATCH))
+            if opt_L > 1:
+                r_opt = np.full((n_acted, opt_L), -1, dtype=np.int64)
+                r_len = np.zeros(n_acted, dtype=np.int64)
+                r_pmax = np.zeros(n_acted, dtype=np.int64)
+                counts = {}
             for w0 in range(0, n_acted, batch):
                 idx = range(w0, min(w0 + batch, n_acted))
                 obs = np.stack([traj[i][0] for i in idx])
-                p, v, _ = engine.search(
-                    obs, num_simulations=muzero.ACT_SEARCH_SIMS,
-                    c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
-                    root_noise=True)
+                if opt_L > 1:
+                    p, v, _, info = engine.search(
+                        obs, num_simulations=muzero.ACT_SEARCH_SIMS,
+                        c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                        root_noise=True, **opt_kw)
+                    sl = slice(w0, w0 + len(idx))
+                    r_opt[sl] = info["root_option"]
+                    r_len[sl] = info["root_option_len"]
+                    r_pmax[sl] = info["root_pmax"]
+                    option_search_counts(counts, info)
+                else:
+                    p, v, _ = engine.search(
+                        obs, num_simulations=muzero.ACT_SEARCH_SIMS,
+                        c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                        root_noise=True)
                 for i, pi, vi in zip(idx, p, v):
                     pols[i], vals[i] = np.asarray(pi, dtype=np.float64), float(vi)
             tail = len(traj) - 1
             if terminated:
                 pols[tail], vals[tail] = np.ones(ACTIONS) / ACTIONS, 0.0
             else:
-                p, v, _ = engine.search(
-                    np.stack([traj[tail][0]]),
-                    num_simulations=muzero.ACT_SEARCH_SIMS,
-                    c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
-                    root_noise=False)
+                if opt_L > 1:
+                    p, v, _, info = engine.search(
+                        np.stack([traj[tail][0]]),
+                        num_simulations=muzero.ACT_SEARCH_SIMS,
+                        c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                        root_noise=False, **opt_kw)
+                    option_search_counts(counts, info)
+                else:
+                    p, v, _ = engine.search(
+                        np.stack([traj[tail][0]]),
+                        num_simulations=muzero.ACT_SEARCH_SIMS,
+                        c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                        root_noise=False)
                 pols[tail] = np.asarray(p[0], dtype=np.float64)
                 vals[tail] = float(v[0])
+            if opt_L > 1:
+                import muzero_option_targets as mot
+                self._birth_options = {
+                    "root_option": [mot.intern_option(r_opt[i], r_len[i])
+                                    for i in range(n_acted)],
+                    "pmax": [int(m) for m in r_pmax]}
+                self._birth_option_counts = counts
             # The prior the actor sampled from (same nets -- or prior_nets
             # under BN_RECAL_ACTING -- same /255 preprocessing as
             # initial_inference), for the behaviour diagnostics

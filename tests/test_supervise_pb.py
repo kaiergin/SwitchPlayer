@@ -376,7 +376,9 @@ def test_supervisor_pins_what_the_run_and_preflight_use(real_sup, g0sup):
         "benchmarks/probes/step0_prefix_bn/states.npz",   # read (1)'s input
         "benchmarks/supervisors/supervise_distill.py",
         "benchmarks/supervisors/supervise_gen1.py",
-        "benchmarks/supervisors/supervise_pb.py"}
+        "benchmarks/supervisors/supervise_pb.py",
+        # Test O stage 3: the option code ablation.py / muzero.py import
+        "muzero_vtree_options.py", "muzero_option_targets.py"}
     # the one non-.py: audit r1 B-L4
     assert [r for r in sup.AUDITED if not r.endswith(".py")] == [
         "pytest.ini", "benchmarks/probes/step0_prefix_bn/states.npz"]

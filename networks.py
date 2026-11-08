@@ -348,23 +348,30 @@ class DynamicsNetwork(nn.Module):
                              _weight=torch.zeros(action_space, latent_channels))
                 for _ in range(self.option_length - 1)])
 
-    def _encode_jump(self, action):
+    def _encode_jump(self, action, check=True):
         """[B, k] long, -1 padded -> [B, C]: the sum of each position's row
         (position 1 = action_embedding), a -1 adding nothing. Every row
         must hold a first move, and its padding must be a suffix (no move
         after a -1): a padding bug fails loudly here instead of training on
-        a no-action or a holed embedding (one host sync per jump call)."""
+        a no-action or a holed embedding (two host syncs per jump call).
+        check=False skips those two value checks (never the shape check):
+        the training unroll's jump rows are validated ON THE HOST when its
+        batch is built (muzero_option_targets.validate_jump_rows, Test O
+        stage 3), so its forward carries no sync (stage-1-2 audit r2's
+        LOW); the search keeps the check."""
         if action.size(1) > self.option_length:
             raise ValueError(
                 f"a jump of {action.size(1)} positions on a dynamics net "
                 f"built for option_length {self.option_length}")
-        valid = action >= 0
-        if not bool(valid[:, 0].all()):
-            raise ValueError("a jump row without a first move (-1 at "
-                             "position 1)")
-        if action.size(1) > 1 and bool((valid[:, 1:] & ~valid[:, :-1]).any()):
-            raise ValueError("a jump row with a move after its -1 padding "
-                             "(the padding must be a suffix)")
+        if check:
+            valid = action >= 0
+            if not bool(valid[:, 0].all()):
+                raise ValueError("a jump row without a first move (-1 at "
+                                 "position 1)")
+            if action.size(1) > 1 and bool(
+                    (valid[:, 1:] & ~valid[:, :-1]).any()):
+                raise ValueError("a jump row with a move after its -1 "
+                                 "padding (the padding must be a suffix)")
         e = None
         for j in range(action.size(1)):
             col = action[:, j]
@@ -376,12 +383,12 @@ class DynamicsNetwork(nn.Module):
             e = row if e is None else e + row
         return e
 
-    def _encode_action(self, action, batch, h, w, device):
+    def _encode_action(self, action, batch, h, w, device, check_jump=True):
         if self.action_encoding == "embed":
             # A [B, k] action is a jump (option_length > 1; k = 1 is one
             # move, the same row as the [B] path); a [B] action is today's.
-            e = (self._encode_jump(action) if action.dim() == 2
-                 else self.action_embedding(action))
+            e = (self._encode_jump(action, check=check_jump)
+                 if action.dim() == 2 else self.action_embedding(action))
             return e.contiguous().view(batch, -1, 1, 1).expand(-1, -1, h, w)
         if self.action_encoding == "plane":
             plane = action.to(torch.float32) / float(self.action_space)
@@ -390,10 +397,14 @@ class DynamicsNetwork(nn.Module):
         index = action.view(batch, 1, 1, 1).expand(batch, 1, h, w)
         return planes.scatter_(1, index, 1.0)
 
-    def forward(self, latent, action):
+    def forward(self, latent, action, check_jump=True):
+        """check_jump=False: a [B, k] jump's first-move / suffix checks are
+        skipped (the caller validated its rows on the host; _encode_jump).
+        Ignored for a [B] action and by "plane" / "onehot"."""
         batch_size = latent.size(0)
         act = self._encode_action(action, batch_size,
-                                  latent.size(2), latent.size(3), latent.device)
+                                  latent.size(2), latent.size(3), latent.device,
+                                  check_jump=check_jump)
         x = self.conv1(torch.cat([latent, act], dim=1))
         x = self.bn1(x)
         # The residual update: the network learns a DELTA on the incoming
