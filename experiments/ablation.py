@@ -2538,7 +2538,19 @@ def option_gate(spec, use_ray, cpu_actor, ray_workers):
     refresh, TD value targets, the paper wrapper stack at the base skip,
     --ray --cpu-actor without a worker pool -- with the env's whole action
     space, one move per base step. Refuses at startup -- before any
-    --overwrite deletion. Off: returns at once."""
+    --overwrite deletion. Off: returns at once.
+
+    Every arm, first: OPTION_LENGTH > 1 (or OPTION_EDGE False) is refused
+    until Test O stage 3 wires a consumer -- the birth search, the refresh,
+    the unroll and the loss all still run the plain path, so such an arm
+    would run silently as O0 (audit r1 of the stage-1-2 build). The stage
+    that wires the option arms lifts this."""
+    if int(muzero.OPTION_LENGTH) != 1 or muzero.OPTION_EDGE is not True:
+        raise SystemExit(
+            f"OPTION_LENGTH {muzero.OPTION_LENGTH!r} / OPTION_EDGE "
+            f"{muzero.OPTION_EDGE!r}: the option arms are not wired yet (Test "
+            "O stage 3: birth search, refresh, unroll and loss still run the "
+            "plain path); only OPTION_LENGTH 1 with OPTION_EDGE True runs")
     if not muzero.OPTION_PRECHECK:
         return
     if muzero.TOKEN_VOCAB is not None:

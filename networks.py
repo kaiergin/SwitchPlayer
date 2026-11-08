@@ -135,9 +135,13 @@ class RepresentationNetwork(nn.Module):
 # head_channels, own [fc_hidden] layer when set, own final fc) over A moves
 # plus a stop class (index A), reading the same trunk output x as the
 # policy and value branches; default PyTorch init everywhere, the final
-# bias zero except 10 on stop (39-44). Built after every existing layer, so
-# an L > 1 net's policy/value layers draw exactly the RNG an L = 1 net's
-# do; L = 1 builds nothing (state_dict, outputs and RNG use unchanged). The
+# bias zero except 10 on stop (39-44). Built after every existing layer of
+# THIS net, so its policy/value layers init exactly as an L = 1 net's at the
+# same seed; the extra heads do draw RNG, so every net built after the
+# prediction net (in NetworkHelper's order the value prefix, the projector
+# and anything later) inits differently from an L = 1 build at that seed
+# (no paired init is required). L = 1 builds nothing (state_dict, outputs
+# and RNG use unchanged). The
 # policy head keeps EfficientZero's zero-init and stays head 0, with a fixed
 # stop logit of -100 (61-66). forward(latent) is unchanged;
 # forward(latent, with_options=True) also returns option logits [B, L, A+1].
@@ -281,7 +285,8 @@ class DynamicsNetwork(nn.Module):
     action_embedding (today's parameter, same name), positions 2..L the new
     option_embeddings[0..L-2], initialised to ZERO (no RNG drawn). A [B]
     long action is today's path exactly; a [B, k] long action (k <= L),
-    padded with -1, is encoded as the SUM of each position's row, a -1
+    padded with -1 (a first move in every row, the padding a suffix, else
+    ValueError), is encoded as the SUM of each position's row, a -1
     contributing nothing -- OptionZero's per-position action planes
     (atari.cpp 141-150), summed into one embedding. L = 1 builds nothing:
     state_dict keys, shapes and outputs are today's.
@@ -345,11 +350,21 @@ class DynamicsNetwork(nn.Module):
 
     def _encode_jump(self, action):
         """[B, k] long, -1 padded -> [B, C]: the sum of each position's row
-        (position 1 = action_embedding), a -1 adding nothing."""
+        (position 1 = action_embedding), a -1 adding nothing. Every row
+        must hold a first move, and its padding must be a suffix (no move
+        after a -1): a padding bug fails loudly here instead of training on
+        a no-action or a holed embedding (one host sync per jump call)."""
         if action.size(1) > self.option_length:
             raise ValueError(
                 f"a jump of {action.size(1)} positions on a dynamics net "
                 f"built for option_length {self.option_length}")
+        valid = action >= 0
+        if not bool(valid[:, 0].all()):
+            raise ValueError("a jump row without a first move (-1 at "
+                             "position 1)")
+        if action.size(1) > 1 and bool((valid[:, 1:] & ~valid[:, :-1]).any()):
+            raise ValueError("a jump row with a move after its -1 padding "
+                             "(the padding must be a suffix)")
         e = None
         for j in range(action.size(1)):
             col = action[:, j]

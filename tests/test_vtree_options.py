@@ -11,9 +11,16 @@ targets, so the tree is pinned three ways:
   * an independent scalar reference written the way OptionZero's code is
     (node objects, an explicit node path pushed through the option,
     mcts.cpp 192-220 / 271-288 / 300-325), compared NODE BY NODE with the
-    engine's tables on pseudo-random fake nets (batch-invariant, so the
-    lockstep T > 1 search is also compared exactly with per-tree runs) and
-    on real de-zeroed nets at T = 1 (matched batch shapes);
+    engine's tables (and its range, counters, PMAX and prefix steps) on
+    pseudo-random fake nets -- jump-made latents with their own logits,
+    values and suggestions, L 3 and 4 (two placeholders on one path), the
+    prefix on and off, shared and filled-primitive landings asserted to
+    occur; batch-invariant, so the lockstep T = 4 search is also compared
+    exactly with per-tree runs -- and on real de-zeroed nets at T = 1
+    (matched batch shapes);
+  * the range seed (the root's primitives only) and edge-on = edge-off bit
+    for bit when no option is crossed and jump rows evaluate as their
+    primitive paths would (read (3)'s on/off probe);
   * stop-only heads and OPTION_EDGE False against v1 (VectorizedPUCT) on
     real nets, to float tolerance (statistics are root-relative, so not bit
     for bit), plus the dominant-option rule, the two-stage arithmetic
@@ -72,17 +79,21 @@ class FakeNets:
     """latent = [path code, made-by-a-jump flag] (float32). preds: {code or
     (code, flag): {"logits", "value", "value_jump", "option": (moves, p)}};
     rewards: {(parent code, moves tuple): r}. Unlisted codes get
-    pseudo-random outputs (seeded by `seed`). Every output depends on its
-    own row only, so any batch layout gives the same numbers."""
+    pseudo-random outputs (seeded by `seed`): with flag_dep (the default)
+    a jump-made latent gets its OWN logits, value and suggestion, so a
+    second evaluation overwriting a first is visible in every field (audit
+    r1); p_len[k] = P(a suggestion of length k + 2). Every output depends on
+    its own row only, so any batch layout gives the same numbers."""
 
     def __init__(self, A=3, L=3, seed=0, preds=None, rewards=None,
-                 p_len=(0.35, 0.35), rscale=1.0, default=None):
+                 p_len=(0.35, 0.35), rscale=1.0, default=None, flag_dep=True):
         self.A, self.L, self.seed = A, L, seed
         self.preds = preds or {}
         self.rewards = rewards or {}
         self.p_len = p_len
         self.rscale = rscale
         self.default = default        # unlisted codes' spec (None: random)
+        self.flag_dep = flag_dep
         self.steps = []
         outer = self
 
@@ -141,17 +152,22 @@ class FakeNets:
         if self.default is not None:
             return self.default
         A = self.A
-        logits = [(mix(self.seed, 1, code, j) - 0.5) * 3 for j in range(A)]
+        f = int(flag) if self.flag_dep else 0
+        logits = [(mix(self.seed, 1, f, code, j) - 0.5) * 3 for j in range(A)]
         best = int(np.argmax(logits))
-        r = mix(self.seed, 50, code)
-        n = 2 if r < self.p_len[0] else (3 if r < sum(self.p_len) else 0)
+        r, acc, n = mix(self.seed, 50, f, code), 0.0, 0
+        for k, pk in enumerate(self.p_len):
+            acc += pk
+            if r < acc:
+                n = k + 2
+                break
         n = min(n, self.L)
-        moves = [best] + [int(mix(self.seed, 60 + i, code) * A)
+        moves = [best] + [int(mix(self.seed, 60 + i, f, code) * A)
                           for i in range(1, n)]
         return {"logits": logits,
-                "value": (mix(self.seed, 99, code) - 0.5) * 4,
-                "value_jump": (mix(self.seed, 98, code) - 0.5) * 4,
-                "option": (tuple(moves), 0.3 + 0.6 * mix(self.seed, 51, code))
+                "value": (mix(self.seed, 99 - f, code) - 0.5) * 4,
+                "option": (tuple(moves),
+                           0.3 + 0.6 * mix(self.seed, 51, f, code))
                 if n >= 2 else None}
 
     def prediction(self, lat, with_options):
@@ -386,9 +402,11 @@ def test_an_exact_tie_goes_to_the_primitive():
 def test_two_stage_choice_by_hand(knobs):
     """d 0.9, c 1.25, uniform priors. Root option (0, 0), p(o) 0.9; v[0] 1,
     the landing [0,0] 2 (by the jump), every reward 0, other values 0.
-    Seed range: c0 0.9, c1 c2 0, option 0 + 0.81 * 2 = 1.62 -> [0, 1.62].
-    Sim 1: all unvisited, u = 0, c0 tops (0.556) -> option vs primitive at
-    zero visits: norm(1.62) = 1 > norm(0.9) -> JUMP to the landing,
+    Seed range (the primitives only): c0 0.9, c1 c2 0 -> [0, 0.9]; the
+    option's 0 + 0.81 * 2 = 1.62 is NOT seeded.
+    Sim 1: all unvisited, u = 0, c0 tops (1.0) -> option vs primitive at
+    zero visits: norm(1.62) = 1.8 > norm(0.9) = 1 -> JUMP to the landing
+    (a first-visit crossing: n_c = 0, so p(o) plays no part),
     expand it, back up 1.62 on root, [0] and [0,0]; the range takes c0's
     1.62, the landing's 1.8 from [0] and the jump's 1.62 -> [0, 1.8].
     Sim 2: c0 0.9 + 0.208 > c1 0.417 -> c0; n_c = n_o = 1, n_p = 0:
@@ -485,6 +503,7 @@ def scenario3():
     Rewards: root jump 0.3, [0]'s jump 0.2, primitive ([0,0], 0) 0.1, every
     other 0. Values: [0] 1, [1] [2] -5, the landing 3 by a jump and -1 by a
     primitive row, the rest 0.
+    Seed range (the primitives only): [-4.5, 0.9].
     Sim 1: root zero-visit, c0 tops; option 0.3 + 0.729*3 = 2.487 >
       primitive 0.9 -> JUMP over the placeholder [0,0]; expand the landing;
       back up 2.487 (root, [0], [0,0], landing). Range [-4.5, 2.763]
@@ -620,6 +639,97 @@ def test_edge_off_keeps_the_suggestions_and_builds_no_jump(knobs):
     assert info2["option_edge"] is False
 
 
+def test_the_root_option_is_not_in_the_range_seed(knobs):
+    """The range is seeded from the root's PRIMITIVE children only (v1;
+    audit r1). Root option (0, 0) whose jump composite is 0.81 * -50 =
+    -40.5: zero-visit primitive c0 0.9 beats it, so sim 1 expands [0] and
+    backs up 0.9 -- the range stays [0, 0.9] (c1 c2 0, c0 0.9)."""
+    fake = FakeNets(A=3, L=3, rscale=0.0, default={"value": 0.0}, preds={
+        code_of([]): {"option": ((0, 0), 0.9)},
+        code_of([0]): {"value": 1.0},
+        (code_of([0, 0]), 1): {"value": -50.0}})
+    tree, _, _, _, info = run(fake, 1, discount=0.9, c_puct=1.25)
+    assert info["sims_crossing_option"].tolist() == [0]
+    assert tree["opt_v"][0, 0].item() == -50.0          # the root holds it
+    assert tree["minv"][0].item() == 0.0
+    assert tree["maxv"][0].item() == pytest.approx(0.9, abs=1e-12)
+
+
+def never_cross(monkeypatch):
+    import muzero_vtree_options as mvo
+    real = mvo.option_vs_primitive
+
+    def scores(*args, **kw):
+        s_o, s_p = real(*args, **kw)
+        return torch.full_like(s_o, -math.inf), s_p
+
+    monkeypatch.setattr(mvo, "option_vs_primitive", scores)
+
+
+def test_edge_on_is_edge_off_when_no_option_is_crossed(knobs):
+    """Read (3)'s on/off probe counts every difference as the edge's: with
+    jump rows that evaluate exactly as the primitive path would (a
+    flag-independent spec, every reward 0) and no option ever crossed, the
+    edge-on search must equal the edge-off one bit for bit -- landings,
+    placeholders and jump rows built and never used change nothing. (A
+    root option composite in the range seed broke this.)"""
+    never_cross(knobs)
+    outside = landed = 0
+    for seed in range(8):
+        fake = FakeNets(A=3, L=3, seed=seed, flag_dep=False, rscale=0.0,
+                        p_len=(0.45, 0.45))
+        on = run(fake, 30, T=2, discount=0.9, c_puct=1.25, option_edge=True)
+        off = run(fake, 30, T=2, discount=0.9, c_puct=1.25, option_edge=False)
+        tree, _, v_on, c_on, i_on = on
+        tree_off, _, v_off, c_off, _ = off
+        assert i_on["sims_crossing_option"].tolist() == [0, 0]
+        assert c_on.tolist() == c_off.tolist(), seed
+        assert v_on.tolist() == v_off.tolist(), seed
+        assert torch.equal(tree["minv"], tree_off["minv"]), seed
+        assert torch.equal(tree["maxv"], tree_off["maxv"]), seed
+        landed += int((tree["opt_land"] >= 0).sum())
+        for t in range(2):
+            if int(tree["opt_land"][t, 0]) >= 0:
+                rc = tree["children"][t, 0]
+                comp = tree["reward"][t, rc] + 0.9 * tree["evalue"][t, rc]
+                oc = tree["opt_r"][t, 0] + 0.9 ** int(tree["opt_len"][t, 0]) \
+                    * tree["opt_v"][t, 0]
+                outside += bool(oc < comp.min() or oc > comp.max())
+    assert landed > 0, "potency: no option edge was built"
+    assert outside > 0, "potency: no root option fell outside the seed"
+
+
+@pytest.mark.parametrize("p", [0.26, 0.95])
+def test_an_option_is_crossed_on_its_first_visit_whatever_its_prior(knobs, p):
+    """DEPARTURE 2 as registered (kept, coordinator 2026-11-08): at n_c = 0
+    both bonuses vanish, the zero-visit composites decide, so the option
+    is crossed on its first move's very first visit whatever p(o) is.
+    OptionZero's init_q_value tie would send that visit to the primitive."""
+    fake = FakeNets(A=3, L=3, rscale=0.0, default={"value": 0.0}, preds={
+        code_of([]): {"option": ((0, 0), p)},
+        code_of([0]): {"value": 1.0},
+        code_of([0, 0]): {"value": 2.0}})
+    tree, _, _, _, info = run(fake, 1, discount=0.9, c_puct=1.25)
+    assert info["sims_crossing_option"].tolist() == [1]
+    assert int(tree["visit"][0, node_at(tree, 0, [0, 0])]) == 1
+    assert not bool(tree["expanded"][0, node_at(tree, 0, [0])])
+
+
+def test_root_pmax_is_the_options_first_move_on_a_near_tie(knobs):
+    """Logits 0 and 1e-8 round to one float32 probability: the logits'
+    argmax says 1, head 0's softmax argmax (the option's first move) says
+    0. root_pmax must read the same argmax as the option (audit r1)."""
+    logits = [0.0, 1e-8, -1.0]
+    assert torch.tensor(logits).argmax().item() == 1
+    probs = torch.softmax(torch.tensor(logits + [-100.0]), 0)
+    assert probs[0] == probs[1]
+    fake = FakeNets(A=3, L=3, rscale=0.0, default={"value": 0.0}, preds={
+        code_of([]): {"logits": logits, "option": ((0, 1), 0.8)}})
+    _, _, _, _, info = run(fake, 2, discount=0.9, c_puct=1.25)
+    assert info["root_option"].tolist() == [[0, 1, -1]]
+    assert info["root_pmax"].tolist() == [0]
+
+
 # ==========================================================================
 # the scalar reference, OptionZero-shaped
 # ==========================================================================
@@ -656,7 +766,8 @@ class Ref:
     mcts.cpp 203-208), the root-relative backup over that path (271-288),
     selectOptionChild transcribed (300-325) -- with the registration's
     departures (eager expansion with the landing row, r + d * value at
-    zero visits, holder semantics, v1's PUCT and range)."""
+    zero visits, holder semantics, v1's PUCT and range: seeded from the
+    root's primitive children only, plus every crossed jump's Q)."""
 
     def __init__(self, nets, A, L, discount, c_puct, max_depth, edge,
                  use_prefix, horizon, floor=0.01):
@@ -667,7 +778,8 @@ class Ref:
         self.lo, self.hi = math.inf, -math.inf
         self.stats = {"expanded": 0, "len_hist": [0] * (L + 1),
                       "cross_sims": 0, "cross_hist": [0] * (L + 1),
-                      "leaf_sum": 0.0, "leaf_max": 0}
+                      "leaf_sum": 0.0, "leaf_max": 0,
+                      "path_placeholders": 0}
 
     def norm(self, x):
         if self.hi > self.lo:
@@ -742,11 +854,16 @@ class Ref:
         if jump:
             n.opt_r, n.opt_v = edges[A], val[A]
             cur = n.children[n.option[0]]
-            for m in n.option[1:]:
+            between = 0           # unevaluated nodes strictly inside the path
+            for i, m in enumerate(n.option[1:]):
                 nx = cur.children.get(m)
                 if nx is None:
                     nx = cur.children[m] = RNode(cur)
                 cur = nx
+                if i < len(n.option) - 2 and not cur.evaluated:
+                    between += 1
+            self.stats["path_placeholders"] = max(
+                self.stats["path_placeholders"], between)
             n.landing = cur
             if not cur.evaluated:
                 self.write(cur, nxt[A], pol[A], val[A],
@@ -787,11 +904,11 @@ class Ref:
                            for p, z in zip(root.policy, noise)]
         root.prior = 1.0
         self.root = root
+        head0 = torch.softmax(olog, 2)[0, 0].tolist()
+        self.pmax = head0.index(max(head0))          # p_max_id_ (304-307)
         self.expand(root)
-        for k in root.children.values():
+        for k in root.children.values():             # the primitives only
             self.upd(k.r + self.d * k.ev)
-        if root.landing is not None:
-            self.upd(root.opt_r + self.dacc(len(root.option)) * root.opt_v)
         for _ in range(sims):
             self.simulate(root)
         return root
@@ -937,10 +1054,26 @@ def check_against_ref(eng_nets, ref_nets, A, L, obs, sims, discount, c_puct,
         assert info["leaf_depth_sum"][0] == s["leaf_sum"]
         assert info["leaf_depth_max"].tolist() == [s["leaf_max"]]
         assert info["root_option_len"].tolist() == [len(root.option)]
+        assert info["root_pmax"].tolist() == [ref.pmax]
+        if root.option:
+            assert int(info["root_option"][0, 0]) == ref.pmax
         if steps is not None:
             assert eng_steps == ref_steps
+        info["_ref"] = s
         out.append((info, pairs))
     return out
+
+
+def potency(res):
+    """(crossings, shared landings, filled-primitive landings, most
+    placeholders inside one option path) over check_against_ref's trees."""
+    c = sh = pr = ph = 0
+    for info, pairs in res:
+        c += int(info["sims_crossing_option"][0])
+        s, p = shape_of(pairs)
+        sh, pr = sh + s, pr + p
+        ph = max(ph, info["_ref"]["path_placeholders"])
+    return c, sh, pr, ph
 
 
 @pytest.mark.parametrize("seed,use_prefix,horizon,max_depth", [
@@ -961,49 +1094,84 @@ def test_engine_matches_the_reference_on_fake_nets(knobs, seed, use_prefix,
     assert crossed > 0, "potency: no option edge was crossed"
 
 
+P_LEN = {3: (0.4, 0.45), 4: (0.3, 0.3, 0.3)}
+
+
+@pytest.mark.parametrize("L", [3, 4])
+@pytest.mark.parametrize("use_prefix,horizon", [(False, 3), (True, 2),
+                                                (True, 4)])
+def test_the_reference_matches_with_jump_dependent_evaluations(
+        knobs, L, use_prefix, horizon):
+    """Audit r1's stronger check, ported: a jump-made latent gets its own
+    logits, value and suggestion (the random fake spec is flag-dependent),
+    L 3 and 4 (two placeholders on one path), the prefix on and off; every
+    tree matched node by node, and each config must actually cross options
+    and fill landings as primitive children."""
+    knobs.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", use_prefix)
+    knobs.setattr(muzero, "PREFIX_LSTM_HORIZON", horizon)
+    total = [0, 0, 0, 0]
+    for seed in range(30, 34):
+        fake = FakeNets(A=3, L=L, seed=seed, p_len=P_LEN[L])
+        res = check_against_ref(fake.nets, fake.nets, 3, L, fake_obs(2), 40,
+                                0.9, 1.25, 12, True, use_prefix, horizon,
+                                steps=fake.steps if use_prefix else None)
+        c, sh, pr, ph = potency(res)
+        total = [total[0] + c, total[1] + sh, total[2] + pr, max(total[3], ph)]
+    assert total[0] > 0 and total[2] > 0, total
+    if L == 4:
+        assert total[3] >= 2, "potency: no path held two placeholders"
+
+
 def test_the_reference_runs_exercise_every_landing_case(knobs):
-    """Potency over seeds: shared landings (two holders) and landings that
-    are also a filled primitive child must both occur and be matched."""
+    """Potency over seeds, L 3 and 4, prefix off and on: shared landings
+    (two or more holders) and landings that are also a filled primitive
+    child must both occur -- and were matched node by node."""
     shared = prim = 0
-    for seed in range(10, 16):
-        fake = FakeNets(A=3, L=3, seed=seed, p_len=(0.45, 0.45))
-        res = check_against_ref(fake.nets, fake.nets, 3, 3, fake_obs(2), 40,
-                                0.9, 1.25, 12, True, False, 3)
-        for _, pairs in res:
-            s, p = shape_of(pairs)
-            shared += s
-            prim += p
+    for L in (3, 4):
+        for use_prefix in (False, True):
+            knobs.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", use_prefix)
+            for seed in range(10, 14):
+                fake = FakeNets(A=3, L=L, seed=seed, p_len=P_LEN[L])
+                res = check_against_ref(
+                    fake.nets, fake.nets, 3, L, fake_obs(2), 40, 0.9, 1.25,
+                    12, True, use_prefix, 3,
+                    steps=fake.steps if use_prefix else None)
+                _, s, p, _ = potency(res)
+                shared += s
+                prim += p
     assert shared > 0 and prim > 0, (shared, prim)
 
 
-def test_lockstep_batch_equals_per_tree_runs(knobs):
+@pytest.mark.parametrize("L", [3, 4])
+def test_lockstep_batch_equals_per_tree_runs(knobs, L):
     """Fake nets are batch-invariant, so the T = 4 lockstep (jump rows of
     several holders in one wave, per-tree node allocation) must equal four
-    T = 1 runs exactly."""
+    T = 1 runs exactly, jump-dependent evaluations and all."""
     knobs.setattr(muzero, "USE_VALUE_PREFIX_IN_TREE", True)
     knobs.setattr(muzero, "PREFIX_LSTM_HORIZON", 2)
-    fake = FakeNets(A=3, L=3, seed=21, p_len=(0.4, 0.4))
+    fake = FakeNets(A=3, L=L, seed=21 + L, p_len=P_LEN[L])
     eng = VectorizedOptionPUCT(fake.nets, 3, CPU)
     obs = fake_obs(4)
-    pol, val, counts, info = eng.search(obs, num_simulations=25,
-                                        discount=0.9, c_puct=1.25,
-                                        root_noise=False, tie_break="first",
-                                        return_info=True, keep_tree=True)
+    kw = dict(num_simulations=30, discount=0.9, c_puct=1.25,
+              root_noise=False, tie_break="first", return_info=True,
+              keep_tree=True)
+    pol, val, counts, info = eng.search(obs, **kw)
     batch_tree = eng.last_tree
     assert info["sims_crossing_option"].sum() > 0
     for t in range(4):
-        p1, v1, c1, i1 = eng.search(obs[t:t + 1], num_simulations=25,
-                                    discount=0.9, c_puct=1.25,
-                                    root_noise=False, tie_break="first",
-                                    return_info=True, keep_tree=True)
+        p1, v1, c1, i1 = eng.search(obs[t:t + 1], **kw)
         one = eng.last_tree
         assert c1[0].tolist() == counts[t].tolist()
         assert v1[0] == val[t]
         n = int(one["count"][0])
         assert int(batch_tree["count"][t]) == n
-        for k in ("visit", "wsum", "tot", "lval", "parent", "opt_land",
-                  "evaluated", "expanded", "pref_len"):
+        for k in ("visit", "wsum", "tot", "lval", "parent", "children",
+                  "opt_land", "opt_moves", "opt_r", "opt_v", "policy",
+                  "reward", "evalue", "prior", "evaluated", "expanded",
+                  "pref", "pref_len", "latent"):
             assert torch.equal(batch_tree[k][t, :n], one[k][0, :n]), k
+        assert batch_tree["minv"][t] == one["minv"][0]
+        assert batch_tree["maxv"][t] == one["maxv"][0]
         for k in info:
             if isinstance(info[k], np.ndarray):
                 assert np.array_equal(info[k][t], i1[k][0]), k
@@ -1074,7 +1242,10 @@ def test_engine_matches_the_reference_on_real_nets(monkeypatch):
     noise = np.random.default_rng(2).dirichlet([0.3] * 4, size=3)
     res = check_against_ref(nets, nets, 4, 3, obs, 20, 0.99, 1.25, 12, True,
                             True, 3, noise=noise, tol=1e-9, steps=log)
-    assert sum(int(i["sims_crossing_option"][0]) for i, _ in res) > 0
+    crossed, _, prim, _ = potency(res)
+    # (no head setting tried on real nets built a SHARED landing -- 32
+    # tried in the r1 fix round; the fake-net checks cover that case)
+    assert crossed > 0 and prim > 0, (crossed, prim)
 
 
 def v1_counts(nets, A, obs, **kw):
@@ -1241,6 +1412,9 @@ def test_drop_in_returns_and_act(monkeypatch):
         x = torch.as_tensor(obs, dtype=torch.float32) / 255.0
         logits = nets["prediction"](nets["representation"](x))[0]
     assert info["root_pmax"].tolist() == logits.argmax(1).tolist()
+    held = info["root_option_len"] >= 2
+    assert held.any()
+    assert (info["root_option"][held, 0] == info["root_pmax"][held]).all()
     actions, p2, v2 = eng.act(obs, greedy=True, num_simulations=6)
     assert actions.tolist() == p2.argmax(axis=1).tolist()
     actions, _, _ = eng.act(obs, greedy=False, training_steps=0,

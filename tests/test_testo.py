@@ -228,6 +228,39 @@ def test_the_gate_ignores_every_other_arm(monkeypatch):
     ablation.option_gate({}, False, False, 2)
 
 
+@pytest.mark.parametrize("change", [
+    {"OPTION_LENGTH": 3}, {"OPTION_LENGTH": 2}, {"OPTION_EDGE": False},
+    {"OPTION_LENGTH": 3, "OPTION_EDGE": False}])
+def test_the_gate_refuses_the_unwired_option_arms(in_arm, monkeypatch,
+                                                  change):
+    """Stage 1-2 built the option heads, the jump dynamics and the option
+    search, but no consumer runs them yet (the birth search, the refresh,
+    the unroll and the loss are the plain path's): an option arm would run
+    silently as O0, so the gate refuses it until stage 3 lifts this (audit
+    r1 of the stage-1-2 build)."""
+    spec = in_arm()
+    for k, v in change.items():
+        monkeypatch.setattr(muzero, k, v)
+    with pytest.raises(SystemExit, match="not wired yet"):
+        ablation.option_gate(spec, True, True, 0)
+
+
+def test_the_unwired_refusal_holds_on_every_arm(monkeypatch):
+    monkeypatch.setattr(muzero, "OPTION_LENGTH", 3)
+    with pytest.raises(SystemExit, match="not wired yet"):
+        ablation.option_gate({}, False, False, 2)       # no OPTION_PRECHECK
+    monkeypatch.setattr(muzero, "OPTION_LENGTH", 1)
+    monkeypatch.setattr(muzero, "OPTION_EDGE", False)
+    with pytest.raises(SystemExit, match="not wired yet"):
+        ablation.option_gate({}, False, False, 2)
+
+
+def test_no_registered_arm_sets_the_option_knobs():
+    for arm, cfg in ablation.ARMS.items():
+        assert cfg.get("OPTION_LENGTH", 1) == 1, arm
+        assert cfg.get("OPTION_EDGE", True) is True, arm
+
+
 def test_run_one_wires_the_gate():
     import inspect
     src = inspect.getsource(ablation.run_one)

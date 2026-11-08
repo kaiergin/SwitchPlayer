@@ -1,12 +1,16 @@
 """Test O stage 1 (CURRICULUM.md "Test O", DESIGN "Heads" and "Dynamics"):
 the option heads and the jump dynamics. Pins: OPTION_LENGTH 1 is the
 pre-Test-O class bit for bit (state_dict keys, shapes, values, outputs and
-RNG use, against networks.py at 7c60e1a6); L > 1 adds only its own keys,
-built last so every existing layer inits as at L = 1; OptionZero's head
-init (network_unit.py 38-44: default weights, bias 0 with 10 on stop) and
-head 0 = policy + a -100 stop logit (61-66); a jump's encoding is the sum
-of per-position rows, -1 adding nothing; the factories and the target
-model follow the knob. CPU only."""
+RNG use, against networks.py at 7c60e1a6, read with git show: the pin
+FAILS, never skips, when that file cannot be read); L > 1 adds only its own
+keys, built last so every existing layer of the SAME net inits as at L = 1
+(nets built after the prediction net do not: its extra heads draw RNG);
+OptionZero's head init (network_unit.py 38-44: default weights, bias 0 with
+10 on stop) and head 0 = policy + a -100 stop logit (61-66); each extra
+head trains its own conv / hidden / fc, never the policy's; a jump's
+encoding is the sum of per-position rows, -1 adding nothing, a first move
+required and the padding a suffix; the factories and the target model
+follow the knob. CPU only."""
 import importlib.util
 import pathlib
 import subprocess
@@ -27,14 +31,15 @@ CPU = torch.device("cpu")
 def pre_o(tmp_path_factory):
     """networks.py as it was before the option code (git show; imported
     from a temp dir, its own scalar_categorical import resolving to the
-    tree's as ever)."""
+    tree's as ever). Unreadable = a FAILED pin, not a skip (audit r1)."""
     try:
         src = subprocess.run(["git", "show", f"{PRE_O}:networks.py"],
                              cwd=ROOT, capture_output=True, text=True,
                              check=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
-        pytest.skip(f"git show {PRE_O}:networks.py unavailable: {exc}")
-    assert "option_length" not in src
+        pytest.fail(f"git show {PRE_O}:networks.py failed, so the L = 1 "
+                    f"identity pin cannot run: {exc}")
+    assert "option_length" not in src and "class PredictionNetwork" in src
     path = tmp_path_factory.mktemp("pre_o") / "networks_pre_o.py"
     path.write_text(src, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("networks_pre_o", path)
@@ -132,6 +137,9 @@ def test_the_default_factories_build_l1(monkeypatch):
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize("kw", PRED_KW)
 def test_l3_adds_only_its_heads_and_inits_every_old_layer_as_l1(kw):
+    """Within THIS net only: the extra heads draw RNG after every old layer,
+    so nets built after it (the value prefix, the projector) do not init
+    as at L = 1 (no paired init is required)."""
     torch.manual_seed(11)
     one = PredictionNetwork(**kw, option_length=1)
     torch.manual_seed(11)
@@ -195,18 +203,56 @@ def test_with_options_returns_head0_as_policy_plus_stop_and_leaves_the_rest():
     assert (probs[:, 0, A] < 1e-30).all()
 
 
-def test_option_heads_read_the_trunk_and_train():
+def no_grad(p):
+    return p.grad is None or p.grad.abs().sum() == 0
+
+
+def has_grad(p):
+    return p.grad is not None and p.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize("kw", PRED_KW)
+def test_option_heads_train_their_own_layers_and_the_trunk(kw):
+    """A loss on the extra heads alone reaches each head's OWN conv,
+    [hidden] and fc and the shared trunk (not detached), and nothing of the
+    policy or value branches (audit r1: heads reading policy_conv or
+    policy_hidden survived every earlier test)."""
     torch.manual_seed(5)
-    net = PredictionNetwork(**PRED_KW[1], option_length=3)
+    net = PredictionNetwork(**kw, option_length=3)
     x = latents(4, 6)
     _, _, _, opt = net(x, with_options=True)
-    opt[:, 1:].sum().backward()
-    assert all(p.grad is not None and p.grad.abs().sum() > 0
-               for p in net.option_fcs.parameters())
-    assert net.block.conv1.weight.grad.abs().sum() > 0, \
+    (opt[:, 1:] * torch.randn(opt[:, 1:].shape,
+                              generator=torch.Generator().manual_seed(1))
+     ).sum().backward()
+    for i in range(2):
+        mods = [net.option_convs[i], net.option_fcs[i]]
+        if kw.get("fc_hidden"):
+            mods.append(net.option_hiddens[i])
+        for m in mods:
+            assert all(has_grad(p) for p in m.parameters()), (i, m)
+    assert has_grad(net.block.conv1.weight), \
         "the option loss must reach the shared trunk (not detached)"
-    assert net.policy_fc.weight.grad is None or \
-        net.policy_fc.weight.grad.abs().sum() == 0
+    branch = [net.policy_conv, net.policy_fc, net.value_conv, net.value_fc]
+    if kw.get("fc_hidden"):
+        branch += [net.policy_hidden, net.value_hidden]
+    for m in branch:
+        assert all(no_grad(p) for p in m.parameters()), m
+
+
+def test_the_factory_heads_with_a_hidden_layer_train_their_own(monkeypatch):
+    monkeypatch.setattr(muzero, "OPTION_LENGTH", 3)
+    monkeypatch.setattr(muzero, "PRED_FC_HIDDEN", 12)
+    monkeypatch.setattr(muzero, "LATENT_CHANNELS", C)
+    torch.manual_seed(2)
+    net = muzero.build_prediction(A)
+    assert len(net.option_hiddens) == 2
+    _, _, _, opt = net(latents(3, 9), with_options=True)
+    opt[:, 2].sum().backward()          # head 2 only
+    assert has_grad(net.option_convs[1].weight)
+    assert has_grad(net.option_hiddens[1].weight)
+    assert no_grad(net.option_convs[0].weight)
+    assert no_grad(net.option_hiddens[0].weight)
+    assert no_grad(net.policy_conv.weight) and no_grad(net.policy_hidden.weight)
 
 
 def test_bad_option_length_raises():
@@ -323,6 +369,35 @@ def test_jump_errors_are_loud():
         net(latents(1, 0), torch.tensor([[1, 2, 3]]))
     with pytest.raises(ValueError, match="option_length 1"):
         dyn(L=1)(latents(1, 0), torch.tensor([[1, 2]]))
+
+
+@pytest.mark.parametrize("bad", [
+    [[-1, 2, 3]], [[-1, -1, -1]], [[2, 1, 0], [-1, 1, -1]]])
+def test_a_jump_row_without_a_first_move_is_refused(bad):
+    with pytest.raises(ValueError, match="first move"):
+        dyn(L=3)(latents(len(bad), 0), torch.tensor(bad))
+
+
+def test_a_one_column_jump_with_no_move_is_refused():
+    """A [B, 1] -1 raised in the pre-Test-O class (an embedding index
+    error); it must not become a silent no-action row."""
+    with pytest.raises(ValueError, match="first move"):
+        dyn(L=1)(latents(2, 0), torch.tensor([[1], [-1]]))
+
+
+@pytest.mark.parametrize("bad", [
+    [[1, -1, 2]], [[0, 0, 0], [3, -1, 4]], [[2, -1, -1, 1]]])
+def test_padding_must_be_a_suffix(bad):
+    net = dyn(L=4)
+    with pytest.raises(ValueError, match="suffix"):
+        net(latents(len(bad), 0), torch.tensor(bad))
+
+
+def test_valid_paddings_pass():
+    net = dyn(L=4).eval()
+    with torch.no_grad():
+        net(latents(4, 0), torch.tensor([[1, 2, 3, 4], [1, 2, 3, -1],
+                                         [0, 4, -1, -1], [3, -1, -1, -1]]))
 
 
 # --------------------------------------------------------------------------

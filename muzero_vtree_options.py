@@ -64,6 +64,14 @@ STRICTLY greater (324). The option crosses the jump in one step.
     OptionZero's init_q_value (317). The primitive side reads "zero-visit"
     as n_p == 0 (every visit of the primitive child came through the
     option), as OptionZero's primitive_count == 0.
+    CONSEQUENCE (kept as registered; Kai's / the coordinator's decision,
+    2026-11-08): an option CAN be crossed on the very first visit of its
+    first move. At n_c == 0 both exploration terms are 0 (sqrt(0)), so that
+    first choice is decided by the two zero-visit composites alone and p(o)
+    plays no part in it. OptionZero's code cannot do this: at n_c == 0 both
+    sides score init_q_value with no bonus, the tie goes to the primitive
+    (324), so its first pass through a first move is always primitive. It
+    matches v1's treatment of unvisited primitives (r + d * value).
   * v1's c_puct is the PUCT coefficient in both stages (OptionZero's
     puct_init + log((1 + N + base) / base), 71/319, is not adopted), and
     v1's normalisation (MinMaxStats with EfficientZero's floor, identity
@@ -75,9 +83,11 @@ STRICTLY greater (324). The option crosses the jump in one step.
   * sqrt(total) is the PRIMITIVE CHILD's count, as the code (308, 320,
     322), not the holder's.
   * No virtual loss (v1's sequential-within-tree argument holds).
-  * max_depth caps SELECTION STEPS, as v1's loop: a jump is one step. (The
-    code has no cap; the O arms run MAX_DEPTH 50 at 50 simulations, where
-    neither reading binds.)
+  * max_depth caps SELECTION STEPS, as v1's loop: a jump is one step, so a
+    descent can reach up to max_depth * L base steps. (OptionZero's code
+    has no cap. In selection steps MAX_DEPTH 50 cannot bind at 50
+    simulations; in base steps it would be a different, looser cap -- a
+    descent of 17 or more length-3 jumps passes 50 base steps.)
 
 EXPANSION (DEPARTURE 2: eager, as v1). Expanding node n evaluates its A
 primitive children in one wave and, when n holds an option (and the edge
@@ -112,9 +122,12 @@ leaf's root-relative total. The range takes, post-increment as v1, every
 path node's Q from its tree parent (v1's update) where that parent has an
 evaluation (a placeholder parent has no total reward to be relative to),
 plus, for every option edge the descent crossed, the landing's Q from the
-holder. The root seeds the range from its children's zero-visit composites
-(v1) and its option's. OptionZero's own bound (a map of root-relative
-means, 365-374) is not adopted (v1 parity).
+holder. The root seeds the range from its primitive children's zero-visit
+composites only, as v1 -- never its option's (audit r1: neither v1 nor
+OptionZero seeds it, and a seeded option composite would make edge-on
+targets differ from edge-off ones where no option is ever crossed).
+OptionZero's own bound (a map of root-relative means, 365-374) is not
+adopted (v1 parity).
 
 READOUT (first-move mode, DEPARTURE 1). Visit fractions over the A
 primitive root children -- an option's visits count on its first move's
@@ -128,7 +141,15 @@ reset, else the increment over the holder's prefix).
 
 OPTION_EDGE False (arm OH): the same heads, the same per-node and root
 suggestions, no jump row and no option edge: v1's search to float
-tolerance. OPTION_LENGTH 1 nets carry no heads: no option anywhere (the
+tolerance. Edge on against edge off with NO option crossed: identical when
+every jump row evaluates as its primitive path would (tests pin it). They
+can differ otherwise, with no crossing at all: a landing the jump row
+evaluated first keeps that evaluation when its primitive parent later
+expands (the first-evaluation rule above), so the primitive descent backs
+up the jump's value and total. Measured in the r1 fix round: 61-63 of 80
+roots on fake nets whose jump rows differ from the primitive path, 0 of 24
+on random real nets at 50 simulations (on real nets, batch-shape wobble
+from the jump rows also enters). OPTION_LENGTH 1 nets carry no heads: no option anywhere (the
 production birth search keeps v1 there). Options replace the token
 vocabulary: TOKEN_VOCAB with this engine raises.
 
@@ -143,7 +164,11 @@ self.last_info after every call):
   root_option_p [T]      the dominant option at the root, from the heads
                          (also when the edge is off), and its p(o)
   root_pmax [T]          the root policy head's argmax (zero_actor.cpp
-                         304-307's p_max_id_; ties to the first)
+                         304-307's p_max_id_): head 0's float32 softmax
+                         through option_argmax, the very argmax the
+                         option's first move reads, so the two never
+                         disagree on a near-tie (ties to the first); L = 1
+                         nets: the policy softmax's argmax
   expanded_nodes [T]     expansions (the root included); placeholders are
                          never expanded before they are filled
   expanded_with_option [T]  expansions whose node's heads suggest an option
@@ -163,19 +188,27 @@ import muzero
 from muzero_vtree import VectorizedPUCT
 
 
-def dominant_option(option_probs):
+def option_argmax(option_probs):
+    """[B, L] each head's argmax over its A+1 classes: the first maximum,
+    as std::max_element (zero_actor.cpp 372). The one argmax both the
+    dominant option and the root's PMAX read."""
+    return option_probs.argmax(dim=2)
+
+
+def dominant_option(option_probs, arg=None):
     """zero_actor.cpp calculateOption (368-381) + setOptionInfo's p(o)
     (395-396) on [B, L, A+1] per-head probabilities (class A = stop).
 
     Returns (moves [B, L] long, -1 past the option; length [B] long, 0 when
     there is none; p [B], the last head's probability of its own move, 0
-    when none). Each head's argmax in turn -- torch.argmax returns the
-    first maximum, as std::max_element -- ending at the first stop; a
-    length under 2 is no option."""
+    when none). Each head's argmax in turn (option_argmax; `arg` passes one
+    already taken) ending at the first stop; a length under 2 is no
+    option."""
     B, L, A1 = option_probs.shape
     stop = A1 - 1
     dev = option_probs.device
-    arg = option_probs.argmax(dim=2)                              # [B, L]
+    if arg is None:
+        arg = option_argmax(option_probs)                         # [B, L]
     before_stop = torch.cumsum((arg == stop).long(), dim=1) == 0
     length = before_stop.long().sum(dim=1)
     length = torch.where(length >= 2, length, torch.zeros_like(length))
@@ -243,18 +276,33 @@ class VectorizedOptionPUCT(VectorizedPUCT):
     # ---- network wrappers (float32 in, float64 stats out) ----
 
     def _predict(self, latent, with_options):
-        """(logits [B,A], policy [B,A] f64, value [B] f64, option moves
-        [B,L] / length [B] / p(o) [B] f64, or None x 3 without heads)."""
+        """(pmax [B] long, policy [B,A] f64, value [B] f64, option moves
+        [B,L] / length [B] / p(o) [B] f64, or None x 3 without heads).
+        pmax is head 0's entry of the SAME option_argmax the option's first
+        move comes from (head 0 = the policy plus a -100 stop logit, so it
+        is the policy's argmax unless every logit sits under -100, where it
+        falls back to the policy softmax's and no option exists); without
+        heads, the policy softmax's argmax."""
         if with_options:
             logits, value, _, olog = self.nets["prediction"](
                 latent, with_options=True)
-            moves, length, p = dominant_option(torch.softmax(olog, dim=2))
+            probs = torch.softmax(olog, dim=2)
+            arg = option_argmax(probs)
+            moves, length, p = dominant_option(probs, arg=arg)
             p = p.double()
+            pmax = arg[:, 0]
         else:
             logits, value, _ = self.nets["prediction"](latent)
             moves = length = p = None
-        policy = torch.softmax(logits, dim=1).double()
-        return logits, policy, value.squeeze(-1).double(), moves, length, p
+            pmax = None
+        pol32 = torch.softmax(logits, dim=1)
+        if pmax is None:
+            pmax = pol32.argmax(dim=1)
+        else:
+            pmax = torch.where(pmax < logits.shape[1], pmax,
+                               pol32.argmax(dim=1))
+        return pmax, pol32.double(), value.squeeze(-1).double(), moves, \
+            length, p
 
     def _root_forward(self, obs):
         with torch.no_grad():
@@ -410,7 +458,7 @@ class VectorizedOptionPUCT(VectorizedPUCT):
         leaf_sum = torch.zeros(T, **f64)
         leaf_max = torch.zeros(T, **lng)
 
-        (root_latent, root_logits, root_policy, root_value, r_moves,
+        (root_latent, root_pmax, root_policy, root_value, r_moves,
          r_len, r_p) = self._root_forward(obs_batch)
         latent = torch.zeros(T, N, *root_latent.shape[1:],
                              dtype=torch.float32, device=dev)
@@ -624,18 +672,14 @@ class VectorizedOptionPUCT(VectorizedPUCT):
             minv = torch.where(m, torch.minimum(minv, q), minv)
             maxv = torch.where(m, torch.maximum(maxv, q), maxv)
 
-        # Root expansion + range seeding (before any simulation).
+        # Root expansion + range seeding (before any simulation): the
+        # primitive children's zero-visit composites only, as v1 -- never
+        # the root option's (audit r1).
         expand(torch.zeros(T, **lng), torch.ones(T, **bol))
         rc = children[:, 0]
         seed = reward.gather(1, rc) + discount * evalue.gather(1, rc)
-        lo, hi = seed.min(dim=1).values, seed.max(dim=1).values
-        if edge_on:
-            has = opt_land[:, 0] >= 0
-            oc = opt_r[:, 0] + dacc(opt_len[:, 0]) * opt_v[:, 0]
-            lo = torch.where(has, torch.minimum(lo, oc), lo)
-            hi = torch.where(has, torch.maximum(hi, oc), hi)
-        minv = torch.minimum(minv, lo)
-        maxv = torch.maximum(maxv, hi)
+        minv = torch.minimum(minv, seed.min(dim=1).values)
+        maxv = torch.maximum(maxv, seed.max(dim=1).values)
 
         gen = generator
         for _ in range(sims):
@@ -704,7 +748,7 @@ class VectorizedOptionPUCT(VectorizedPUCT):
             "root_option": opt_moves[:, 0].cpu().numpy(),
             "root_option_len": opt_len[:, 0].cpu().numpy(),
             "root_option_p": opt_p[:, 0].cpu().numpy(),
-            "root_pmax": root_logits.argmax(dim=1).cpu().numpy(),
+            "root_pmax": root_pmax.cpu().numpy(),
             "expanded_nodes": n_exp.cpu().numpy(),
             "expanded_with_option": len_hist[:, 2:].sum(dim=1).cpu().numpy(),
             "option_len_hist": len_hist.cpu().numpy(),
