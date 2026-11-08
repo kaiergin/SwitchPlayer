@@ -1523,6 +1523,39 @@ ARMS[PLAIN_ARM + "-o0"] = {
             "unit and first-layer filter diagnostics in every row, and the "
             "O0 pre-check's shares (OPTION_PRECHECK). Run as TK.",
 }
+# Test O stage 4a (CURRICULUM "Test O", ARMS): OF, O0 plus OptionZero's option
+# head at L = 3 base steps, first move only -- play unchanged (the prior's
+# first-move sample, a fresh decision every base step); the option edge in
+# the birth search; the heads and the jump rows train the shared net
+# (DEPARTURE 1). OH, OF with the option edge OFF in the birth search: the same
+# heads, the same suggestions and the same jump training. Everything else is
+# O0's, OPTION_PRECHECK included: it reads plain play, which OF and OH keep,
+# so the three arms' pre-check shares compare. The variant suffixes follow
+# O0's (lineage "o").
+ARMS[PLAIN_ARM + "-of"] = {
+    **ARMS[PLAIN_ARM + "-o0"],
+    "OPTION_LENGTH": 3,
+    "_doc": "Test O's OF: Test O's O0 (...-mspacman-plain-o0) plus "
+            "OptionZero's option head at OPTION_LENGTH 3 (12 frames), first "
+            "move only: play unchanged (the prior's first-move sample, a "
+            "fresh decision every base step); the option edge in the birth "
+            "search (OPTION_EDGE True, muzero_vtree_options); the records "
+            "carry the root's suggestion and PMAX; each unroll edge jumps "
+            "the option's moves where the play matched it; the heads train "
+            "at scale 1 in the shared loss; the option diagnostics and the "
+            "on/off root probe in every row beside O0's pre-check shares. "
+            "Run as TK.",
+}
+ARMS[PLAIN_ARM + "-oh"] = {
+    **ARMS[PLAIN_ARM + "-of"],
+    "OPTION_EDGE": False,
+    "_doc": "Test O's OH: Test O's OF (...-mspacman-plain-of) with the "
+            "option edge OFF in the birth search (OPTION_EDGE False): the "
+            "same heads, the same per-node and root suggestions, the same "
+            "records, jump training and option loss; no jump row and no "
+            "option edge in the tree. OF minus OH is the edge alone. Run as "
+            "TK.",
+}
 
 # PB (Kai, 2026-10-24; pre-registered in CURRICULUM.md "PB: per-step prefix
 # BatchNorm statistics on the token arm", after Step 0 (iii)): TK with the
@@ -2538,25 +2571,38 @@ def option_gate(spec, use_ray, cpu_actor, ray_workers):
     refresh, TD value targets, the paper wrapper stack at the base skip,
     --ray --cpu-actor without a worker pool -- with the env's whole action
     space, one move per base step. Refuses at startup -- before any
-    --overwrite deletion. Off: returns at once.
+    --overwrite deletion. Off (OPTION_LENGTH 1, OPTION_EDGE True, no
+    OPTION_PRECHECK): returns at once.
 
-    Every arm, first: OPTION_LENGTH > 1 (or OPTION_EDGE False) is refused
-    until Test O stage 4 adds the option arms, their gate (the tested path,
-    TRAIN_PREFETCH off) and their diagnostics (audit r1 of the stage-1-2
-    build: no such arm may run before every piece exists). Stage 3 wired
-    the birth search, the records, the unroll, the head targets and the
-    loss; stage 4 lifts this."""
-    if int(muzero.OPTION_LENGTH) != 1 or muzero.OPTION_EDGE is not True:
-        raise SystemExit(
-            f"OPTION_LENGTH {muzero.OPTION_LENGTH!r} / OPTION_EDGE "
-            f"{muzero.OPTION_EDGE!r}: the option arms are not wired yet (Test "
-            "O stage 4: the arms, their gate and their diagnostics); only "
-            "OPTION_LENGTH 1 with OPTION_EDGE True runs")
-    if not muzero.OPTION_PRECHECK:
+    Every arm, first, the knobs themselves: OPTION_LENGTH an int >= 1 and
+    OPTION_EDGE a bool; OPTION_EDGE False needs option heads (OPTION_LENGTH
+    >= 2: arm OH), so OPTION_LENGTH 1 with the edge off is refused.
+
+    An OPTION ARM (OPTION_LENGTH >= 2, Test O stage 4a: OF, OH) is held to
+    the pre-check's tested path above and also refused unless TRAIN_PREFETCH
+    is off (a prefetched batch would read PMAX and the head targets one to
+    TRAIN_PREFETCH_DEPTH + 1 steps late; muzero_option_targets' THE ORDER),
+    ACTION_ENCODING is "embed" (the per-position jump rows are embeddings)
+    and no TOKEN_VOCAB is set (options replace the vocabulary). The
+    registered arms set OPTION_PRECHECK too; the option checks cover it."""
+    L, edge = muzero.OPTION_LENGTH, muzero.OPTION_EDGE
+    if (isinstance(L, bool) or not isinstance(L, (int, np.integer))
+            or L < 1):
+        raise SystemExit(f"OPTION_LENGTH must be an int >= 1 (1 = no "
+                         f"options); got {L!r}")
+    if not isinstance(edge, bool):
+        raise SystemExit(f"OPTION_EDGE must be True or False; got {edge!r}")
+    option = int(L) > 1
+    if not option and edge is not True:
+        raise SystemExit("OPTION_EDGE False turns off the option edge of an "
+                         "option arm (OH): it needs option heads, "
+                         "OPTION_LENGTH >= 2; got OPTION_LENGTH 1")
+    if not (option or muzero.OPTION_PRECHECK):
         return
+    who = f"OPTION_LENGTH {int(L)}" if option else "OPTION_PRECHECK"
     if muzero.TOKEN_VOCAB is not None:
-        raise SystemExit("OPTION_PRECHECK reads plain moves, one per base "
-                         "step: it refuses a TOKEN_VOCAB")
+        raise SystemExit(f"{who} reads plain moves, one per base step: it "
+                         "refuses a TOKEN_VOCAB")
     base = int(muzero.TOKEN_BASE_FRAMES)
     need = {"PAPER_TARGETS": True, "BIRTH_SEARCH": True,
             "USE_TARGET_MODEL": True, "REFRESH_VTREE": True,
@@ -2564,22 +2610,27 @@ def option_gate(spec, use_ray, cpu_actor, ray_workers):
             "USE_GUMBEL_SEARCH": False, "ACTOR_GUMBEL_SEARCH": False,
             "REFRESH_OFFLOAD": False, "REFRESH_SATURATE": False,
             "ASYNC_LOOP": False, "VALUE_TARGET_MODE": "td"}
+    if option:
+        need.update({"TRAIN_PREFETCH": False, "ACTION_ENCODING": "embed"})
     bad = [f"{k}={getattr(muzero, k)!r}" for k, v in need.items()
            if getattr(muzero, k) != v]
     if bad:
-        raise SystemExit("OPTION_PRECHECK runs only on the tested path "
+        raise SystemExit(f"{who} runs only on the tested path "
                          f"(policy-only acting + birth search, paper "
-                         f"targets, vectorized refresh); got {', '.join(bad)}")
+                         f"targets, vectorized refresh"
+                         + (", no batch prefetch, embedded actions"
+                            if option else "")
+                         + f"); got {', '.join(bad)}")
     if not (use_ray and cpu_actor) or ray_workers:
-        raise SystemExit("OPTION_PRECHECK runs with --ray --cpu-actor (no "
+        raise SystemExit(f"{who} runs with --ray --cpu-actor (no "
                          "--ray-workers pool)")
     if FRAMESKIP != base:
-        raise SystemExit(f"OPTION_PRECHECK plays one move per step of the "
+        raise SystemExit(f"{who} plays one move per step of the "
                          f"wrapper stack at --frameskip {base}; got "
                          f"{FRAMESKIP}")
     n_env = env_actions(ENV_NAME)
     if ACTIONS != n_env:
-        raise SystemExit(f"OPTION_PRECHECK plays {ENV_NAME}'s whole action "
+        raise SystemExit(f"{who} plays {ENV_NAME}'s whole action "
                          f"space ({n_env} moves); got {ACTIONS}")
 
 
@@ -2630,6 +2681,288 @@ def option_search_counts(acc, info):
     acc["leaf_depth_max"] = max(acc.get("leaf_depth_max", 0), m)
     acc["roots"] = acc.get("roots", 0) + len(info["root_pmax"])
     return acc
+
+
+# Test O stage 4a: the option arms' per-row diagnostics (CURRICULUM "Test O",
+# READS (3), (4), (6), DEPARTURES 3 and 7, DESIGN "Prefix BN"). Accumulated in
+# Run._opt_window (plain ints, floats and lists: checkpointed, so a resume
+# keeps a partial row), emitted by Run._merge_option_stats in the row that
+# carries O0's pre-check shares, OPTION_LENGTH > 1 only. The on/off root
+# probe's roots: OPTION_PROBE_ROOTS of the row's acted positions.
+OPTION_PROBE_ROOTS = 256
+
+
+def option_window_empty(L, A, K):
+    """One row's option window, every count at zero. L the option length, A
+    the moves, K the unroll."""
+    return {
+        # read (3): the LIVE birth searches' counters (option_search_counts,
+        # every life's _birth_option_counts; the refresh never adds here)
+        "roots": 0, "expanded_nodes": 0, "expanded_with_option": 0,
+        "option_len_hist": [0] * (L + 1), "simulations": 0,
+        "sims_crossing_option": 0, "crossed_len_hist": [0] * (L + 1),
+        "leaf_depth_sum": 0.0, "leaf_depth_max": 0,
+        # DEPARTURE 7 and read (4), over the acted positions at birth
+        "acted": 0, "hit": 0, "pi_m": 0.0, "frames": 0, "play": [0] * A,
+        "s4_n": [0] * L, "s4_opt": [0] * L, "s4_rep": [0] * L,
+        "s4_hist": [[0] * A for _ in range(L)],
+        "with_option": 0, "nonrepeat": 0, "root_len_hist": [0] * (L + 1),
+        # the row's train steps (TrainingHelper._option_last, note_option_step)
+        "steps": 0, "mask_share": 0.0, "jump_share": [0.0] * K,
+        "span": 0.0, "loss_steps": 0, "nonfinite": 0, "loss": 0.0,
+        "cons_jump": 0.0, "cons_jump_n": 0, "cons_single": 0.0,
+        "cons_single_n": 0, "birth_pos": 0, "birth_pos_n": 0,
+        "birth_root": 0, "birth_root_n": 0,
+    }
+
+
+def option_window_add_search(w, counts):
+    """Add one life's birth-search counters (_birth_option_counts, the
+    option_search_counts sums; {} when nothing was searched) to window w in
+    place."""
+    for k in ("roots", "expanded_nodes", "expanded_with_option",
+              "simulations", "sims_crossing_option"):
+        w[k] += int(np.sum(counts.get(k, 0)))
+    w["leaf_depth_sum"] += float(np.sum(counts.get("leaf_depth_sum", 0.0)))
+    w["leaf_depth_max"] = max(w["leaf_depth_max"],
+                              int(counts.get("leaf_depth_max", 0)))
+    for k in ("option_len_hist", "crossed_len_hist"):
+        if k in counts:
+            v = np.asarray(counts[k]).reshape(-1)
+            if len(v) != len(w[k]):
+                raise ValueError(f"{k} of {len(v)} lengths in a window of "
+                                 f"{len(w[k])}")
+            w[k] = [int(a) + int(b) for a, b in zip(w[k], v)]
+    return w
+
+
+def option_state_counts(played, options, L, A):
+    """Read (4), STATE DEPENDENCE, over one life's acted positions 0..n-1:
+    played [n] the moves played, options [n] each position's root suggestion
+    (the birth search's dominant option, its moves; () when none). Step j =
+    1..L compares the option's j-th move with the move played at t + j - 1
+    (step 1 = its first move against the move played at t), unconditionally
+    (an earlier miss does not end the comparison).
+    THE DENOMINATOR at step j (s4_n[j-1]): acted positions t >= 1 whose
+    suggestion has at least j moves and where t + j - 1 is an acted position
+    of this life (a life's end leaves the later steps nothing to compare
+    with). t = 0 is left out of every step: the repeat baseline needs the
+    move played before t, which a life's first position lacks; so the three
+    predictors share their positions.
+      s4_opt[j-1]   the option's j-th move == played[t + j - 1];
+      s4_rep[j-1]   REPEAT THE LAST MOVE: played[t - 1] == played[t + j - 1]
+                    (persistence from what is known at t, every step);
+      s4_hist[j-1]  the played moves at those positions, per move: the
+                    MARGINAL baseline's hits are s4_hist[j-1][mode], mode the
+                    row's most frequent played move (option_row_fields);
+      with_option   positions holding an option (t = 0 included), of which
+      nonrepeat     those whose moves are not one move repeated;
+      root_len_hist positions by suggestion length (index 0 = none)."""
+    n = len(played)
+    out = {"s4_n": [0] * L, "s4_opt": [0] * L, "s4_rep": [0] * L,
+           "s4_hist": [[0] * A for _ in range(L)], "with_option": 0,
+           "nonrepeat": 0, "root_len_hist": [0] * (L + 1)}
+    for t, o in enumerate(options):
+        k = len(o)
+        out["root_len_hist"][k] += 1
+        if k >= 2:
+            out["with_option"] += 1
+            out["nonrepeat"] += int(len(set(o)) > 1)
+        if t == 0:
+            continue
+        prev = int(played[t - 1])
+        for j in range(1, k + 1):
+            q = t + j - 1
+            if q >= n:
+                break
+            m = int(played[q])
+            out["s4_n"][j - 1] += 1
+            out["s4_opt"][j - 1] += int(int(o[j - 1]) == m)
+            out["s4_rep"][j - 1] += int(prev == m)
+            out["s4_hist"][j - 1][m] += 1
+    return out
+
+
+def option_probe_stats(pol_on, pol_off, root_option, root_len):
+    """Read (3)'s ON/OFF ROOT PROBE over T roots searched twice, the option
+    edge on (pol_on) and off (pol_off), [T, A] visit targets; root_option
+    [T, L] the root's dominant option (-1 padded), root_len [T] its length
+    (0 = none). Sums and counts a row turns into means:
+      js_sum      the Jensen-Shannon divergence between the two targets, in
+                  nats (0 log 0 = 0; at most ln 2), summed over roots;
+      flips       roots whose top move FLIPS: no move is top in both (a tie
+                  at the top counts every tied move as top, so a tie never
+                  makes a flip by itself: "ties count as no flip");
+      shift_roots roots holding an option (the others are left out), and
+      shift_sum   their pi_on[m1] - pi_off[m1], m1 the option's first move.
+    """
+    P = np.asarray(pol_on, dtype=np.float64)
+    Q = np.asarray(pol_off, dtype=np.float64)
+    T = len(P)
+    M = 0.5 * (P + Q)
+
+    def kl(X):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = np.where(X > 0, X * np.log(X / np.where(M > 0, M, 1.0)), 0.0)
+        return t.sum(axis=1)
+
+    js = 0.5 * kl(P) + 0.5 * kl(Q)
+    top_on = P == P.max(axis=1, keepdims=True)
+    top_off = Q == Q.max(axis=1, keepdims=True)
+    flip = ~(top_on & top_off).any(axis=1)
+    has = np.asarray(root_len) >= 2
+    first = np.asarray(root_option)[:, 0].clip(min=0)
+    rows = np.arange(T)
+    shift = P[rows, first] - Q[rows, first]
+    return {"roots": int(T), "js_sum": float(js.sum()),
+            "flips": int(flip.sum()), "shift_roots": int(has.sum()),
+            "shift_sum": float(shift[has].sum())}
+
+
+def _ratio(a, b, nd=6):
+    return round(float(a) / float(b), nd) if b else None
+
+
+def option_prefix_panel(acc, spans, err_k, ctl_k, err_1, ctl_1, abs1_eval,
+                        abs1_train):
+    """DESIGN "Prefix BN": the row's prefix panel (evaluate_diagnostics) on
+    jump rows, one option batch's sums into `acc` in place. spans [B, K] the
+    rows' edge spans; per row (all [B]): err_k / ctl_k the step-K prefix
+    error |prefix - truth| and its control |truth| (the panel's "prefix" /
+    "control", truth the undiscounted sum of the edges' rewards: a jump
+    edge's reward is its positions' sum, DEPARTURE 4); err_1 / ctl_1 the
+    step-1 error and control ("prefix_step1"); abs1_eval / abs1_train
+    |step-1 prefix| through eval-mode and train-mode value-prefix BN (PB's
+    probe, Step 0 (iii): the FIXED line was eval / train <= 2). Rows are
+    "jump" when any edge of the window jumps, else "single"; for step 1,
+    "jump1" when the FIRST edge jumps, else "single1"."""
+    spans = np.asarray(spans)
+    for kind, m in (("jump", spans.max(axis=1) > 1),
+                    ("single", spans.max(axis=1) <= 1)):
+        acc[f"{kind}_n"] = acc.get(f"{kind}_n", 0) + int(m.sum())
+        acc[f"{kind}_err"] = acc.get(f"{kind}_err", 0.0) + float(err_k[m].sum())
+        acc[f"{kind}_ctl"] = acc.get(f"{kind}_ctl", 0.0) + float(ctl_k[m].sum())
+    for kind, m in (("jump1", spans[:, 0] > 1), ("single1", spans[:, 0] <= 1)):
+        for k, v in (("n", m.sum()), ("err", err_1[m].sum()),
+                     ("ctl", ctl_1[m].sum()), ("eval", abs1_eval[m].sum()),
+                     ("train", abs1_train[m].sum())):
+            acc[f"{kind}_{k}"] = acc.get(f"{kind}_{k}", 0) + (
+                int(v) if k == "n" else float(v))
+    return acc
+
+
+def option_prefix_fields(acc):
+    """option_prefix_panel's sums as row fields: means per row kind, the
+    rows behind each, and the step-1 BN ratio (eval / train-mode |prefix|)
+    for first-edge jumps and one-step first edges."""
+    g = acc.get
+    return {
+        "opt_prefix_jump": _ratio(g("jump_err", 0.0), g("jump_n", 0)),
+        "opt_prefix_jump_control": _ratio(g("jump_ctl", 0.0), g("jump_n", 0)),
+        "opt_prefix_jump_rows": g("jump_n", 0),
+        "opt_prefix_single": _ratio(g("single_err", 0.0), g("single_n", 0)),
+        "opt_prefix_single_control": _ratio(g("single_ctl", 0.0),
+                                            g("single_n", 0)),
+        "opt_prefix_single_rows": g("single_n", 0),
+        "opt_prefix_step1_jump": _ratio(g("jump1_err", 0.0), g("jump1_n", 0)),
+        "opt_prefix_step1_jump_control": _ratio(g("jump1_ctl", 0.0),
+                                                g("jump1_n", 0)),
+        "opt_prefix_step1_jump_rows": g("jump1_n", 0),
+        "opt_prefix_step1_jump_bn_ratio": _ratio(g("jump1_eval", 0.0),
+                                                 g("jump1_train", 0.0), 4),
+        "opt_prefix_step1_single_bn_ratio": _ratio(g("single1_eval", 0.0),
+                                                   g("single1_train", 0.0),
+                                                   4),
+    }
+
+
+def option_row_fields(w, probe, base_frames):
+    """The row fields of option window w (option_window_empty) and the
+    row's on/off probe (option_probe_stats plus "seconds"; None when no root
+    was probed). Counts are logged beside every rate, so a read pooled over
+    rows (read (3)'s [90k, end]) is computed from counts. base_frames: the
+    frames of one base step (TOKEN_BASE_FRAMES)."""
+    L = len(w["s4_n"])
+    play = w["play"]
+    mode = int(np.argmax(play)) if sum(play) else None
+    marg = ([int(h[mode]) for h in w["s4_hist"]] if mode is not None
+            else [0] * L)
+    steps, ls = w["steps"], w["loss_steps"]
+    out = {
+        # read (3) ENGAGEMENT, the live birth searches
+        "opt_roots": w["roots"], "opt_nodes": w["expanded_nodes"],
+        "opt_nodes_with_option": w["expanded_with_option"],
+        "opt_len_hist": list(w["option_len_hist"]),
+        "opt_sims": w["simulations"],
+        "opt_sims_crossing": w["sims_crossing_option"],
+        "opt_crossed_len_hist": list(w["crossed_len_hist"]),
+        "opt_leaf_depth_sum": round(w["leaf_depth_sum"], 3),
+        "opt_leaf_depth_max": w["leaf_depth_max"],
+        "opt_node_option_rate": _ratio(w["expanded_with_option"],
+                                       w["expanded_nodes"]),
+        "opt_crossing_rate": _ratio(w["sims_crossing_option"],
+                                    w["simulations"]),
+        "opt_leaf_depth_mean": _ratio(w["leaf_depth_sum"], w["simulations"],
+                                      4),
+        # DEPARTURE 7: the hit rate beside mean pi[m], acted positions
+        "opt_acted": w["acted"], "opt_hits": w["hit"],
+        "opt_hit_rate": _ratio(w["hit"], w["acted"], 4),
+        "opt_pi_m": _ratio(w["pi_m"], w["acted"], 4),
+        # read (4) STATE DEPENDENCE (option_state_counts)
+        "opt_s4_positions": list(w["s4_n"]),
+        "opt_s4_option_hits": list(w["s4_opt"]),
+        "opt_s4_repeat_hits": list(w["s4_rep"]),
+        "opt_s4_marginal_hits": marg, "opt_s4_mode": mode,
+        "opt_s4_played_hist": [list(h) for h in w["s4_hist"]],
+        "opt_s4_accuracy": [_ratio(a, n, 4)
+                            for a, n in zip(w["s4_opt"], w["s4_n"])],
+        "opt_s4_repeat_accuracy": [_ratio(a, n, 4)
+                                   for a, n in zip(w["s4_rep"], w["s4_n"])],
+        "opt_s4_marginal_accuracy": [_ratio(a, n, 4)
+                                     for a, n in zip(marg, w["s4_n"])],
+        "opt_play_counts": list(play),
+        "opt_root_options": w["with_option"],
+        "opt_root_option_share": _ratio(w["with_option"], w["acted"], 4),
+        "opt_root_len_hist": list(w["root_len_hist"]),
+        "opt_nonrepeat": w["nonrepeat"],
+        "opt_nonrepeat_share": _ratio(w["nonrepeat"], w["with_option"], 4),
+        # the row's train steps: unroll edges, the option loss, the batch
+        # mask share (not DEPARTURE 7's hit rate), jump rows' consistency
+        "opt_steps": steps, "opt_loss_steps": ls,
+        "opt_steps_nonfinite": w["nonfinite"],
+        "opt_loss": _ratio(w["loss"], ls, 6),
+        "opt_mask_share": _ratio(w["mask_share"], steps, 4),
+        "opt_jump_share": [_ratio(s, steps, 4) for s in w["jump_share"]],
+        "opt_span_mean": _ratio(w["span"], steps, 4),
+        "opt_span_frames": (round(w["span"] / steps * base_frames, 2)
+                            if steps else None),
+        "opt_cons_jump": _ratio(w["cons_jump"], w["cons_jump_n"], 6),
+        "opt_cons_jump_edges": w["cons_jump_n"],
+        "opt_cons_single": _ratio(w["cons_single"], w["cons_single_n"], 6),
+        "opt_cons_single_edges": w["cons_single_n"],
+        # DEPARTURE 3: the sampled birth-target share
+        "opt_birth_target_share": _ratio(w["birth_pos"], w["birth_pos_n"],
+                                         4),
+        "opt_birth_target_positions": w["birth_pos_n"],
+        "opt_birth_target_share_roots": _ratio(w["birth_root"],
+                                               w["birth_root_n"], 4),
+        "opt_birth_target_roots": w["birth_root_n"],
+        # read (6): decisions per second of play (60 frames a second)
+        "opt_decisions_per_s": _ratio(60 * w["acted"], w["frames"], 3),
+    }
+    p = probe or {"roots": 0}
+    T = p["roots"]
+    out.update({
+        "opt_probe_roots": T,
+        "opt_probe_js": _ratio(p.get("js_sum", 0.0), T, 6),
+        "opt_probe_flips": p.get("flips", 0),
+        "opt_probe_flip_share": _ratio(p.get("flips", 0), T, 4),
+        "opt_probe_shift_roots": p.get("shift_roots", 0),
+        "opt_probe_shift": _ratio(p.get("shift_sum", 0.0),
+                                  p.get("shift_roots", 0), 6),
+        "opt_probe_s": (round(p["seconds"], 2) if "seconds" in p else None),
+    })
+    return out
 
 
 # REWARD_GROWTH's REWARD_UNIT per game (env_tag_fragment of the env id): the
@@ -3728,6 +4061,10 @@ class Run:
             self._note_behaviour(out[:-1], born)
             if muzero.OPTION_PRECHECK:
                 self._note_precheck(out[:-1])
+            if int(muzero.OPTION_LENGTH) > 1:
+                # Test O stage 4a: the option row window (this life's birth
+                # search counters, its acted positions, the probe's roots)
+                self._note_options(out[:-1])
         pols = [t["target_policy"] for t in out if t["has_policy_target"]]
         # Unreachable-empty from every current caller (play_episode always
         # yields >= 1 policy-carrying record; cap 0 keeps its greedy tail
@@ -3964,6 +4301,156 @@ class Run:
         got = option_precheck_counts(tgt, act, self._birth_pmax)
         w = getattr(self, "_pc_window", None) or {}
         self._pc_window = {k: w.get(k, 0) + v for k, v in got.items()}
+
+    def _option_window(self):
+        """The current row's option window (option_window_empty at the run's
+        L, moves and unroll when none is open)."""
+        w = getattr(self, "_opt_window", None)
+        if w is None:
+            w = self._opt_window = option_window_empty(
+                int(muzero.OPTION_LENGTH), ACTIONS, int(muzero.UNROLL_STEPS))
+        return w
+
+    def _option_probe_pool(self):
+        """The current row's probe roots: {"row": rows emitted before this
+        one, "keys" [k] float64, "obs" [k] stacks, "rng"}. THE RULE: every
+        acted position of the row draws a key from a generator pinned to
+        (seed, row, 0x0B5E), in arrival order, and the probe takes the
+        OPTION_PROBE_ROOTS positions with the smallest keys -- a uniform
+        sample without replacement, the same however the row's lives are
+        chunked. The training RNG streams are never drawn."""
+        pool = getattr(self, "_opt_probe", None)
+        if pool is None:
+            pool = self._opt_probe = {
+                "row": 0, "keys": np.zeros(0), "obs": [],
+                "rng": np.random.default_rng([int(self.seed), 0, 0x0B5E])}
+        return pool
+
+    def _note_options(self, acted):
+        """Test O stage 4a, OPTION_LENGTH > 1: one life into the row's
+        option window (Run._opt_window, emitted and restarted by
+        _merge_option_stats, checkpointed): read (3)'s engagement counters
+        from this life's LIVE birth search (_birth_option_counts: every
+        acted root and a cut life's greedy tail; never the refresh's), and
+        over its acted records (the birth targets, the move played, the
+        root suggestion and PMAX as written at birth): DEPARTURE 7's hit
+        rate (played == PMAX) and pi[PMAX], read (4)'s state-dependence
+        counts (option_state_counts), the moves played and their frames
+        (read (6)'s decisions per second), and the on/off probe's root keys
+        (_option_probe_pool)."""
+        import muzero_option_targets as mot
+        w = self._option_window()
+        option_window_add_search(
+            w, getattr(self, "_birth_option_counts", None) or {})
+        if not acted:
+            return
+        L = int(muzero.OPTION_LENGTH)
+        act = [int(t["action"]) for t in acted]
+        pm = [mot.record_pmax(t) for t in acted]
+        w["acted"] += len(act)
+        w["hit"] += int(sum(a == m for a, m in zip(act, pm)))
+        w["pi_m"] += float(sum(float(t["target_policy"][m])
+                               for t, m in zip(acted, pm)))
+        w["frames"] += int(sum(muzero.token_frames(a) for a in act))
+        w["play"] = [int(c) + int(n) for c, n in zip(
+            w["play"], np.bincount(act, minlength=len(w["play"])))]
+        got = option_state_counts(act, [mot.option_moves(t) for t in acted],
+                                  L, len(w["play"]))
+        for k in ("with_option", "nonrepeat"):
+            w[k] += got[k]
+        for k in ("s4_n", "s4_opt", "s4_rep", "root_len_hist"):
+            w[k] = [a + b for a, b in zip(w[k], got[k])]
+        w["s4_hist"] = [[a + b for a, b in zip(x, y)]
+                        for x, y in zip(w["s4_hist"], got["s4_hist"])]
+        pool = self._option_probe_pool()
+        keys = np.concatenate([pool["keys"], pool["rng"].random(len(acted))])
+        obs = pool["obs"] + [t["obs"] for t in acted]
+        keep = np.argsort(keys, kind="stable")[:OPTION_PROBE_ROOTS]
+        pool["keys"] = keys[keep]
+        pool["obs"] = [obs[i] for i in keep]
+
+    def _option_probe(self, obs, row):
+        """Read (3)'s ON/OFF ROOT PROBE (descriptive), at row time: the
+        probe roots `obs` searched twice by the option engine
+        (muzero_vtree_options.VectorizedOptionPUCT, the birth search's
+        subclass), the option edge on and off, on ONE pinned net -- the
+        learner's nets, in eval mode, as the birth search runs them -- with
+        the birth search's simulations, c_puct and discount, root noise
+        from ONE draw shared by both searches (noise_override; Dirichlet at
+        DIRICHLET_ALPHA from a generator pinned to (seed, row, 0x015E): the
+        engine's own draw would take torch's global RNG) and tie_break
+        "first" (no tie draw). So no training RNG stream is drawn, and every
+        net's train / eval mode is restored. Returns option_probe_stats plus
+        "seconds" (the probe's wall clock), or None without roots."""
+        if not obs:
+            return None
+        import muzero_vtree_options
+        t0 = time.perf_counter()
+        nets = {k: getattr(self.trainer, k) for k in
+                ("representation", "dynamics", "prediction", "value_prefix")}
+        modes = {k: n.training for k, n in nets.items()}
+        for n in nets.values():
+            n.eval()
+        try:
+            x = np.stack(obs)
+            T = len(x)
+            noise = np.random.default_rng([int(self.seed), int(row), 0x015E]
+                                          ).dirichlet(np.full(
+                                              ACTIONS,
+                                              float(muzero.DIRICHLET_ALPHA)),
+                                              size=T)
+            engine = muzero_vtree_options.VectorizedOptionPUCT(
+                nets, ACTIONS, self.trainer.device)
+            batch = max(1, int(muzero.VTREE_REFRESH_BATCH))
+            got = {}
+            for edge in (True, False):
+                pols, ropt, rlen = [], [], []
+                for w0 in range(0, T, batch):
+                    sl = slice(w0, w0 + batch)
+                    p, _, _, info = engine.search(
+                        x[sl], num_simulations=muzero.ACT_SEARCH_SIMS,
+                        c_puct=muzero.C_PUCT, discount=muzero.DISCOUNT,
+                        root_noise=True, noise_override=noise[sl],
+                        tie_break="first", option_edge=edge,
+                        return_info=True)
+                    pols.append(np.asarray(p, dtype=np.float64))
+                    ropt.append(info["root_option"])
+                    rlen.append(info["root_option_len"])
+                got[edge] = (np.concatenate(pols), np.concatenate(ropt),
+                             np.concatenate(rlen))
+        finally:
+            for k, n in nets.items():
+                n.train(modes[k])
+        (pon, ropt, rlen), (poff, _, _) = got[True], got[False]
+        out = option_probe_stats(pon, poff, ropt, rlen)
+        out["seconds"] = time.perf_counter() - t0
+        return out
+
+    def _merge_option_stats(self, errs):
+        """Test O stage 4a (OPTION_LENGTH > 1): the row's option fields
+        (option_row_fields: read (3)'s engagement counts and rates and its
+        on/off root probe, run here on the row's probe roots; DEPARTURES 3
+        and 7; read (4); the train-step means) and read (6)'s cheap missing
+        items -- window positions read per acted record so far, the replay's
+        stack bytes -- into `errs`; then the window and the probe roots
+        restart (the next row's generator pinned to its own index)."""
+        w = self._option_window()
+        pool = self._option_probe_pool()
+        probe = self._option_probe(pool["obs"], pool["row"])
+        errs.update(option_row_fields(w, probe,
+                                      int(muzero.TOKEN_BASE_FRAMES)))
+        env = int(getattr(self, "env_steps", 0) or 0)
+        errs["opt_grad_uses_per_record"] = (
+            round(self.trainer.training_steps * int(muzero.TRAINING_BATCHES)
+                  * (int(muzero.UNROLL_STEPS) + 1) / env, 3) if env else None)
+        errs["opt_replay_obs_bytes"] = int(sum(
+            np.asarray(r["obs"]).nbytes
+            for t in (getattr(self, "replay", None) or []) for r in t))
+        self._opt_window = None
+        nxt = pool["row"] + 1
+        self._opt_probe = {
+            "row": nxt, "keys": np.zeros(0), "obs": [],
+            "rng": np.random.default_rng([int(self.seed), nxt, 0x0B5E])}
 
     def _note_tokens(self, out, z0s):
         """TOKEN_VOCAB row diagnostics (P2a read 4), accumulated per row
@@ -4562,6 +5049,9 @@ class Run:
                 "value_control": 0.0, "policy_entropy": 0.0, "policy_maxp": 0.0,
                 "prefix_step1": 0.0, "prefix_step1_control": 0.0}
         projs = []
+        # Test O stage 4a (OPTION_LENGTH > 1, option batches): the prefix
+        # panel split by row kind (option_prefix_panel's sums)
+        opt_pf = {} if int(muzero.OPTION_LENGTH) > 1 else None
         if self.replay:
             with torch.no_grad():
                 for _ in range(batches):
@@ -4599,6 +5089,7 @@ class Run:
                     # call i is LSTM step i.
                     was_training = vp.training
                     vp.eval()
+                    jumps = (opt_pf is not None and "option_span" in b)
                     try:
                         for i in range(1, K + 1):
                             latent, reward, _ = self.trainer.dynamics(latent, acts[:, i - 1])
@@ -4611,12 +5102,30 @@ class Run:
                                 t1 = truth[:, 1:2]
                                 errs["prefix_step1"] += (prefix - t1).abs().mean().item()
                                 errs["prefix_step1_control"] += t1.abs().mean().item()
+                                if jumps:
+                                    # Test O: the same step-1 prefix through
+                                    # train-mode BN (batch statistics, on a
+                                    # copy: PB's probe, Step 0 (iii))
+                                    p1, l1 = prefix, latent
+                                    vpt = copy.deepcopy(vp).train()
+                                    p1t, _, _ = vpt(
+                                        l1, vpt.initial_state(obs.size(0),
+                                                              DEVICE), step=1)
                     finally:
                         vp.train(was_training)
                     tgt = truth[:, K:K + 1]
                     errs["per_step"] += (running - tgt).abs().mean().item()
                     errs["prefix"] += (prefix - tgt).abs().mean().item()
                     errs["control"] += tgt.abs().mean().item()
+                    if jumps:
+                        option_prefix_panel(
+                            opt_pf, np.asarray(b["option_span"]),
+                            (prefix - tgt).abs().squeeze(1).cpu().numpy(),
+                            tgt.abs().squeeze(1).cpu().numpy(),
+                            (p1 - t1).abs().squeeze(1).cpu().numpy(),
+                            t1.abs().squeeze(1).cpu().numpy(),
+                            p1.abs().squeeze(1).cpu().numpy(),
+                            p1t.abs().squeeze(1).cpu().numpy())
             errs = {k: v / batches for k, v in errs.items()}
             errs.update(projector_collapse_stats(self.trainer.projector,
                                                  torch.cat(projs)))
@@ -4638,6 +5147,12 @@ class Run:
             errs.update(stats)
         # BIRTH_SEARCH and ReDo accounting (2026-09-26), same pattern.
         self._merge_row_stats(errs)
+        if opt_pf is not None:
+            # Test O stage 4a: the option arms' row (read (3) with its on/off
+            # root probe, read (4), DEPARTURES 3 and 7, the train steps, read
+            # (6)) and the prefix panel on jump rows
+            self._merge_option_stats(errs)
+            errs.update(option_prefix_fields(opt_pf))
         if muzero.RESET_EVERY_STEPS:
             # Test C: the resets so far (a row written before its
             # iteration's reset counts it out) and the weight ships that
@@ -5024,6 +5539,20 @@ def save_run_checkpoint(run, path, meta):
                       or []],
             "windows": copy.deepcopy(getattr(run, "ramp_windows", None)
                                      or ramp_windows_empty())}
+    if int(muzero.OPTION_LENGTH) > 1:
+        # Test O stage 4a: the open row's option window and its probe roots
+        # (their keys, stacks -- at most OPTION_PROBE_ROOTS, about 22 MB --
+        # and the pinned generator's state), so a resume keeps a partial
+        # row's counts and its probe's sample; only then, so every other
+        # arm's head is unchanged
+        pool = getattr(run, "_opt_probe", None)
+        state["option_diag"] = {
+            "window": copy.deepcopy(getattr(run, "_opt_window", None)),
+            "probe": None if pool is None else {
+                "row": int(pool["row"]),
+                "keys": [float(k) for k in pool["keys"]],
+                "obs": list(pool["obs"]),
+                "rng": copy.deepcopy(pool["rng"].bit_generator.state)}}
     state["rng"] = {
         "np": np.random.get_state(),
         "py": random.getstate(),
@@ -5125,6 +5654,19 @@ def load_run_checkpoint(run, path, expect):
         run.ramp_trace = [list(e) for e in state["ramp"]["trace"]]
         run.ramp_windows = copy.deepcopy(state["ramp"].get("windows")
                                          or ramp_windows_empty())
+    if "option_diag" in state:
+        # Test O stage 4a: the partial row's option window and probe roots
+        od = state["option_diag"]
+        run._opt_window = copy.deepcopy(od["window"])
+        p = od["probe"]
+        if p is None:
+            run._opt_probe = None
+        else:
+            rng = np.random.Generator(np.random.PCG64())
+            rng.bit_generator.state = p["rng"]
+            run._opt_probe = {"row": int(p["row"]),
+                              "keys": np.asarray(p["keys"], dtype=np.float64),
+                              "obs": list(p["obs"]), "rng": rng}
     # Test C2: the ramp's values at the restored step and reset origin (a
     # no-op without RAMP_STEPS)
     muzero.apply_ramps(run.trainer.training_steps)
@@ -5672,6 +6214,45 @@ def note_ramp_window(run):
         w["target_mean"] += float(last[1])
 
 
+def note_option_step(run):
+    """Test O stage 4a: the gradient step just taken into the row's option
+    window (Run._opt_window), from the trainer's _option_last, which is
+    consumed here so no step counts twice (none: nothing). Every step adds
+    its batch's host shares -- the mask share (NOT DEPARTURE 7's hit rate),
+    the per-edge jump share, the span, DEPARTURE 3's birth-target counts --
+    which hold whether or not the step was finite; the option loss and the
+    jump / one-step rows' consistency sums join only where all are finite
+    (loss_steps), a non-finite step counted apart, as the step window
+    does. Read after the step's own loss sync, so its device scalars are
+    ready: the float() copies wait on nothing."""
+    last = getattr(run.trainer, "_option_last", None)
+    if last is None:
+        return
+    run.trainer._option_last = None
+    w = run._option_window()
+    w["steps"] += 1
+    w["mask_share"] += float(last["option_mask_share"])
+    js = list(last["option_jump_share"])
+    if len(js) != len(w["jump_share"]):
+        raise ValueError(f"a batch of {len(js)} unroll edges in an option "
+                         f"window of {len(w['jump_share'])}")
+    w["jump_share"] = [a + float(b) for a, b in zip(w["jump_share"], js)]
+    w["span"] += float(last["option_span_mean"])
+    for k in ("birth_pos", "birth_pos_n", "birth_root", "birth_root_n"):
+        w[k] += int(last[k])
+    vals = (float(last["option_loss"]), float(last["cons_jump_sum"]),
+            float(last["cons_single_sum"]))
+    if not all(np.isfinite(v) for v in vals):
+        w["nonfinite"] += 1
+        return
+    w["loss_steps"] += 1
+    w["loss"] += vals[0]
+    w["cons_jump"] += vals[1]
+    w["cons_jump_n"] += int(last["cons_jump_n"])
+    w["cons_single"] += vals[2]
+    w["cons_single_n"] += int(last["cons_single_n"])
+
+
 def after_train_step(run):
     """Per-gradient-step hook, called by every training loop right after the
     step counter advances. Today: Test C2's ramp (the step just taken into
@@ -5682,7 +6263,10 @@ def after_train_step(run):
     and pre-clip grad norm; mean grad norm over the 20 steps before vs after
     each pass -- round-2 design audit). Touches nothing on `run` while ReDo
     and the ramp are off, so every other arm is unchanged and test stubs
-    need no new surface."""
+    need no new surface. Test O stage 4a (OPTION_LENGTH > 1): first the
+    step's option numbers into the row's option window (note_option_step)."""
+    if int(muzero.OPTION_LENGTH) > 1:
+        note_option_step(run)
     if muzero.RAMP_STEPS:
         note_ramp_window(run)
         muzero.apply_ramps(run.trainer.training_steps)

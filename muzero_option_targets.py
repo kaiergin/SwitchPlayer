@@ -67,9 +67,12 @@ the option arms' gate (stage 4) is to refuse it.
 Positions written: the acted records the window visits (OptionZero's
 setActionPairInfo refuses pos >= size), rows in order then positions in
 order, so a position two rows share takes the later row's value. The
-written argmax is the TRAINING forward's (train-mode BN; the root's on the
-augmented observation under USE_AUGMENTATION, where OptionZero's Atari
-learner has no augmentation -- a departure recorded in CURRICULUM).
+written argmax is the TRAINING forward's (train-mode BN). Under
+USE_AUGMENTATION that forward starts at the AUGMENTED root observation, so
+EVERY PMAX the learner writes descends from it -- the root's directly, each
+unrolled position's through latents unrolled from it -- where OptionZero's
+Atari learner has no augmentation. A small UNREGISTERED difference: CURRICULUM
+records it as a CODE NOTE (stage 3), not among the DEPARTURES.
 """
 import numpy as np
 

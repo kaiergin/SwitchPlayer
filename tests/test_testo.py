@@ -26,6 +26,8 @@ from tests.test_supervise_testb import _py_each, real_sup, sup  # noqa
 from tests.test_testc import make_run
 
 O0 = ablation.PLAIN_ARM + "-o0"
+OF = ablation.PLAIN_ARM + "-of"
+OH = ablation.PLAIN_ARM + "-oh"
 C0 = ablation.LONG_ARM + "-n0"
 ENV_ID = "MsPacmanNoFrameskip-v4"
 A = 9
@@ -44,6 +46,7 @@ def no_leak():
     yield
     assert muzero.OPTION_PRECHECK is False
     assert muzero.TOKEN_VOCAB is None
+    assert muzero.OPTION_LENGTH == 1 and muzero.OPTION_EDGE is True
 
 
 @pytest.fixture
@@ -100,10 +103,48 @@ def test_o0_holds_the_registered_recipe():
         assert gone not in o0
 
 
-def test_only_o0_has_the_flag_on():
+def test_only_o0_and_the_option_arms_have_the_flag_on():
+    # stage 4a: OF and OH keep O0's pre-check (it reads plain play, which
+    # they keep), so the three arms' shares compare
     assert muzero.OPTION_PRECHECK is False
     assert [n for n, s in ablation.ARMS.items()
-            if s.get("OPTION_PRECHECK")] == [O0]
+            if s.get("OPTION_PRECHECK")] == [O0, OF, OH]
+
+
+def test_of_is_o0_plus_the_option_length_and_oh_of_minus_the_edge():
+    """Test O stage 4a's arms (CURRICULUM "Test O", ARMS): OF = O0 + L 3,
+    OH = OF + OPTION_EDGE False; nothing else differs, the pre-check
+    included."""
+    o0, of, oh = ablation.ARMS[O0], ablation.ARMS[OF], ablation.ARMS[OH]
+    d = {k for k in set(o0) | set(of) if o0.get(k, "-") != of.get(k, "-")}
+    assert d == {"OPTION_LENGTH", "_doc"}
+    d = {k for k in set(of) | set(oh) if of.get(k, "-") != oh.get(k, "-")}
+    assert d == {"OPTION_EDGE", "_doc"}
+    assert of["OPTION_LENGTH"] == 3 and "OPTION_EDGE" not in of
+    assert oh["OPTION_LENGTH"] == 3 and oh["OPTION_EDGE"] is False
+    for spec in (of, oh):
+        assert spec["OPTION_PRECHECK"] is True
+        assert spec["TOKEN_VOCAB"] is None
+        assert "TRAIN_PREFETCH" not in spec       # the default, off
+        assert spec["_doc"].startswith("Test O's O")
+    assert "OF" in of["_doc"] and "OH" in oh["_doc"]
+    # C0's differences carry over unchanged
+    c0 = ablation.ARMS[C0]
+    assert {k for k in set(c0) | set(of) if c0.get(k, "-") != of.get(k, "-")
+            } == DIFFERENT | {"OPTION_LENGTH", "_doc"}
+
+
+def test_the_option_arms_resolve_to_the_registered_knobs(in_arm):
+    in_arm(OF)
+    assert muzero.OPTION_LENGTH == 3 and muzero.OPTION_EDGE is True
+    assert muzero.TRAIN_PREFETCH is False
+    assert muzero.ACTION_ENCODING == "embed"
+    assert ablation.ACTIONS == A
+
+
+def test_oh_resolves_with_the_edge_off(in_arm):
+    in_arm(OH)
+    assert muzero.OPTION_LENGTH == 3 and muzero.OPTION_EDGE is False
 
 
 # --------------------------------------------------------------------------
@@ -228,38 +269,120 @@ def test_the_gate_ignores_every_other_arm(monkeypatch):
     ablation.option_gate({}, False, False, 2)
 
 
+# --------------------------------------------------------------------------
+# the option arms' gate (stage 4a lifted stage 3's refusal)
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("arm", [OF, OH])
+def test_the_gates_pass_the_option_arms(in_arm, arm):
+    spec = in_arm(arm)
+    ablation.token_gate(spec, True, True, 0)
+    ablation.option_gate(spec, True, True, 0)
+    ablation.reward_growth_gate(True, True, 0)
+    ablation.student_gate(spec, None, True)
+    ablation.reset_gate(spec, True, True, 0, 2000, None)
+    ablation.ramp_gate(spec)
+
+
+def test_the_gate_passes_length_2_and_an_arm_without_the_precheck(
+        in_arm, monkeypatch):
+    spec = in_arm(OF)
+    monkeypatch.setattr(muzero, "OPTION_LENGTH", 2)
+    ablation.option_gate(spec, True, True, 0)
+    monkeypatch.setattr(muzero, "OPTION_PRECHECK", False)
+    monkeypatch.setattr(muzero, "OPTION_EDGE", False)
+    ablation.option_gate(spec, True, True, 0)
+
+
 @pytest.mark.parametrize("change", [
-    {"OPTION_LENGTH": 3}, {"OPTION_LENGTH": 2}, {"OPTION_EDGE": False},
-    {"OPTION_LENGTH": 3, "OPTION_EDGE": False}])
-def test_the_gate_refuses_the_unwired_option_arms(in_arm, monkeypatch,
-                                                  change):
-    """Stage 1-2 built the option heads, the jump dynamics and the option
-    search, and stage 3 wired the birth search, the records, the unroll,
-    the head targets and the loss; the arms, their gate and their
-    diagnostics are stage 4's, so the gate refuses an option arm until
-    stage 4 lifts this (audit r1 of the stage-1-2 build: no such arm may
-    run before every piece exists)."""
-    spec = in_arm()
+    {"TRAIN_PREFETCH": True}, {"PAPER_TARGETS": False},
+    {"BIRTH_SEARCH": False}, {"ACTION_ENCODING": "plane"},
+    {"USE_SEARCH_ACTING": True}, {"REFRESH_VTREE": False},
+    {"VALUE_TARGET_MODE": "mixed"}, {"USE_GUMBEL_SEARCH": True},
+    {"USE_TARGET_MODEL": False}, {"ASYNC_LOOP": True},
+    {"REFRESH_OFFLOAD": True}, {"REFRESH_SATURATE": True},
+    {"USE_ATARI_WRAPPERS": False}, {"ACTOR_GUMBEL_SEARCH": True}])
+@pytest.mark.parametrize("arm", [OF, OH])
+@pytest.mark.parametrize("precheck", [True, False])
+def test_the_gate_refuses_an_option_arm_off_the_tested_path(
+        in_arm, monkeypatch, change, arm, precheck):
+    spec = in_arm(arm)
+    monkeypatch.setattr(muzero, "OPTION_PRECHECK", precheck)
     for k, v in change.items():
         monkeypatch.setattr(muzero, k, v)
-    with pytest.raises(SystemExit, match="not wired yet"):
+    with pytest.raises(SystemExit, match="OPTION_LENGTH 3 runs only on "
+                                         "the tested path"):
         ablation.option_gate(spec, True, True, 0)
 
 
-def test_the_unwired_refusal_holds_on_every_arm(monkeypatch):
-    monkeypatch.setattr(muzero, "OPTION_LENGTH", 3)
-    with pytest.raises(SystemExit, match="not wired yet"):
-        ablation.option_gate({}, False, False, 2)       # no OPTION_PRECHECK
-    monkeypatch.setattr(muzero, "OPTION_LENGTH", 1)
-    monkeypatch.setattr(muzero, "OPTION_EDGE", False)
-    with pytest.raises(SystemExit, match="not wired yet"):
+@pytest.mark.parametrize("precheck", [True, False])
+def test_the_gate_refuses_an_option_arms_launch_modes_steps_and_moves(
+        in_arm, monkeypatch, precheck):
+    spec = in_arm(OF)
+    monkeypatch.setattr(muzero, "OPTION_PRECHECK", precheck)
+    for args in ((False, False, 0), (True, False, 0), (True, True, 2),
+                 (False, True, 0)):
+        with pytest.raises(SystemExit,
+                           match="OPTION_LENGTH 3 runs with --ray --cpu-actor"):
+            ablation.option_gate(spec, *args)
+    monkeypatch.setattr(ablation, "FRAMESKIP", 30)
+    with pytest.raises(SystemExit, match="OPTION_LENGTH 3 plays one move "
+                                         "per step .* --frameskip 4"):
+        ablation.option_gate(spec, True, True, 0)
+    monkeypatch.setattr(ablation, "FRAMESKIP", 4)
+    monkeypatch.setattr(ablation, "ACTIONS", 5)
+    with pytest.raises(SystemExit, match="OPTION_LENGTH 3 plays .*whole "
+                                         "action space"):
+        ablation.option_gate(spec, True, True, 0)
+    monkeypatch.setattr(ablation, "ACTIONS", A)
+    monkeypatch.setattr(muzero, "TOKEN_VOCAB", ((0, 4), (1, 4)))
+    with pytest.raises(SystemExit, match="OPTION_LENGTH 3 reads plain moves"
+                                         ".*refuses a TOKEN_VOCAB"):
+        ablation.option_gate(spec, True, True, 0)
+
+
+@pytest.mark.parametrize("bad", [0, -3, 2.5, "3", None, True, False])
+def test_the_gate_refuses_a_malformed_option_length_on_every_arm(
+        monkeypatch, bad):
+    monkeypatch.setattr(muzero, "OPTION_LENGTH", bad)
+    with pytest.raises(SystemExit, match="OPTION_LENGTH must be an int >= 1"):
         ablation.option_gate({}, False, False, 2)
 
 
-def test_no_registered_arm_sets_the_option_knobs():
+@pytest.mark.parametrize("bad", [None, 0, 1, "True"])
+def test_the_gate_refuses_a_non_bool_option_edge_on_every_arm(monkeypatch,
+                                                              bad):
+    monkeypatch.setattr(muzero, "OPTION_EDGE", bad)
+    with pytest.raises(SystemExit, match="OPTION_EDGE must be True or False"):
+        ablation.option_gate({}, False, False, 2)
+
+
+@pytest.mark.parametrize("precheck", [True, False])
+def test_the_edge_off_without_heads_is_refused_on_every_arm(monkeypatch,
+                                                            precheck):
+    # (no tested path needed to refuse it: the arm is not an option arm)
+    monkeypatch.setattr(muzero, "OPTION_PRECHECK", precheck)
+    monkeypatch.setattr(muzero, "OPTION_EDGE", False)
+    with pytest.raises(SystemExit, match="OPTION_EDGE False .* "
+                                         "OPTION_LENGTH >= 2"):
+        ablation.option_gate({}, False, False, 2)
+
+
+def test_an_option_length_on_any_arm_is_held_to_the_path(monkeypatch):
+    # not only the registered arms: OPTION_LENGTH > 1 alone makes an arm an
+    # option arm, the pre-check off or on
+    monkeypatch.setattr(muzero, "OPTION_LENGTH", 3)
+    with pytest.raises(SystemExit, match="OPTION_LENGTH 3 runs"):
+        ablation.option_gate({}, False, False, 2)
+
+
+def test_only_the_option_arms_set_the_option_knobs():
     for arm, cfg in ablation.ARMS.items():
+        if arm in (OF, OH):
+            continue
         assert cfg.get("OPTION_LENGTH", 1) == 1, arm
         assert cfg.get("OPTION_EDGE", True) is True, arm
+    assert ablation.ARMS[OF]["OPTION_LENGTH"] == 3
+    assert ablation.ARMS[OH]["OPTION_EDGE"] is False
 
 
 def test_run_one_wires_the_gate():

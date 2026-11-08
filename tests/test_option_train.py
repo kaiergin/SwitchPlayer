@@ -318,6 +318,54 @@ def test_a_replay_of_such_lives_alone_still_samples(plain_knobs):
     assert b["option_span"][0].tolist() == [3, 1, 1, 1, 1]
 
 
+def test_a_train_step_on_a_cut_life_fallback_window(o0, monkeypatch):
+    """Stage 3's audits left this for stage 4 (the test above pins only the
+    root, real_mask and spans): a TRAIN STEP on that fallback window, real
+    frames and option nets. Every row is root 0 (sampled with replacement),
+    its window 0 3 4 5 6 7: one jump, three one-step edges onto real
+    positions (6 the closing record), the last edge onto padding. The step
+    is finite; PMAX is rewritten at the acted positions it visits (0 3 4 5)
+    and never at the closing record or the padding; the policy target is
+    masked at the padding only (a cut life's closing record keeps its
+    search); the closing record and the padding are terminal for the heads
+    (stop, scale 1); the padding edge takes no consistency."""
+    run = option_run(o0, monkeypatch)
+    tr = run.trainer
+    rng = np.random.default_rng(12)
+    played = [0, 1, 2, 1, 2, 3]
+    life = hand_life(played, options={0: (0, 1, 2), 1: (1, 2, 1)},
+                     pmax=list(played), terminated=False, A_=A9)
+    for r in life:
+        r["obs"] = rng.integers(0, 255, (12, 84, 84), dtype=np.uint8)
+        r["target_policy"] = rng.dirichlet(np.ones(A9))
+    assert mot.truncated_roots(life, 5, 3) == [0]
+    dezero_policy(tr)
+    seed_all(13)
+    b = build_batch(tr, [life], 4, A9)
+    assert all(r is life[0] for r in b["sample_refs"])
+    assert b["option_span"].tolist() == [[3, 1, 1, 1, 1]] * 4
+    assert b["real_mask"].tolist() == [[True] * 5 + [False]] * 4
+    assert b["has_policy_target"].tolist() == [[True] * 5 + [False]] * 4
+    assert b["actions"][:, 0].tolist() == [[0, 1, 2]] * 4
+    assert (b["option_scale"][:, 4:] == 1.0).all()
+    assert (b["option_target"][:, 4:, :, A9] == 1.0).all()
+    assert [[None if x is None else at(life, x) for x in row]
+            for row in b["pmax_refs"]] == [[0, 3, 4, 5, None, None]] * 4
+    for r in life[:-1]:
+        r["pmax"] = -7                      # mark: rewritten or not
+    loss = asyncio.run(tr.train_step(b))
+    assert math.isfinite(loss)
+    assert [life[k]["pmax"] for k in (1, 2)] == [-7, -7]   # never visited
+    assert all(isinstance(life[k]["pmax"], int) and 0 <= life[k]["pmax"] < A9
+               for k in (0, 3, 4, 5))
+    assert "pmax" not in life[6]
+    last = tr._option_last
+    assert last["option_jump_share"] == [1.0, 0.0, 0.0, 0.0, 0.0]
+    assert last["option_span_mean"] == 7.0
+    assert last["cons_jump_n"] == 4 and last["cons_single_n"] == 3 * 4
+    assert math.isfinite(float(last["option_loss"]))
+
+
 # ==========================================================================
 # head targets (getOptionPolicy / getOptionLossScale + DEPARTURE 7)
 # ==========================================================================
@@ -1149,7 +1197,8 @@ def test_the_row_diagnostics_run_on_option_nets_and_jump_batches(
         o0, monkeypatch):
     """evaluate_diagnostics (every eval row) builds paper batches -- jump
     rows now -- and unrolls them through the dynamics with its check on;
-    the dormant-unit read walks the nets. Nothing new is logged here."""
+    the dormant-unit read walks the nets. Stage 4a's option fields (opt_*,
+    tests/test_option_diag.py) join the row; nothing under another name."""
     run = option_run(o0, monkeypatch)
     run.replay = real_lives(3)
     seed_all(10)
@@ -1157,6 +1206,7 @@ def test_the_row_diagnostics_run_on_option_nets_and_jump_batches(
     assert math.isfinite(errs["prefix"]) and math.isfinite(errs["value"])
     assert "dormant_025" in errs
     assert not any(k.startswith("option") for k in errs)
+    assert "opt_prefix_jump_rows" in errs and "opt_probe_roots" in errs
 
 
 # ==========================================================================

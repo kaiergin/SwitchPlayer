@@ -3051,7 +3051,12 @@ class TrainingHelper:
         loss_option, step 0 plus the unrolled steps / K), the masked share,
         the per-edge jump share and the mean span (host floats, defined in
         _option_inputs: the masked share is over window positions and heads,
-        not a hit rate). L = 1: none of this runs.
+        not a hit rate); since stage 4a also the jump and one-step edges'
+        consistency sums (detached device scalars of the unweighted
+        per-sample term) and counts, and DEPARTURE 3's birth-target counts,
+        all for ablation.note_option_step, which consumes it. The loss, its
+        gradients and every write are unchanged by these. L = 1: none of
+        this runs.
         """
         # Determine the number of unroll steps from the batch.
         unroll_steps = batch["actions"].shape[1]
@@ -3199,7 +3204,14 @@ class TrainingHelper:
                                 else is_weights * real_mask[:, i])
             latent_loss = consistency_loss(online_proj, target_proj,
                                            weights=cons_weights)
-            
+            if oin is not None:
+                # Test O stage 4a: each row's consistency at this edge
+                # (consistency_loss's per-sample term, unweighted, detached),
+                # for the jump / one-step rows' means (_option_inputs' masks)
+                with torch.no_grad():
+                    oin["cons"].append(-F.cosine_similarity(
+                        online_proj.detach(), target_proj.detach(), dim=1))
+
             # Loss for reward prediction. (reward[0] not used since it is reward for entering obs)
             reward_loss = wmean(-torch.sum(converted_target_rewards[:, i, :] * F.log_softmax(reward_logits, dim=1), dim=1))
 
@@ -3265,11 +3277,20 @@ class TrainingHelper:
                       if ramp_vterms is not None else None)
         if oin is not None:
             # Test O: the batch's option numbers, for the diagnostics stage
-            # (the loss stays a device scalar: no new sync here)
-            self._option_last = {"option_loss": oin["loss"].detach(),
-                                 "option_mask_share": oin["mask_share"],
-                                 "option_jump_share": oin["jump_share"],
-                                 "option_span_mean": oin["span_mean"]}
+            # (the loss and the consistency sums stay device scalars: no new
+            # sync here; ablation.note_option_step reads them after the
+            # step's own sync)
+            cons = torch.stack(oin["cons"], dim=1)                 # [B, K]
+            self._option_last = {
+                "option_loss": oin["loss"].detach(),
+                "option_mask_share": oin["mask_share"],
+                "option_jump_share": oin["jump_share"],
+                "option_span_mean": oin["span_mean"],
+                "cons_jump_sum": (cons * oin["jump_mask"]).sum(),
+                "cons_jump_n": oin["jump_n"],
+                "cons_single_sum": (cons * oin["single_mask"]).sum(),
+                "cons_single_n": oin["single_n"],
+                **oin["birth"]}
 
         # Backpropagate the total loss.
         total_loss.backward()
@@ -3350,7 +3371,22 @@ class TrainingHelper:
           jump_share  [K], the share of rows whose edge i + 1 jumps (span
                       > 1);
           span_mean   base steps a window spans, on average, a padding
-                      step counted as 1."""
+                      step counted as 1.
+        Test O stage 4a, for the row diagnostics (ablation.note_option_step):
+          jump_mask   [B, K] device 0/1: edge i + 1 jumps (a jump always
+                      lands on a real position), jump_n its count;
+          single_mask [B, K] device 0/1: edge i + 1 is one step AND lands
+                      on a real position (real_mask: not padding past the
+                      trajectory's end, which the consistency loss masks
+                      too), single_n its count;
+          birth       DEPARTURE 3's counts: "birth_pos_n" the acted records
+                      the windows visit (pmax_refs: the closing record and
+                      padding excluded), "birth_pos" those whose policy
+                      target is still the birth search's (never refreshed:
+                      no "refreshed_step", which the refresh stamps on every
+                      record of a trajectory it re-searches, every acted
+                      one replaced); "birth_root_n" / "birth_root" the same
+                      over the sampled roots (sample_refs)."""
         if "option_target" not in batch:
             raise ValueError(
                 f"nets with option heads (option_length {option_length}) "
@@ -3372,15 +3408,35 @@ class TrainingHelper:
                 f"dynamics net of length {dyn_l}")
         scale = np.asarray(batch["option_scale"])
         spans = np.asarray(batch["option_span"])
+        jump = spans > 1
+        real = batch.get("real_mask")
+        real = (np.ones((spans.shape[0], spans.shape[1] + 1), dtype=bool)
+                if real is None else np.asarray(real, dtype=bool))
+        single = (spans == 1) & real[:, 1:]
+        pos = [r for row in (batch.get("pmax_refs") or []) for r in row
+               if r is not None]
+        roots = batch.get("sample_refs") or []
         return {
             "target": torch.tensor(batch["option_target"],
                                    dtype=torch.float32, device=self.device),
             "scale": torch.tensor(scale, dtype=torch.float32,
                                   device=self.device),
-            "argmax": [], "loss": None,
+            "argmax": [], "loss": None, "cons": [],
             "mask_share": float((scale == 0).mean()),
-            "jump_share": [float(x) for x in (spans > 1).mean(axis=0)],
-            "span_mean": float(spans.sum(axis=1).mean())}
+            "jump_share": [float(x) for x in jump.mean(axis=0)],
+            "span_mean": float(spans.sum(axis=1).mean()),
+            "jump_mask": torch.tensor(jump, dtype=torch.float32,
+                                      device=self.device),
+            "jump_n": int(jump.sum()),
+            "single_mask": torch.tensor(single, dtype=torch.float32,
+                                        device=self.device),
+            "single_n": int(single.sum()),
+            "birth": {
+                "birth_pos_n": len(pos),
+                "birth_pos": sum(1 for r in pos if "refreshed_step" not in r),
+                "birth_root_n": len(roots),
+                "birth_root": sum(1 for r in roots
+                                  if "refreshed_step" not in r)}}
 
     def _option_loss(self, oin, i, option_logits, policy_logits, is_weights,
                      unroll_steps):

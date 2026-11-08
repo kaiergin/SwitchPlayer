@@ -117,7 +117,8 @@ def test_legacy_arms_pin_augmentation_off(ablation):
                         "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-long-n0",
                         "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-reset-r0",
                         "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-ramp-a0",
-                        "effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-plain-o0",
+                        *(f"effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-plain-o{v}"
+                          for v in ("0", "f", "h")),
                         *(f"effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-mined-m{k}"
                           for k in (1, 2)),
                         *(f"effzero-repro-faithful-prioract-noredo-temp05-bnrecal-mspacman-tokens-adam-w{k}"
