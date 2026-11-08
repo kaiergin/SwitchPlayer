@@ -536,6 +536,19 @@ OWN_PLAY_LOG = False
 # the shares of positions able to hold a length-2 and a length-3 option
 # (ablation.option_precheck_counts). False = off (bit for bit).
 OPTION_PRECHECK = False
+# Test O (Kai, 2026-11-07; CURRICULUM "Test O", DESIGN): OptionZero's option
+# head. OPTION_LENGTH = L, an option's most moves (base steps): L > 1 gives
+# the prediction net L - 1 extra heads over the moves plus a stop class and
+# the dynamics per-position action rows for a jump of up to L moves (read at
+# network construction, build_prediction / build_dynamics; the target model
+# mirrors the live nets'); the option search (muzero_vtree_options) reads L
+# from the nets it is given. 1 = off: no extra heads, no option code
+# anywhere, every state_dict and output bit for bit.
+OPTION_LENGTH = 1
+# Only meaningful when OPTION_LENGTH > 1. True: the option search's tree
+# carries each expanded node's option edge (arm OF). False: the same heads
+# and the same root suggestions, no option edge in the tree (arm OH).
+OPTION_EDGE = True
 
 
 def schedule_steps(training_steps):
@@ -1702,7 +1715,8 @@ def build_dynamics(action_space, support_size=None, num_bins=None, transform=Tru
                            blocks=DYN_BLOCKS,
                            action_encoding=ACTION_ENCODING,
                            reward_channels=REWARD_HEAD_CHANNELS,
-                           renormalize=LATENT_RENORMALIZE)
+                           renormalize=LATENT_RENORMALIZE,
+                           option_length=OPTION_LENGTH)
 
 
 def build_prediction(action_space, support_size=None, num_bins=None, transform=True):
@@ -1712,7 +1726,8 @@ def build_prediction(action_space, support_size=None, num_bins=None, transform=T
                              num_bins=VALUE_BINS if num_bins is None else num_bins,
                              transform=transform,
                              head_channels=PRED_HEAD_CHANNELS,
-                             fc_hidden=PRED_FC_HIDDEN)
+                             fc_hidden=PRED_FC_HIDDEN,
+                             option_length=OPTION_LENGTH)
 
 
 def prefix_bn_steps():
@@ -3324,7 +3339,9 @@ class TrainingHelper:
                 num_bins=self.prediction.num_bins,
                 transform=self.prediction.transform,
                 head_channels=self.prediction.head_channels,
-                fc_hidden=self.prediction.fc_hidden).to(self.device)
+                fc_hidden=self.prediction.fc_hidden,
+                option_length=getattr(self.prediction, "option_length", 1)
+                ).to(self.device)
             self.target_dynamics = DynamicsNetwork(
                 latent_channels=latent,
                 action_space=self.action_space,
@@ -3334,7 +3351,9 @@ class TrainingHelper:
                 blocks=len(self.dynamics.blocks),
                 action_encoding=self.dynamics.action_encoding,
                 reward_channels=self.dynamics.reward_channels,
-                renormalize=self.dynamics.renormalize_output).to(self.device)
+                renormalize=self.dynamics.renormalize_output,
+                option_length=getattr(self.dynamics, "option_length", 1)
+                ).to(self.device)
             self.target_value_prefix = ValuePrefixNetwork(
                 latent_channels=self.value_prefix.conv.in_channels,
                 hidden_size=self.value_prefix.hidden_size,

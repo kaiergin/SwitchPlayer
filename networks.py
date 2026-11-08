@@ -123,9 +123,28 @@ class RepresentationNetwork(nn.Module):
 # PredictionNetwork with categorical value representation.
 # NOTE: the policy head returns raw logits. Callers are responsible for
 # applying softmax (for acting/priors) or log_softmax (for the training loss).
+#
+# option_length=L > 1 (muzero.OPTION_LENGTH; CURRICULUM "Test O", DESIGN
+# "Heads"): OptionZero's option heads (network_unit.py 27-67). Their
+# PolicyNetwork runs ONE 1x1 conv + BatchNorm with
+# num_output_channels * option_seq_length channels and gives head i its own
+# channel slice and its own fc (38); a 1x1 conv's output channel and a
+# BatchNorm channel each read only their own filter / statistics, so after
+# the shared trunk the heads share nothing. Mirrored at our head sizes: each
+# extra head i = 1..L-1 is a copy of OUR policy branch (own 1x1 conv of
+# head_channels, own [fc_hidden] layer when set, own final fc) over A moves
+# plus a stop class (index A), reading the same trunk output x as the
+# policy and value branches; default PyTorch init everywhere, the final
+# bias zero except 10 on stop (39-44). Built after every existing layer, so
+# an L > 1 net's policy/value layers draw exactly the RNG an L = 1 net's
+# do; L = 1 builds nothing (state_dict, outputs and RNG use unchanged). The
+# policy head keeps EfficientZero's zero-init and stays head 0, with a fixed
+# stop logit of -100 (61-66). forward(latent) is unchanged;
+# forward(latent, with_options=True) also returns option logits [B, L, A+1].
 class PredictionNetwork(nn.Module):
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
-                 pool=(6, 6), transform=True, head_channels=32, fc_hidden=None):
+                 pool=(6, 6), transform=True, head_channels=32, fc_hidden=None,
+                 option_length=1):
         super(PredictionNetwork, self).__init__()
         # Whether decoded scalars come back through h_inverse. Must match the
         # transform flag the training side passes to scalar_to_categorical_batch
@@ -176,7 +195,29 @@ class PredictionNetwork(nn.Module):
         self.head_channels = head_channels
         self.fc_hidden = fc_hidden
 
-    def forward(self, latent):
+        # Test O's option heads (see the note above the class). Registered
+        # last: L = 1 adds no module, no key and no RNG draw.
+        self.action_space = action_space
+        self.option_length = int(option_length)
+        if self.option_length < 1:
+            raise ValueError(f"option_length must be >= 1, got {option_length!r}")
+        if self.option_length > 1:
+            self.option_convs = nn.ModuleList()
+            self.option_hiddens = nn.ModuleList() if fc_hidden else None
+            self.option_fcs = nn.ModuleList()
+            for _ in range(self.option_length - 1):
+                self.option_convs.append(
+                    nn.Conv2d(latent_channels, head_channels, kernel_size=1))
+                if fc_hidden:
+                    self.option_hiddens.append(nn.Linear(features, fc_hidden))
+                fc = nn.Linear(fc_hidden if fc_hidden else features,
+                               action_space + 1)
+                with torch.no_grad():
+                    fc.bias.zero_()
+                    fc.bias[action_space] = 10.0   # the stop class
+                self.option_fcs.append(fc)
+
+    def forward(self, latent, with_options=False):
         x = self.block(latent)
         x = self.relu(x)
 
@@ -197,8 +238,26 @@ class PredictionNetwork(nn.Module):
         value_logits = self.value_fc(v)  # shape: (batch_size, num_bins)
         support = create_support(self.support_size, self.num_bins, latent.device)
         value = scalar_from_logits(value_logits, support, invert=self.transform)
-        
-        return policy_logits, value, value_logits
+
+        if not with_options:
+            return policy_logits, value, value_logits
+        return policy_logits, value, value_logits, self._option_logits(
+            x, policy_logits)
+
+    def _option_logits(self, x, policy_logits):
+        """[B, L, A+1]: head 0 = the policy logits plus a fixed stop logit
+        of -100 (network_unit.py 61-66), heads 1..L-1 the option heads."""
+        stop = torch.full((policy_logits.size(0), 1), -100.0,
+                          dtype=policy_logits.dtype, device=policy_logits.device)
+        heads = [torch.cat([policy_logits, stop], dim=1)]
+        for i in range(self.option_length - 1):
+            o = self.relu(self.option_convs[i](x))
+            o = F.adaptive_avg_pool2d(o, self.pool)
+            o = o.contiguous().view(o.size(0), -1)
+            if self.option_hiddens is not None:
+                o = self.relu(self.option_hiddens[i](o))
+            heads.append(self.option_fcs[i](o))
+        return torch.stack(heads, dim=1)
 
 # Revised DynamicsNetwork with categorical reward representation.
 class DynamicsNetwork(nn.Module):
@@ -215,11 +274,22 @@ class DynamicsNetwork(nn.Module):
                   imposes an ordinal fiction the reference tolerates);
       "onehot" -- |A| binary planes (thin, no fake metric; the curriculum
                   branch's choice, and it extends to duration planes).
+
+    option_length=L > 1 (muzero.OPTION_LENGTH; CURRICULUM "Test O", DESIGN
+    "Dynamics"): one forward can be a JUMP of up to L moves. "embed" only
+    (anything else raises): per-position embedding rows, position 1 =
+    action_embedding (today's parameter, same name), positions 2..L the new
+    option_embeddings[0..L-2], initialised to ZERO (no RNG drawn). A [B]
+    long action is today's path exactly; a [B, k] long action (k <= L),
+    padded with -1, is encoded as the SUM of each position's row, a -1
+    contributing nothing -- OptionZero's per-position action planes
+    (atari.cpp 141-150), summed into one embedding. L = 1 builds nothing:
+    state_dict keys, shapes and outputs are today's.
     """
 
     def __init__(self, latent_channels=128, action_space=9, support_size=10, num_bins=21,
                  pool=(6, 6), transform=True, blocks=2, action_encoding="embed",
-                 reward_channels=32, renormalize=True):
+                 reward_channels=32, renormalize=True, option_length=1):
         super(DynamicsNetwork, self).__init__()
         self.renormalize_output = renormalize   # see RepresentationNetwork
         # See PredictionNetwork: must match the encode side's transform flag.
@@ -257,9 +327,46 @@ class DynamicsNetwork(nn.Module):
         nn.init.zeros_(self.reward_fc.weight)
         nn.init.zeros_(self.reward_fc.bias)
 
+        # Test O's jump rows (see the class docstring). Registered last and
+        # built from explicit zeros (no reset_parameters, no RNG draw).
+        self.option_length = int(option_length)
+        if self.option_length < 1:
+            raise ValueError(f"option_length must be >= 1, got {option_length!r}")
+        if self.option_length > 1:
+            if action_encoding != "embed":
+                raise ValueError(
+                    f"option_length {self.option_length} > 1 needs "
+                    f"action_encoding 'embed' (per-position embedding rows); "
+                    f"got {action_encoding!r}")
+            self.option_embeddings = nn.ModuleList([
+                nn.Embedding(action_space, latent_channels,
+                             _weight=torch.zeros(action_space, latent_channels))
+                for _ in range(self.option_length - 1)])
+
+    def _encode_jump(self, action):
+        """[B, k] long, -1 padded -> [B, C]: the sum of each position's row
+        (position 1 = action_embedding), a -1 adding nothing."""
+        if action.size(1) > self.option_length:
+            raise ValueError(
+                f"a jump of {action.size(1)} positions on a dynamics net "
+                f"built for option_length {self.option_length}")
+        e = None
+        for j in range(action.size(1)):
+            col = action[:, j]
+            table = (self.action_embedding if j == 0
+                     else self.option_embeddings[j - 1])
+            row = table(col.clamp(min=0))
+            row = torch.where((col >= 0).unsqueeze(1), row,
+                              torch.zeros_like(row))
+            e = row if e is None else e + row
+        return e
+
     def _encode_action(self, action, batch, h, w, device):
         if self.action_encoding == "embed":
-            e = self.action_embedding(action)
+            # A [B, k] action is a jump (option_length > 1; k = 1 is one
+            # move, the same row as the [B] path); a [B] action is today's.
+            e = (self._encode_jump(action) if action.dim() == 2
+                 else self.action_embedding(action))
             return e.contiguous().view(batch, -1, 1, 1).expand(-1, -1, h, w)
         if self.action_encoding == "plane":
             plane = action.to(torch.float32) / float(self.action_space)
