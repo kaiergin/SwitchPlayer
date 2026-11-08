@@ -1135,6 +1135,44 @@ OPTION CODE, stages 1-2 (network; option search and its tests), 2026-11-08, buil
   so the unroll validates jump rows on the host at batch time; probes and distill.prep
   build nets without option_gate (no registered arm sets the knobs, pinned by a test);
   two docstrings overstate.
+OPTION CODE, stage 3 (records, unroll, targets and loss; the birth search on the option
+  engine), 2026-11-08, 43a020d6: muzero_option_targets.py holds host-side ports of
+  getStepLength, the window walk, getOptionPolicy / getOptionLossScale (with DEPARTURE
+  7's product) and updateMax; records carry the root's suggestion and PMAX; jump rows are
+  validated on the host and the training dynamics call skips its in-graph check. Flag off,
+  two O0 batches and train steps and an O0 life through the birth search are pinned bit
+  for bit against git e11fd5f8 (batch, loss, every gradient, BN buffers, optimizer, target
+  nets, priorities, records, RNG streams). CPU cost of an option step at batch 64 about
+  the same as O0's; 192 B more per record never refreshed.
+  CODE NOTES: PMAX at birth is the root's pre-noise head-0 argmax through the learner's
+  nets, as the pre-check's m; it is rewritten after each step at the window positions the
+  walk visits, rows then positions, a later row winning (OptionZero writes before the
+  backward: same values); a skipped non-finite step writes none. Every PMAX the learner
+  writes comes from a forward that starts at the AUGMENTED root observation
+  (USE_AUGMENTATION, as every training forward here; unrolled latents descend from it);
+  OptionZero has no augmentation, a small unregistered difference. The
+  zero-initialised policy head ties every logit, so records born before the first step
+  carry PMAX 0 and their extra heads are masked wherever move 0 was not played (about
+  0.88 of heads on long lives at uniform play); this clears with the first rewrites. After
+  that the mask share is about 1 - P(played = PMAX), so it stays high while the prior is
+  flat at temperature 0.5, which is the registered rule. The jump edge's discount has no
+  training consumer (landing targets are the position's own, the prefix sums
+  undiscounted); it acts in the search only.
+  CODE AUDIT r1 (two auditors): no HIGH; 1 MEDIUM, a test gap (the option loss's gradient
+  weight unpinned: moving it outside the 1/K scaling kept the loss value and passed every
+  test; the shipped weight measured right, 1/K at all six positions); LOWs, among them a
+  cut life whose jumps push every window past the cut gave no root, a crash only on a
+  replay of nothing but such lives. An independent port of base_env.h's rules, fuzzed over
+  3,000 lives and 200 batches, and a batch oracle over 29,563 rows (18,743 jump edges)
+  found 0 mismatches. Fixes 7788abd0 (the gradient weight pinned at every position under
+  both loss-scaling settings, killing both mutants; such a cut life keeps root 0 under the
+  plain fallback; the birth search refuses a head-length mismatch both ways; option
+  batches carry a validation mark the train step requires).
+  CODE AUDIT r2, a fresh check of the fixes: nothing above LOW; the stage 3 loop is
+  CLOSED. Left for stage 4: the option suites in the preflight and AUDITED, TRAIN_PREFETCH
+  refused for option arms, read (3)'s counts accumulated across lives, the hit rate as
+  DEPARTURE 7 defines it (the batch mask share is not it), a train step on a fallback
+  window in the tests, one docstring's wording, the manifest rewrite.
   A third MEDIUM is a CONSEQUENCE OF DEPARTURE 2, KEPT as registered: a zero-visit option
   and its first move's primitive both score r + d x value with no exploration bonus at
   the first visit, so an option can be crossed on its node's first visit, and p(o) plays
