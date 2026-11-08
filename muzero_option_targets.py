@@ -66,7 +66,10 @@ read PMAX one to TRAIN_PREFETCH_DEPTH + 1 steps late, as priorities do
 the option arms' gate (stage 4) is to refuse it.
 Positions written: the acted records the window visits (OptionZero's
 setActionPairInfo refuses pos >= size), rows in order then positions in
-order, so a position two rows share takes the later row's value.
+order, so a position two rows share takes the later row's value. The
+written argmax is the TRAINING forward's (train-mode BN; the root's on the
+augmented observation under USE_AUGMENTATION, where OptionZero's Atari
+learner has no augmentation -- a departure recorded in CURRICULUM).
 """
 import numpy as np
 
@@ -156,7 +159,12 @@ def truncated_roots(traj, unroll_steps, option_length):
     legal iff start + span_of(start) <= n = len - 1 -- the positions it
     really spans, counted per root. Roots below len - K x L always fit;
     only the last K x L - K candidates are walked. At L 1 (every span K)
-    this is range(len - K) exactly."""
+    this is range(len - K) exactly.
+    A cut life with K < len <= K x L can have NO fitting root (every window
+    jumps past the cut: len 7, K 5, length-3 jumps played at 0 and 1). It
+    then keeps root 0 under the plain fallback (its window padded past the
+    cut), as a short cut life (len <= K) keeps its roots (audit r1 of stage
+    3: a replay of such lives alone had no root, and sampling crashed)."""
     n = len(traj) - 1
     K, L = int(unroll_steps), int(option_length)
     safe = max(0, len(traj) - K * L)
@@ -164,7 +172,7 @@ def truncated_roots(traj, unroll_steps, option_length):
     for idx in range(safe, len(traj) - K):
         if idx + span_of(traj, idx, K) <= n:
             out.append(idx)
-    return out
+    return out or [0]
 
 
 def jump_reward(traj, prev, pos):

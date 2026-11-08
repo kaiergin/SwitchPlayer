@@ -234,10 +234,11 @@ def test_the_gate_ignores_every_other_arm(monkeypatch):
 def test_the_gate_refuses_the_unwired_option_arms(in_arm, monkeypatch,
                                                   change):
     """Stage 1-2 built the option heads, the jump dynamics and the option
-    search, but no consumer runs them yet (the birth search, the refresh,
-    the unroll and the loss are the plain path's): an option arm would run
-    silently as O0, so the gate refuses it until stage 3 lifts this (audit
-    r1 of the stage-1-2 build)."""
+    search, and stage 3 wired the birth search, the records, the unroll,
+    the head targets and the loss; the arms, their gate and their
+    diagnostics are stage 4's, so the gate refuses an option arm until
+    stage 4 lifts this (audit r1 of the stage-1-2 build: no such arm may
+    run before every piece exists)."""
     spec = in_arm()
     for k, v in change.items():
         monkeypatch.setattr(muzero, k, v)

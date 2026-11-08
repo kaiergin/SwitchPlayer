@@ -291,6 +291,33 @@ def test_truncated_roots_on_a_long_life_match_the_definition():
     assert len(got) < len(life) - 5         # some tail roots dropped
 
 
+def _no_fit_life():
+    # a CUT life of 6 acted positions (len 7, K 5 < 7 <= K x L = 15) with
+    # length-3 jumps played at 0 and 1: the plain candidates are 0 and 1,
+    #   0: 0 3 4 5 6 7   span 7 -> 7 > 6
+    #   1: 1 4 5 6 7 8   span 7 -> 8 > 6
+    # so no window fits (audit r1 of stage 3)
+    played = [0, 1, 2, 1, 2, 3]
+    return hand_life(played, options={0: (0, 1, 2), 1: (1, 2, 1)},
+                     pmax=list(played), terminated=False)
+
+
+def test_a_cut_life_no_window_fits_keeps_root_0():
+    life = _no_fit_life()
+    assert [mot.span_of(life, i, 5) for i in (0, 1)] == [7, 7]
+    assert mot.truncated_roots(life, 5, 3) == [0]
+
+
+def test_a_replay_of_such_lives_alone_still_samples(plain_knobs):
+    life = _no_fit_life()
+    b = build_batch(stub_trainer(), [life], 1)
+    assert b["sample_refs"][0] is life[0]
+    # root 0's window under the plain fallback: positions 0 3 4 5 6 7, the
+    # last one padding past the cut tail
+    assert b["real_mask"][0].tolist() == [True] * 5 + [False]
+    assert b["option_span"][0].tolist() == [3, 1, 1, 1, 1]
+
+
 # ==========================================================================
 # head targets (getOptionPolicy / getOptionLossScale + DEPARTURE 7)
 # ==========================================================================
@@ -775,6 +802,69 @@ def test_the_option_loss_enters_the_total_at_scale_1(o0, monkeypatch):
     assert got == pytest.approx(terms[0] + sum(terms[1:]) / 5, rel=1e-5)
 
 
+@pytest.mark.parametrize("effzero", [True, False])
+def test_the_option_terms_gradient_weight_at_every_position(o0, monkeypatch,
+                                                            effzero):
+    """Audit r1 of stage 3 (its test_audit_grad_weight.py, ported): the
+    loss VALUE cannot see where the option term sits against the 1/K
+    gradient scale, so its GRADIENT is pinned. dTotal / d option_logits_i
+    = w_i x d l_i / d option_logits_i, l_i calculate_loss's term written
+    out here and w_i the position's weight: 1/K on every unrolled position
+    and, under EFFZERO_LOSS_SCALING (O0's), on the root too; 1 on the root
+    otherwise (OptionZero's loss_option = step 0 + the unrolled / K,
+    train.py 235 / 258). Head 0 of the stacked logits takes none (the
+    policy loss reads the policy logits). And every written PMAX is its own
+    forward's policy-logit argmax, a later row winning."""
+    assert muzero.EFFZERO_LOSS_SCALING is True
+    monkeypatch.setattr(muzero, "EFFZERO_LOSS_SCALING", effzero)
+    run = option_run(o0, monkeypatch)
+    tr = run.trainer
+    dezero_policy(tr)
+    replay = real_lives(1)
+    seed_all(4)
+    b = build_batch(tr, replay, 8, A9)
+    K = b["actions"].shape[1]
+    kept = []
+    orig = tr.prediction.forward
+
+    def fwd(*a, **kw):
+        out = orig(*a, **kw)
+        if kw.get("with_options"):
+            out[3].retain_grad()
+            kept.append(out)
+        return out
+
+    tr.prediction.forward = fwd
+    asyncio.run(tr.train_step(b))
+    assert len(kept) == K + 1
+    w = torch.tensor(b["is_weights"], dtype=torch.float32)
+    tgt = torch.tensor(b["option_target"], dtype=torch.float32)
+    sc = torch.tensor(b["option_scale"], dtype=torch.float32)
+    for s, out in enumerate(kept):
+        lg = out[3].detach().clone().requires_grad_(True)
+        Lh = lg.shape[1]
+        tot = 0.0
+        for h in range(1, Lh):
+            ce = -(tgt[:, s, h - 1] * torch.log_softmax(lg[:, h], dim=1)
+                   ).sum(dim=1)
+            tot = tot + (w * sc[:, s, h - 1] * ce).mean()
+        (tot / (Lh - 1)).backward()
+        weight = 1.0 / K if (s > 0 or effzero) else 1.0
+        want = lg.grad[:, 1:] * weight
+        got = out[3].grad[:, 1:]
+        assert want.abs().sum() > 0, s
+        assert torch.allclose(got, want, atol=1e-7, rtol=1e-4), (s, float(
+            got.abs().sum() / want.abs().sum()))
+        assert float(out[3].grad[:, 0].abs().sum()) == 0.0, s
+    want = {}
+    for row, refs in enumerate(b["pmax_refs"]):
+        for s, ref in enumerate(refs):
+            if ref is not None:
+                want[id(ref)] = (ref, int(kept[s][0].argmax(dim=1)[row]))
+    assert want
+    assert all(ref["pmax"] == v for ref, v in want.values())
+
+
 def test_the_reported_shares(o0, monkeypatch):
     run = option_run(o0, monkeypatch)
     tr = run.trainer
@@ -801,11 +891,40 @@ def test_option_nets_refuse_a_batch_without_option_targets(o0, monkeypatch):
     seed_all(6)
     b = build_batch(tr, replay, 4, A9)
     for k in ("option_target", "option_scale", "option_span", "pmax_refs",
-              "option_length"):
+              "option_length", "option_rows_validated"):
         b.pop(k)
     b["actions"] = b["actions"][..., 0]
     with pytest.raises(ValueError, match="no option targets"):
         asyncio.run(tr.train_step(b))
+
+
+def test_option_nets_refuse_rows_not_validated_on_the_host(o0, monkeypatch):
+    """The forward skips the network's jump-row check (check_jump=False), so
+    train_step requires finish_batch_paper's mark (audit r1 of stage 3)."""
+    run = option_run(o0, monkeypatch)
+    tr = run.trainer
+    replay = real_lives(0)
+    seed_all(6)
+    b = build_batch(tr, replay, 4, A9)
+    assert b["option_rows_validated"] is True
+    calls = []
+    spy(tr.dynamics, calls, "dyn")
+    for bad in (None, False, 1):
+        c = dict(b)
+        if bad is None:
+            c.pop("option_rows_validated")
+        else:
+            c["option_rows_validated"] = bad
+        with pytest.raises(ValueError, match="not validated on the host"):
+            asyncio.run(tr.train_step(c))
+    assert calls == [], "refused before any forward"
+
+
+def test_a_flag_off_batch_carries_no_option_field(plain_knobs):
+    life = hand_life([1, 2, 3, 0])
+    b = build_batch(stub_trainer(L_=1), [life], 4)
+    assert not any(k.startswith("option") or k == "pmax_refs" for k in b)
+    assert b["actions"].shape == (4, 5)
 
 
 def test_a_skipped_nonfinite_step_writes_no_pmax(o0, monkeypatch):
@@ -846,11 +965,46 @@ def suggest(tr, moves=(4, 4)):
             fc.bias[m] = 20.0
 
 
+def net_argmax(tr, frames):
+    """The learner's own top move per stack, computed apart from the search
+    (eval mode, /255 as the search's root forward; modes restored)."""
+    nets = (tr.representation, tr.prediction)
+    modes = [n.training for n in nets]
+    for n in nets:
+        n.eval()
+    try:
+        with torch.no_grad():
+            x = torch.tensor(np.stack(frames), dtype=torch.float32) / 255.0
+            logits, _, _ = tr.prediction(tr.representation(x))
+    finally:
+        for n, m in zip(nets, modes):
+            n.train(m)
+    return [int(a) for a in logits.argmax(dim=1)]
+
+
 @pytest.mark.parametrize("edge", [True, False])
 def test_the_birth_search_runs_the_option_engine(o0, monkeypatch, edge):
+    """De-zeroed policy weights (the network's top move varies by stack and
+    differs from the visit argmax somewhere), each extra head's bias on move
+    4, so every node's dominant option is (its top move, 4, 4). The records
+    must hold the NETWORK's top move as PMAX (zero_actor.cpp 306), not the
+    visits' (audit r1 of stage 3: zero-init ties gave both 0)."""
     run = option_run(o0, monkeypatch, edge=edge)
-    monkeypatch.setattr(muzero, "ACT_SEARCH_SIMS", 4)
-    suggest(run.trainer)
+    monkeypatch.setattr(muzero, "ACT_SEARCH_SIMS", 12)
+    tr = run.trainer
+    dezero_policy(tr, seed=11, scale=1.0)
+    with torch.no_grad():
+        for fc in tr.prediction.option_fcs:
+            fc.bias.zero_()
+            fc.bias[4] = 20.0
+    n = 8
+    frames = [f for f, _, _ in life3(n, [0] * n, seed=5)]
+    m = net_argmax(tr, frames[:n])
+    # play: (m0, 4, 4) from 0 -- a jump; after it, never the top move, nor 4
+    acts = [m[0], 4, 4] + [next(v for v in range(A9) if v not in (m[t], 4))
+                           for t in range(3, n)]
+    traj = [(f, (acts[t] if t < n else 0), (10.0,) if t % 2 else ())
+            for t, f in enumerate(frames)]
     seen = []
     real = muzero_vtree_options.VectorizedOptionPUCT.search
 
@@ -866,29 +1020,32 @@ def test_the_birth_search_runs_the_option_engine(o0, monkeypatch, edge):
         raise AssertionError("the option arm ran the v1 birth search")
 
     monkeypatch.setattr(muzero_vtree.VectorizedPUCT, "search", no_v1)
-    acts = [0, 4, 4, 1]
-    out = run.paper_targets(life3(4, acts), False, born_step=0)
+    seed_all(21)
+    out = run.paper_targets(traj, False, born_step=0)
     assert [kw["option_edge"] for kw, _ in seen] == [edge, edge]
     assert [kw["root_noise"] for kw, _ in seen] == [True, False]
     assert all(kw["return_info"] is True for kw, _ in seen)
     info = seen[0][1]
     assert info["option_edge"] is edge
-    assert info["root_option"].tolist() == [[0, 4, 4]] * 4
-    for i in range(4):
-        assert out[i]["root_option"] == (0, 4, 4)
-        assert out[i]["root_option"] is mot.intern_option([0, 4, 4], 3)
-        assert out[i]["pmax"] == int(info["root_pmax"][i]) == 0
-    assert "root_option" not in out[4] and "pmax" not in out[4]
+    visit_top = [int(np.argmax(r["target_policy"])) for r in out[:n]]
+    assert any(v != t for v, t in zip(visit_top, m)), \
+        "the case needs a stack whose visit argmax is not the network's"
+    for i in range(n):
+        assert out[i]["pmax"] == m[i] == int(info["root_pmax"][i]), i
+        assert out[i]["root_option"] == (m[i], 4, 4), i
+        assert out[i]["root_option"] is mot.intern_option([m[i], 4, 4], 3)
+    assert "root_option" not in out[n] and "pmax" not in out[n]
     assert run._birth_options is None
     counts = run._birth_option_counts
-    assert counts["roots"] == 5 and counts["simulations"] == 20
-    assert counts["expanded_with_option"] >= 5
+    assert counts["roots"] == n + 1 and counts["simulations"] == 12 * (n + 1)
+    assert counts["expanded_with_option"] >= n + 1
     if edge:
         assert counts["sims_crossing_option"] > 0
     else:
         assert counts["sims_crossing_option"] == 0
-    # the records jump where the play matched the suggestion
-    assert [mot.step_length(out, t) for t in range(5)] == [3, 1, 1, 1, 1]
+    # the records jump where the play matched the suggestion, only there
+    assert [mot.step_length(out, t) for t in range(n + 1)] == \
+        [3] + [1] * n
 
 
 def test_the_precheck_still_runs_under_options(o0, monkeypatch):
@@ -906,6 +1063,23 @@ def test_the_birth_search_refuses_nets_without_the_heads(o0, monkeypatch):
     monkeypatch.setattr(muzero, "OPTION_LENGTH", 3)
     with pytest.raises(ValueError, match="option heads of length 1"):
         run._birth_search(life3(2, [0, 1]), True)
+
+
+def test_the_birth_search_refuses_heads_under_option_length_1(o0,
+                                                              monkeypatch):
+    """The other way (audit r1 of stage 3): nets with heads under
+    OPTION_LENGTH 1 must not run v1 silently while the trainer keys on the
+    nets' option_length. Refused before anything runs: no RNG drawn."""
+    run = option_run(o0, monkeypatch, L_=3)
+    monkeypatch.setattr(muzero, "OPTION_LENGTH", 1)
+    before = rng_states()
+    with pytest.raises(ValueError,
+                       match="OPTION_LENGTH 1: .*option heads of length 3"):
+        run._birth_search(life3(2, [0, 1]), True)
+    assert same_rng(before, rng_states())
+    assert not hasattr(run, "_birth_stats")
+    assert all(n.training for n in (run.trainer.representation,
+                                    run.trainer.prediction))
 
 
 def test_the_refresh_keeps_the_suggestions_and_pmax(o0, monkeypatch):

@@ -3781,8 +3781,9 @@ class Run:
         zero_actor.cpp 306's p_max_id_, the PMAX tag 164); and
         self._birth_option_counts, the life's search counters summed
         (option_search_counts; for the diagnostics stage, not logged). The
-        nets must carry heads of OPTION_LENGTH. OPTION_LENGTH 1: v1, the
-        call above, unchanged."""
+        nets' heads must be of OPTION_LENGTH, either way (nets without
+        option heads under OPTION_LENGTH 1). OPTION_LENGTH 1: v1, the call
+        above, unchanged."""
         import muzero_vtree
         t0 = time.time()
         if nets is None:
@@ -3791,13 +3792,17 @@ class Run:
                     "prediction": self.trainer.prediction,
                     "value_prefix": self.trainer.value_prefix}
         opt_L = int(muzero.OPTION_LENGTH)
+        # Both ways (audit r1 of stage 3): the trainer keys on the nets'
+        # option_length, so nets with heads under OPTION_LENGTH 1 (or none
+        # under L > 1) must not run the other engine silently. An attribute
+        # read only: no RNG drawn, nothing else touched.
+        have = int(getattr(nets["prediction"], "option_length", 1))
+        if have != opt_L:
+            raise ValueError(
+                f"OPTION_LENGTH {opt_L}: the birth search's nets carry "
+                f"option heads of length {have}")
         if opt_L > 1:
             import muzero_vtree_options
-            have = int(getattr(nets["prediction"], "option_length", 1))
-            if have != opt_L:
-                raise ValueError(
-                    f"OPTION_LENGTH {opt_L}: the birth search's nets carry "
-                    f"option heads of length {have}")
             opt_kw = {"option_edge": bool(muzero.OPTION_EDGE),
                       "return_info": True}
         modes = {k: n.training for k, n in nets.items()}

@@ -3048,9 +3048,10 @@ class TrainingHelper:
         is written back to its record's PMAX after the step
         (muzero_option_targets.write_pmax). self._option_last holds the
         batch's option loss (a detached device scalar: OptionZero's
-        loss_option, step 0 plus the unrolled steps / K), the masked share
-        and the per-edge jump share (host floats). L = 1: none of this
-        runs.
+        loss_option, step 0 plus the unrolled steps / K), the masked share,
+        the per-edge jump share and the mean span (host floats, defined in
+        _option_inputs: the masked share is over window positions and heads,
+        not a hit rate). L = 1: none of this runs.
         """
         # Determine the number of unroll steps from the batch.
         unroll_steps = batch["actions"].shape[1]
@@ -3334,18 +3335,32 @@ class TrainingHelper:
         """Test O stage 3: train_step's option inputs (nets with option
         heads). Refuses a batch without the paper builder's option fields
         (a plain-builder batch, or one built for another L) rather than
-        training the heads on nothing. Returns the device targets / masks,
-        an empty argmax list _option_loss fills, and the host-side shares
-        (from the batch arrays: no device work): mask_share = the share of
-        (row, position, head) loss terms masked (scale 0: the move played at
-        the position missed its PMAX), jump_share[i] = the share of rows
-        whose edge i + 1 jumps (span > 1), span_mean = base steps a window
-        spans, on average."""
+        training the heads on nothing, and one whose jump rows were not
+        validated on the host (finish_batch_paper's mark: the forward skips
+        the network's own check). Returns the device targets / masks, an
+        empty argmax list _option_loss fills, and host-side shares (from
+        the batch arrays: no device work):
+          mask_share  the share of (row, WINDOW position, extra head) loss
+                      terms masked (scale 0: the move played at the
+                      position missed its PMAX), over every window position
+                      -- the closing record and padding included (never
+                      masked), the positions a jump skips excluded. It is
+                      NOT DEPARTURE 7's hit rate (played == m over acted
+                      positions), which the diagnostics stage logs apart;
+          jump_share  [K], the share of rows whose edge i + 1 jumps (span
+                      > 1);
+          span_mean   base steps a window spans, on average, a padding
+                      step counted as 1."""
         if "option_target" not in batch:
             raise ValueError(
                 f"nets with option heads (option_length {option_length}) "
                 "train on the paper builder's option batch (PAPER_TARGETS); "
                 "this batch carries no option targets")
+        if batch.get("option_rows_validated") is not True:
+            raise ValueError(
+                "an option batch whose jump rows were not validated on the "
+                "host (finish_batch_paper marks it): the training dynamics "
+                "call skips the network's own check")
         dyn_l = int(getattr(self.dynamics, "option_length", 1))
         acts = np.asarray(batch["actions"])
         if (int(batch["option_length"]) != option_length
@@ -3826,6 +3841,9 @@ class TrainingHelper:
             # training step carries no sync for it).
             import muzero_option_targets as mot
             mot.validate_jump_rows(out["actions"], opt["target"].shape[-1] - 1)
+            # the mark train_step requires before it skips the network's
+            # own check (audit r1 of stage 3); option batches only
+            out["option_rows_validated"] = True
             out["option_length"] = opt["length"]
             out["option_target"] = opt["target"]
             out["option_scale"] = opt["scale"]
