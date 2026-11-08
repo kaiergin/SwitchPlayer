@@ -1470,7 +1470,7 @@ READ (7) RESULT 2026-11-07 22:56-23:35 (2,304 s, CPU): descriptive. Top and bott
     room is reached by trying moves and seeing real outcomes, which is exploration.
     Limits: one decision, one student, token-era T0 (36 slots), the emulator used to
     measure (never to train). Outputs read-only in
-    Y:\SwitchPlayer-testg-r7-runenchmarks\probes\probe_gap_read7\ (backup in the
+    Y:\SwitchPlayer-testg-r7-run\benchmarks\probes\probe_gap_read7\ (backup in the
     scratchpad); read7.json and the printout in benchmarks/probes/probe_gap_read7-results/.
 TEST G COMPLETE. NEXT: Kai's call.
 WHAT IT SAYS: the gap points at real weakness about as well as the student's own
