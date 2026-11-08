@@ -1435,6 +1435,17 @@ training overlap (the twin's), so 1,120 in 65 strata and 190 clusters. Intervals
     gap +0.020 [-0.085, +0.125] (on the 1,103 states whose stratum both logs hold).
   Read (7), whether there is anything for search or exploration to find, is registered
   and still to be built and run.
+READ (7) CODE (test-g, b2aa3f40, probe_gap_read7.py): fresh-eyes audit nothing above LOW,
+  the loop CLOSED; the search matches the trainer's birth search (50 simulations, C_PUCT
+  1.25, root noise 0.3 at 0.25, eval-mode BN; batch 8 not 64, numerics only). How to read
+  it, from the audit: ROOM is conservative, since residuals at lags 5-11 run below the
+  null, so a class chosen on lucky delays 0-3 scores low on 8-11; the intervals hold the
+  fifth labels fixed (outcomes exist only for drawn states), so they cover outcomes given
+  the labels; a search gain is one noisy birth-search decision, not a bound, and includes
+  the shift from the deployed slot to the raw trainer-BN prior (in 3 of 16 test states
+  they differ), so the search's own part is gain(k) minus gain(raw). The 200-simulation
+  search extends the 50 exactly (same noise seed). Runs from its own frozen tree,
+  Y:\SwitchPlayer-testg-r7-run at b2aa3f40.
 WHAT IT SAYS: the gap points at real weakness about as well as the student's own
   uncertainty (prior entropy) does, and not measurably better. A master is not needed to
   find this much. The late-twin read hints that a student net trained on recent play
