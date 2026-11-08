@@ -1376,7 +1376,17 @@ NETS CODE 2026-11-07 (test-g, probe_gap_nets.py): built 2e9c9b6d; code audit: th
   the early-stopping score are all prefixes of held first lives (69-285 each); not a bug.
   Trained from its own frozen tree, Y:\SwitchPlayer-testg-nets-run at 19272300.
 STAGE 2b CODE (test-g, bedd1e7b, probe_gap_stage2b.py): the nets on the kept states, G2's
-  inside clause, the baselines and reads (1)-(6); read (7) later. Audit in progress.
+  inside clause, the baselines and reads (1)-(6); read (7) later. Fresh-eyes audit:
+  nothing above LOW, the loop CLOSED. Its LOWs: no finiteness check on the nets', value
+  head's or prior's outputs (a NaN would rank as a top tie; checked by hand on the pass
+  files); one undefined baseline in any draw makes the primary NOT SHOWN (conservative);
+  read (4)'s intervals print undefined if a draw lacks states on one side. Choices, all
+  judged consistent with the text: baselines oriented once on the primary's sample; the
+  lower bound is the two-sided interval's 2.5th percentile; an undefined statistic is not
+  above 0; read (3) ranks the master minus the value head inside strata; read (5)'s
+  agreement is rho_w between discount pairs, G's pairs beside; read (6)'s plain Spearman
+  is one-stratum rho_w; the beside read is on all kept states. Runs from its own frozen
+  tree, Y:\SwitchPlayer-testg2b-run at bedd1e7b, after the nets finish.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
