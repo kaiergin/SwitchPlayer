@@ -1134,11 +1134,21 @@ THE VALUE NETS, all alike: a small plain conv net (Nature DQN torso, separate fr
   the student's clip (T0's ceiling 1, per base step, REWARD_UNIT 10) and raw. Target:
   the measured discounted return to the end of the life, from the logged rewards, no
   bootstrap (P5c's hazard). Targets standardised per head and heads weighted equally,
-  since raw targets have 15-22x the clipped heads' SD; outputs de-standardised before
-  g. Three seeds each, averaged. 80 / 20 split of lives, stratified by life index, early
-  stop on the primary head's held-out loss. A held-out stack whose
-  hash is in the training set is left out of the held-out score: the first 75-175 base
-  steps of first lives repeat byte for byte.
+  since raw targets have 15-40x the clipped heads' SD (T0 15-23x, T2 22-40x); outputs
+  de-standardised before g. Three seeds each, averaged. 80 / 20 split of lives,
+  stratified by life index, early stop on the primary head's held-out loss. A held-out
+  stack whose hash is in the training set is left out of that early-stopping score:
+  first lives share an opening byte for byte (T2's median 189 base steps, up to about
+  270), and games with identical first lives also share their second lives' start.
+  G2's first clause is read on all held-out stacks (see G2).
+  CHOICES pinned before any net trained (2026-11-07, the build's audit): Nature-DQN torso
+  (fc 512), inputs / 255; Adam 3e-4, batch 64; at most 30 epochs, patience 5, the best
+  epoch's weights kept, and a best epoch at the cap is flagged; one split per net,
+  shared by its three seeds (a seed-averaged score needs common held-out lives), drawn
+  per life index, round(n / 5) held out; standardisation from training stacks only; the
+  late twin is the last third of T0's lives through iteration 45 (lives 90-134, 15 whole
+  games) with its own split, so read (3) leaves out states by the late twin's own
+  training digests.
   - MASTER NET: T2's log only.
   - TWIN: T0's log only, the same net and targets, so both sides of the gap are
     measured returns (the guard against an optimistic bootstrapped value).
@@ -1199,8 +1209,15 @@ call, no retuning and no rerun with g in hand. The pilot's one lengthening of th
 opening, for G6, is the only exception.
   G1: 30 plain games each replay T0's row at iteration 45 and T2's at iteration 42
       (PROBE_THREADS 2, as the rows ran).
-  G2: each net beats a constant (R2 > 0) on held-out lives at the primary head, or the
-      verdict is VOID. Inside strata, where they are used: if a 95% lower bound of
+  G2: each net, seed-averaged, beats a constant on held-out lives at the primary head:
+      R2 above 0 about the held-out stacks' own mean, on ALL held-out stacks, or the
+      verdict is VOID; the R2 without the shared openings is printed beside it. (Amended
+      2026-11-07, before any net trained, from the nets' code audit: without the
+      openings the held-out mean is about half the training mean and most of the spread
+      is gone, so even a position-only table scored R2 <= 0 there in 26% of other splits
+      for the twin. A sanity bar should not VOID the test by the luck of a split, and a
+      repeated stack repeats an input, not the held-out life's return.) The master and
+      twin gate; the late twin's R2 is descriptive. Inside strata, where they are used: if a 95% lower bound of
       rho_w(master net, T2's mean return) or rho_w(twin, T0's mean return) is not above
       0, the verdict is NOT SHOWN, since nets that cannot rank states answer the question.
   G3: mean G at the primary head above 0, lower bound above 0: T2 must really beat
