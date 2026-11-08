@@ -48,16 +48,22 @@ order); their de-standardised outputs are averaged.
     twin.
 THE SPLIT, one a net, shared by its three seeds (so their average has held-out
 lives): inside each life index (the life's place in its game, 0 at a game's
-first life), floor(n / 5 + 1/2) of its n lives held out, drawn at random with a
-fixed seed. A held-out stack whose hash is in the net's training stacks is left
-out of the held-out score (early stopping and G2): the first 75-175 base steps
-of first lives repeat byte for byte. The SCORED stacks are the rest.
-G2, its first clause: each net, seed-averaged, beats a constant at the primary
-head on its scored held-out stacks: R2 = 1 - SSE / SST about their own mean
-(so above every constant) must be above 0, for the master and the twin, or
-G2_VOID. The late twin's is printed beside them and gates nothing (read (3) is
-descriptive). R2 against the training mean, R2 per head and per seed print
-beside it. Written to g2.json.
+first life), round(n / 5) of its n lives held out (floor(n / 5 + 1/2): n / 5
+never ends in .5), drawn at random with a fixed seed. A held-out stack whose
+hash is in the net's training stacks is left out of the EARLY-STOPPING score:
+first lives share an opening byte for byte, and games with identical first
+lives also share their second lives' start. The SCORED stacks are the rest. A
+best epoch at the epoch cap is FLAGGED (printed, in the pass file and
+g2.json), never a gate.
+G2, its FIRST clause only (amended 2026-11-07, before any net trained): each
+net, seed-averaged, beats a constant at the primary head on ALL its held-out
+stacks: R2 = 1 - SSE / SST about their own mean (so above every constant)
+must be above 0, for the master and the twin, or G2_FIRST_CLAUSE_VOID. The R2
+on the scored stacks (without the shared openings) prints beside it,
+descriptive; so do the late twin's, which gates nothing (read (3) is
+descriptive), R2 against the training mean, per head and per seed. Written to
+g2.json with "clause": "first": G2's inside-strata clause needs the sampled
+states, a later stage's.
 
 THE PASSES, each a fresh process (`nets` runs the missing ones in order, then
 g2); every file is stamped with the knobs and a hash of the source its numbers
@@ -124,6 +130,9 @@ NETS = {"master": {"player": "T2", "late": False, "stream": 0},
         "twin": {"player": "T0", "late": False, "stream": 1},
         "late": {"player": "T0", "late": True, "stream": 2}}
 GATED = ("master", "twin")                     # G2's nets; late is read (3)'s
+# g2.json's verdicts: G2's FIRST clause only (its inside-strata clause needs
+# the sampled states, a later stage's)
+G2_FIRST_PASS, G2_FIRST_VOID = "G2_FIRST_CLAUSE_PASS", "G2_FIRST_CLAUSE_VOID"
 SEEDS = (0, 1, 2)
 HEADS = tuple((scale, gamma) for scale in gc.SCALES for gamma in gc.DISCOUNTS)
 PRIMARY = 0                                    # ("clip", 0.997)
@@ -491,12 +500,18 @@ def r2(pred, y, constant=None):
 
 
 def g2_verdict(reads):
-    """("PASS" | "G2_VOID", reasons): each gated net's seed-averaged R2 at
-    the primary head above 0."""
-    reasons = [f"{n}: R2 {reads[n]['r2']} at the primary head, not above 0"
-               for n in GATED
+    """(G2_FIRST_PASS | G2_FIRST_VOID, reasons): G2's first clause, each
+    gated net's seed-averaged R2 at the primary head on all its held-out
+    stacks ("r2") above 0."""
+    reasons = [f"{n}: R2 {reads[n]['r2']} at the primary head on all "
+               f"held-out stacks, not above 0" for n in GATED
                if reads[n]["r2"] is None or not reads[n]["r2"] > 0]
-    return ("G2_VOID", reasons) if reasons else ("PASS", [])
+    return (G2_FIRST_VOID, reasons) if reasons else (G2_FIRST_PASS, [])
+
+
+def best_at_cap(best, epochs=None):
+    """A best epoch at the epoch cap (EPOCHS): flagged, never a gate."""
+    return int(best) == int(EPOCHS if epochs is None else epochs)
 
 
 # --------------------------------------------------------------------------
@@ -678,6 +693,7 @@ def stage_train(out, net, seed):
            "raw_over_clip_sd": [float(sd[n + j] / sd[j])
                                 for j in range(n)],
            "history": history, "best_epoch": best,
+           "epoch_cap": EPOCHS, "best_at_cap": best_at_cap(best),
            "scored_digests": torch.from_numpy(np.frombuffer(
                b"".join(data.digests[i] for i in scored), dtype=np.uint8)
                .reshape(-1, 16).copy()),
@@ -687,38 +703,54 @@ def stage_train(out, net, seed):
                     round(time.time() - t0)},
            "memory": e1._memory()}
     write(path, rec)
+    if rec["best_at_cap"]:
+        print(f"FLAG {net} seed {seed}: its best epoch {best} is the epoch "
+              f"cap {EPOCHS} (recorded; not a gate)", flush=True)
     print(f"{net} seed {seed}: best epoch {best} of {len(history)}, held "
           f"primary {history[best - 1]['held_mse'][PRIMARY]:.4f}; raw / clip "
           f"SD {[round(v, 1) for v in rec['raw_over_clip_sd']]}; memory "
           f"{rec['memory']} [{rec['secs']['total']}s]", flush=True)
 
 
+def r2_reads(per_seed, y, train_mean, tag=""):
+    """The R2s of seed-averaged predictions (seeds, n, heads) against y (n,
+    heads): at the primary head about y's mean (the gate's number when tag
+    is ""), against the training mean, per seed, per head."""
+    pred = per_seed.mean(axis=0)
+    return {f"r2{tag}": r2(pred[:, PRIMARY], y[:, PRIMARY]),
+            f"r2{tag}_vs_train_mean": r2(pred[:, PRIMARY], y[:, PRIMARY],
+                                         train_mean[PRIMARY]),
+            f"r2{tag}_per_seed": [r2(p[:, PRIMARY], y[:, PRIMARY])
+                                  for p in per_seed],
+            f"r2{tag}_per_head": [r2(pred[:, h], y[:, h])
+                                  for h in range(len(HEADS))]}
+
+
 def read_net(net, data, train, held, scored, seen, out):
-    """G2's numbers for one net through load / predict."""
+    """G2's numbers for one net through load / predict: on ALL its held-out
+    stacks (the first clause's), and on the scored ones (descriptive)."""
     nets = load(net, out)
     if nets.train_digests != frozenset(seen):
         raise SystemExit(f"{net}: its files trained on other stacks")
     per_seed = np.concatenate(
-        [nets.predict_seeds(data.stacks(scored[i:i + EVAL_BATCH]))
-         for i in range(0, len(scored), EVAL_BATCH)], axis=1)
+        [nets.predict_seeds(data.stacks(held[i:i + EVAL_BATCH]))
+         for i in range(0, len(held), EVAL_BATCH)], axis=1)
+    in_scored = np.isin(held, scored)
     for s, seed in enumerate(SEEDS):
         obj = read(net_file(out, net, seed))
         saved = obj["held_pred"].numpy()
         same = np.frombuffer(b"".join(data.digests[i] for i in scored),
                              dtype=np.uint8).reshape(-1, 16)
         if not np.array_equal(obj["scored_digests"].numpy(), same) or \
-                np.max(np.abs(saved - per_seed[s]) / nets.terms[s][1]) > 1e-4:
+                saved.shape != per_seed[s][in_scored].shape or np.max(
+                    np.abs(saved - per_seed[s][in_scored])
+                    / nets.terms[s][1]) > 1e-4:
             raise SystemExit(f"{net} seed {seed}: its saved held-out "
                              f"predictions do not come back")
-    pred, y = per_seed.mean(axis=0), data.y[scored]
     train_mean = data.y[train].mean(axis=0)
-    return {"r2": r2(pred[:, PRIMARY], y[:, PRIMARY]),
-            "r2_vs_train_mean": r2(pred[:, PRIMARY], y[:, PRIMARY],
-                                   train_mean[PRIMARY]),
-            "r2_per_seed": [r2(p[:, PRIMARY], y[:, PRIMARY])
-                            for p in per_seed],
-            "r2_per_head": [r2(pred[:, h], y[:, h])
-                            for h in range(len(HEADS))],
+    return {**r2_reads(per_seed, data.y[held], train_mean),
+            **r2_reads(per_seed[:, in_scored], data.y[scored], train_mean,
+                       "_scored"),
             "held_stacks": len(held),
             "scored": len(scored), "held_in_training":
                 len(held) - len(scored), "train_stacks": len(train)}
@@ -729,9 +761,11 @@ def stage_g2(out):
     if path.exists():
         raise SystemExit(f"{path} exists: G2 is never overwritten (move it "
                          f"aside first)")
+    at_cap = []
     for net in NETS:
         for seed in SEEDS:
-            read(net_file(out, net, seed))
+            if read(net_file(out, net, seed))["best_at_cap"]:
+                at_cap.append(f"{net} s{seed}")
     t0, reads = time.time(), {}
     for player in ("T2", "T0"):
         lives, totals = read_log(player)
@@ -744,24 +778,32 @@ def stage_g2(out):
                         info["held"]:
                     raise SystemExit(f"{net} seed {seed}: another split")
             reads[net] = read_net(net, data, train, held, scored, seen, out)
-            reads[net]["held_lives"] = len(info["held"])
-            reads[net]["gated"] = net in GATED
-            reads[net]["pass"] = (reads[net]["r2"] is not None
-                                  and reads[net]["r2"] > 0)
-            print(f"G2 {net}: R2 {reads[net]['r2']} at the primary head on "
-                  f"{len(scored)} held-out stacks of {len(info['held'])} "
-                  f"lives (against the training mean "
-                  f"{reads[net]['r2_vs_train_mean']}; per seed "
-                  f"{reads[net]['r2_per_seed']})"
-                  + ("" if net in GATED else "; descriptive"), flush=True)
+            r = reads[net]
+            r["held_lives"] = len(info["held"])
+            r["gated"] = net in GATED
+            r["pass"] = r["r2"] is not None and r["r2"] > 0
+            r["best_at_cap"] = [s for s in SEEDS if f"{net} s{s}" in at_cap]
+            print(f"G2 first clause, {net}: R2 {r['r2']} at the primary head "
+                  f"on all {len(held)} held-out stacks of "
+                  f"{len(info['held'])} lives (against the training mean "
+                  f"{r['r2_vs_train_mean']}; per seed {r['r2_per_seed']})"
+                  + ("" if net in GATED else "; descriptive")
+                  + f"; beside it, on the {len(scored)} scored stacks "
+                  f"(descriptive): {r['r2_scored']}", flush=True)
             del data
         del lives
     verdict, reasons = g2_verdict(reads)
-    write(path, {"verdict": verdict, "reasons": reasons, "reads": reads,
-                 "heads": [[s, g] for s, g in HEADS], "gated": list(GATED),
+    if at_cap:
+        print(f"FLAG best epoch at the epoch cap {EPOCHS}: {at_cap} "
+              f"(recorded; not a gate)", flush=True)
+    write(path, {"clause": "first", "verdict": verdict, "reasons": reasons,
+                 "reads": reads, "heads": [[s, g] for s, g in HEADS],
+                 "gated": list(GATED), "epoch_cap": EPOCHS,
+                 "best_at_cap": at_cap,
                  "secs": round(time.time() - t0), "memory": e1._memory()})
-    print(("SMOKE " if SMOKE else "") + f"G2 (first clause): {verdict}"
-          + (f" ({'; '.join(reasons)})" if reasons else ""), flush=True)
+    print(("SMOKE " if SMOKE else "") + f"G2 FIRST CLAUSE: {verdict}"
+          + (f" ({'; '.join(reasons)})" if reasons else "")
+          + " -- the inside-strata clause is a later stage's", flush=True)
 
 
 def run_stage(out, stage, *args):

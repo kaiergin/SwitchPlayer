@@ -410,6 +410,29 @@ def test_fit_keeps_the_best_epoch_and_stops_after_patience(tree):
     assert again[gn.PRIMARY] == pytest.approx(primary[best - 1], rel=1e-5)
 
 
+@pytest.mark.parametrize("offsets,best,epochs", [
+    ((1.0, 0.5, 0.8, 0.9, 0.2, 0.1, 0.1, 0.1), 2, 4),   # stops 2 after it
+    ((1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3), 8, 8),   # the cap
+    ((0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5), 1, 3)])  # ties: the first
+def test_early_stopping_on_scripted_held_out_losses(tree, monkeypatch,
+                                                    offsets, best, epochs):
+    """The held-out primary error per epoch scripted (prediction = target +
+    offset, so the error is offset ** 2): the best epoch is the lowest, the
+    first on ties, and training stops PATIENCE (here 2) epochs after it."""
+    lives, _ = gn.read_log("T2")
+    data, _, train, _, scored, _ = gn.net_data("master", lives)
+    mean, sd = gn.standardiser(data.y[train])
+    z = (data.y[scored] - mean) / sd
+    script = iter(offsets)
+    monkeypatch.setattr(gn, "data_z", lambda model, d, idx: z + next(script))
+    _, _, _, history, got = gn.fit(data, train, scored, 0, 0, epochs=8,
+                                   patience=2)
+    assert (got, len(history)) == (best, epochs)
+    assert [h["held_mse"][gn.PRIMARY] for h in history] == pytest.approx(
+        [o * o for o in offsets[:epochs]])
+    assert gn.best_at_cap(got, 8) is (best == 8)
+
+
 def test_the_split_is_stratified_by_life_index():
     held = gn.split_lives([0, 1, 2] * 42, 0)
     assert len(held) == 24
@@ -466,15 +489,27 @@ def test_r2():
     assert gn.r2(y, np.ones(4)) is None
 
 
-def test_g2_verdict():
-    def reads(m, t, late):
-        return {"master": {"r2": m}, "twin": {"r2": t}, "late": {"r2": late}}
-    assert gn.g2_verdict(reads(0.2, 0.01, -1.0)) == ("PASS", [])
-    v, why = gn.g2_verdict(reads(0.2, -0.01, 0.5))
-    assert v == "G2_VOID" and len(why) == 1 and why[0].startswith("twin")
+def test_g2_verdict_is_the_first_clause_on_all_held_out_stacks():
+    def reads(m, t, late, scored=-1.0):
+        return {n: {"r2": v, "r2_scored": scored}
+                for n, v in (("master", m), ("twin", t), ("late", late))}
+    # the verdict names say they are G2's first clause, never all of G2
+    assert (gn.G2_FIRST_PASS, gn.G2_FIRST_VOID) == ("G2_FIRST_CLAUSE_PASS",
+                                                    "G2_FIRST_CLAUSE_VOID")
+    # the scored-set R2 is descriptive: negative there does not VOID
+    assert gn.g2_verdict(reads(0.2, 0.01, -1.0)) == (gn.G2_FIRST_PASS, [])
+    v, why = gn.g2_verdict(reads(0.2, -0.01, 0.5, scored=0.9))
+    assert v == gn.G2_FIRST_VOID and len(why) == 1
+    assert why[0].startswith("twin") and "all held-out" in why[0]
     v, why = gn.g2_verdict(reads(0.0, 0.3, 0.5))
-    assert v == "G2_VOID" and why[0].startswith("master")
-    assert gn.g2_verdict(reads(None, 0.3, 0.5))[0] == "G2_VOID"
+    assert v == gn.G2_FIRST_VOID and why[0].startswith("master")
+    assert gn.g2_verdict(reads(None, 0.3, 0.5))[0] == gn.G2_FIRST_VOID
+
+
+def test_best_epoch_at_the_cap():
+    assert gn.best_at_cap(30, 30) and not gn.best_at_cap(29, 30)
+    assert not gn.best_at_cap(1, 30)
+    assert gn.best_at_cap(gn.EPOCHS) and not gn.best_at_cap(gn.EPOCHS - 1)
 
 
 # --------------------------------------------------------------------------
@@ -594,10 +629,51 @@ def test_a_whole_run_reads_only_its_logs(tree, monkeypatch, capsys):
         gn.stage_g2(out)
     finally:
         RECORDING[0] = False
+    printed = capsys.readouterr().out
     g2 = gn.read(out / "g2.json")
     assert set(g2["reads"]) == set(gn.NETS)
+    assert g2["clause"] == "first"
+    assert g2["verdict"] in (gn.G2_FIRST_PASS, gn.G2_FIRST_VOID)
     assert (g2["verdict"], g2["reasons"]) == gn.g2_verdict(g2["reads"])
+    assert f"G2 FIRST CLAUSE: {g2['verdict']}" in printed
     assert g2["reads"]["late"]["gated"] is False
+    # the cap flag: every pass file's and g2.json's, against the best epoch
+    flagged = []
+    for net in gn.NETS:
+        for seed in gn.SEEDS:
+            f = gn.read(gn.net_file(out, net, seed))
+            assert f["epoch_cap"] == 2
+            assert f["best_at_cap"] is (f["best_epoch"] == 2)
+            if f["best_at_cap"]:
+                flagged.append(f"{net} s{seed}")
+                assert f"FLAG {net} seed {seed}" in printed
+        assert g2["reads"][net]["best_at_cap"] == [
+            s for s in gn.SEEDS if f"{net} s{s}" in flagged]
+    assert g2["best_at_cap"] == flagged and g2["epoch_cap"] == 2
+    # G2's R2 is on ALL held-out stacks, seed-averaged through predict; the
+    # scored stacks' R2 is beside it
+    for player, nets in (("T2", ("master",)), ("T0", ("twin", "late"))):
+        lives, _ = gn.read_log(player)
+        for net in nets:
+            data, _, train, held, scored, _ = gn.net_data(net, lives)
+            r = g2["reads"][net]
+            pred = gn.predict(data.stacks(held), net, out)
+            y = data.y[held]
+            assert r["r2"] == pytest.approx(gn.r2(pred[:, 0], y[:, 0]),
+                                            rel=1e-6, abs=1e-9)
+            assert r["pass"] is (r["r2"] > 0)
+            assert r["r2_vs_train_mean"] == pytest.approx(gn.r2(
+                pred[:, 0], y[:, 0], data.y[train, 0].mean()), rel=1e-6,
+                abs=1e-9)
+            assert r["r2_per_head"] == pytest.approx(
+                [gn.r2(pred[:, h], y[:, h]) for h in range(8)], rel=1e-6,
+                abs=1e-9)
+            keep = np.isin(held, scored)
+            assert r["r2_scored"] == pytest.approx(
+                gn.r2(pred[keep, 0], data.y[scored, 0]), rel=1e-6, abs=1e-9)
+            if net != "late":                    # 3 or 6 shared stacks
+                assert r["r2"] != pytest.approx(r["r2_scored"], abs=1e-6)
+            assert len(r["r2_scored_per_seed"]) == 3
     # held-out first lives' 3 shared stacks: master 1 such life, twin 2, the
     # late twin none (its held lives are index 1 and 2)
     for net, shared in {"master": 3, "twin": 6, "late": 0}.items():
@@ -657,6 +733,26 @@ def test_g2_refuses_saved_predictions_that_do_not_come_back(tree,
     with pytest.raises(SystemExit, match="do not come back"):
         gn.stage_g2(out)
     assert not (out / "g2.json").exists()
+
+
+def test_a_best_epoch_at_the_cap_is_flagged(tree, monkeypatch, capsys):
+    """One epoch: every best epoch is the cap, printed and recorded."""
+    monkeypatch.setattr(gn, "EPOCHS", 1)
+    out = tree["out"]
+    out.mkdir()
+    gn.stage_train(out, "master", 1)
+    f = gn.read(gn.net_file(out, "master", 1))
+    assert f["best_epoch"] == 1 and f["best_at_cap"] is True
+    assert f["epoch_cap"] == 1
+    assert "FLAG master seed 1" in capsys.readouterr().out
+    monkeypatch.setattr(gn, "EPOCHS", 4)          # the cap is the knob's
+    (out / "x").mkdir()
+    gn.stage_train(out / "x", "master", 1)
+    f = gn.read(gn.net_file(out / "x", "master", 1))
+    assert f["epoch_cap"] == 4
+    assert f["best_at_cap"] is (f["best_epoch"] == 4)
+    assert ("FLAG master seed 1" in capsys.readouterr().out) is \
+        f["best_at_cap"]
 
 
 def test_importing_the_probe_changes_nothing_process_wide():
