@@ -1106,6 +1106,45 @@ O0 CODE 2026-11-07: built 7c8faac6 + a67b970f; code audit no HIGH, 1 MEDIUM (no 
   dip); reserved GPU memory fell from 6.07 to 3.52 GB during the refresh, maybe an
   allocator retry, not logged; GPU headroom about 4.6 GB, so a GPU-heavy app on the host
   can push O0 out of memory. All 30 suites pass in the build tree (1,291 s).
+OPTION CODE, stages 1-2 (network; option search and its tests), 2026-11-08, built during
+  O0's run as BUILD ORDER says (O0's pre-check shares so far, rows to 60: hold2 0.08 at row
+  5, 0.24-0.28 from row 40; the registered read is pooled over [90k, end]). e31f4ecb:
+  OPTION_LENGTH (1 = off) and OPTION_EDGE knobs; L - 1 option heads, each its own copy of
+  the policy branch after the trunk, bias 0 with 10 on stop; per-position action embeddings
+  (O0's lineage runs "embed"), rows 2..L zero, a jump the sum of its rows; the search a
+  subclass of v1 in muzero_vtree_options.py, v1 untouched. Flag off, the nets match O0's
+  code on keys, shapes, values, parameter order, buffers and construction RNG, and O0's
+  iteration-60 snapshot loads strictly with bit-identical outputs.
+  CODE AUDIT r1 (two auditors): no HIGH; 2 MEDIUM, fixed (the option heads' own layers
+  untested; nothing refused OPTION_LENGTH > 1 before its consumers exist, so such an arm
+  would have run as O0); LOWs taken in, among them: the root option no longer seeds the
+  min-max range. Fixes 5671c296. Edge-on and edge-off targets then differ only through
+  the edge, in two ways: crossings, and landings first evaluated by a jump row, whose
+  evaluation a later primitive descent reuses (DEPARTURE 2's first evaluation, as
+  OptionZero evaluates a node once). Read (3)'s on/off print counts both; its ENGAGED
+  label counts crossings only. Early in a run rows 2..L are near zero, so such a landing
+  holds about its first move's one-step latent two or three levels deep. With crossings
+  forced off, random real nets at A 9, L 3, 50 simulations: visit counts differ in 0 to
+  4 of 24 roots by setting (4 with rows 2..L at zero), each through a reused jump
+  evaluation; 61-63 of 80 fake roots built to make jump rows differ. On CUDA the print
+  also carries batch-shape float wobble (v1's documented ~1e-3 decoded-value noise), so
+  not every on/off difference there is the edge's.
+  CODE AUDIT r2, a fresh check of the fixes: nothing above LOW; the stage 1-2 loop is
+  CLOSED. Its LOWs go into stage 3: the jump-row check costs two host syncs a call,
+  harmless in the search (1% of its syncs) but the only syncs inside a training forward,
+  so the unroll validates jump rows on the host at batch time; probes and distill.prep
+  build nets without option_gate (no registered arm sets the knobs, pinned by a test);
+  two docstrings overstate.
+  A third MEDIUM is a CONSEQUENCE OF DEPARTURE 2, KEPT as registered: a zero-visit option
+  and its first move's primitive both score r + d x value with no exploration bonus at
+  the first visit, so an option can be crossed on its node's first visit, and p(o) plays
+  no part in that choice. OptionZero's tie at init_q_value sends that first visit to the
+  primitive. Kept because the registration says it and v1 treats unvisited primitives
+  the same way. Measured on random de-zeroed nets (A 9, L 3, 50 simulations, 48 roots):
+  17% of option wins come at the first visit; crossings 26.9 against 24.9 of 50 under
+  OptionZero's tie; JS divergence between the two rules 0.005, against 0.024 for edge on
+  against off; root value higher in 34 of 48 roots (the larger of two estimates). Trained
+  nets may differ. Read (3)'s crossing rate includes these first-visit crossings.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
