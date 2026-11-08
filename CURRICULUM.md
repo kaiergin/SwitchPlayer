@@ -1337,6 +1337,20 @@ STAGE 2a CODE 2026-11-07 (branch test-g, cfa6d3e7, probe_gap_stage2a.py): G on e
   undefined G5 is VOID. Runs from its own frozen tree Y:\SwitchPlayer-testg2a-run at
   cfa6d3e7, reading the pilot's files from Y:\SwitchPlayer-testg-run. Measured cost about
   2 h, not the 5 h estimated.
+STAGE 2a RESULT 2026-11-07 18:01-19:56 (6,891 s, CPU): PASS-SO-FAR. 1,121 states, 65
+  strata (11 with one state), 190 clusters (largest 58 states). G3: mean G at the primary
+  head +3.00 clipped units, 95% interval [+2.56, +3.42] (10,000 cluster draws): T2 beats
+  T0 from T0's own states. G4 OK for both on every chunk. G5: rho_w of the halves 0.661,
+  Spearman-Brown 0.796, bar 0.5. Mean G, clip: 0.997 +3.00, 0.99 +0.97, 0.98 +0.42, 0.95
+  +0.12; raw: +42.4, +13.9, +6.6, +2.4. Branch ends: T0 17,484 at a life's end and 452 at
+  the cap; T2 17,392 and 544. Lag profile of the residuals (null -0.067): T0 lag 1 +0.225,
+  lag 4 -0.084, lag 8 -0.155; T2 lag 1 +0.305, lag 4 -0.059, lag 8 -0.245; G lag 1 +0.248.
+  T2's lag 1 is just above the pilot's 0.3 bar, a pilot-only stop, so here it is
+  descriptive: neighbouring delays share a little, so the effective K is somewhat under
+  16, and G5 already measures the reliability that results. Outputs read-only in
+  Y:\SwitchPlayer-testg2a-run\benchmarks\probes\probe_gap_stage2a\ (backup in the
+  scratchpad); gates.json in benchmarks/probes/probe_gap_stage2a-results/. g is not yet
+  opened: the nets are under audit and untrained.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
