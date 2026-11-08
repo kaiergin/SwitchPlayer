@@ -1368,6 +1368,15 @@ STAGE 2a RESULT 2026-11-07 18:01-19:56 (6,891 s, CPU): PASS-SO-FAR. 1,121 states
   Y:\SwitchPlayer-testg2a-run\benchmarks\probes\probe_gap_stage2a\ (backup in the
   scratchpad); gates.json in benchmarks/probes/probe_gap_stage2a-results/. g is not yet
   opened: the nets are under audit and untrained.
+NETS CODE 2026-11-07 (test-g, probe_gap_nets.py): built 2e9c9b6d; code audit: the code
+  matched the text, 1 HIGH in the text (G2's first clause on the scored set alone could
+  VOID by split luck: amended above, dc1b13a5, before any net trained), LOWs (g2.json
+  now names its clause; a best epoch at the cap is flagged); fixed 19272300; re-audit:
+  nothing above LOW, the loop CLOSED. The 31% of the master's held-out stacks left out of
+  the early-stopping score are all prefixes of held first lives (69-285 each); not a bug.
+  Trained from its own frozen tree, Y:\SwitchPlayer-testg-nets-run at 19272300.
+STAGE 2b CODE (test-g, bedd1e7b, probe_gap_stage2b.py): the nets on the kept states, G2's
+  inside clause, the baselines and reads (1)-(6); read (7) later. Audit in progress.
 
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
