@@ -1400,6 +1400,50 @@ STAGE 2b CODE (test-g, bedd1e7b, probe_gap_stage2b.py): the nets on the kept sta
   is one-stratum rho_w; the beside read is on all kept states. Runs from its own frozen
   tree, Y:\SwitchPlayer-testg2b-run at bedd1e7b, after the nets finish.
 
+### RESULT -- Test G stage 2b: the master-student value gap, 2026-11-07
+
+VERDICT, PRIMARY: NOT SHOWN. The gap ranks states by how much better the master really
+does, inside strata, but it is not shown to beat the best signal that needs no master.
+Run 21:15-21:40 (1,491 s, CPU) from Y:\SwitchPlayer-testg2b-run at bedd1e7b; the nets'
+and value head's outputs checked finite by hand. 1,121 kept states, 1 left out for
+training overlap (the twin's), so 1,120 in 65 strata and 190 clusters. Intervals are 95%,
+10,000 cluster draws. Primary head: 0.997 per frame, the student's clip.
+  GATES: G1, G3-G6 passed earlier (pilot, stage 2a). G2: the first clause passed (all
+    held-out R2 master 0.899, twin 0.606; see NETS RESULT), the inside clause passed:
+    rho_w(master net, T2's return) +0.272 [+0.185, +0.333], rho_w(twin, T0's return)
+    +0.362 [+0.282, +0.419].
+  (1) PRIMARY: rho_w(g, G) +0.165 [+0.082, +0.232], lower bound above 0. Baselines,
+    oriented on the sample: student prior entropy (oriented -) +0.122 [+0.061, +0.182],
+    twin value (-) +0.101 [+0.025, +0.170], T0's value head (+) +0.008 [-0.063, +0.077],
+    steps (+) +0.043 [-0.018, +0.104]. g minus the best baseline, best inside each draw:
+    +0.043 [-0.059, +0.110], lower bound not above 0: NOT SHOWN. Ceiling sqrt(G5) 0.89.
+    Beside it, all 1,121 states: the same to the third decimal.
+  (2) Master alone +0.145 [+0.060, +0.211]; g minus the master alone +0.020 [-0.032,
+    +0.074]: the student's side adds little here. rho_w(g, T2's return) +0.143; rho_w(g,
+    -T0's return) -0.022 [-0.094, +0.045]; the reference rho_w(-T0's return, G) +0.185.
+  (3) The twin's worth. The late-only twin in place of the twin: +0.305 [+0.225, +0.360],
+    against the twin's +0.165. Rank form: the twin +0.175, T0's value head +0.122. So the
+    recent-play twin gives a much better gap than the all-history twin, and both beat the
+    bootstrapped value head. Descriptive; not tested against the baselines.
+  (4) Ignoring a worse master: 46 states with g <= 0. Their mean G +0.24 [-0.30, +0.91]
+    against +3.12 [+2.68, +3.54] for the rest; the share with G <= 0, 0.50 against 0.27.
+    Where the nets say the master is no better, it mostly is not.
+  (5) Horizons, rho_w(g, G) per head: clip 0.997 +0.165, 0.99 +0.181, 0.98 +0.157, 0.95
+    +0.116; raw +0.180, +0.152, +0.123, +0.114. g's heads agree closely (clip 0.69-0.96),
+    more than G's own (0.55-0.93): here the four discounts carry much the same signal.
+  (6) Across positions, plain Spearman: g +0.292 [+0.215, +0.366]; the position-table
+    gap +0.020 [-0.085, +0.125] (on the 1,103 states whose stratum both logs hold).
+  Read (7), whether there is anything for search or exploration to find, is registered
+  and still to be built and run.
+WHAT IT SAYS: the gap points at real weakness about as well as the student's own
+  uncertainty (prior entropy) does, and not measurably better. A master is not needed to
+  find this much. The late-twin read hints that a student net trained on recent play
+  would do better; that was not registered as the primary and needs fresh states to
+  test. Outputs read-only in Y:\SwitchPlayer-testg2b-run\benchmarks\probes\probe_gap_stage2b\
+  (backup in the scratchpad); stage2b.json and the run's printout in
+  benchmarks/probes/probe_gap_stage2b-results/. NEXT: Kai's call (the registration's NEXT:
+  NOT SHOWN goes to Kai).
+
 ### Next experiment (pre-registered) -- Test Q: mining over long training on Q*bert (Kai, 2026-11-07)
 
 DECISION: Kai 2026-11-07, after E3 ("Sure we can run this test then move onto
