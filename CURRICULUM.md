@@ -1446,6 +1446,33 @@ READ (7) CODE (test-g, b2aa3f40, probe_gap_read7.py): fresh-eyes audit nothing a
   they differ), so the search's own part is gain(k) minus gain(raw). The 200-simulation
   search extends the 50 exactly (same noise seed). Runs from its own frozen tree,
   Y:\SwitchPlayer-testg-r7-run at b2aa3f40.
+READ (7) RESULT 2026-11-07 22:56-23:35 (2,304 s, CPU): descriptive. Top and bottom fifths
+  by g inside strata, 222 states each, 120 drawn from each (127 clusters); mean g top
+  +12.8, bottom +2.8. About 4.1 outcome classes per state (top 4.11, bottom 4.17).
+  Clipped units at the primary head, scored on delays 8-11, intervals 95%:
+  ROOM, the class chosen on delays 0-3 against the deployed one: top +2.87 [+1.85,
+    +3.92], bottom +2.28 [+1.65, +2.92], top minus bottom +0.59 [-0.58, +1.82]. The chosen
+    class differs from the deployed one at 81% of states. ROOM is conservative (see the
+    code note), and +2.6 over both fifths is near T2's whole advantage (G3, +3.00).
+  MEAN CLASS minus deployed: top +0.80 [+0.17, +1.48], bottom -0.07 [-0.54, +0.41], top
+    minus bottom +0.86 [+0.08, +1.70]. Where g is high, T0's deployed move is worse than
+    an average alternative; where g is low it is about average.
+  SEARCH GAIN, the top slot's class minus deployed: raw trainer-BN prior top +0.02, bottom
+    -0.12; 50 simulations top +0.07 [-0.19, +0.37], bottom +0.02 [-0.44, +0.42]; 200
+    simulations top -0.07 [-0.43, +0.34], bottom +0.06 [-0.41, +0.47]. Search moves the
+    top slot off the deployed class at about 29% (50) and 32% (200) of states, the raw
+    prior at 11%, and gains nothing measurable in either fifth.
+  WHAT IT SAYS: there is real room at T0's states, about as much as the master's whole
+    lead, found by trying each class in the real game; it is not clearly larger where g
+    is high, but T0's own move is worse there than an average alternative. One decision
+    of birth search with T0's own model finds none of it at 50 or 200 simulations. For
+    Kai's question: here more search with the student's model does not help, and the
+    room is reached by trying moves and seeing real outcomes, which is exploration.
+    Limits: one decision, one student, token-era T0 (36 slots), the emulator used to
+    measure (never to train). Outputs read-only in
+    Y:\SwitchPlayer-testg-r7-runenchmarks\probes\probe_gap_read7\ (backup in the
+    scratchpad); read7.json and the printout in benchmarks/probes/probe_gap_read7-results/.
+TEST G COMPLETE. NEXT: Kai's call.
 WHAT IT SAYS: the gap points at real weakness about as well as the student's own
   uncertainty (prior entropy) does, and not measurably better. A master is not needed to
   find this much. The late-twin read hints that a student net trained on recent play
