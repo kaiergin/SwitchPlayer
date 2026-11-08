@@ -955,8 +955,10 @@ def test_the_option_lineages_are_o0s_pattern_alone(real_sup):  # noqa: F811
     for v, arm, option in OPTIONS:
         lin = s.LINEAGES[v]
         assert {k: x for k, x in lin.items()
-                if k not in ("named", "option")} == o
+                if k not in ("named", "option", "sims")} == o
         assert lin["named"] is True and lin["option"] == option
+        # the simulations option_alert's counter check reads: the arm's
+        assert lin["sims"] == ablation.ARMS[arm]["ACT_SEARCH_SIMS"] == 50
         # the arm is O0's plus exactly those knobs (OF's edge the default)
         assert {k: x for k, x in ablation.ARMS[arm].items() if k != "_doc"} \
             == {**{k: x for k, x in ablation.ARMS[O0].items()
@@ -1078,7 +1080,12 @@ def test_their_quick_probes_pass_and_their_asserts_bite(sup):  # noqa: F811
                   f"{a}[{O0!r}]['OPTION_LENGTH'] = 3",
                   # off O0 while still C0's but for the skipped knobs (C0
                   # moved with it): only the pin against O0 sees it
+                  f"{a}[{C0!r}]['TRAINING_BATCHES'] = 77; "
+                  f"{a}[{arm!r}]['TRAINING_BATCHES'] = 77",
+                  # the simulations moved everywhere (C0, O0 and the arm):
+                  # only the pin on the alert's "sims" sees it
                   f"{a}[{C0!r}]['ACT_SEARCH_SIMS'] = 25; "
+                  f"{a}[{O0!r}]['ACT_SEARCH_SIMS'] = 25; "
                   f"{a}[{arm!r}]['ACT_SEARCH_SIMS'] = 25"]
         breaks.append(f"del {a}[{arm!r}]['OPTION_EDGE']" if v == "oh" else
                       f"{a}[{arm!r}]['OPTION_EDGE'] = False")
@@ -1134,7 +1141,11 @@ def _opt_row(sup, **extra):  # noqa: F811
              opt_probe_flip_share=0.0469,
              opt_jump_share=[0.4, 0.3, 0.2, 0.1, 0.05], opt_span_mean=2.25,
              opt_loss=1.5, opt_acted=1000, opt_steps=10000,
-             opt_probe_roots=256, opt_steps_nonfinite=0)
+             opt_probe_roots=256, opt_steps_nonfinite=0,
+             # read (3)'s counters, consistent: 3 cut lives' tails beyond
+             # the acted positions, 50 simulations a root
+             opt_roots=1003, opt_nodes=40000, opt_sims=1003 * 50,
+             opt_nodes_with_option=12500, opt_sims_crossing=6000)
     r.update(extra)
     return r
 
@@ -1177,8 +1188,10 @@ def test_a_row_short_of_its_option_read_alerts(sup, capsys,  # noqa: F811
                "opt_nodes_with_option, opt_len_hist, opt_sims, "
                "opt_sims_crossing, ...)"),
         (_opt_row(sup, opt_acted=0), "opt_acted 0 (the row's acted "
-                                     "positions, train steps and probe "
-                                     "roots must each count above 0)"),
+                                     "positions, train steps, probe roots "
+                                     "and read (3)'s birth-search roots, "
+                                     "nodes and simulations must each "
+                                     "count above 0)"),
         (_opt_row(sup, opt_steps=None), "opt_steps None (the row's"),
         (_opt_row(sup, opt_probe_roots=0, opt_acted=True),
          "opt_acted True, opt_probe_roots 0 (the row's"),
@@ -1188,6 +1201,25 @@ def test_a_row_short_of_its_option_read_alerts(sup, capsys,  # noqa: F811
          "stop rule: stop and report (Kai's call)"),
         (_opt_row(sup, opt_steps_nonfinite=None),
          "opt_steps_nonfinite None: non-finite"),
+        # read (3)'s own counters (audit r1 of stage 4b)
+        (_opt_row(sup, opt_roots=0, opt_nodes=None, opt_sims=0),
+         "opt_roots 0, opt_nodes None, opt_sims 0 (the row's"),
+        (_opt_row(sup, opt_sims=1003 * 50 - 1),
+         "opt_sims 50149 != opt_roots 1003 x the arm's 50 simulations: "
+         "read (3)'s counters do not add up"),
+        (_opt_row(sup, opt_roots=999, opt_sims=999 * 50),
+         "opt_roots 999 < opt_acted 1000 (every acted position is a birth "
+         "root)"),
+        (_opt_row(sup, opt_nodes=1002),
+         "opt_nodes 1002 < opt_roots 1003 (every root is an expansion)"),
+        (_opt_row(sup, opt_nodes_with_option=40001),
+         "opt_nodes_with_option 40001 outside 0..opt_nodes 40000"),
+        (_opt_row(sup, opt_nodes_with_option=None),
+         "opt_nodes_with_option None outside 0..opt_nodes 40000"),
+        (_opt_row(sup, opt_sims_crossing=1003 * 50 + 1),
+         "opt_sims_crossing 50151 outside 0..opt_sims 50150"),
+        (_opt_row(sup, opt_sims_crossing=-1),
+         "opt_sims_crossing -1 outside 0..opt_sims 50150"),
     ]
     path = sup.paths(v, 0)[2]
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -1243,8 +1275,11 @@ def test_the_option_fields_are_the_trainers(real_sup):  # noqa: F811
     assert len(set(s.OPTION_FIELDS)) == len(s.OPTION_FIELDS) == len(want)
     assert set(s.OPTION_FIELDS) == want
     assert all(k.startswith("opt_") for k in want)
-    assert set(s.OPTION_COUNTS) <= set(s.OPTION_SHOWN) <= want
-    assert s.OPTION_COUNTS == ("opt_acted", "opt_steps", "opt_probe_roots")
+    assert set(s.OPTION_COUNTS) <= want and set(s.OPTION_SHOWN) <= want
+    assert s.OPTION_COUNTS == ("opt_acted", "opt_steps", "opt_probe_roots",
+                               "opt_roots", "opt_nodes", "opt_sims")
+    assert {"opt_acted", "opt_steps", "opt_probe_roots"} <= set(
+        s.OPTION_SHOWN)
     for k in ("opt_node_option_rate", "opt_crossing_rate", "opt_hit_rate",
               "opt_probe_js", "opt_probe_flip_share", "opt_jump_share",
               "opt_span_mean", "opt_loss"):
@@ -1317,13 +1352,23 @@ BOUND = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES", "ITERATIONS",
 
 
 def test_every_earlier_lineage_is_as_it_was(sup, pre_sup,  # noqa: F811
-                                            capsys, tmp_path):
+                                            capsys, tmp_path, monkeypatch):
     """Stage 4b changes nothing for the lineages before it: for each of them
     and each variant it binds, the bound names, the run's names and paths,
     its chain, stop, command, prep command and quick probe, and its EVAL
     lines and ALERTs, equal the supervisor's at PRE_S4B; only the usage line,
-    SUITES, AUDITED and SMOKE_SCRIPTS gain stage 4b's entries."""
+    SUITES, AUDITED and SMOKE_SCRIPTS gain stage 4b's entries. Audit r1 of
+    stage 4b: every master is FINISHED in both copies (final_row stubbed
+    alike), so each student's quick probe -- its master checks to the end --
+    and its stop are compared in full, never as a shared SystemExit."""
     new, old = sup, pre_sup
+
+    def finished(variant, seed):
+        return 30, 5000                  # (final iteration, final env steps)
+
+    for mod in (old, new):
+        monkeypatch.setattr(mod, "final_row", finished)
+    students = 0
     assert set(new.LINEAGES) == set(old.LINEAGES) | {"of", "oh"}
     for letter in old.LINEAGES:
         assert new.LINEAGES[letter] == old.LINEAGES[letter], letter
@@ -1347,10 +1392,15 @@ def test_every_earlier_lineage_is_as_it_was(sup, pre_sup,  # noqa: F811
                 assert _outcome(getattr(new, f), v) == \
                     _outcome(getattr(old, f), v), (f, v)
             for f in ("stop_env_steps", "quick"):
-                assert _outcome(getattr(new, f), v, 0) == \
-                    _outcome(getattr(old, f), v, 0), (f, v)
+                got = _outcome(getattr(new, f), v, 0)
+                assert got == _outcome(getattr(old, f), v, 0), (f, v)
+                # every probe and stop ran to its end, students' included
+                assert got[0] == "ok", (f, v, got)
             assert new.command(v, 0, 12345) == old.command(v, 0, 12345), v
+            assert new.command(v, 0) == old.command(v, 0), v
             if new.is_student(v):
+                students += 1
+                assert "distill.master_checks(" in new.quick(v, 0), v
                 pick = {"snapshot": "s.pth", "iterations": 5}
                 assert new.prep_command(v, 0, pick) == \
                     old.prep_command(v, 0, pick), v
@@ -1366,6 +1416,8 @@ def test_every_earlier_lineage_is_as_it_was(sup, pre_sup,  # noqa: F811
                 mod.Rows(str(p), v, 0).emit()
                 outs.append(capsys.readouterr().out)
             assert outs[0] == outs[1] and outs[0].startswith("EVAL "), v
+    # f1-f4, t1-t2, w1-w2, m1-m2, q1-q8, p1-p8
+    assert students == 26
     for mod in (old, new):
         assert mod.main([]) == 2
     old_usage, new_usage = capsys.readouterr().out.split("usage: ")[1:]

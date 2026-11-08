@@ -166,9 +166,12 @@ defaults off, and the option gate admitting the arm on its launch mode (and
 refusing it without --cpu-actor) with the option heads in the arm's nets.
 Each EVAL line prints the key opt_* fields beside the pre-check's shares
 (option_text), and a row without every opt_* field (OPTION_FIELDS), with no
-acted position, train step or probe root counted, or with a non-finite option
-train step (STOP RULES: stop and report) is an ALERT (option_alert). Test O's
-option smoke (smoke_testof.py) counts as a trainer.
+acted position, train step, probe root or birth-search root, node or
+simulation counted, with read (3)'s counters off their invariants (opt_sims =
+opt_roots x the arm's simulations, roots >= acted positions, nodes >= roots;
+option_counter_breaks), or with a non-finite option train step (STOP RULES:
+stop and report) is an ALERT (option_alert). Test O's option smoke
+(smoke_testof.py) counts as a trainer.
 
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
@@ -414,18 +417,22 @@ LINEAGES = {
     # O0's plus the lineage's "option" knobs (quick() pins them; option_text
     # and option_alert read the rows' opt_* fields). "named": a one-run
     # lineage keyed by its variant itself, the arm's suffix ("of" ->
-    # ...-mspacman-plain-of; lineage_key, gen); dated as Test O's o0
+    # ...-mspacman-plain-of; lineage_key, gen); dated as Test O's o0.
+    # "sims": the arm's ACT_SEARCH_SIMS, every birth root's simulations
+    # (quick() pins it; option_alert's read (3) counter check reads it)
     "of": {"arm": PLAIN_ARM, "run": "mspacman-plain", "prep": None,
            "generations": 1, "iterations": 300, "nominal": 150,
            "discounts": (0.997 ** 4,), "rule": "keep",
            "date": "2026-11-07", "resets": {"RESET_EVERY_STEPS": 0},
-           "plain": True, "named": True, "option": {"OPTION_LENGTH": 3}},
+           "plain": True, "named": True, "option": {"OPTION_LENGTH": 3},
+           "sims": 50},
     "oh": {"arm": PLAIN_ARM, "run": "mspacman-plain", "prep": None,
            "generations": 1, "iterations": 300, "nominal": 150,
            "discounts": (0.997 ** 4,), "rule": "keep",
            "date": "2026-11-07", "resets": {"RESET_EVERY_STEPS": 0},
            "plain": True, "named": True,
-           "option": {"OPTION_LENGTH": 3, "OPTION_EDGE": False}},
+           "option": {"OPTION_LENGTH": 3, "OPTION_EDGE": False},
+           "sims": 50},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
@@ -1086,6 +1093,9 @@ def quick(variant, seed):
                  "assert {_k: _v for _k, _v in spec.items() if _k != '_doc'} "
                  "== {**{_k: _v for _k, _v in _o0.items() if _k != '_doc'}, "
                  f"**{option!r}}}; "
+                 # the simulations option_alert's counter check reads
+                 f"assert spec['ACT_SEARCH_SIMS'] == "
+                 f"{LINEAGES[LINEAGE]['sims']}; "
                  "assert 'OPTION_LENGTH' not in _o0 and "
                  "'OPTION_EDGE' not in _o0; "
                  "assert muzero.OPTION_LENGTH == 1 and "
@@ -2661,8 +2671,44 @@ OPTION_SHOWN = ("opt_node_option_rate", "opt_crossing_rate", "opt_hit_rate",
                 "opt_span_mean", "opt_loss", "opt_acted", "opt_steps",
                 "opt_probe_roots", "opt_steps_nonfinite")
 # the counts a row of an option arm must hold above 0: its acted positions,
-# its train steps and its probe roots
-OPTION_COUNTS = ("opt_acted", "opt_steps", "opt_probe_roots")
+# its train steps and its probe roots, and read (3)'s own counters -- the live
+# birth searches' roots, expanded nodes and simulations (audit r1 of stage 4b)
+OPTION_COUNTS = ("opt_acted", "opt_steps", "opt_probe_roots", "opt_roots",
+                 "opt_nodes", "opt_sims")
+
+
+def option_counter_breaks(r, sims):
+    """Read (3)'s counters against what the birth searches guarantee, by
+    construction (muzero_vtree_options: every root runs exactly `sims`
+    simulations, "simulations" np.full(T, sims); every root is itself an
+    expansion, "expanded_nodes" counting the root; a node's suggestion and a
+    simulation's crossing are each counted once at most; ablation's
+    _birth_search searches every acted position of a life, plus a cut life's
+    greedy tail): opt_sims == opt_roots x sims, opt_roots >= opt_acted,
+    opt_nodes >= opt_roots, 0 <= opt_nodes_with_option <= opt_nodes and
+    0 <= opt_sims_crossing <= opt_sims. Checked only where the counts are
+    positive ints (option_alert reports those that are not); returns the
+    broken ones' texts."""
+    g = r.get
+    if not all(type(g(k)) is int and g(k) > 0 for k in
+               ("opt_roots", "opt_nodes", "opt_sims", "opt_acted")):
+        return []
+    out = []
+    if g("opt_sims") != g("opt_roots") * sims:
+        out.append(f"opt_sims {g('opt_sims')} != opt_roots {g('opt_roots')} "
+                   f"x the arm's {sims} simulations")
+    if g("opt_roots") < g("opt_acted"):
+        out.append(f"opt_roots {g('opt_roots')} < opt_acted "
+                   f"{g('opt_acted')} (every acted position is a birth root)")
+    if g("opt_nodes") < g("opt_roots"):
+        out.append(f"opt_nodes {g('opt_nodes')} < opt_roots "
+                   f"{g('opt_roots')} (every root is an expansion)")
+    for part, whole in (("opt_nodes_with_option", "opt_nodes"),
+                        ("opt_sims_crossing", "opt_sims")):
+        v = g(part)
+        if part in r and not (type(v) is int and 0 <= v <= g(whole)):
+            out.append(f"{part} {v!r} outside 0..{whole} {g(whole)}")
+    return out
 
 
 def option_text(r):
@@ -2679,10 +2725,13 @@ def option_alert(r):
     """Test O stage 4b: an option lineage's (OF / OH) row that lacks opt_*
     fields (OPTION_FIELDS: the rows are the only record of read (3)'s
     counts, read (4) and the probe, nothing rebuilds them after the run),
-    holds a count of OPTION_COUNTS at 0 or not an int (None included), or
-    counts a non-finite option train step (Test O's STOP RULES: stop and
-    report, Kai's call); else None, as for every other lineage's row."""
-    if not LINEAGES[LINEAGE].get("option"):
+    holds a count of OPTION_COUNTS at 0 or not an int (None included),
+    breaks read (3)'s counter invariants (option_counter_breaks at the
+    lineage's "sims"), or counts a non-finite option train step (Test O's
+    STOP RULES: stop and report, Kai's call); else None, as for every other
+    lineage's row."""
+    lin = LINEAGES[LINEAGE]
+    if not lin.get("option"):
         return None
     out = []
     missing = [k for k in OPTION_FIELDS if k not in r]
@@ -2696,7 +2745,11 @@ def option_alert(r):
            if k in r and not (type(r.get(k)) is int and r.get(k) > 0)]
     if bad:
         out.append(", ".join(bad) + " (the row's acted positions, train "
-                   "steps and probe roots must each count above 0)")
+                   "steps, probe roots and read (3)'s birth-search roots, "
+                   "nodes and simulations must each count above 0)")
+    broken = option_counter_breaks(r, lin["sims"])
+    if broken:
+        out.append("; ".join(broken) + ": read (3)'s counters do not add up")
     nf = r.get("opt_steps_nonfinite")
     if "opt_steps_nonfinite" in r and not (type(nf) is int and nf == 0):
         out.append(f"opt_steps_nonfinite {nf!r}: non-finite option train "

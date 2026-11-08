@@ -1444,9 +1444,21 @@ def test_an_of_snapshot_scores_through_the_exact_eval_probe(
                      stop_env_steps=16)
     rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
     assert [r["iteration"] for r in rows] == [1, 2]
+    # the supervisor's option ALERT on these REAL rows, at this run's 6
+    # simulations: silent, and its counter invariants hold non-vacuously
+    # (audit r1 of stage 4b: a false alert in a multi-day run is worse
+    # than none)
+    real_sup.configure("of")
+    monkeypatch.setitem(real_sup.LINEAGES["of"], "sims", 6)
     for r in rows:
         assert {k for k in r if k.startswith("opt_")} == \
             set(real_sup.OPTION_FIELDS)
+        assert real_sup.option_alert(r) is None, real_sup.option_alert(r)
+        assert real_sup.option_counter_breaks(r, 6) == []
+        assert r["opt_sims"] == r["opt_roots"] * 6 > 0
+        assert r["opt_roots"] > r["opt_acted"] > 0          # a cut tail
+        assert r["opt_nodes"] >= r["opt_roots"]
+        assert real_sup.option_counter_breaks(r, 7) != []   # it can bite
     snap = tmp_path / "of-run" / "snapshots-e2e-of-seed0" / \
         "weights-iter002.pth"
     blob = torch.load(snap, map_location="cpu", weights_only=False)
