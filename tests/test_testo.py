@@ -6,10 +6,21 @@ gate; the plain search path; the pre-check's statistic on hand-computed
 trajectories, life ends and cut lives included, the learner's argmax and not
 the actor's, its row fields and its window; the flag off leaving every other
 arm's search, RNG streams and rows alone; the supervisor's lineage; and, end to
-end on real Ms. Pac-Man (CPU), a run's rows. CPU only."""
+end on real Ms. Pac-Man (CPU), a run's rows.
+
+Stage 4b of the option code: the supervisor's OF and OH lineages (named,
+one run each, alone as o0): their names, stops, commands and main(), the
+refusal of a chain, the quick probe (O0's arm plus the option knobs, the
+gate admitting it, the heads in its nets) with each pin biting, the EVAL
+line's option fields and the option ALERTs, OPTION_FIELDS against the
+trainer's own fields, the option suites and smoke in the preflight -- and
+every lineage before stage 4b pinned against the supervisor at git PRE_S4B
+(the pin FAILS, never skips, when git cannot read it). CPU only."""
 import contextlib
+import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
 
 import numpy as np
@@ -925,6 +936,447 @@ def test_other_lineages_rows_are_as_they_were(sup, capsys):
     sup.Rows(path, "n0", 0).emit()
     out = capsys.readouterr().out
     assert "frames/decision" in out and "hold2" not in out
+
+
+# --------------------------------------------------------------------------
+# the supervisor, stage 4b: OF and OH, each a named one-run lineage alone
+# --------------------------------------------------------------------------
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+PRE_S4B = "216d945f"          # the build tree's head before stage 4b
+OPTIONS = (("of", OF, {"OPTION_LENGTH": 3}),
+           ("oh", OH, {"OPTION_LENGTH": 3, "OPTION_EDGE": False}))
+FOUR = ["tests/test_options_net.py", "tests/test_vtree_options.py",
+        "tests/test_option_train.py", "tests/test_option_diag.py"]
+
+
+def test_the_option_lineages_are_o0s_pattern_alone(real_sup):  # noqa: F811
+    s = real_sup
+    o = s.LINEAGES["o"]
+    for v, arm, option in OPTIONS:
+        lin = s.LINEAGES[v]
+        assert {k: x for k, x in lin.items()
+                if k not in ("named", "option")} == o
+        assert lin["named"] is True and lin["option"] == option
+        # the arm is O0's plus exactly those knobs (OF's edge the default)
+        assert {k: x for k, x in ablation.ARMS[arm].items() if k != "_doc"} \
+            == {**{k: x for k, x in ablation.ARMS[O0].items()
+                   if k != "_doc"}, **option}
+        s.configure(v)
+        assert s.LINEAGE == v and s.GENERATIONS == 1
+        assert s.VARIANTS == {v: arm} and s.NAMES == {v: v.upper()}
+        assert s.RUNS == {v: f"mspacman-plain-{v}"}
+        assert s.run_name(v, 0) == f"mspacman-plain-{v}-s0-2026-11-07"
+        assert s.SEEDS == {0: "2026-11-07"}
+        assert s.DISCOUNTS == {v: 0.997 ** 4} and s.DISCOUNT_RULE == "keep"
+        assert s.TOTAL_ENV_STEPS == 100000 and s.target(v) == 100000
+        assert s.lineage_key(v) == v and s.lineage_variant(v, 0) == v
+        assert s.gen(v) == 0
+        assert s.upstream(v) is None and s.master_of(v) is None
+        assert s.predecessor(v, 0) is None
+        assert not s.is_student(v) and not s.is_external(v)
+        assert s.PREP_PREFIX is None and s.run_token_steps(v) == 1
+        assert (s.ITERATIONS, s.NOMINAL_ITERATIONS) == (300, 150)
+        assert s.ENV_ID == ENV_ID and s.EPISODES_PER_ITER == 3
+        with pytest.raises(SystemExit, match="o0 is not of the bound "):
+            s.target("o0")
+    assert s.lineage_key("o0") == "o" and s.lineage_key("of0") == "o"
+    s.configure("o")
+    assert s.VARIANTS == {"o0": O0}
+    with pytest.raises(SystemExit, match="of is not of the bound lineage"):
+        s.target("of")
+
+
+def test_their_stops_and_commands_are_o0s_with_their_arm(sup):  # noqa: F811
+    sup.configure("o")
+    o0 = sup.command("o0", 0)
+    for v, arm, _ in OPTIONS:
+        sup.configure(v)
+        assert sup.stop_env_steps(v, 0) == 100000
+        c = sup.command(v, 0)
+        assert c == [x.replace(O0, arm) for x in o0]
+        assert c[c.index("--arms") + 1] == arm
+        assert c[c.index("--stop-env-steps") + 1] == "100000"
+        assert c[c.index("--iterations") + 1] == "300"
+        assert c[c.index("--seed") + 1] == "0"
+        assert {"--snapshot-weights", "--ray", "--cpu-actor"} <= set(c)
+        for gone in ("--token-vocab", "--distill-set", "--init-weights",
+                     "--resume"):
+            assert gone not in c
+        rel, base, jsonl, ckpt, _ = sup.paths(v, 0)
+        assert rel == f"benchmarks/results/mspacman-plain-{v}-s0-2026-11-07"
+        assert pathlib.Path(ckpt).name == (
+            f"resume-mspacmannoframeskip-skip4-{arm}-seed0.ckpt")
+        assert pathlib.Path(sup.snapshot_path(v, 0, 5)).parent.name == (
+            f"snapshots-mspacmannoframeskip-skip4-{arm}-seed0")
+        assert [pathlib.Path(p).name for p in sup.probe_jsonls(v, 0)][:2] \
+            == [f"probe_exhaustive_eval-mspacman-plain-{v}-s0-2026-11-07"
+                f"{s}.jsonl" for s in ("-acting", "")]
+
+
+def test_main_starts_each_without_a_wait(sup, monkeypatch,  # noqa: F811
+                                         capsys):
+    monkeypatch.setattr(sup, "settle_stop", lambda variant, seed: None)
+    for v, arm, _ in OPTIONS:
+        assert sup.main([v, "0"]) == 1
+        assert sup.LINEAGE == v and sup.VARIANTS == {v: arm}
+        out = capsys.readouterr().out
+        assert f"{v} s0 starts the lineage" in out and "WAITING" not in out
+    for argv in (["of", "1"], ["oh", "1"], ["OF", "0"], ["of0", "0"],
+                 ["oh0", "0"], ["o", "0"], ["of", "0", "1"], ["f", "0"],
+                 ["o0f", "0"]):
+        assert sup.main(argv) == 2, argv
+
+
+@pytest.mark.parametrize("change", [
+    {"after": "o0"}, {"prep": "of-prep"},
+    {"generations": 2, "discounts": (0.997 ** 4,) * 2},
+    {"external": {"variant": "o0", "live": True}}, {"first": 1},
+    {"twin": "o"}, {"mine": True}])
+def test_a_named_lineage_refuses_a_chain(sup, monkeypatch,  # noqa: F811
+                                         change):
+    """OF and OH run alone, from scratch: a named lineage given an "after",
+    a prep, a second generation, an external generation 0 or mining refuses
+    to bind (configure, and so main)."""
+    good = dict(sup.LINEAGES["of"])
+    monkeypatch.setitem(sup.LINEAGES, "of", {**good, **change})
+    with pytest.raises(SystemExit, match="named by its one run"):
+        sup.configure("of")
+    with pytest.raises(SystemExit, match="named by its one run"):
+        sup.main(["of", "0"])
+    monkeypatch.setitem(sup.LINEAGES, "of", good)
+    sup.configure("of")
+    assert sup.VARIANTS == {"of": OF}
+    sup.configure("n")                   # an unnamed lineage keeps its after
+    assert sup.upstream("n0") == "r0"
+
+
+def _wrapped(code, before, after):
+    """`code` (a quick probe) run with `before` applied in its child and
+    `after` restoring it whatever the probe does (EACH restores only
+    ablation.ARMS and three muzero flags)."""
+    return ("import sys\nsys.path[:0] = ['.', 'experiments']\n"
+            "import muzero, ablation\n" + before + "\ntry:\n"
+            f"    exec({code!r}, {{}})\nfinally:\n    " + after + "\n")
+
+
+def test_their_quick_probes_pass_and_their_asserts_bite(sup):  # noqa: F811
+    a = "ablation.ARMS"
+    codes, want = [], []
+    for v, arm, option in OPTIONS:
+        sup.configure(v)
+        code = sup.quick(v, 0)
+        anchor = f"spec = ablation.ARMS[{arm!r}]; "
+        assert code.count(anchor) == 1
+        assert code.count("ablation.option_gate(_sp, True, True, 0)") == 1
+        breaks = [f"{a}[{arm!r}]['OPTION_LENGTH'] = 2",
+                  f"del {a}[{arm!r}]['OPTION_LENGTH']",
+                  f"{a}[{arm!r}]['OPTION_EDGE'] = True",
+                  f"{a}[{arm!r}]['TRAIN_PREFETCH'] = True",
+                  f"{a}[{arm!r}]['OPTION_PRECHECK'] = False",
+                  f"{a}[{arm!r}]['ACT_SEARCH_SIMS'] = 25",
+                  f"{a}[{arm!r}]['_nominal_iterations'] = 50",
+                  f"{a}[{O0!r}]['OPTION_LENGTH'] = 3",
+                  # off O0 while still C0's but for the skipped knobs (C0
+                  # moved with it): only the pin against O0 sees it
+                  f"{a}[{C0!r}]['ACT_SEARCH_SIMS'] = 25; "
+                  f"{a}[{arm!r}]['ACT_SEARCH_SIMS'] = 25"]
+        breaks.append(f"del {a}[{arm!r}]['OPTION_EDGE']" if v == "oh" else
+                      f"{a}[{arm!r}]['OPTION_EDGE'] = False")
+        codes += [code.replace(anchor, b + "; " + anchor) for b in breaks]
+        want += [(v, b, "AssertionError") for b in breaks]
+        # the module defaults switched on, the gate admitting the arm off
+        # its launch mode, the gate refusing it on its own, nets without
+        # the heads: each in its own try / finally
+        for before, after, err in (
+                ("muzero.OPTION_LENGTH = 3", "muzero.OPTION_LENGTH = 1",
+                 "AssertionError"),
+                ("muzero.OPTION_EDGE = False", "muzero.OPTION_EDGE = True",
+                 "AssertionError"),
+                ("_g = ablation.option_gate\n"
+                 "ablation.option_gate = lambda *a, **k: None",
+                 "ablation.option_gate = _g", "AssertionError"),
+                ("_g = ablation.option_gate\n"
+                 "def _no(*a, **k):\n    raise SystemExit('refused')\n"
+                 "ablation.option_gate = _no",
+                 "ablation.option_gate = _g", "SystemExit: refused"),
+                ("_b = ablation.build_networks\n"
+                 "def _l1(sp):\n    muzero.OPTION_LENGTH = 1\n"
+                 "    return _b(sp)\n"
+                 "ablation.build_networks = _l1",
+                 "ablation.build_networks = _b", "AssertionError")):
+            codes.append(_wrapped(code, before, after))
+            want.append((v, before, err))
+        codes.append(code)
+        want.append((v, "unbroken", "ok"))
+    got = _py_each(codes)
+    for (v, b, w), g in zip(want, got):
+        assert g.startswith(w), (v, b, g)
+
+
+def test_o0s_quick_probe_has_no_option_check(sup):  # noqa: F811
+    sup.configure("o")
+    code = sup.quick("o0", 0)
+    assert "OPTION_LENGTH" not in code and "option_gate(" not in code
+    assert "_skip = ('TOKEN_VOCAB', 'TOKEN_LONG_BIAS', 'OWN_PLAY_LOG', " \
+        "'OPTION_PRECHECK', 'VTREE_REFRESH_BATCH', 'VTREE_COMMUNAL_TRAJS', " \
+        "'_doc'); " in code
+
+
+def _opt_row(sup, **extra):  # noqa: F811
+    """A good OF / OH row: O0's pre-check shares, every opt_* field (the
+    shown ones at hand-picked values), then `extra`."""
+    r = _o_row(pc_positions=900, pc_hold2_share=0.0612,
+               pc_hold3_share=0.0211, pc_pi_m=0.41, pc_pi_played=0.33,
+               pc_hit_rate=0.7)
+    r.update({k: 7 for k in sup.OPTION_FIELDS})
+    r.update(opt_node_option_rate=0.3125, opt_crossing_rate=0.125,
+             opt_hit_rate=0.61, opt_probe_js=0.0123,
+             opt_probe_flip_share=0.0469,
+             opt_jump_share=[0.4, 0.3, 0.2, 0.1, 0.05], opt_span_mean=2.25,
+             opt_loss=1.5, opt_acted=1000, opt_steps=10000,
+             opt_probe_roots=256, opt_steps_nonfinite=0)
+    r.update(extra)
+    return r
+
+
+SHOWN = (" | opt node 0.3125  cross 0.125  hit 0.61  probe js 0.0123  flip "
+         "0.0469  jump 0.4/0.3/0.2/0.1/0.05  span 2.25  loss 1.5 (acted 1000"
+         "  steps 10000  probe roots 256  nonfinite 0)")
+
+
+@pytest.mark.parametrize("v", ["of", "oh"])
+def test_each_row_prints_the_option_fields_beside_the_shares(
+        sup, capsys, v):  # noqa: F811
+    sup.configure(v)
+    path = sup.paths(v, 0)[2]
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(_opt_row(sup)) + "\n")
+    sup.Rows(path, v, 0).emit()
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.startswith(f"EVAL {v} s0"))
+    assert ("hold2 0.0612  hold3 0.0211  pi[m] 0.41  pi[played] 0.33  hit 0.7"
+            "  positions 900" + SHOWN + " | elapsed 60.0 s") in line
+    assert "ALERT" not in out and "frames/decision" not in out
+    assert sup.option_alert(_opt_row(sup)) is None
+
+
+@pytest.mark.parametrize("v", ["of", "oh"])
+def test_a_row_short_of_its_option_read_alerts(sup, capsys,  # noqa: F811
+                                               v):
+    sup.configure(v)
+    n = len(sup.OPTION_FIELDS)
+    drop2 = {k: x for k, x in _opt_row(sup).items()
+             if k not in ("opt_probe_js", "opt_loss")}
+    bare = {k: x for k, x in _opt_row(sup).items()
+            if not k.startswith("opt_")}
+    cases = [
+        (drop2, "2 opt_* fields missing (opt_loss, opt_probe_js): this "
+                "row's option read cannot be rebuilt after the run"),
+        (bare, f"{n} opt_* fields missing (opt_roots, opt_nodes, "
+               "opt_nodes_with_option, opt_len_hist, opt_sims, "
+               "opt_sims_crossing, ...)"),
+        (_opt_row(sup, opt_acted=0), "opt_acted 0 (the row's acted "
+                                     "positions, train steps and probe "
+                                     "roots must each count above 0)"),
+        (_opt_row(sup, opt_steps=None), "opt_steps None (the row's"),
+        (_opt_row(sup, opt_probe_roots=0, opt_acted=True),
+         "opt_acted True, opt_probe_roots 0 (the row's"),
+        (_opt_row(sup, opt_probe_roots=1.0), "opt_probe_roots 1.0 (the "),
+        (_opt_row(sup, opt_steps_nonfinite=3),
+         "opt_steps_nonfinite 3: non-finite option train steps -- Test O's "
+         "stop rule: stop and report (Kai's call)"),
+        (_opt_row(sup, opt_steps_nonfinite=None),
+         "opt_steps_nonfinite None: non-finite"),
+    ]
+    path = sup.paths(v, 0)[2]
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+    rows = sup.Rows(path, v, 0)
+    for i, (r, want) in enumerate(cases):
+        got = sup.option_alert(r)
+        assert got is not None and want in got, (i, got)
+        with open(path, "a") as f:
+            f.write(json.dumps({**r, "iteration": 10 + 5 * i}) + "\n")
+        rows.emit()
+        out = capsys.readouterr().out
+        assert f"ALERT: {v} s0 row {10 + 5 * i}: " in out and want in out, i
+    # one ALERT line per finding kind, joined: a row missing fields and with
+    # a zero count names both
+    both = sup.option_alert({k: x for k, x in _opt_row(sup, opt_acted=0)
+                             .items() if k != "opt_loss"})
+    assert both.startswith("1 opt_* fields missing (opt_loss)")
+    assert "; opt_acted 0 (" in both
+    # the pre-check's own ALERT still bites on an option row
+    with open(path, "a") as f:
+        f.write(json.dumps(_opt_row(sup, iteration=99,
+                                    pc_positions=None)) + "\n")
+    rows.emit()
+    out = capsys.readouterr().out
+    assert f"ALERT: {v} s0 row 99: pc_positions None" in out
+    assert "opt_* fields missing" not in out
+
+
+def test_o0s_rows_carry_no_option_read(sup, capsys):  # noqa: F811
+    sup.configure("o")
+    assert sup.option_alert(_o_row()) is None
+    assert sup.option_alert(_opt_row(sup, opt_acted=0)) is None
+    path = sup.paths("o0", 0)[2]
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(_opt_row(sup, opt_acted=0)) + "\n")
+    sup.Rows(path, "o0", 0).emit()
+    out = capsys.readouterr().out
+    assert "hold2 0.0612" in out and "opt node" not in out
+    assert "ALERT" not in out
+
+
+def test_the_option_fields_are_the_trainers(real_sup):  # noqa: F811
+    """OPTION_FIELDS is every opt_* field the trainer writes into an option
+    row (option_row_fields, option_prefix_fields, _merge_option_stats' two
+    read (6) items; tests/test_option_diag.py pins it on a real run's rows
+    too); the shown and checked fields among them."""
+    s = real_sup
+    w = ablation.option_window_empty(3, A, 5)
+    want = (set(ablation.option_row_fields(w, None, 4))
+            | set(ablation.option_prefix_fields({}))
+            | {"opt_grad_uses_per_record", "opt_replay_obs_bytes"})
+    assert len(set(s.OPTION_FIELDS)) == len(s.OPTION_FIELDS) == len(want)
+    assert set(s.OPTION_FIELDS) == want
+    assert all(k.startswith("opt_") for k in want)
+    assert set(s.OPTION_COUNTS) <= set(s.OPTION_SHOWN) <= want
+    assert s.OPTION_COUNTS == ("opt_acted", "opt_steps", "opt_probe_roots")
+    for k in ("opt_node_option_rate", "opt_crossing_rate", "opt_hit_rate",
+              "opt_probe_js", "opt_probe_flip_share", "opt_jump_share",
+              "opt_span_mean", "opt_loss"):
+        assert k in s.OPTION_SHOWN
+
+
+def test_the_option_suites_and_smoke_are_in_the_preflight(
+        real_sup):  # noqa: F811
+    s = real_sup
+    assert s.SUITES[7:12] == ["tests/test_testo.py"] + FOUR
+    assert set(FOUR) <= set(s.AUDITED)
+    assert {"muzero_vtree_options.py",
+            "muzero_option_targets.py"} <= set(s.AUDITED)
+    assert "smoke_testof.py" in s.SMOKE_SCRIPTS
+    for cmd in (["py", "-u", "C:/sp/smoke_testof.py", "of", "C:/sp/of_r1"],
+                ["py", "-B", "-u", "C:" + chr(92) + "sp" + chr(92)
+                 + "smoke_testof.py", "child", "build", "C:/sp/of_r1"]):
+        assert s.is_trainer(cmd), cmd
+    for cmd in (["py", "smoke_testof.py.bak"],
+                ["py", "tests/test_smoke_testof.py"],
+                ["py", "post_testof.py", "Y:/run", "of"]):
+        assert not s.is_trainer(cmd), cmd
+
+
+# ---- no drift: every lineage before stage 4b as git PRE_S4B had it -------
+@pytest.fixture
+def pre_sup(sup, monkeypatch, tmp_path):  # noqa: F811
+    """supervise_testb.py at PRE_S4B (git show; a FAILED pin, never a skip,
+    when git cannot read it), pointed at the same temp tree, process table
+    and memory stand-ins as `sup`."""
+    try:
+        src = subprocess.run(
+            ["git", "show",
+             f"{PRE_S4B}:benchmarks/supervisors/supervise_testb.py"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+            encoding="utf-8").stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.fail(f"git show {PRE_S4B}:supervise_testb.py failed, so the "
+                    f"no-drift pin cannot run: {exc}")
+    assert "lineage_key" not in src and '"of": {' not in src
+    # (named so that the suite pin's scan for supervisors read by a suite,
+    # test_supervise_testb's, sees no file of that name)
+    path = tmp_path / "pre_s4b_supervisor.py"
+    path.write_text(src, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("pre_s4b_supervisor", path)
+    old = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(old)
+    monkeypatch.setattr(old, "REPO", sup.REPO)
+    monkeypatch.setattr(old, "MANIFEST", sup.MANIFEST)
+    monkeypatch.setitem(old.LINEAGES["m"]["external"], "tree",
+                        sup.LINEAGES["m"]["external"]["tree"])
+    monkeypatch.setattr(old, "_procs", lambda: iter(()))
+    monkeypatch.setattr(old, "commit_free_gb", lambda: None)
+    assert old.time is sup.time           # its sleep trapped by `sup` too
+    return old
+
+
+def _outcome(fn, *a):
+    try:
+        return ("ok", fn(*a))
+    except SystemExit as e:
+        return ("exit", str(e))
+
+
+BOUND = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES", "ITERATIONS",
+         "NOMINAL_ITERATIONS", "DISCOUNTS", "DISCOUNT_RULE", "SEEDS",
+         "PREP_PREFIX", "ENV_ID", "TAG", "G_RANDOM", "G_HUMAN", "NEAR_RANDOM",
+         "REWARD_UNIT", "N_TOKENS", "EPISODES_PER_ITER", "TOTAL_ENV_STEPS",
+         "MAX_REPLAY")
+
+
+def test_every_earlier_lineage_is_as_it_was(sup, pre_sup,  # noqa: F811
+                                            capsys, tmp_path):
+    """Stage 4b changes nothing for the lineages before it: for each of them
+    and each variant it binds, the bound names, the run's names and paths,
+    its chain, stop, command, prep command and quick probe, and its EVAL
+    lines and ALERTs, equal the supervisor's at PRE_S4B; only the usage line,
+    SUITES, AUDITED and SMOKE_SCRIPTS gain stage 4b's entries."""
+    new, old = sup, pre_sup
+    assert set(new.LINEAGES) == set(old.LINEAGES) | {"of", "oh"}
+    for letter in old.LINEAGES:
+        assert new.LINEAGES[letter] == old.LINEAGES[letter], letter
+        old.configure(letter)
+        new.configure(letter)
+        assert {k: getattr(new, k) for k in BOUND} == \
+            {k: getattr(old, k) for k in BOUND}, letter
+        own = [v for v in old.VARIANTS if v[:1] == letter]
+        for v in old.VARIANTS:
+            assert new.lineage_key(v) == v[:1]
+            for f in ("gen", "master_of", "upstream", "is_student",
+                      "is_external", "is_frozen", "tree_of",
+                      "run_token_steps", "prep_rel"):
+                assert _outcome(getattr(new, f), v) == \
+                    _outcome(getattr(old, f), v), (f, v)
+            for f in ("run_name", "paths", "own_play_rel", "predecessor"):
+                assert _outcome(getattr(new, f), v, 0) == \
+                    _outcome(getattr(old, f), v, 0), (f, v)
+        for v in own:
+            for f in ("target",):
+                assert _outcome(getattr(new, f), v) == \
+                    _outcome(getattr(old, f), v), (f, v)
+            for f in ("stop_env_steps", "quick"):
+                assert _outcome(getattr(new, f), v, 0) == \
+                    _outcome(getattr(old, f), v, 0), (f, v)
+            assert new.command(v, 0, 12345) == old.command(v, 0, 12345), v
+            if new.is_student(v):
+                pick = {"snapshot": "s.pth", "iterations": 5}
+                assert new.prep_command(v, 0, pick) == \
+                    old.prep_command(v, 0, pick), v
+            # the EVAL line and its ALERTs (a row with every kind of field)
+            row = _opt_row(new, iteration=5, opt_acted=0,
+                           tok_frames_per_decision=8.0, resets=0,
+                           held_ships=0, conv1_weak_frac=0.1,
+                           reward_max=9.0)
+            outs = []
+            for mod in (old, new):
+                p = tmp_path / f"rows-{mod.__name__}-{v}.jsonl"
+                p.write_text(json.dumps(row) + "\n")
+                mod.Rows(str(p), v, 0).emit()
+                outs.append(capsys.readouterr().out)
+            assert outs[0] == outs[1] and outs[0].startswith("EVAL "), v
+    for mod in (old, new):
+        assert mod.main([]) == 2
+    old_usage, new_usage = capsys.readouterr().out.split("usage: ")[1:]
+    assert "'o0']" in old_usage and "'of'" not in old_usage
+    assert new_usage == old_usage.replace("'o0']", "'o0', 'of', 'oh']")
+    assert new.SUITES == old.SUITES[:8] + FOUR + old.SUITES[8:]
+    assert set(new.AUDITED) == set(old.AUDITED) | set(FOUR)
+    assert new.SMOKE_SCRIPTS == old.SMOKE_SCRIPTS + ("smoke_testof.py",)
+    for k in ("TRAIN_STEPS", "MODE", "MAX_TOKEN_STEPS", "COMMIT_ALERT_GB",
+              "PACE_ALERT_MIN", "KAIS_CALL_STOPS", "PREP_CHECKS"):
+        assert getattr(new, k) == getattr(old, k), k
 
 
 # --------------------------------------------------------------------------

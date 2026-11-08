@@ -544,22 +544,30 @@ def test_supervisor_pins_what_the_runs_and_preflight_use(real_sup, g2sup):
         assert (ROOT / rel).exists(), rel
     assert len(set(sup.AUDITED)) == len(sup.AUDITED)
     assert set(sup.SUITES) <= set(sup.AUDITED)
-    assert len(set(sup.SUITES)) == len(sup.SUITES) == 30
+    assert len(set(sup.SUITES)) == len(sup.SUITES) == 34
     # every suite supervise_gen2.py ran, after this supervisor's, Test B's,
-    # Test C's, Test C2's, Test B2W's, E3's, Test Q's and Test O's (first: -x
-    # stops on them before the slow suites)
-    assert sup.SUITES[:8] == ["tests/test_supervise_testb.py",
-                              "tests/test_testb.py", "tests/test_testc.py",
-                              "tests/test_testc2.py", "tests/test_testb2w.py",
-                              "tests/test_e3.py", "tests/test_testq.py",
-                              "tests/test_testo.py"]
-    assert sup.SUITES[8:] == g2sup.SUITES
+    # Test C's, Test C2's, Test B2W's, E3's, Test Q's and Test O's -- O0's,
+    # then the option code's four (first: -x stops on them before the slow
+    # suites)
+    assert sup.SUITES[:12] == ["tests/test_supervise_testb.py",
+                               "tests/test_testb.py", "tests/test_testc.py",
+                               "tests/test_testc2.py",
+                               "tests/test_testb2w.py", "tests/test_e3.py",
+                               "tests/test_testq.py", "tests/test_testo.py",
+                               "tests/test_options_net.py",
+                               "tests/test_vtree_options.py",
+                               "tests/test_option_train.py",
+                               "tests/test_option_diag.py"]
+    assert sup.SUITES[12:] == g2sup.SUITES
     assert set(g2sup.AUDITED) <= set(sup.AUDITED)
     assert set(sup.AUDITED) - set(g2sup.AUDITED) == {
         "tests/test_supervise_testb.py", "tests/test_testb.py",
         "tests/test_testc.py", "tests/test_testc2.py",
         "tests/test_testb2w.py", "tests/test_e3.py", "tests/test_testq.py",
         "tests/test_testo.py",
+        # Test O stage 4b: the option code's suites
+        "tests/test_options_net.py", "tests/test_vtree_options.py",
+        "tests/test_option_train.py", "tests/test_option_diag.py",
         # E3's suite reads E3a's probe (and the probes it imports)
         "benchmarks/probes/probe_e3a_sequences.py",
         "benchmarks/probes/probe_action_census.py",
@@ -684,8 +692,8 @@ def test_supervisor_refuses_bad_arguments(sup, monkeypatch, capsys):
     assert ("usage: supervise_testb.py <variant: ['f0', 'f1', 'f2', 'f3', "
             "'f4', 't0', 't1', 't2', 'r0', 'n0', 'a0', 'w0', 'w1', 'w2', "
             "'m1', 'm2', 'q0', 'q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7', "
-            "'q8', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'o0']> "
-            "<seed: [0]>") in out
+            "'q8', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'o0', "
+            "'of', 'oh']> <seed: [0]>") in out
 
 
 def test_no_generation_2_leftovers(real_sup):
@@ -2342,7 +2350,7 @@ def test_f0_runs_preflight_then_each_launch_guarded_without_a_prep(
     assert sup.main(["f0", "0"]) == 1                 # 5 quick deaths
     out = capsys.readouterr().out
     assert "CRASH LOOP" in out
-    assert ("preflight ok (manifest + quick probe + 30 suites); starting f0 "
+    assert ("preflight ok (manifest + quick probe + 34 suites); starting f0 "
             f"s0 ({F[0]}, --stop-env-steps 20000, at most 60 iterations)") \
         in out
     # no wait, no prep, no prep integrity: f0 has none
@@ -2896,7 +2904,7 @@ LINEAGE_NAMES = ("LINEAGE", "GENERATIONS", "VARIANTS", "RUNS", "NAMES",
 def test_test_b2s_lineage_and_test_bs_unchanged(real_sup):
     sup = real_sup
     assert set(sup.LINEAGES) == {"f", "t", "r", "n", "a", "w", "m", "q", "p",
-                                 "o"}
+                                 "o", "of", "oh"}
     assert sup.TOTAL_ENV_STEPS == 100000
     loaded = {k: getattr(sup, k) for k in LINEAGE_NAMES}
     assert loaded["LINEAGE"] == "f"         # the module loads as Test B's
@@ -3513,9 +3521,11 @@ def test_test_c2s_lineage(real_sup):
     for letter, lin in sup.LINEAGES.items():
         if letter != "a":
             assert "ramps" not in lin, letter
-            # (E3's "m" runs generations 1-2 only: "first")
+            # (E3's "m" runs generations 1-2 only: "first"; Test O's named
+            # OF / OH, their key: lineage_variant)
             for k in range(lin.get("first", 0), lin["generations"]):
-                arm = ablation.ARMS[f"{lin['arm']}-{letter}{k}"]
+                arm = ablation.ARMS[
+                    f"{lin['arm']}-{sup.lineage_variant(letter, k)}"]
                 assert not any(x.startswith("RAMP_") for x in arm), letter
     # the tolerance sits far below one step of the ramp (~1e-6 in gamma)
     assert sup.RAMP_GAMMA_TOL == 1e-12
@@ -4139,7 +4149,8 @@ def test_a_smoke_counts_as_a_trainer(sup, monkeypatch, capsys):
     (smoke_teste3.py: its parent and its "child" trainers)."""
     assert sup.SMOKE_SCRIPTS == ("smoke_testc.py", "smoke_testc2.py",
                                  "smoke_testb2w.py", "smoke_teste3.py",
-                                 "smoke_testq.py", "smoke_testo.py")
+                                 "smoke_testq.py", "smoke_testo.py",
+                                 "smoke_testof.py")
     procs = [
         (1, ["py", "-u", "C:" + chr(92) + "sp" + chr(92) + "smoke_testc2.py",
              "C:/sp/smoke_testc2_r2"]),
@@ -4242,9 +4253,11 @@ def test_test_b2ws_lineage(real_sup):
         if letter == "w":
             continue
         assert "optim" not in lin, letter
-        # (E3's "m" runs generations 1-2 only: "first")
+        # (E3's "m" runs generations 1-2 only: "first"; Test O's named OF /
+        # OH, their key: lineage_variant)
         for k in range(lin.get("first", 0), lin["generations"]):
-            arm = ablation.ARMS[f"{lin['arm']}-{letter}{k}"]
+            arm = ablation.ARMS[
+                f"{lin['arm']}-{sup.lineage_variant(letter, k)}"]
             assert {o: _knob(arm, o) for o in SGD_OPTIM} == SGD_OPTIM, letter
     # the others' names and numbers come back
     sup.configure("f")

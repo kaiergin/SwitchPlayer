@@ -17,7 +17,14 @@ train step (loss, gradients, BN buffers, optimizer, PMAX writes, RNG), are
 pinned bit for bit against the build tree before this stage (git show
 b4e4d807: muzero.py, experiments/ablation.py), loaded from git as
 test_option_train.py loads e11fd5f8 -- the pins FAIL, never skip, when git
-cannot read those files. CPU only."""
+cannot read those files.
+
+Stage 4b (the exact-eval layout hook): probe_exhaustive_eval.py reads a
+snapshot's OPTION_LENGTH from its spec and builds its nets at it; a real OF
+snapshot from a tiny run scores through the probe's own path, deployed and
+trainer-BN, playing head 0 alone; one call refuses the other layout, and the
+strict loads fail loudly across layouts; the rows' opt_* fields are the
+supervisor's OPTION_FIELDS. CPU only."""
 import asyncio
 import contextlib
 import copy
@@ -41,6 +48,9 @@ import muzero_option_targets as mot  # noqa: E402
 import muzero_vtree_options  # noqa: E402
 from tests.test_prioract2 import _fake_pipe, restore_rngs  # noqa: E402,F401
 from tests.test_testc import make_run  # noqa: E402
+# stage 4b: probe_exhaustive_eval.py as a module, the supervisor as deployed
+from tests.test_gumbelact8 import probe  # noqa: E402,F401
+from tests.test_supervise_testb import real_sup  # noqa: E402,F401
 from tests.test_option_train import (  # noqa: E402
     A9, CPU, build_batch, dezero_policy, life3, real_lives, rng_states,
     same_rng, seed_all, suggest)
@@ -1134,7 +1144,9 @@ def test_an_o0_life_row_and_step_are_the_pre_stage_4a_code(o0, pre_s4,
     appears. Audit r1 of stage 4a: the two runs hold SEPARATE trainers and
     nets (deep copies of one start), so any change the new code made to
     trainer or net state shows in the comparison after every phase, and
-    the checkpoint heads are compared by VALUE."""
+    the checkpoint heads are compared by VALUE. Stage 4b (audit r2 of 4a):
+    every other run attribute is a deep copy too (spec, reset_log and
+    held_ships were shared by reference, so an in-place change to one hid)."""
     assert muzero.OPTION_LENGTH == 1
     monkeypatch.setattr(muzero, "ACT_SEARCH_SIMS", 6)
     torch.set_num_threads(2)
@@ -1147,9 +1159,17 @@ def test_an_o0_life_row_and_step_are_the_pre_stage_4a_code(o0, pre_s4,
     run.trainer._ensure_target_model()
     run.set_train_mode(False)          # a Run's resting state (Run.__init__)
     old_run = object.__new__(old_ab.Run)
-    old_run.__dict__.update(copy.copy(run.__dict__))
+    # Stage 4b (audit r2 of stage 4a): EVERY attribute a deep copy, not the
+    # run's own objects by reference (spec, reset_log, held_ships were), so
+    # an in-place change the new code makes to one shows in _same_runs
+    old_run.__dict__.update({k: copy.deepcopy(v)
+                             for k, v in run.__dict__.items()
+                             if k != "trainer"})
     old_run.trainer = copy.deepcopy(run.trainer)
     assert old_run.trainer.representation is not run.trainer.representation
+    for k in ("spec", "reset_log", "held_ships"):
+        assert old_run.__dict__[k] is not run.__dict__[k], k
+    assert set(old_run.__dict__) == set(run.__dict__)
     run.replay, old_run.replay = [], []
     _same_runs(run, old_run)
     for terminated, seed in ((True, 1), (False, 2), (True, 3)):
@@ -1307,3 +1327,232 @@ def test_run_one_writes_the_option_fields_into_each_of_row(
         assert r["opt_probe_s"] is not None
         assert r["replay_records"] > 0 and "dormant_025" in r
         assert not any(k.startswith("tok_") for k in r)
+
+
+# ==========================================================================
+# stage 4b: the exact-eval layout hook -- probe_exhaustive_eval.py on OF
+# snapshots (CURRICULUM "Test O", BUILD ORDER: "the exact-eval layout hook")
+# ==========================================================================
+ENV_MSP = "MsPacmanNoFrameskip-v4"
+
+
+def _opt_keys(sd):
+    return [k for k in sd if k.startswith("option_")]
+
+
+def _o0_layout(blob):
+    """The snapshot as O0's layout would hold it: the option heads' and the
+    jump rows' keys dropped (nets and acting states), the option knobs out of
+    the spec."""
+    out = {**blob, "spec": {k: v for k, v in blob["spec"].items()
+                            if k not in ("OPTION_LENGTH", "OPTION_EDGE")}}
+    for n in ablation.NET_NAMES:
+        out[n] = {k: v for k, v in blob[n].items()
+                  if not k.startswith("option_")}
+    out["acting_states"] = {n: {k: v for k, v in sd.items()
+                                if not k.startswith("option_")}
+                            for n, sd in blob["acting_states"].items()}
+    return out
+
+
+def _save(blob, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(blob, path)
+    return path
+
+
+def _perturbed(blob, seed=5):
+    """The snapshot with head 0's final layer drawn at random (the same
+    draw in the trainer's and the acting prediction, so the prior argmax
+    varies over a game) and the option heads' final layers at a far larger
+    scale: if play read any option head, the moves would move."""
+    g = torch.Generator().manual_seed(seed)
+    out = {**blob, "prediction": dict(blob["prediction"]),
+           "acting_states": {n: dict(sd) for n, sd in
+                             blob["acting_states"].items()}}
+    for k in ("policy_fc.weight", "policy_fc.bias"):
+        x = torch.randn(blob["prediction"][k].shape, generator=g) * 0.5
+        out["prediction"][k] = x
+        out["acting_states"]["prediction"][k] = x.clone()
+    for k in _opt_keys(blob["prediction"]):
+        if k.startswith("option_fcs."):
+            x = torch.randn(blob["prediction"][k].shape, generator=g) * 50.0
+            out["prediction"][k] = x
+            out["acting_states"]["prediction"][k] = x.clone()
+    return out
+
+
+def test_the_probe_reads_the_option_length_from_the_spec(
+        probe, tmp_path):  # noqa: F811
+    """snapshot_option_length: the spec's OPTION_LENGTH, 1 without it; a
+    value that is not an int >= 1 is refused."""
+    for spec, want in (({"OPTION_LENGTH": 3}, 3), ({}, 1),
+                       ({"OPTION_LENGTH": 1, "OPTION_EDGE": False}, 1)):
+        p = _save({"spec": spec}, tmp_path / "ok" / "weights-iter005.pth")
+        assert probe.snapshot_option_length(p) == want
+    p = _save({}, tmp_path / "none" / "weights-iter005.pth")
+    assert probe.snapshot_option_length(p) == 1
+    for bad in (True, 0, -2, 3.0, "3", None):
+        p = _save({"spec": {"OPTION_LENGTH": bad}},
+                  tmp_path / "bad" / "weights-iter005.pth")
+        with pytest.raises(SystemExit, match="is not an int >= 1"):
+            probe.snapshot_option_length(p)
+    with probe.snapshot_option_layout(3):
+        assert muzero.OPTION_LENGTH == 3
+    assert muzero.OPTION_LENGTH == 1
+
+
+@pytest.mark.slow
+def test_an_of_snapshot_scores_through_the_exact_eval_probe(
+        probe, real_sup, monkeypatch, tmp_path,  # noqa: F811
+        restore_rngs):  # noqa: F811
+    """A REAL OF snapshot -- written by run_one under --snapshot-weights on a
+    tiny CPU run, its acting states the BN-recalibrated representation /
+    prediction states RayPipeline.snapshot_acting_states ships -- scores
+    through the probe's own path (main: the nets built at the snapshot's
+    OPTION_LENGTH, load, apply_acting_states), DEPLOYED and TRAINER-BN, and
+    plays head 0 alone: the same snapshot with its option keys dropped,
+    scored at O0's layout, plays the same moves, games and records -- also
+    with head 0 de-zeroed and the option heads blown up. One probe call
+    refuses the other layout either way, and nets built at O0's layout
+    cannot load an OF snapshot (strict load), nor OF's an O0 one. The rows'
+    opt_* fields are exactly the supervisor's OPTION_FIELDS."""
+    torch.set_num_threads(2)
+    fake = _fake_pipe([], 0)
+
+    def shipped(self):
+        frames = ablation.bn_calibration_frames(self.run.replay,
+                                                muzero.BN_RECAL_FRAMES)
+        return {n: s for n, s in ablation.bn_recalibrated_states(
+            self.run.trainer, frames).items()}
+
+    fake.snapshot_acting_states = shipped
+    monkeypatch.setattr(ablation, "RayPipeline", fake)
+    monkeypatch.setattr(ablation, "ENV_NAME", ENV_MSP)
+    monkeypatch.setattr(ablation, "FRAMESKIP", 4)
+    monkeypatch.setattr(ablation, "ACTIONS", A9)
+    monkeypatch.setattr(ablation, "EPISODE_CAP", 8)
+    (tmp_path / "of-run").mkdir()
+    monkeypatch.setattr(ablation, "RESULTS", tmp_path / "of-run")
+    monkeypatch.setattr(ablation, "TAG", "")
+    monkeypatch.setattr(ablation, "DEVICE", torch.device("cpu"))
+    monkeypatch.setitem(ablation.ARMS, "e2e-of", {
+        **ablation.ARMS[OF], "TRAINING_BATCHES": 16, "ACT_SEARCH_SIMS": 6})
+    out = tmp_path / "a.jsonl"
+    ablation.run_one("e2e-of", 0, 300, 1, 4, 1, out, checkpoint_every=1,
+                     use_ray=True, cpu_actor=True, snapshot_weights=True,
+                     stop_env_steps=16)
+    rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert [r["iteration"] for r in rows] == [1, 2]
+    for r in rows:
+        assert {k for k in r if k.startswith("opt_")} == \
+            set(real_sup.OPTION_FIELDS)
+    snap = tmp_path / "of-run" / "snapshots-e2e-of-seed0" / \
+        "weights-iter002.pth"
+    blob = torch.load(snap, map_location="cpu", weights_only=False)
+    assert blob["spec"]["OPTION_LENGTH"] == 3
+    assert blob["spec"]["PREFIX_BN_PER_STEP"] is True
+    assert set(blob["acting_states"]) == {"representation", "prediction"}
+    # the option heads in the nets AND in the shipped acting states, their
+    # weights the trainer's (the recalibration resets BN statistics only;
+    # the heads hold no BN)
+    heads = _opt_keys(blob["prediction"])
+    assert heads and heads == _opt_keys(blob["acting_states"]["prediction"])
+    assert {"option_convs", "option_fcs"} <= {k.split(".")[0] for k in heads} \
+        <= {"option_convs", "option_hiddens", "option_fcs"}
+    assert {k.split(".")[1] for k in heads} == {"0", "1"}       # L - 1 = 2
+    for k in heads:
+        assert torch.equal(blob["prediction"][k],
+                           blob["acting_states"]["prediction"][k]), k
+    assert _opt_keys(blob["dynamics"]) == ["option_embeddings.0.weight",
+                                           "option_embeddings.1.weight"]
+    for n in ("representation", "value_prefix", "projector"):
+        assert not _opt_keys(blob[n]), n
+    twin = _save(_o0_layout(blob), tmp_path / "o0-twin" / "s" /
+                 "weights-iter002.pth")
+    pert = _perturbed(blob)
+    pert_of = _save(pert, tmp_path / "of-pert" / "s" / "weights-iter002.pth")
+    pert_o0 = _save(_o0_layout(pert),
+                    tmp_path / "o0-pert" / "s" / "weights-iter002.pth")
+    monkeypatch.setattr(probe, "ENV", ENV_MSP)
+    real_play = ablation.Run.play_episode
+    moves = []
+
+    def capped(self, greedy=False, cap=None):
+        got = real_play(self, greedy=greedy, cap=40)
+        moves.append([int(t[1]) for t in got[0][:-1]])
+        return got
+
+    monkeypatch.setattr(ablation.Run, "play_episode", capped)
+    layouts = []
+    orig_load = probe.load
+
+    def spy_load(run, path):
+        layouts.append((path.parent.parent.name,
+                        run.trainer.prediction.option_length,
+                        run.trainer.dynamics.option_length))
+        return orig_load(run, path)
+
+    monkeypatch.setattr(probe, "load", spy_load)
+
+    def score(path, acting):
+        monkeypatch.setattr(probe, "ACTING", acting)
+        moves.clear()
+        probe.main([str(path)])
+        run = path.parent.parent.name
+        rec = json.loads((tmp_path / (
+            f"probe_exhaustive_eval-{run}{'-acting' if acting else ''}"
+            f"-noops1.jsonl")).read_text().splitlines()[-1])
+        assert rec["variant"] == ("acting" if acting else "raw")
+        assert rec["acting_states"] is acting
+        assert rec["iteration"] == 2 and rec["env"] == ENV_MSP
+        assert rec["max_noop"] == 1 and list(rec["games"]) == ["1"]
+        return rec, list(moves)
+
+    def same(a, b):
+        ra, ma = a
+        rb, mb = b
+        assert ma == mb and ma and all(ma)
+        for k in ("games", "exact_mean", "sd", "min", "phase_means",
+                  "capped"):
+            assert ra[k] == rb[k], k
+
+    for acting in (True, False):
+        same(score(snap, acting), score(twin, acting))
+        p = score(pert_of, acting)
+        same(p, score(pert_o0, acting))
+        assert len({m for life in p[1] for m in life}) > 1   # a varied prior
+    assert layouts == [(name, L, L) for _ in (0, 1)
+                       for name, L in (("of-run", 3), ("o0-twin", 1),
+                                       ("of-pert", 3), ("o0-pert", 1))]
+    assert muzero.OPTION_LENGTH == 1                         # restored
+    # one call, one layout: the other one refused, either way round
+    monkeypatch.setattr(probe, "ACTING", False)
+    with pytest.raises(SystemExit, match="OPTION_LENGTH 3 differs from the "
+                                         "probe's 1"):
+        probe.main([str(twin), str(snap)])
+    with pytest.raises(SystemExit, match="OPTION_LENGTH 1 differs from the "
+                                         "probe's 3"):
+        probe.main([str(snap), str(twin)])
+    assert muzero.OPTION_LENGTH == 1
+    # and below the guard, the strict loads fail loudly
+    with ablation.arm_config(probe.ARM), \
+            ablation._run_length_globals(90, 2000), \
+            probe.snapshot_prefix_layout(True):
+        o0_run = ablation.Run(probe.ARM, 0, ablation.ARMS[probe.ARM])
+        o0_run.env.close()
+        with pytest.raises(SystemExit, match="OPTION_LENGTH 3 differs"):
+            orig_load(o0_run, snap)
+        for n in ("prediction", "dynamics"):
+            with pytest.raises(RuntimeError, match="option_"):
+                getattr(o0_run.trainer, n).load_state_dict(blob[n])
+        with pytest.raises(RuntimeError, match="option_"):
+            probe.apply_acting_states(o0_run, blob)
+        with probe.snapshot_option_layout(3):
+            of_run = ablation.Run(probe.ARM, 0, ablation.ARMS[probe.ARM])
+            of_run.env.close()
+            o0_blob = torch.load(twin, map_location="cpu", weights_only=False)
+            with pytest.raises(RuntimeError, match="option_"):
+                of_run.trainer.prediction.load_state_dict(
+                    o0_blob["prediction"])
+    assert muzero.OPTION_LENGTH == 1

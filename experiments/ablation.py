@@ -2784,8 +2784,10 @@ def option_state_counts(played, options, L, A):
     suggestion has at least j moves and where t + j - 1 is an acted position
     of this life (a life's end leaves the later steps nothing to compare
     with). t = 0 is left out of every step: the repeat baseline needs the
-    move played before t, which a life's first position lacks; so the three
-    predictors share their positions.
+    move played before t, which a life's first position lacks; so the five
+    predictors (the option and its four baselines: repeat, per-step
+    persistence, the first move repeated, the marginal) share their
+    positions.
       s4_opt[j-1]   the option's j-th move == played[t + j - 1];
       s4_rep[j-1]   REPEAT THE LAST MOVE: played[t - 1] == played[t + j - 1]
                     (persistence from what is known at t, every step);

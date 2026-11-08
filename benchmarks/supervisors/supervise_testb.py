@@ -142,6 +142,34 @@ pre-check's shares where a token run prints its token diagnostics, and a row
 without them is an ALERT (precheck_alert: no replay survives a run, so they
 cannot be rebuilt afterwards).
 
+TEST O's OF AND OH (Kai, 2026-11-07; CURRICULUM.md "Test O", ARMS: "Order O0,
+the pre-check, OF, OH if called for"; stage 4b of the option code): two more
+one-run lineages, each ALONE as o0 (no "after", no prep, no master, from
+scratch to 100,000 env steps, --iterations 300 around a planned 150) -- of
+(...-mspacman-plain-of: O0 plus OptionZero's option head at OPTION_LENGTH 3,
+first move only) and oh (...-mspacman-plain-oh: OF with the option edge OFF in
+the birth search, OPTION_EDGE False). One at a time, after O0: the order is
+Kai's and the launcher's, nothing here waits for another run. From their own
+run worktree (launch_testof.ps1 -Variant of / oh, hand-off post_testof.py):
+
+    python benchmarks/supervisors/supervise_testb.py of 0
+    python benchmarks/supervisors/supervise_testb.py oh 0
+
+Read the text below as for Test O's o0, with "of" / "OF" (or "oh" / "OH") /
+launch_testof.ps1 / post_testof.py. Each is a NAMED lineage: keyed by its
+variant itself, the arm's own suffix (lineage_key; its one generation is 0),
+so a named lineage refuses a chain (configure: one generation, no "after", no
+prep, no external run). It is "plain" as o0 (the pre-check's shares and their
+ALERT included: OF and OH keep the pre-check), and quick() also pins its arm
+to O0's plus the lineage's "option" knobs and nothing else, the module
+defaults off, and the option gate admitting the arm on its launch mode (and
+refusing it without --cpu-actor) with the option heads in the arm's nets.
+Each EVAL line prints the key opt_* fields beside the pre-check's shares
+(option_text), and a row without every opt_* field (OPTION_FIELDS), with no
+acted position, train step or probe root counted, or with a non-finite option
+train step (STOP RULES: stop and report) is an ALERT (option_alert). Test O's
+option smoke (smoke_testof.py) counts as a trainer.
+
 THE STOP (an amendment to the pre-registration, so that overshoots do not
 accumulate): generation k's --stop-env-steps is target() --
 round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS), Test B's 20,000 x (k + 1)
@@ -382,6 +410,22 @@ LINEAGES = {
           "discounts": (0.997 ** 4,), "rule": "keep",
           "date": "2026-11-07", "resets": {"RESET_EVERY_STEPS": 0},
           "plain": True},
+    # Test O stage 4b: OF and OH, each ALONE as o0 and "plain" as o0, its arm
+    # O0's plus the lineage's "option" knobs (quick() pins them; option_text
+    # and option_alert read the rows' opt_* fields). "named": a one-run
+    # lineage keyed by its variant itself, the arm's suffix ("of" ->
+    # ...-mspacman-plain-of; lineage_key, gen); dated as Test O's o0
+    "of": {"arm": PLAIN_ARM, "run": "mspacman-plain", "prep": None,
+           "generations": 1, "iterations": 300, "nominal": 150,
+           "discounts": (0.997 ** 4,), "rule": "keep",
+           "date": "2026-11-07", "resets": {"RESET_EVERY_STEPS": 0},
+           "plain": True, "named": True, "option": {"OPTION_LENGTH": 3}},
+    "oh": {"arm": PLAIN_ARM, "run": "mspacman-plain", "prep": None,
+           "generations": 1, "iterations": 300, "nominal": 150,
+           "discounts": (0.997 ** 4,), "rule": "keep",
+           "date": "2026-11-07", "resets": {"RESET_EVERY_STEPS": 0},
+           "plain": True, "named": True,
+           "option": {"OPTION_LENGTH": 3, "OPTION_EDGE": False}},
 }
 # Every lineage's budget: generation k's stop brings its cumulative env
 # steps to round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) (target()).
@@ -411,21 +455,44 @@ GAMES = {
 def lineage_variant(letter, k):
     """Lineage `letter`'s generation k: "<letter><k>" -- or, below its
     "first" generation run here, its "external" run's variant (E3: generation
-    0 is Test B2's t0)."""
+    0 is Test B2's t0). Test O stage 4b: a "named" lineage's one run is the
+    key itself (OF's "of")."""
     spec = LINEAGES[letter]
+    if spec.get("named"):
+        return letter
     if k < spec.get("first", 0):
         return spec["external"]["variant"]
     return f"{letter}{k}"
 
 
+def lineage_key(variant):
+    """The LINEAGES key `variant` belongs to: its first letter (Test B's f0
+    -> "f", every lineage before Test O's stage 4b) -- or, for a "named"
+    one-run lineage (Test O's OF and OH, "of" / "oh": the arm's own suffix),
+    the variant itself."""
+    if variant in LINEAGES and LINEAGES[variant].get("named"):
+        return variant
+    return variant[:1]
+
+
 def configure(letter):
     """Bind lineage `letter`'s names and numbers (LINEAGES) module-wide:
-    the module loads as Test B's ("f"); main() binds its variant's."""
+    the module loads as Test B's ("f"); main() binds its variant's. A
+    "named" lineage (Test O's OF / OH) is one run from scratch: one
+    generation and no "after", prep or external run, else SystemExit (its
+    variant has no generation digit, so it cannot chain)."""
     global LINEAGE, GENERATIONS, VARIANTS, RUNS, NAMES, ITERATIONS
     global NOMINAL_ITERATIONS, DISCOUNTS, DISCOUNT_RULE, SEEDS, PREP_PREFIX
     global ENV_ID, TAG, G_RANDOM, G_HUMAN, NEAR_RANDOM, REWARD_UNIT, N_TOKENS
     global EPISODES_PER_ITER, TOTAL_ENV_STEPS, MAX_REPLAY
     spec = LINEAGES[letter]
+    if spec.get("named") and (
+            spec["generations"] != 1 or spec.get("prep") is not None
+            or any(spec.get(k) for k in ("after", "external", "first",
+                                         "twin", "mine"))):
+        raise SystemExit(f"lineage {letter!r} is named by its one run: one "
+                         f"generation from scratch, with no 'after', prep, "
+                         f"master or external run")
     game = GAMES[spec.get("game", "mspacman")]
     ENV_ID, TAG = game["env"], game["tag"]
     G_RANDOM, G_HUMAN = game["g_random"], game["g_human"]
@@ -438,15 +505,15 @@ def configure(letter):
     # "external") runs only generations first.. here; its generations are
     # lineage_variant()'s (the external run's name for generation 0)
     every = [lineage_variant(letter, k) for k in range(GENERATIONS)]
-    names = [f"{letter}{k}" for k in range(spec.get("first", 0),
-                                            GENERATIONS)]
+    names = [lineage_variant(letter, k) for k in range(spec.get("first", 0),
+                                                        GENERATIONS)]
     # Test C: a lineage that starts "after" another lineage's run binds that
     # run's names too (its wait reads that run's files); E3: its external
     # generation 0 likewise
     known = names + ([spec["after"]] if spec.get("after") else []) + [
         v for v in every if v not in names]
-    VARIANTS = {v: f"{LINEAGES[v[0]]['arm']}-{v}" for v in known}
-    RUNS = {v: f"{LINEAGES[v[0]]['run']}-{v}" for v in known}
+    VARIANTS = {v: f"{LINEAGES[lineage_key(v)]['arm']}-{v}" for v in known}
+    RUNS = {v: f"{LINEAGES[lineage_key(v)]['run']}-{v}" for v in known}
     NAMES = {v: v.upper() for v in known}
     ITERATIONS, NOMINAL_ITERATIONS = spec["iterations"], spec["nominal"]
     DISCOUNTS = dict(zip(every, spec["discounts"]))
@@ -537,11 +604,15 @@ PREP_CHECKS = ("the value support (", "past the reward supports",
                # path weights
                "overlapping mined paths", "non-finite mined path weights")
 # Every suite supervise_gen2.py ran, plus this supervisor's, Test B's, Test
-# C's, Test C2's, Test B2W's, E3's, Test Q's and Test O's.
+# C's, Test C2's, Test B2W's, E3's, Test Q's and Test O's (O0's, then the
+# option code's: stage 1-2's network and search, stage 3's records, targets
+# and loss, stage 4a's diagnostics).
 SUITES = ["tests/test_supervise_testb.py", "tests/test_testb.py",
           "tests/test_testc.py", "tests/test_testc2.py",
           "tests/test_testb2w.py", "tests/test_e3.py",
           "tests/test_testq.py", "tests/test_testo.py",
+          "tests/test_options_net.py", "tests/test_vtree_options.py",
+          "tests/test_option_train.py", "tests/test_option_diag.py",
           "tests/test_supervise_gen2.py", "tests/test_gen2.py",
           "tests/test_supervise_gen1.py", "tests/test_gen1.py",
           "tests/test_pbn.py",
@@ -596,7 +667,10 @@ AUDITED = ["muzero.py", "redo.py", "muzero_vtree.py", "networks.py",
 
 
 def gen(variant):
-    """The generation k of `variant` ("f<k>"; Test B2's "t<k>")."""
+    """The generation k of `variant` ("f<k>"; Test B2's "t<k>"); 0 for a
+    "named" lineage's one run (Test O's "of", "oh")."""
+    if variant in LINEAGES and LINEAGES[variant].get("named"):
+        return 0
     return int(variant[1:])
 
 
@@ -605,7 +679,7 @@ def master_of(variant):
     None for f0 / t0 (from scratch). E3's m1: the external t0
     (lineage_variant)."""
     k = gen(variant)
-    return lineage_variant(variant[0], k - 1) if k else None
+    return lineage_variant(lineage_key(variant), k - 1) if k else None
 
 
 def is_external(variant):
@@ -642,14 +716,14 @@ def upstream(variant):
     lineage's "after" run (Test C: n0 after r0 -- never a master: no prep,
     no master gate); None when it waits for no run."""
     m = master_of(variant)
-    return m if m is not None else LINEAGES[variant[0]].get("after")
+    return m if m is not None else LINEAGES[lineage_key(variant)].get("after")
 
 
 def run_name(variant, seed):
     """The run's folder name, dated by the variant's own lineage (Test C's
     "after" run by its own; SEEDS still rejects an unknown seed)."""
     SEEDS[seed]
-    return f"{RUNS[variant]}-s{seed}-{LINEAGES[variant[0]]['date']}"
+    return f"{RUNS[variant]}-s{seed}-{LINEAGES[lineage_key(variant)]['date']}"
 
 
 def paths(variant, seed):
@@ -713,7 +787,7 @@ def target(variant):
     round(TOTAL_ENV_STEPS x (k + 1) / GENERATIONS) -- Test B's 20,000 x
     (k + 1), Test B2's 33,333 / 66,667 / 100,000. SystemExit for a variant
     of another lineage than the bound one (audit r2b NIT-3)."""
-    if variant[:1] != LINEAGE:
+    if lineage_key(variant) != LINEAGE:
         raise SystemExit(f"{variant} is not of the bound lineage "
                          f"{LINEAGE!r}")
     return round(TOTAL_ENV_STEPS * (gen(variant) + 1) / GENERATIONS)
@@ -728,7 +802,7 @@ def stop_env_steps(variant, seed):
     earlier generations start with the external T0 (lineage_variant), its
     final row read in its frozen tree."""
     k = gen(variant)
-    earlier = [lineage_variant(variant[0], j) for j in range(k)]
+    earlier = [lineage_variant(lineage_key(variant), j) for j in range(k)]
     spent = []
     for v in earlier:
         try:
@@ -839,7 +913,9 @@ def quick(variant, seed):
     the mined-token build are this tree's -- and m1's master checks read
     the external T0's REAL final snapshot in its frozen tree. Test O: a
     "plain" lineage's arm has no vocabulary and no own-play log, and is C0's
-    but for those and the pre-check. SystemExit while F{k-1} has no final row
+    but for those and the pre-check; an option lineage's (stage 4b: OF, OH)
+    is O0's plus its "option" knobs, with the option gate admitting it and
+    the heads in its nets. SystemExit while F{k-1} has no final row
     (master_final): the preflight reports it."""
     arm = VARIANTS[variant]
     plain = LINEAGES[LINEAGE].get("plain")
@@ -973,25 +1049,75 @@ def quick(variant, seed):
         code += ("assert spec.get('_mine_q') is True; "
                  "assert hasattr(distill, 'played_path_weights') and "
                  "'mine_q' in distill.prep.__code__.co_varnames; ")
+    option = LINEAGES[LINEAGE].get("option")
     if plain:
         # Test O: C0's arm but for the vocabulary, its bias, the own-play log,
         # the pre-check and the base's refresh shapes; the flag off by default;
-        # the build this tree's
+        # the build this tree's. (Stage 4b: an option lineage's knobs are
+        # skipped here too, and pinned against O0's arm below.)
+        skip = ("'TOKEN_VOCAB', 'TOKEN_LONG_BIAS', 'OWN_PLAY_LOG', "
+                "'OPTION_PRECHECK', 'VTREE_REFRESH_BATCH', "
+                "'VTREE_COMMUNAL_TRAJS', '_doc'"
+                + "".join(f", {k!r}" for k in (option or ())))
         code += ("assert spec['OPTION_PRECHECK'] is True; "
                  "assert muzero.OPTION_PRECHECK is False; "
                  "assert spec['TOKEN_LONG_BIAS'] == 0.0; "
                  "assert spec['VTREE_REFRESH_BATCH'] == 256; "
                  "assert spec['VTREE_COMMUNAL_TRAJS'] == 8; "
                  f"_t = ablation.ARMS[{LONG_ARM + '-n0'!r}]; "
-                 "_skip = ('TOKEN_VOCAB', 'TOKEN_LONG_BIAS', 'OWN_PLAY_LOG', "
-                 "'OPTION_PRECHECK', 'VTREE_REFRESH_BATCH', "
-                 "'VTREE_COMMUNAL_TRAJS', '_doc'); "
+                 f"_skip = ({skip}); "
                  "assert {_k: _v for _k, _v in spec.items() if _k not in "
                  "_skip} == {_k: _v for _k, _v in _t.items() if _k not in "
                  "_skip}; "
                  "assert 'OPTION_PRECHECK' not in _t; "
                  "assert hasattr(ablation, 'option_gate') and "
                  "hasattr(ablation, 'option_precheck_counts'); ")
+    if option:
+        # Test O stage 4b: OF / OH are O0's arm plus the lineage's option
+        # knobs and nothing else (OF's OPTION_EDGE is the module default,
+        # True), O0 has none, the module defaults are off and the option
+        # code is this tree's; then, under the arm's config at the run's env,
+        # frameskip and moves, the option gate admits the arm on its launch
+        # mode (--ray --cpu-actor), refuses it without --cpu-actor, and the
+        # arm's nets carry the option heads and the jump rows
+        n_opt = option["OPTION_LENGTH"]
+        edge = option.get("OPTION_EDGE", True)
+        code += (f"_o0 = ablation.ARMS[{PLAIN_ARM + '-o0'!r}]; "
+                 "assert {_k: _v for _k, _v in spec.items() if _k != '_doc'} "
+                 "== {**{_k: _v for _k, _v in _o0.items() if _k != '_doc'}, "
+                 f"**{option!r}}}; "
+                 "assert 'OPTION_LENGTH' not in _o0 and "
+                 "'OPTION_EDGE' not in _o0; "
+                 "assert muzero.OPTION_LENGTH == 1 and "
+                 "muzero.OPTION_EDGE is True; "
+                 "import muzero_vtree_options, muzero_option_targets; "
+                 "assert hasattr(ablation, 'option_row_fields') and "
+                 "hasattr(ablation, 'option_prefix_fields') and "
+                 "hasattr(ablation.Run, '_merge_option_stats') and "
+                 "hasattr(ablation.Run, '_option_probe'); ")
+        gate = (f"ablation.ENV_NAME = {ENV_ID!r}\n"
+                f"ablation.FRAMESKIP = {BASE_FRAMES}\n"
+                f"ablation.ACTIONS = ablation.env_actions({ENV_ID!r})\n"
+                f"with ablation.arm_config({arm!r}) as _sp, "
+                f"ablation.token_actions():\n"
+                f"    assert muzero.OPTION_LENGTH == {n_opt} and "
+                f"muzero.OPTION_EDGE is {edge!r}\n"
+                f"    ablation.option_gate(_sp, True, True, 0)\n"
+                f"    try:\n"
+                f"        ablation.option_gate(_sp, True, False, 0)\n"
+                f"    except SystemExit:\n"
+                f"        pass\n"
+                f"    else:\n"
+                f"        raise AssertionError('option_gate admits {arm} "
+                f"without --cpu-actor')\n"
+                f"    _n = ablation.build_networks(_sp)\n"
+                f"    assert _n['prediction'].option_length == {n_opt} and "
+                f"len(_n['prediction'].option_fcs) == {n_opt - 1}\n"
+                f"    assert _n['dynamics'].option_length == {n_opt} and "
+                f"len(_n['dynamics'].option_embeddings) == {n_opt - 1}\n"
+                f"assert muzero.OPTION_LENGTH == 1 and "
+                f"muzero.OPTION_EDGE is True\n")
+        code += f"exec({gate!r}); "
     m = master_of(variant)
     if m is None:
         return code + (f"assert spec['DISCOUNT'] == {DISCOUNTS[variant]}; "
@@ -1909,9 +2035,11 @@ TRAINER_MODULES = ("ablation", "distill", "experiments.ablation",
 # Test C2 audit r1b L4: the pre-launch GPU smokes train in-process or as
 # "smoke_testc*.py child" (no ablation.py on the command line): a supervisor
 # started by hand beside one waits it out like any trainer (Test B2W's
-# smoke too, and E3's, smoke_teste3.py)
+# smoke too, and E3's, smoke_teste3.py; Test O's OF / OH smoke,
+# smoke_testof.py, its parent and its child phases)
 SMOKE_SCRIPTS = ("smoke_testc.py", "smoke_testc2.py", "smoke_testb2w.py",
-                 "smoke_teste3.py", "smoke_testq.py", "smoke_testo.py")
+                 "smoke_teste3.py", "smoke_testq.py", "smoke_testo.py",
+                 "smoke_testof.py")
 
 
 def is_trainer(cmd):
@@ -2086,6 +2214,9 @@ class Rows:
                            r.get("pc_hold2_share"), r.get("pc_hold3_share"),
                            r.get("pc_pi_m"), r.get("pc_pi_played"),
                            r.get("pc_hit_rate"), r.get("pc_positions")))
+            if LINEAGES[LINEAGE].get("option"):
+                # Test O stage 4b: the option arms' key fields beside them
+                tok += option_text(r)
             # the rebuild's live reads (as PB's audit r1 B-N4): the search
             # targets' entropy (read (4)), the step-K (5) and step-1
             # value-prefix errors (eval-mode BN, the per-step sets)
@@ -2124,6 +2255,9 @@ class Rows:
             precheck = precheck_alert(r)
             if precheck:
                 alerts.append(precheck)
+            option = option_alert(r)
+            if option:
+                alerts.append(option)
             for alert in alerts:
                 print(f"ALERT: {self.variant} s{self.seed} row "
                       f"{r.get('iteration')}: {alert}", flush=True)
@@ -2483,6 +2617,94 @@ def precheck_alert(r):
             f"they cannot be rebuilt after the run")
 
 
+# Test O stage 4b: every opt_* field an option arm's row carries -- the
+# trainer's option_row_fields (read (3)'s counts and rates and its on/off
+# probe, DEPARTURES 3 and 7, read (4), the train-step means, read (6)'s
+# decisions per second), option_prefix_fields (the prefix panel by row kind)
+# and _merge_option_stats' read (6) items; tests pin it against the
+# trainer's own (ablation's) output and a real row.
+OPTION_FIELDS = (
+    "opt_roots", "opt_nodes", "opt_nodes_with_option", "opt_len_hist",
+    "opt_sims", "opt_sims_crossing", "opt_crossed_len_hist",
+    "opt_leaf_depth_sum", "opt_leaf_depth_max", "opt_node_option_rate",
+    "opt_crossing_rate", "opt_leaf_depth_mean", "opt_acted", "opt_hits",
+    "opt_hit_rate", "opt_pi_m", "opt_s4_positions", "opt_s4_option_hits",
+    "opt_s4_repeat_hits", "opt_s4_marginal_hits", "opt_s4_mode",
+    "opt_s4_played_hist", "opt_s4_accuracy", "opt_s4_repeat_accuracy",
+    "opt_s4_persist_hits", "opt_s4_persist_accuracy",
+    "opt_s4_first_move_hits", "opt_s4_first_move_accuracy",
+    "opt_s4_marginal_accuracy", "opt_play_counts", "opt_root_options",
+    "opt_root_option_share", "opt_root_len_hist", "opt_nonrepeat",
+    "opt_nonrepeat_share", "opt_steps", "opt_loss_steps",
+    "opt_steps_nonfinite", "opt_loss", "opt_mask_share", "opt_jump_share",
+    "opt_span_mean", "opt_span_frames", "opt_cons_jump",
+    "opt_cons_jump_edges", "opt_cons_single", "opt_cons_single_edges",
+    "opt_birth_target_share", "opt_birth_target_positions",
+    "opt_birth_target_share_roots", "opt_birth_target_roots",
+    "opt_decisions_per_s", "opt_probe_roots", "opt_probe_js",
+    "opt_probe_flips", "opt_probe_flip_share", "opt_probe_shift_roots",
+    "opt_probe_shift", "opt_probe_s",
+    "opt_prefix_jump", "opt_prefix_jump_control", "opt_prefix_jump_rows",
+    "opt_prefix_single", "opt_prefix_single_control",
+    "opt_prefix_single_rows", "opt_prefix_step1_jump",
+    "opt_prefix_step1_jump_control", "opt_prefix_step1_jump_rows",
+    "opt_prefix_step1_single", "opt_prefix_step1_single_control",
+    "opt_prefix_step1_single_rows", "opt_prefix_step1_jump_bn_ratio",
+    "opt_prefix_step1_single_bn_ratio",
+    "opt_grad_uses_per_record", "opt_replay_obs_bytes")
+# the EVAL line's option fields (option_text): read (3)'s per-node option rate
+# and crossing rate, DEPARTURE 7's hit rate, the on/off probe's JS divergence
+# and flip share, the unroll's jump share per step, its mean span and the
+# option loss -- then the counts option_alert checks
+OPTION_SHOWN = ("opt_node_option_rate", "opt_crossing_rate", "opt_hit_rate",
+                "opt_probe_js", "opt_probe_flip_share", "opt_jump_share",
+                "opt_span_mean", "opt_loss", "opt_acted", "opt_steps",
+                "opt_probe_roots", "opt_steps_nonfinite")
+# the counts a row of an option arm must hold above 0: its acted positions,
+# its train steps and its probe roots
+OPTION_COUNTS = ("opt_acted", "opt_steps", "opt_probe_roots")
+
+
+def option_text(r):
+    """Test O stage 4b: the EVAL line's option part (OPTION_SHOWN; a list,
+    opt_jump_share's per unroll step, as its entries joined by '/')."""
+    def show(v):
+        return "/".join(str(x) for x in v) if isinstance(v, list) else str(v)
+    return (" | opt node %s  cross %s  hit %s  probe js %s  flip %s  jump %s  "
+            "span %s  loss %s (acted %s  steps %s  probe roots %s  "
+            "nonfinite %s)" % tuple(show(r.get(k)) for k in OPTION_SHOWN))
+
+
+def option_alert(r):
+    """Test O stage 4b: an option lineage's (OF / OH) row that lacks opt_*
+    fields (OPTION_FIELDS: the rows are the only record of read (3)'s
+    counts, read (4) and the probe, nothing rebuilds them after the run),
+    holds a count of OPTION_COUNTS at 0 or not an int (None included), or
+    counts a non-finite option train step (Test O's STOP RULES: stop and
+    report, Kai's call); else None, as for every other lineage's row."""
+    if not LINEAGES[LINEAGE].get("option"):
+        return None
+    out = []
+    missing = [k for k in OPTION_FIELDS if k not in r]
+    if missing:
+        out.append(f"{len(missing)} opt_* fields missing ("
+                   + ", ".join(missing[:6])
+                   + (", ..." if len(missing) > 6 else "")
+                   + "): this row's option read cannot be rebuilt after the "
+                   "run")
+    bad = [f"{k} {r.get(k)!r}" for k in OPTION_COUNTS
+           if k in r and not (type(r.get(k)) is int and r.get(k) > 0)]
+    if bad:
+        out.append(", ".join(bad) + " (the row's acted positions, train "
+                   "steps and probe roots must each count above 0)")
+    nf = r.get("opt_steps_nonfinite")
+    if "opt_steps_nonfinite" in r and not (type(nf) is int and nf == 0):
+        out.append(f"opt_steps_nonfinite {nf!r}: non-finite option train "
+                   f"steps -- Test O's stop rule: stop and report (Kai's "
+                   f"call)")
+    return "; ".join(out) or None
+
+
 def snapshot(deaths_log, variant, seed, attempt, rc, lifetime):
     """Append the death-time environment to deaths.log; one line to stdout."""
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2598,13 +2820,14 @@ def main(argv):
         pass
     if "--write-manifest" in argv:
         return write_manifest()
-    if argv and argv[0][:1] in LINEAGES:
+    if argv and lineage_key(argv[0]) in LINEAGES:
         # the variant's lineage: Test B's f0-f4, Test B2's t0-t2, Test C's
-        # r0 / n0, Test C2's a0, Test B2W's w0-w2, E3's m1 / m2 or Test O's o0
-        configure(argv[0][:1])
+        # r0 / n0, Test C2's a0, Test B2W's w0-w2, E3's m1 / m2, Test O's o0
+        # or its named OF / OH, "of" / "oh"
+        configure(lineage_key(argv[0]))
     if (len(argv) != 2 or argv[0] not in VARIANTS
             or not argv[1].isdigit() or int(argv[1]) not in SEEDS):
-        every = [f"{c}{k}" for c, spec in LINEAGES.items()
+        every = [lineage_variant(c, k) for c, spec in LINEAGES.items()
                  for k in range(spec.get("first", 0), spec["generations"])]
         print(f"usage: supervise_testb.py <variant: {every}> "
               f"<seed: {sorted(SEEDS)}> | --write-manifest", flush=True)

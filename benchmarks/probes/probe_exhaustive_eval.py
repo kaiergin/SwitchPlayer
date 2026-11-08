@@ -18,7 +18,12 @@ agent instead of the prior argmax (below). PROBE_ENV (default Pong-v4): the
 env id the snapshots were trained on (Ms. Pac-Man, 2026-10-16:
 MsPacmanNoFrameskip-v4); the action count comes from the env. Every game is
 a whole GAME (Run.play_game: all lives of a multi-life game, the 3000 cap per
-life); a Pong game is one life, so Pong records are unchanged."""
+life); a Pong game is one life, so Pong records are unchanged. The probe's nets
+take each layout knob from the first snapshot's spec -- TOKEN_VOCAB,
+PREFIX_BN_PER_STEP and (Test O stage 4b: OF / OH) OPTION_LENGTH, whose option
+heads and jump rows the strict load needs -- and one call refuses a snapshot of
+another layout. An option snapshot plays head 0 alone, its prior argmax:
+prediction(latent) is unchanged, the option heads never run."""
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # "" deletes the var on Windows
 import contextlib
@@ -67,6 +72,12 @@ def load(run, path):
         # Likewise one prefix-head layout (the per-step BN buffers).
         raise SystemExit(f"{path.name}: PREFIX_BN_PER_STEP {pbn} differs "
                          f"from the probe's {muzero.PREFIX_BN_PER_STEP}")
+    L = spec_option_length(d, path)
+    if L != muzero.OPTION_LENGTH:
+        # Likewise one option layout (Test O: the option heads and the jump
+        # rows), so an OF snapshot never meets O0's nets or the reverse.
+        raise SystemExit(f"{path.name}: OPTION_LENGTH {L} differs from the "
+                         f"probe's {muzero.OPTION_LENGTH}")
     for n in ablation.NET_NAMES:
         getattr(run.trainer, n).load_state_dict(d[n])
     renorm = d.get("spec", {}).get("LATENT_RENORMALIZE", True)
@@ -190,6 +201,41 @@ def snapshot_prefix_layout(pbn):
         muzero.PREFIX_BN_PER_STEP = saved
 
 
+def spec_option_length(d, path):
+    """The OPTION_LENGTH a loaded snapshot's run trained with (its weights
+    file's spec, the arm as arm_config applied it: Test O's OF / OH carry 3;
+    a spec without the knob ran the module default, 1, no option heads).
+    SystemExit on a value that is not an int >= 1."""
+    L = (d.get("spec") or {}).get("OPTION_LENGTH", 1)
+    if isinstance(L, bool) or not isinstance(L, int) or L < 1:
+        raise SystemExit(f"{path.name}: OPTION_LENGTH {L!r} is not an int "
+                         f">= 1")
+    return L
+
+
+def snapshot_option_length(path):
+    """spec_option_length of the snapshot at `path` (Test O stage 4b): the
+    prediction net's option heads and the dynamics' jump rows exist only at
+    L > 1, so the probe's nets must be built at the snapshot's L for the
+    strict load. The deployed policy reads head 0 alone (prediction(latent)
+    is unchanged, the heads and the rows are never run)."""
+    path = pathlib.Path(path)
+    d = torch.load(str(path), map_location="cpu", weights_only=False)
+    return spec_option_length(d, path)
+
+
+@contextlib.contextmanager
+def snapshot_option_layout(L):
+    """OPTION_LENGTH for the probe's Run, restored after (OPTION_EDGE plays no
+    part: no search runs in the prior argmax, and it changes no layout)."""
+    saved = muzero.OPTION_LENGTH
+    muzero.OPTION_LENGTH = int(L)
+    try:
+        yield
+    finally:
+        muzero.OPTION_LENGTH = saved
+
+
 def play(run, noops):
     """One noop-start game: (return, base steps, terminated), plus the
     decisions played under TOKEN_VOCAB (where base steps count frames / 4
@@ -235,8 +281,10 @@ def main(argv):
     check_mode()
     vocab = snapshot_vocab(argv[0]) if argv else None
     pbn = snapshot_prefix_bn(argv[0]) if argv else False
+    opt_L = snapshot_option_length(argv[0]) if argv else 1
     with ablation.arm_config(ARM), ablation._run_length_globals(90, 2000), \
-            snapshot_tokens(vocab), snapshot_prefix_layout(pbn):
+            snapshot_tokens(vocab), snapshot_prefix_layout(pbn), \
+            snapshot_option_layout(opt_L):
         run = ablation.Run(ARM, 0, ablation.ARMS[ARM])
         assert muzero.USE_SEARCH_ACTING is False       # greedy = prior argmax
         if SEARCH_SIMS:
