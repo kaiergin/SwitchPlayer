@@ -2563,7 +2563,8 @@ def token_gate(spec, use_ray, cpu_actor, ray_workers):
         raise SystemExit("TOKEN_VOCAB has duplicate tokens")
 
 
-def option_gate(spec, use_ray, cpu_actor, ray_workers):
+def option_gate(spec, use_ray, cpu_actor, ray_workers, distill_set=None,
+                init_weights=None):
     """Test O (CURRICULUM: "token_gate becomes option_gate"): an arm under
     OPTION_PRECHECK has no vocabulary, so token_gate passes it unchecked; this
     holds it to the same path instead -- policy-only acting with birth
@@ -2584,7 +2585,18 @@ def option_gate(spec, use_ray, cpu_actor, ray_workers):
     TRAIN_PREFETCH_DEPTH + 1 steps late; muzero_option_targets' THE ORDER),
     ACTION_ENCODING is "embed" (the per-position jump rows are embeddings)
     and no TOKEN_VOCAB is set (options replace the vocabulary). The
-    registered arms set OPTION_PRECHECK too; the option checks cover it."""
+    registered arms set OPTION_PRECHECK too; the option checks cover it.
+    Audit r1 of stage 4a: an option arm also refuses what the registration
+    leaves off for every arm ("Left off for all arms: long-token bias,
+    swaps, distillation, mining, ceiling growth, own-play logs"; ARMS: "from
+    scratch, one generation, no swaps") and Test C / C2's knobs:
+    RESET_EVERY_STEPS, RAMP_STEPS, ceiling GROWTH (REWARD_GROWTH with
+    REWARD_GROWTH_START != REWARD_GROWTH_CEILING -- REWARD_GROWTH itself is
+    on in O0's recipe, holding the sign clip at a constant ceiling 1),
+    OWN_PLAY_LOG, TOKEN_LONG_BIAS, SCHEDULE_OFFSET_STEPS (a distilled
+    student's offline phase), the spec's _student / _master_arm /
+    _distill_offline_steps / _mine / _mine_q, --distill-set and
+    --init-weights."""
     L, edge = muzero.OPTION_LENGTH, muzero.OPTION_EDGE
     if (isinstance(L, bool) or not isinstance(L, (int, np.integer))
             or L < 1):
@@ -2603,6 +2615,30 @@ def option_gate(spec, use_ray, cpu_actor, ray_workers):
     if muzero.TOKEN_VOCAB is not None:
         raise SystemExit(f"{who} reads plain moves, one per base step: it "
                          "refuses a TOKEN_VOCAB")
+    if option:
+        off = [f"{k}={getattr(muzero, k)!r}"
+               for k in ("RESET_EVERY_STEPS", "RAMP_STEPS", "OWN_PLAY_LOG",
+                         "TOKEN_LONG_BIAS", "SCHEDULE_OFFSET_STEPS")
+               if getattr(muzero, k)]
+        if (muzero.REWARD_GROWTH and muzero.REWARD_GROWTH_START
+                != muzero.REWARD_GROWTH_CEILING):
+            off.append(f"REWARD_GROWTH from {muzero.REWARD_GROWTH_START!r} "
+                       f"to {muzero.REWARD_GROWTH_CEILING!r} (ceiling "
+                       f"growth)")
+        off += [f"{k}={spec[k]!r}" for k in
+                ("_student", "_master_arm", "_distill_offline_steps",
+                 "_mine", "_mine_q") if spec.get(k)]
+        if distill_set:
+            off.append("--distill-set")
+        if init_weights:
+            off.append("--init-weights")
+        if off:
+            raise SystemExit(f"{who} runs from scratch, one generation, "
+                             "with what the registration leaves off for "
+                             "every arm left off (resets, ramps, ceiling "
+                             "growth, own-play logs, the long-token bias, "
+                             "swaps, distillation, mining); got "
+                             f"{', '.join(off)}")
     base = int(muzero.TOKEN_BASE_FRAMES)
     need = {"PAPER_TARGETS": True, "BIRTH_SEARCH": True,
             "USE_TARGET_MODEL": True, "REFRESH_VTREE": True,
@@ -2705,6 +2741,7 @@ def option_window_empty(L, A, K):
         # DEPARTURE 7 and read (4), over the acted positions at birth
         "acted": 0, "hit": 0, "pi_m": 0.0, "frames": 0, "play": [0] * A,
         "s4_n": [0] * L, "s4_opt": [0] * L, "s4_rep": [0] * L,
+        "s4_prev": [0] * L, "s4_first": [0] * L,
         "s4_hist": [[0] * A for _ in range(L)],
         "with_option": 0, "nonrepeat": 0, "root_len_hist": [0] * (L + 1),
         # the row's train steps (TrainingHelper._option_last, note_option_step)
@@ -2752,6 +2789,14 @@ def option_state_counts(played, options, L, A):
       s4_opt[j-1]   the option's j-th move == played[t + j - 1];
       s4_rep[j-1]   REPEAT THE LAST MOVE: played[t - 1] == played[t + j - 1]
                     (persistence from what is known at t, every step);
+      s4_prev[j-1]  PER-STEP PERSISTENCE: played[t + j - 2] == played[t + j
+                    - 1], the move played just before step j's position
+                    (s4_rep at step 1; audit r1 of stage 4a);
+      s4_first[j-1] THE OPTION'S FIRST MOVE REPEATED: o_1 == played[t + j -
+                    1] at every step (s4_opt at step 1). Heads that only
+                    copy head 0, (o_1, o_1, o_1), score exactly this, so
+                    the later heads show state dependence of their own only
+                    where s4_opt beats it (audit r1: they beat s4_rep);
       s4_hist[j-1]  the played moves at those positions, per move: the
                     MARGINAL baseline's hits are s4_hist[j-1][mode], mode the
                     row's most frequent played move (option_row_fields);
@@ -2760,6 +2805,7 @@ def option_state_counts(played, options, L, A):
       root_len_hist positions by suggestion length (index 0 = none)."""
     n = len(played)
     out = {"s4_n": [0] * L, "s4_opt": [0] * L, "s4_rep": [0] * L,
+           "s4_prev": [0] * L, "s4_first": [0] * L,
            "s4_hist": [[0] * A for _ in range(L)], "with_option": 0,
            "nonrepeat": 0, "root_len_hist": [0] * (L + 1)}
     for t, o in enumerate(options):
@@ -2779,6 +2825,8 @@ def option_state_counts(played, options, L, A):
             out["s4_n"][j - 1] += 1
             out["s4_opt"][j - 1] += int(int(o[j - 1]) == m)
             out["s4_rep"][j - 1] += int(prev == m)
+            out["s4_prev"][j - 1] += int(int(played[q - 1]) == m)
+            out["s4_first"][j - 1] += int(int(o[0]) == m)
             out["s4_hist"][j - 1][m] += 1
     return out
 
@@ -2853,8 +2901,10 @@ def option_prefix_panel(acc, spans, err_k, ctl_k, err_1, ctl_1, abs1_eval,
 
 def option_prefix_fields(acc):
     """option_prefix_panel's sums as row fields: means per row kind, the
-    rows behind each, and the step-1 BN ratio (eval / train-mode |prefix|)
-    for first-edge jumps and one-step first edges."""
+    rows behind each -- step K by any-jump / no-jump windows, step 1 by
+    first-edge jump / one-step first edge (error, control, rows for both:
+    audit r1 of stage 4a) -- and the step-1 BN ratio (eval / train-mode
+    |prefix|) for both first-edge kinds."""
     g = acc.get
     return {
         "opt_prefix_jump": _ratio(g("jump_err", 0.0), g("jump_n", 0)),
@@ -2868,6 +2918,11 @@ def option_prefix_fields(acc):
         "opt_prefix_step1_jump_control": _ratio(g("jump1_ctl", 0.0),
                                                 g("jump1_n", 0)),
         "opt_prefix_step1_jump_rows": g("jump1_n", 0),
+        "opt_prefix_step1_single": _ratio(g("single1_err", 0.0),
+                                          g("single1_n", 0)),
+        "opt_prefix_step1_single_control": _ratio(g("single1_ctl", 0.0),
+                                                  g("single1_n", 0)),
+        "opt_prefix_step1_single_rows": g("single1_n", 0),
         "opt_prefix_step1_jump_bn_ratio": _ratio(g("jump1_eval", 0.0),
                                                  g("jump1_train", 0.0), 4),
         "opt_prefix_step1_single_bn_ratio": _ratio(g("single1_eval", 0.0),
@@ -2881,7 +2936,11 @@ def option_row_fields(w, probe, base_frames):
     row's on/off probe (option_probe_stats plus "seconds"; None when no root
     was probed). Counts are logged beside every rate, so a read pooled over
     rows (read (3)'s [90k, end]) is computed from counts. base_frames: the
-    frames of one base step (TOKEN_BASE_FRAMES)."""
+    frames of one base step (TOKEN_BASE_FRAMES).
+    opt_acted counts the row's acted positions from a CHECKPOINTED window,
+    so it equals O0's pre-check pc_positions only in a row no resume cut:
+    the pre-check window is not checkpointed (_note_precheck), and after a
+    resume pc_positions holds the post-resume lives alone."""
     L = len(w["s4_n"])
     play = w["play"]
     mode = int(np.argmax(play)) if sum(play) else None
@@ -2918,6 +2977,12 @@ def option_row_fields(w, probe, base_frames):
                             for a, n in zip(w["s4_opt"], w["s4_n"])],
         "opt_s4_repeat_accuracy": [_ratio(a, n, 4)
                                    for a, n in zip(w["s4_rep"], w["s4_n"])],
+        "opt_s4_persist_hits": list(w["s4_prev"]),
+        "opt_s4_persist_accuracy": [_ratio(a, n, 4) for a, n in
+                                    zip(w["s4_prev"], w["s4_n"])],
+        "opt_s4_first_move_hits": list(w["s4_first"]),
+        "opt_s4_first_move_accuracy": [_ratio(a, n, 4) for a, n in
+                                       zip(w["s4_first"], w["s4_n"])],
         "opt_s4_marginal_accuracy": [_ratio(a, n, 4)
                                      for a, n in zip(marg, w["s4_n"])],
         "opt_play_counts": list(play),
@@ -4358,7 +4423,8 @@ class Run:
                                   L, len(w["play"]))
         for k in ("with_option", "nonrepeat"):
             w[k] += got[k]
-        for k in ("s4_n", "s4_opt", "s4_rep", "root_len_hist"):
+        for k in ("s4_n", "s4_opt", "s4_rep", "s4_prev", "s4_first",
+                  "root_len_hist"):
             w[k] = [a + b for a, b in zip(w[k], got[k])]
         w["s4_hist"] = [[a + b for a, b in zip(x, y)]
                         for x, y in zip(w["s4_hist"], got["s4_hist"])]
@@ -4431,9 +4497,18 @@ class Run:
         (option_row_fields: read (3)'s engagement counts and rates and its
         on/off root probe, run here on the row's probe roots; DEPARTURES 3
         and 7; read (4); the train-step means) and read (6)'s cheap missing
-        items -- window positions read per acted record so far, the replay's
-        stack bytes -- into `errs`; then the window and the probe roots
-        restart (the next row's generator pinned to its own index)."""
+        items into `errs`; then the window and the probe roots restart (the
+        next row's generator pinned to its own index). Read (6)'s items:
+          opt_grad_uses_per_record = training steps x TRAINING_BATCHES x
+              (UNROLL_STEPS + 1) / env steps, cumulative: the window
+              positions the gradient steps read per acted record so far.
+              An option arm's records ARE base steps (env steps), so the
+              denominator is its records; C0's records are tokens (several
+              base steps each), so read (6) recomputes this per arm from
+              each arm's own rows (train_steps, its records), never from
+              this field across arms;
+          opt_replay_obs_bytes = the replay's observation stacks, in bytes
+              (the records' other fields apart)."""
         w = self._option_window()
         pool = self._option_probe_pool()
         probe = self._option_probe(pool["obs"], pool["row"])
@@ -6222,9 +6297,10 @@ def note_option_step(run):
     the per-edge jump share, the span, DEPARTURE 3's birth-target counts --
     which hold whether or not the step was finite; the option loss and the
     jump / one-step rows' consistency sums join only where all are finite
-    (loss_steps), a non-finite step counted apart, as the step window
-    does. Read after the step's own loss sync, so its device scalars are
-    ready: the float() copies wait on nothing."""
+    AND the step itself is (the step window's rule: the trainer's total
+    loss and pre-clip grad norm, _last_step), loss_steps; a non-finite step
+    is counted apart. Read after the step's own loss sync, so its device
+    scalars are ready: the float() copies wait on nothing."""
     last = getattr(run.trainer, "_option_last", None)
     if last is None:
         return
@@ -6242,6 +6318,14 @@ def note_option_step(run):
         w[k] += int(last[k])
     vals = (float(last["option_loss"]), float(last["cons_jump_sum"]),
             float(last["cons_single_sum"]))
+    # The step window's rule too (after_train_step: the trainer's _last_step
+    # (total loss, pre-clip grad norm), either non-finite = a non-finite
+    # step, which SKIP_NONFINITE_GRAD_STEPS skips): such a step's option
+    # loss is not averaged in even where it is finite itself (audit r1 of
+    # stage 4a). A trainer that has taken no step yet has no _last_step.
+    step = getattr(run.trainer, "_last_step", None)
+    if step is not None:
+        vals = vals + (float(step[0]), float(step[1]))
     if not all(np.isfinite(v) for v in vals):
         w["nonfinite"] += 1
         return
@@ -6989,7 +7073,8 @@ def run_one(arm, seed, iterations, episodes_per_iter, train_steps, eval_every, o
         birth_search_gate()
         sve_gate()
         token_gate(spec, use_ray, cpu_actor, ray_workers)
-        option_gate(spec, use_ray, cpu_actor, ray_workers)
+        option_gate(spec, use_ray, cpu_actor, ray_workers,
+                    distill_set=distill_set, init_weights=init_weights)
         reward_growth_gate(use_ray, cpu_actor, ray_workers)
         student_gate(spec, distill_set, snapshot_weights)
         env_stop_gate(spec, stop_env_steps, use_ray, cpu_actor, iterations,

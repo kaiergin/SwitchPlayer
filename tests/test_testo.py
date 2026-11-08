@@ -385,11 +385,77 @@ def test_only_the_option_arms_set_the_option_knobs():
     assert ablation.ARMS[OH]["OPTION_EDGE"] is False
 
 
+@pytest.mark.parametrize("change", [
+    {"RESET_EVERY_STEPS": 40000}, {"RAMP_STEPS": 10000},
+    {"REWARD_GROWTH_CEILING": 160.0}, {"REWARD_GROWTH_START": 0.5},
+    {"OWN_PLAY_LOG": True}, {"TOKEN_LONG_BIAS": 0.5},
+    {"SCHEDULE_OFFSET_STEPS": 20000}])
+@pytest.mark.parametrize("arm", [OF, OH])
+def test_the_gate_refuses_what_every_arm_leaves_off(in_arm, monkeypatch,
+                                                    change, arm):
+    """Audit r1 of stage 4a: "Left off for all arms: long-token bias, swaps,
+    distillation, mining, ceiling growth, own-play logs" and Test C / C2's
+    resets and ramps. REWARD_GROWTH itself stays on (O0's recipe holds the
+    sign clip at a constant ceiling 1): only GROWTH is refused."""
+    spec = in_arm(arm)
+    assert muzero.REWARD_GROWTH is True
+    for k, v in change.items():
+        monkeypatch.setattr(muzero, k, v)
+    with pytest.raises(SystemExit, match="OPTION_LENGTH 3 runs from "
+                                         "scratch, one generation"):
+        ablation.option_gate(spec, True, True, 0)
+
+
+@pytest.mark.parametrize("extra", [
+    {"_student": "distill"}, {"_student": "fresh"},
+    {"_master_arm": O0}, {"_distill_offline_steps": 20000},
+    {"_mine": True}, {"_mine_q": True}])
+def test_the_gate_refuses_a_student_a_swap_and_mining(in_arm, extra):
+    spec = in_arm(OF)
+    with pytest.raises(SystemExit, match="runs from scratch.*" +
+                       list(extra)[0]):
+        ablation.option_gate({**spec, **extra}, True, True, 0)
+
+
+def test_the_gate_refuses_a_distillation_set_and_init_weights(in_arm):
+    spec = in_arm(OF)
+    with pytest.raises(SystemExit, match="from scratch.*--distill-set"):
+        ablation.option_gate(spec, True, True, 0, distill_set="set.npz")
+    with pytest.raises(SystemExit, match="from scratch.*--init-weights"):
+        ablation.option_gate(spec, True, True, 0, init_weights="w.pth")
+    ablation.option_gate(spec, True, True, 0, distill_set=None,
+                         init_weights=None)
+
+
+def test_the_left_off_checks_are_the_option_arms_alone(in_arm, monkeypatch):
+    # O0's pre-check gate is unchanged: the same knobs do not refuse it
+    spec = in_arm(O0)
+    for k, v in (("OWN_PLAY_LOG", True), ("TOKEN_LONG_BIAS", 0.5)):
+        monkeypatch.setattr(muzero, k, v)
+    ablation.option_gate({**spec, "_mine": True}, True, True, 0,
+                         distill_set="set.npz", init_weights="w.pth")
+
+
 def test_run_one_wires_the_gate():
+    """After token_actions() (it reads the action count) and before the
+    refusal of conflicting state and its --overwrite deletion (audit r1 of
+    stage 4a), with the run's --distill-set and --init-weights."""
     import inspect
     src = inspect.getsource(ablation.run_one)
-    assert "option_gate(spec, use_ray, cpu_actor, ray_workers)" in src
-    assert src.index("token_actions()") < src.index("option_gate(")
+    call = ("option_gate(spec, use_ray, cpu_actor, ray_workers,\n"
+            "                    distill_set=distill_set, "
+            "init_weights=init_weights)")
+    assert src.replace("\r\n", "\n").count(call) == 1
+    gate = src.index("option_gate(")
+    assert src.index("token_actions()") < gate
+    assert gate < src.index("refuse_conflicting_state(")
+    # the deletion lives inside refuse_conflicting_state (its --overwrite
+    # branch), and the only other unlink run_one can reach before it is
+    # the identity guard that refuses instead
+    rsrc = inspect.getsource(ablation.refuse_conflicting_state)
+    assert "if overwrite:" in rsrc
+    assert src.count("refuse_conflicting_state(") == 1
+    assert src.index("if init_weights and overwrite:") > gate
 
 
 # --------------------------------------------------------------------------

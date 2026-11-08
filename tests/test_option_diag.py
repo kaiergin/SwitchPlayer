@@ -237,6 +237,20 @@ def test_state_dependence_by_hand():
     assert got["s4_n"] == [5, 4, 2]
     assert got["s4_opt"] == [4, 3, 2]
     assert got["s4_rep"] == [2, 1, 0]
+    # PER-STEP PERSISTENCE (audit r1), the move played just before each
+    # step's position:
+    #   t = 1: played 0|1, 1|1, 1|2  -> miss, hit, miss
+    #   t = 3: played 1|2, 2|2, 2|2  -> miss, hit, hit
+    #   t = 4: 2|2, 2|2 -> hit, hit;  t = 5: 2|2, 2|3 -> hit, miss
+    #   t = 6: 2|3 -> miss
+    assert got["s4_prev"] == [2, 3, 1]
+    assert got["s4_prev"][0] == got["s4_rep"][0]       # one at step 1
+    # THE OPTION'S FIRST MOVE REPEATED (audit r1):
+    #   t = 1 (1..): 1 1 2 -> hit, hit, miss;  t = 3 (2..): 2 2 2 -> 3 hits
+    #   t = 4 (2..): 2 2 -> 2 hits;  t = 5 (2..): 2 3 -> hit, miss
+    #   t = 6 (0..): 3 -> miss
+    assert got["s4_first"] == [4, 3, 1]
+    assert got["s4_first"][0] == got["s4_opt"][0]      # one at step 1
     # the played moves compared at each step: step 1 at t = 1 3 4 5 6,
     # step 2 at t+1 = 2 4 5 6, step 3 at t+2 = 3 5
     assert got["s4_hist"] == [[0, 1, 3, 1], [0, 1, 2, 1], [0, 0, 2, 0]]
@@ -248,7 +262,8 @@ def test_state_dependence_by_hand():
 def test_state_dependence_row_fields_and_the_marginal_baseline():
     w = ablation.option_window_empty(3, 4, 5)
     got = ablation.option_state_counts(S4_PLAYED, S4_OPTIONS, 3, 4)
-    for k in ("s4_n", "s4_opt", "s4_rep", "s4_hist", "root_len_hist"):
+    for k in ("s4_n", "s4_opt", "s4_rep", "s4_prev", "s4_first", "s4_hist",
+              "root_len_hist"):
         w[k] = got[k]
     w["with_option"], w["nonrepeat"] = 6, 5
     w["acted"], w["play"] = 7, [1, 2, 3, 1]     # the row's played moves
@@ -260,9 +275,61 @@ def test_state_dependence_row_fields_and_the_marginal_baseline():
     assert row["opt_s4_accuracy"] == [0.8, 0.75, 1.0]
     assert row["opt_s4_repeat_accuracy"] == [0.4, 0.25, 0.0]
     assert row["opt_s4_marginal_accuracy"] == [0.6, 0.5, 1.0]
+    assert row["opt_s4_persist_hits"] == [2, 3, 1]
+    assert row["opt_s4_persist_accuracy"] == [0.4, 0.75, 0.5]
+    assert row["opt_s4_first_move_hits"] == [4, 3, 1]
+    assert row["opt_s4_first_move_accuracy"] == [0.8, 0.75, 0.5]
     assert row["opt_root_options"] == 6
     assert row["opt_root_option_share"] == round(6 / 7, 4)
     assert row["opt_nonrepeat_share"] == round(5 / 6, 4)
+
+
+def test_a_head_copying_head_0_scores_the_first_move_baseline_by_hand():
+    """Audit r1 of stage 4a: extra heads that only copy head 0 (option
+    (o1, o1, o1), o1 = the move played: head 0 always hits) carry no state
+    dependence of their own, yet beat the played[t-1] repeat baseline at
+    steps 2 and 3. They score the first-move baseline EXACTLY, and at step 2
+    exactly per-step persistence too (both predict played[t]).
+    t:        0  1  2  3  4  5      played; option at t = (played[t],) x 3
+    """
+    played = [3, 3, 1, 1, 1, 2]
+    got = ablation.option_state_counts(played, [(m, m, m) for m in played],
+                                       3, 4)
+    # D: step 1 at t = 1..5, step 2 at t = 1..4, step 3 at t = 1..3
+    assert got["s4_n"] == [5, 4, 3]
+    # option = first move: t = 1 (3): 3 1 1 -> hit, miss, miss
+    #   t = 2 (1): 1 1 1 -> 3 hits;  t = 3 (1): 1 1 2 -> hit, hit, miss
+    #   t = 4 (1): 1 2 -> hit, miss;  t = 5 (2): 2 -> hit
+    assert got["s4_opt"] == got["s4_first"] == [5, 2, 1]
+    # played[t-1]: t = 1 (3): 3 1 1 -> hit, miss, miss;  t = 2 (3): 1 1 1
+    #   -> 0;  t = 3 (1): 1 1 2 -> hit, hit, miss;  t = 4 (1): 1 2 -> hit,
+    #   miss;  t = 5 (1): 2 -> miss
+    assert got["s4_rep"] == [3, 1, 0]
+    # per step: t = 1: 3|3 3|1 1|1 -> hit, miss, hit;  t = 2: 3|1 1|1 1|1 ->
+    #   miss, hit, hit;  t = 3: 1|1 1|1 1|2 -> hit, hit, miss;  t = 4: 1|1
+    #   1|2 -> hit, miss;  t = 5: 1|2 -> miss
+    assert got["s4_prev"] == [3, 2, 2]
+    # the copy head beats the old baseline at steps 2 and 3 ...
+    acc = [a / n for a, n in zip(got["s4_opt"], got["s4_n"])]
+    rep = [a / n for a, n in zip(got["s4_rep"], got["s4_n"])]
+    assert acc[1] > rep[1] and acc[2] > rep[2]
+    # ... and not the first-move baseline, nor persistence at steps 2 and 3
+    assert got["s4_opt"][1] == got["s4_prev"][1]
+    assert got["s4_opt"][2] < got["s4_prev"][2]
+
+
+def test_a_copy_head_equals_the_first_move_baseline_on_random_lives():
+    rng = np.random.default_rng(7)
+    for _ in range(300):
+        n = int(rng.integers(1, 30))
+        played = [int(rng.integers(0, 4))]
+        for _ in range(n - 1):            # sticky play, as Ms. Pac-Man's
+            played.append(played[-1] if rng.random() < 0.6
+                          else int(rng.integers(0, 4)))
+        opts = [(m,) * int(rng.choice([0, 2, 3])) for m in played]
+        got = ablation.option_state_counts(played, opts, 3, 4)
+        assert got["s4_opt"] == got["s4_first"]
+        assert got["s4_prev"][0] == got["s4_rep"][0]
 
 
 def test_state_dependence_edge_cases():
@@ -375,6 +442,10 @@ def test_engagement_hit_rate_and_state_dependence_over_two_lives(
     assert w["s4_n"] == [2, 1, 1]
     assert w["s4_opt"] == [2, 1, 1]
     assert w["s4_rep"] == [1, 0, 1]
+    # per step: t = 1 2|2 2|5 5|2 -> hit, miss, miss; t = 3 5|2 -> miss.
+    # first move 2: t = 1 vs 2 5 2 -> hit, miss, hit; t = 3 vs 2 -> hit
+    assert w["s4_prev"] == [1, 0, 0]
+    assert w["s4_first"] == [2, 0, 1]
     assert w["s4_hist"][0][2] == 2 and sum(w["s4_hist"][0]) == 2
     assert w["s4_hist"][1][5] == 1 and w["s4_hist"][2][2] == 1
     assert (w["with_option"], w["nonrepeat"]) == (4, 2)
@@ -651,6 +722,43 @@ def test_the_step_window_by_hand(of):
     assert row["opt_birth_target_roots"] == 24
 
 
+@pytest.mark.parametrize("bad", [(1.0, float("nan")), (1.0, float("inf")),
+                                 (float("nan"), 0.5)])
+def test_a_non_finite_step_on_the_step_windows_rule(of, bad):
+    """Audit r1 of stage 4a: a step whose total loss or pre-clip grad norm
+    is non-finite (the trainer's _last_step: the step window's rule, the
+    step SKIP_NONFINITE_GRAD_STEPS skips) is counted non-finite, its option
+    loss and consistency left out even when they are finite themselves;
+    its batch shares still count."""
+    run = stub_run(of)
+    run.trainer._last_step = (1.0, torch.tensor(0.5))
+    run.trainer._option_last = _last()                    # a finite step
+    ablation.note_option_step(run)
+    run.trainer._last_step = (bad[0], torch.tensor(bad[1]))
+    run.trainer._option_last = _last(option_loss=torch.tensor(9.0),
+                                     option_mask_share=0.75)
+    ablation.note_option_step(run)
+    row = ablation.option_row_fields(run._opt_window, None, 4)
+    assert row["opt_steps"] == 2 and row["opt_loss_steps"] == 1
+    assert row["opt_steps_nonfinite"] == 1
+    assert row["opt_loss"] == 0.5                         # 9.0 left out
+    assert row["opt_cons_jump_edges"] == 4
+    assert row["opt_mask_share"] == 0.5                   # (.25 + .75) / 2
+
+
+def test_the_step_rule_matches_the_step_windows_through_the_hook(of):
+    # the same step through after_train_step: both windows count it
+    # non-finite (O0's arm runs the step window, STEP_DIAGNOSTICS)
+    assert muzero.STEP_DIAGNOSTICS is True
+    run = stub_run(of)
+    run.trainer._last_step = (1.0, torch.tensor(float("nan")))
+    run.trainer._option_last = _last()
+    ablation.after_train_step(run)
+    assert run._step_window["nonfinite"] == 1 and run._step_window["n"] == 0
+    assert run._opt_window["nonfinite"] == 1
+    assert run._opt_window["loss_steps"] == 0
+
+
 def test_after_train_step_feeds_it_only_on_option_arms(of, monkeypatch):
     run = stub_run(of)
     run.trainer._option_last = _last()
@@ -734,9 +842,16 @@ def test_the_prefix_panel_by_row_kind_by_hand():
     assert f["opt_prefix_step1_jump_rows"] == 2
     assert f["opt_prefix_step1_jump"] == round(0.05 / 2, 6)
     assert f["opt_prefix_step1_jump_control"] == 0.25
+    # first edge one step: rows 1 and 2 (audit r1: error, control, rows)
+    assert f["opt_prefix_step1_single_rows"] == 2
+    assert f["opt_prefix_step1_single"] == round((0.02 + 0.03) / 2, 6)
+    assert f["opt_prefix_step1_single_control"] == 0.25    # (.2 + .3) / 2
     assert f["opt_prefix_step1_jump_bn_ratio"] == 3.0      # 6 / 2
     assert f["opt_prefix_step1_single_bn_ratio"] == 1.0    # 5 / 5
-    assert ablation.option_prefix_fields({})["opt_prefix_jump"] is None
+    empty = ablation.option_prefix_fields({})
+    assert empty["opt_prefix_jump"] is None
+    assert empty["opt_prefix_step1_single"] is None
+    assert empty["opt_prefix_step1_single_rows"] == 0
 
 
 def test_the_row_runs_the_panel_and_the_probe_on_option_nets(of,
@@ -1016,7 +1131,10 @@ def test_an_o0_life_row_and_step_are_the_pre_stage_4a_code(o0, pre_s4,
     its row (evaluate_diagnostics: the prediction-error panel, the pre-check
     shares, the behaviour means, the dormant read), the step hook and the
     checkpoint head equal the pre-4a code's, and no option field or window
-    appears."""
+    appears. Audit r1 of stage 4a: the two runs hold SEPARATE trainers and
+    nets (deep copies of one start), so any change the new code made to
+    trainer or net state shows in the comparison after every phase, and
+    the checkpoint heads are compared by VALUE."""
     assert muzero.OPTION_LENGTH == 1
     monkeypatch.setattr(muzero, "ACT_SEARCH_SIMS", 6)
     torch.set_num_threads(2)
@@ -1027,9 +1145,13 @@ def test_an_o0_life_row_and_step_are_the_pre_stage_4a_code(o0, pre_s4,
     run = make_run(o0, O0)
     dezero_policy(run.trainer)
     run.trainer._ensure_target_model()
+    run.set_train_mode(False)          # a Run's resting state (Run.__init__)
     old_run = object.__new__(old_ab.Run)
     old_run.__dict__.update(copy.copy(run.__dict__))
+    old_run.trainer = copy.deepcopy(run.trainer)
+    assert old_run.trainer.representation is not run.trainer.representation
     run.replay, old_run.replay = [], []
+    _same_runs(run, old_run)
     for terminated, seed in ((True, 1), (False, 2), (True, 3)):
         traj = life3(9, [1, 2, 3, 4, 5, 6, 7, 8, 0], seed=seed)
         seed_all(5 + seed)
@@ -1048,6 +1170,7 @@ def test_an_o0_life_row_and_step_are_the_pre_stage_4a_code(o0, pre_s4,
         run.replay.append(out_new)
         old_run.replay.append(out_old)
     assert not hasattr(run, "_opt_window") and not hasattr(run, "_opt_probe")
+    _same_runs(run, old_run)
     seed_all(9)
     e_old = old_run.evaluate_diagnostics(batches=2)
     s_old = rng_states()
@@ -1059,32 +1182,86 @@ def test_an_o0_life_row_and_step_are_the_pre_stage_4a_code(o0, pre_s4,
         {k: v for k, v in e_old.items() if k not in drop}
     assert "pc_positions" in e_new and "beh_act_prob" in e_new
     assert not any(k.startswith("opt_") for k in e_new)
+    _same_runs(run, old_run)
     # the step hook
     for r in (run, old_run):
         r.trainer._last_step = (1.25, torch.tensor(0.5))
         r._step_window = None
     ablation.after_train_step(run)
-    w_new = run._step_window
     old_ab.after_train_step(old_run)
-    assert w_new == old_run._step_window
+    assert run._step_window == old_run._step_window
     assert not hasattr(run, "_opt_window")
-    # the checkpoint head
+    _same_runs(run, old_run)
+    # the checkpoint head, by value
     p_new, p_old = tmp_path / "n.ckpt", tmp_path / "o.ckpt"
+    meta = {"iteration": 3, "elapsed_s": 2.0, "training_steps": 40000}
     seed_all(1)
-    ablation.save_run_checkpoint(run, p_new, {"iteration": 3,
-                                              "elapsed_s": 2.0})
+    ablation.save_run_checkpoint(run, p_new, meta)
     seed_all(1)
-    old_ab.save_run_checkpoint(old_run, p_old, {"iteration": 3,
-                                                "elapsed_s": 2.0})
+    old_ab.save_run_checkpoint(old_run, p_old, meta)
     h_new = ablation._read_checkpoint(p_new)
     h_old = ablation._read_checkpoint(p_old)
     assert list(h_new) == list(h_old)
-
-    def untimed(d):
-        return {k: {kk: vv for kk, vv in v.items()
-                    if kk != "birth_search_s_last"} for k, v in d.items()}
-    assert untimed(h_new["diag_stats"]) == untimed(h_old["diag_stats"])
     assert "option_diag" not in h_new
+    _same_value(h_new, h_old, "head")
+    assert len(h_new["replay"]) == 3 and "target" in h_new
+
+
+TIMED = {"birth_search_s_last"}
+
+
+def _same_value(a, b, path):
+    """Deep equality for checkpoint heads, run attributes and trainer
+    state: tensors and arrays exactly, NaNs equal, the timing fields
+    (TIMED) skipped."""
+    assert type(a) is type(b), (path, type(a), type(b))
+    if torch.is_tensor(a):
+        assert a.dtype == b.dtype and a.shape == b.shape, path
+        assert torch.equal(a, b) or (a.is_floating_point() and bool(
+            ((a == b) | (a.isnan() & b.isnan())).all())), path
+    elif isinstance(a, np.ndarray):
+        assert a.dtype == b.dtype and np.array_equal(a, b,
+                                                     equal_nan=a.dtype.kind
+                                                     == "f"), path
+    elif isinstance(a, dict):
+        assert list(a) == list(b), (path, list(a), list(b))
+        for k in a:
+            if k not in TIMED:
+                _same_value(a[k], b[k], f"{path}.{k}")
+    elif isinstance(a, (list, tuple)):
+        assert len(a) == len(b), path
+        for i, (x, y) in enumerate(zip(a, b)):
+            _same_value(x, y, f"{path}[{i}]")
+    elif isinstance(a, float):
+        assert a == b or (math.isnan(a) and math.isnan(b)), (path, a, b)
+    elif isinstance(a, torch.nn.Module):
+        _same_value(a.state_dict(), b.state_dict(), path + ".state_dict")
+        assert [m.training for m in a.modules()] == \
+            [m.training for m in b.modules()], path + ".training"
+    elif isinstance(a, torch.optim.Optimizer):
+        _same_value(a.state_dict(), b.state_dict(), path + ".state_dict")
+    else:
+        assert a == b, (path, a, b)
+
+
+def _same_runs(new, old):
+    """The two runs' own state: the same attributes (no new one on the new
+    run), and the trainers' every attribute -- nets with their modes and
+    buffers, optimizers, target nets, counters -- equal by value. The
+    bootstrap cache is keyed on id(trajectory), so only its size is
+    compared."""
+    skip = {"trainer", "replay"}
+    assert set(new.__dict__) == set(old.__dict__)
+    for k in new.__dict__:
+        if k not in skip:
+            _same_value(new.__dict__[k], old.__dict__[k], f"run.{k}")
+    tn, to = new.trainer.__dict__, old.trainer.__dict__
+    assert set(tn) == set(to), set(tn) ^ set(to)
+    for k in tn:
+        if k == "_boot_cache":
+            assert len(tn[k] or {}) == len(to[k] or {})
+        else:
+            _same_value(tn[k], to[k], f"trainer.{k}")
 
 
 # ==========================================================================
@@ -1113,7 +1290,10 @@ def test_run_one_writes_the_option_fields_into_each_of_row(
     rows = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
     assert [r["iteration"] for r in rows] == [1, 2]    # 8 env steps a life
     for r in rows:
-        # the pre-check beside the option fields, O0's fields kept
+        # the pre-check beside the option fields, O0's fields kept. They
+        # agree here because no resume cut a row: the option window is
+        # checkpointed, the pre-check's is not (after a resume pc_positions
+        # holds the post-resume lives alone; option_row_fields' docstring)
         assert r["pc_positions"] == 8 and r["opt_acted"] == 8
         assert r["opt_roots"] == 8 + 1                 # a cut life's tail
         assert r["opt_sims"] == 9 * 6
