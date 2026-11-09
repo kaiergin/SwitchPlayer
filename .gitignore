@@ -25,3 +25,14 @@ venv/
 benchmarks/results/
 
 checkpoint-2025-04-17-pre-resize.pth.bak
+
+# Local Switch captures and review images (large; game footage, not redistributed)
+live_frames1/
+misfire_examples/
+template_review/
+sessions/
+
+# Local scratch and comparison outputs
+/test.py
+/distribution.py
+benchmarks/results-*/

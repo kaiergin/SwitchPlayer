@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import serial
 import select
 import struct
@@ -9,10 +10,17 @@ import math
 import cv2
 import numpy as np
 
-# Set the serial port here (this is the name of the USB to serial adapter that shows up on your computer)
-PORT = 'COM5'
+# Set the serial port here (this is the name of the USB to serial adapter that
+# shows up on your computer). Override without editing this file by setting
+# SWITCH_PORT, e.g. SWITCH_PORT=COM7. Set SWITCH_PORT=none to import the
+# constants and command encoders with no hardware attached (dry run) -- sends
+# become no-ops that report success.
+PORT = os.environ.get('SWITCH_PORT', 'COM5')
 
-ser = serial.Serial(port=PORT, baudrate=19200,timeout=1)
+if PORT.lower() in ('none', 'off', ''):
+    ser = None
+else:
+    ser = serial.Serial(port=PORT, baudrate=19200,timeout=1)
 
 DEPTH_BUFFER = 10
 
@@ -131,16 +139,25 @@ def p_wait(waitTime):
 
 # Wait for data to be available on the serial port
 def wait_for_data(timeout = 1.0, sleepTime = 0.1):
+    # The original spun forever when the MCU never answered: the loop tested
+    # only inWaiting and ignored `timeout` entirely, so a miswired or unpowered
+    # board hung the caller instead of reporting a failure. Honour the timeout.
+    if ser is None:
+        return
     t0 = time.perf_counter()
     t1 = t0
     inWaiting = ser.in_waiting
     while ((t1 - t0 < sleepTime) or (inWaiting == 0)):
+        if t1 - t0 >= timeout:
+            break
         time.sleep(sleepTime)
         inWaiting = ser.in_waiting
         t1 = time.perf_counter()
 
 # Read X bytes from the serial port (returns list)
 def read_bytes(size):
+    if ser is None:
+        return []
     bytes_in = ser.read(size)
     return list(bytes_in)
 
@@ -155,6 +172,8 @@ def read_byte():
 
 # Discard all incoming bytes and read the last (latest) (returns int)
 def read_byte_latest():
+    if ser is None:
+        return 0
     inWaiting = ser.in_waiting
     if inWaiting == 0:
         inWaiting = 1
@@ -167,6 +186,8 @@ def read_byte_latest():
 
 # Write bytes to the serial port
 def write_bytes(bytes_out):
+    if ser is None:
+        return
     ser.write(bytearray(bytes_out))
     return
 
@@ -190,25 +211,65 @@ def crc8_ccitt(old_crc, new_data):
     return data
 
 # Send a raw packet and wait for a response (CRC will be added automatically)
-def send_packet(packet=[0x00,0x00,0x08,0x80,0x80,0x80,0x80,0x00], debug=False):
-    if not debug:
-        bytes_out = []
-        bytes_out.extend(packet)
+# Blocking on the ACK costs 3.31 ms of the measured 8.00 ms round trip -- 10%
+# of a 33 ms step. With ACK_NONBLOCKING the ACK for packet N is read at the
+# start of packet N+1: the reply has been sitting in the OS buffer for a whole
+# step by then, so it costs nothing to collect. The trade is that a failure is
+# noticed one step late. Sync and handshake still block, since they are
+# sequential by construction.
+ACK_NONBLOCKING = False
+_ack_pending = False
+_ack_failures = 0
 
-        # Compute CRC
-        crc = 0
-        for d in packet:
-            crc = crc8_ccitt(crc, d)
-        bytes_out.append(crc)
+
+def ack_failures():
+    """Packets whose ACK was missing or wrong (non-blocking mode only)."""
+    return _ack_failures
+
+
+def reset_ack_state():
+    global _ack_pending, _ack_failures
+    _ack_pending, _ack_failures = False, 0
+    if ser is not None:
+        ser.reset_input_buffer()
+
+
+def send_packet(packet=[0x00,0x00,0x08,0x80,0x80,0x80,0x80,0x00], debug=False,
+                wait_ack=None):
+    global _ack_pending, _ack_failures
+    if debug:
+        return True
+
+    bytes_out = []
+    bytes_out.extend(packet)
+
+    # Compute CRC
+    crc = 0
+    for d in packet:
+        crc = crc8_ccitt(crc, d)
+    bytes_out.append(crc)
+
+    if ser is None:
+        write_bytes(bytes_out)            # dry run: nothing to ACK
+        return True
+
+    wait = (not ACK_NONBLOCKING) if wait_ack is None else wait_ack
+    if wait:
         write_bytes(bytes_out)
-        # print(bytes_out)
+        return read_byte() == RESP_USB_ACK
 
-        # Wait for USB ACK or UPDATE NACK
-        byte_in = read_byte()
-        commandSuccess = (byte_in == RESP_USB_ACK)
-    else:
-        commandSuccess = True
-    return commandSuccess
+    # Non-blocking: score the PREVIOUS packet against whatever has arrived,
+    # then send. Never stall waiting for it.
+    ok = True
+    if _ack_pending:
+        waiting = ser.in_waiting
+        if waiting:
+            ok = RESP_USB_ACK in read_bytes(waiting)
+        if not ok:
+            _ack_failures += 1
+    write_bytes(bytes_out)
+    _ack_pending = True
+    return ok
 
 # Convert DPAD value to actual DPAD value used by Switch
 def decrypt_dpad(dpad):
@@ -394,9 +455,11 @@ def force_sync():
 # Start MCU syncing process
 def sync():
     inSync = False
+    reset_ack_state()
 
-    # Try sending a packet
-    inSync = send_packet()
+    # Try sending a packet. Always blocking: the handshake is sequential, so a
+    # deferred ACK would be scored against the wrong packet.
+    inSync = send_packet(wait_ack=True)
     if not inSync:
         # Not in sync: force resync and send a packet
         inSync = force_sync()

@@ -99,9 +99,14 @@ py -3.12 -m venv .venv
 Verified on an RTX 4070 with torch 2.13.0+cu130, ray 2.57.0, gymnasium 1.3.0.
 `requirements.lock.txt` is a full freeze of that environment.
 
-The legacy Switch/Tetris environment (`controller.py`, `core.py`, `tetris.py`,
-`envTest.py`) targets Python 3.7 with TensorFlow and needs a separate
-environment -- see the notes at the bottom of `requirements.txt`.
+The Switch/Tetris environment (`controller.py`, `core.py`, `tetris.py`,
+`envTest.py`) needs `gym` and `pyserial`, which are not in the lock file above
+-- see the notes at the bottom of `requirements.txt`. It no longer needs
+TensorFlow: `tetris_masks.py` replaced the three CNNs with measured regions of
+interest and template correlation, so state and reward detection run on numpy
+and OpenCV alone. `python tetris_masks.py --eval` reproduces the accuracy
+figures against the labelled corpus without any hardware attached, and
+`--demo` steps through frames with the ROIs drawn on.
 
 Currently only support for Windows machines  
 
@@ -113,3 +118,60 @@ Currently only support for Windows machines
 * [Arduino Uno R3](https://www.amazon.com/Sintron-UNO-R3-ATMEGA328P-Arduino/dp/B073DYD97C/ref=sxin_2_ac_d_pm?ac_md=1-0-VW5kZXIgJDEw-ac_d_pm&cv_ct_cx=arduino+uno+r3&keywords=arduino+uno+r3&pd_rd_i=B073DYD97C&pd_rd_r=9305d6a8-c762-46e8-b3f8-356745bc8a6d&pd_rd_w=z4ysu&pd_rd_wg=MwvP1&pf_rd_p=0e223c60-bcf8-4663-98f3-da892fbd4372&pf_rd_r=RAANRF34YJKT950W9MVQ&psc=1&qid=1584519878&s=electronics)
 * [USB to serial](https://www.amazon.com/gp/product/B01CYBHM26/ref=ppx_yo_dt_b_asin_title_o00_s00?ie=UTF8&psc=1)
 * [Camlink 4k](https://www.amazon.com/gp/product/B07K3FN5MR/ref=ppx_yo_dt_b_asin_title_o02_s00?ie=UTF8&psc=1)
+
+### Emulated controller: wiring and firmware
+
+The Arduino sits between two USB connections and is **not** driven over its own
+USB cable. Three wires carry the commands:
+
+```
+   PC ──USB── [USB-to-TTL adapter] ──3 wires── [Arduino Uno] ──USB-B── Switch dock
+
+        adapter GND ─────────────── Uno GND
+        adapter TX  ─────────────── Uno pin 0 (RX)
+        adapter RX  ─────────────── Uno pin 1 (TX)
+        adapter VCC ──── leave disconnected (the dock powers the Uno)
+```
+
+TX goes to RX and RX goes to TX — the one crossover people get wrong. Leave the
+adapter's VCC off so the board is not powered from two sources at once.
+
+The Uno's own USB-B port plugs into the **dock**, not the PC. Its ATmega16U2 is
+reflashed with LUFA firmware so the board enumerates to the Switch as a wired
+controller; the ATmega328P runs a sketch that reads this UART and forwards
+inputs. Both come from the upstream project linked under References.
+
+**Flash the 328P sketch BEFORE reflashing the 16U2.** Once the 16U2 is HID
+firmware the normal IDE upload path is gone, and you have to restore the stock
+16U2 firmware to upload a sketch again. Put the 16U2 into DFU mode by shorting
+the two-pin reset header beside the USB jack. Disconnect the TTL adapter while
+uploading a sketch — it shares pins 0/1 with the upload path.
+
+#### What the PC side expects
+
+`controller.py` is a library, not a script. Verified against its own code:
+
+| | |
+|---|---|
+| Port | `PORT` at `controller.py:14` — **hardcoded, edit it** |
+| Baud | 19200, 8N1, 1 s timeout |
+| Handshake | 9x `0xFF` -> `0xFF`; `0x33` -> `0xCC`; `0xCC` -> `0x33` |
+| Packet | 8 bytes `[btn_hi, btn_lo, dpad, LX, LY, RX, RY, 0x00]` + CRC8-CCITT |
+| Per-packet reply | `0x90` (`RESP_USB_ACK`) |
+
+`serial.Serial(...)` runs at **module import**, so `import controller` — and
+therefore `import tetris` — throws immediately if the port is absent. There is
+no lazy-connect path.
+
+#### Checking it works
+
+```bash
+pip install pyserial                       # not in the lock file
+python -c "import serial.tools.list_ports as l; print([p.device for p in l.comports()])"
+python -c "import controller; print('sync:', controller.sync())"   # True == talking
+python -c "import controller; controller.sync(); controller.testbench_btn()"
+```
+
+`sync()` returning `True` means the handshake completed and the MCU is ACKing.
+If it returns `False`, the wiring or the baud rate is wrong. If the Switch shows
+no controller at all, that is the 16U2 firmware, not this link.
