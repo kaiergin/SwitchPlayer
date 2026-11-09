@@ -37,10 +37,10 @@ Pillow          # gamefeed.py
 pygame          # playpacman.py (human demonstration capture)
 
 # ---------------------------------------------------------------------------
-# Legacy Switch/Tetris pipeline (controller.py, core.py, tetris.py, envTest.py).
-# That code targets TensorFlow 1.x/2.x on Python 3.7 and is NOT installable
-# alongside the stack above -- use a separate environment if you need it.
-#   tensorflow==2.1
+# Switch/Tetris pipeline (controller.py, core.py, tetris.py, envTest.py).
+# No longer needs TensorFlow: tetris_masks.py replaced the three CNNs with
+# measured ROIs and template correlation, so it runs on numpy + OpenCV and
+# installs alongside the stack above. Only `gym` is still pinned old.
 #   gym==0.17.2
 # ---------------------------------------------------------------------------
 pyserial        # controller.py: USB serial link to the Arduino/Switch
