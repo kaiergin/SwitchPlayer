@@ -1229,6 +1229,41 @@ OPTION CODE, stage 4a (the OF and OH arms, the gate, per-row option diagnostics 
   OptionZero's tie; JS divergence between the two rules 0.005, against 0.024 for edge on
   against off; root value higher in 34 of 48 roots (the larger of two estimates). Trained
   nets may differ. Read (3)'s crossing rate includes these first-visit crossings.
+OPTION CODE, stage 4b (the launch kit), 2026-11-08, 450b9ab3: the supervisor's named
+  one-run lineages "of" and "oh" (seed 0, run date 2026-11-07 shared with o0; a chain, a
+  swap, mining or an external run is refused); option row fields and alerts; the four
+  option suites join the preflight (SUITES 30 to 34) and AUDITED; the exact-eval probe
+  builds its nets at the snapshot's OPTION_LENGTH, refuses mixed layouts in one call and
+  plays head 0 only (the option heads hold no BN, so the acting states carry them bit for
+  bit). Every older lineage is pinned against git 216d945f. In the scratchpad: the GPU
+  smoke, the hand-off (exact evals, deployed and trainer-BN, whole games, 30 noop
+  starts), the launcher, the watch and the event wait, mirroring O0's kit.
+  CODE AUDIT r1 (two auditors): no HIGH; 2 MEDIUM: (1) the GPU smoke never formed an
+  option: at the heads' init (stop bias 10) every head's argmax is stop, so no node held
+  an option and the option search's GPU cost went unmeasured while the smoke printed OK;
+  the smoke now forces full-length options with p(o) near 1 on search copies only, asserts
+  that OF crosses and OH does not, and pins that no forced weight reaches the checkpoint,
+  the snapshot, the actor or the trainer; (2) OF and OH appended to one hand-off log, so
+  OH's first event wait would replay OF's completion; each now has its own log. LOWs taken
+  in: launch gates computed by a script (O0's pre-check over [90k, end], under 5% refuses
+  OF; OF's read (3) verdict and complete exact evals before OH; one override, -KaiCleared,
+  only on Kai's decision); OH refuses while OF's hand-off is live; read (3)'s counters
+  guarded by invariants (opt_sims = opt_roots x 50, roots >= acted, nodes >= roots), each
+  traced through the trainer and the search; the no-drift pin compares the student
+  lineages in full. Fixes 117d307a.
+  CODE AUDIT r2, a fresh check of the fixes: nothing above LOW; the stage 4b loop is
+  CLOSED. LOWs left, as operator notes: before OH, check OF's hand-off first, since the
+  evals gate refuses before the live-hand-off check and its text says "Kai's call" even
+  while that hand-off is still working; -KaiCleared passes every gate at once, so run
+  without it first and pass it only for the gate Kai ruled on, never for missing evals;
+  a smoke that fails leaves its checkpoint (about 2.6 GB), snapshot and ship.pth in its
+  temp folder to delete by hand; "all done" in the docs means the hand-off exited with
+  every eval landed (one that gives up never prints it).
+  HOW TO READ the GPU smoke: forced options are a worst case for memory (every expansion
+  gets a landing row) but not for crossings (0.6% of simulations in the 8-simulation dry
+  runs); read the crossing share at 50 simulations on its PEAKS line.
+  Not built: read (8)'s varied-start eval (missing from O0's kit too) and read (5)'s
+  search-reach probe; both run after the runs, on the kept snapshots.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
