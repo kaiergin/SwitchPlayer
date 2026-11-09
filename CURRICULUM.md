@@ -1264,6 +1264,20 @@ OPTION CODE, stage 4b (the launch kit), 2026-11-08, 450b9ab3: the supervisor's n
   runs); read the crossing share at 50 simulations on its PEAKS line.
   Not built: read (8)'s varied-start eval (missing from O0's kit too) and read (5)'s
   search-reach probe; both run after the runs, on the kept snapshots.
+RUN NOTES, Test O. O0 (run tree Y:\SwitchPlayer-testo-run at 7c3fa713) launched 17:58
+  11-07 and was paused twice for Kai (13:29-14:44 and 17:05-23:59 11-08; each resume
+  went from the last checkpoint). RUN COMPLETE 11:23 11-09 at iteration 162, 100,673 env
+  steps; the hand-off's exact evals hold all 33 rows, deployed and trainer-BN (11:27).
+  O0 PRE-CHECK, final: hold2 share 0.2466 (2,930 of 11,882 positions, rows 150-162 in
+  [90k, end]): PASS, so OF runs without a call to Kai.
+  GPU SMOKES at 15cb8dd5 with options forced (the memory worst case). A first OF smoke
+  died at 11:25 when drive C: filled up while writing its checkpoint, unrelated to the
+  code; old smoke folders were cleared and it was rerun. OF: SMOKE OK, nvidia-smi peak
+  7,680 MiB (birth search), trainer peak commit 12.24 GB, lowest free commit 23.6 GB;
+  9.6% of simulations cross an option edge at 50 simulations; probe JS 0.026, 38 flips.
+  OH: SMOKE OK, 7,235 MiB, 11.8 GB, no crossings, probe JS 0.0001 (batch-shape wobble).
+  OF LAUNCHED 11:51 11-09 from Y:\SwitchPlayer-testof-run at 15cb8dd5 (preflight:
+  manifest, quick probe, 34 suites); hand-off post_testof.py -> post_testof.log.
 
 ### Next experiment (pre-registered) -- Test G: does the master-student value gap point at real weakness? (Kai, 2026-11-07)
 
