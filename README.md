@@ -179,9 +179,13 @@ correlation, so state and reward detection run on numpy and OpenCV alone.
 Only Windows is supported.
 
 ### Hardware used
-* [Arduino Uno R3](https://www.amazon.com/Sintron-UNO-R3-ATMEGA328P-Arduino/dp/B073DYD97C)
-* [USB to serial](https://www.amazon.com/gp/product/B01CYBHM26)
-* [Camlink 4k](https://www.amazon.com/gp/product/B07K3FN5MR)
+* [Arduino Uno R3](https://docs.arduino.cc/hardware/uno-rev3/), or a
+  compatible board with the ATmega16U2 USB chip (it gets reflashed, see below).
+* A USB-to-TTL serial adapter at 5 V logic, like the Uno. Boards based on FTDI,
+  CP2102 or CH340 chips work, for example FTDI's
+  [TTL-232R-5V](https://ftdichip.com/products/ttl-232r-5v/).
+* [Elgato Cam Link 4K](https://www.elgato.com/us/en/p/cam-link-4k), or any UVC
+  capture card that `view_switch.py` can open.
 
 The controller emulation is based on
 [SwitchInputEmulator](https://github.com/wchill/SwitchInputEmulator).
