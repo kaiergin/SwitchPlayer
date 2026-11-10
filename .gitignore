@@ -36,3 +36,6 @@ sessions/
 /test.py
 /distribution.py
 benchmarks/results-*/
+
+# Private ideas list (kept local)
+/IDEAS_BACKLOG.md
