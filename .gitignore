@@ -25,3 +25,6 @@ venv/
 benchmarks/results/
 
 checkpoint-2025-04-17-pre-resize.pth.bak
+
+# Private ideas list (kept local)
+/IDEAS_BACKLOG.md
