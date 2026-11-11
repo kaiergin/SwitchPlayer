@@ -789,6 +789,116 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
+
+(Pre-registration: "Next experiment (pre-registered) -- Test O", below; its RUN NOTES at
+its end.)
+RUN: OF from Y:\SwitchPlayer-testof-run at 15cb8dd5, launched 11:51 11-09. Paused for
+  Kai at 13:01 11-09 (last checkpoint 12:49, iteration 6). The 14:02 resume was paused
+  again at 14:06 inside its preflight. Resumed at 14:46; the trainer restarted from the
+  iteration-6 checkpoint at 15:03. RUN COMPLETE 00:21 11-11 at iteration 159: 100,204
+  env steps, 318,000 train steps, 34.3 h on the run's clock. The hand-off's exact evals
+  hold all 32 rows, both evals (00:24). No non-finite step: step_nonfinite and
+  opt_steps_nonfinite are 0 in every row, and supv2_1.log has no [nonfinite] line.
+  MEMORY: the trainer's commit sat near 10 GB, with peaks of 13 to 15.2 GB when its
+  GPU use spiked (the search trees count against host commit); O0 peaked at 10.8 GB.
+  One TRAINER BIG warning (15.22 GB, 13:39 11-10, 7.4 GB free). No creep: the hourly
+  minimum stayed flat, and there was no restart. Lowest free commit 5.8 GB (11:00
+  11-10, with other load on the host), below the 9.0 GB the registration's MEMORY
+  noted.
+SCORING: score_testo.py (scratchpad, standard library). Fresh-eyes audit rounds r1-r6;
+  the loop CLOSED at r6. No round found a HIGH. The MEDIUMs fixed in r1-r5 were all in
+  read (6) or in guards for missing or foreign data. The verdict numbers were identical
+  in every round. Output: score_testo_r5.log. testo_gates.py (audited at stage 4b) gives
+  the same read (3).
+  (1) PRIMARY, OF against O0, deployed [90k, end]: NO DIFFERENT, so INCONCLUSIVE (one
+      seed; never "level").
+      - Means: OF 868.1 (rows 145-159, n 4), O0 957.2 (rows 150-162, n 4); gap -89.2
+        against a band of +-306.7.
+      - Trainer-BN beside it: 946.9 against 1080.8 (-133.8).
+      - Seed bands, read (7): +-450 (47%) and +-335 (35%) of O0's mean.
+  (2) Against C0 (1262.4, n 4):
+      - OF: -394.3, WORSE (PROVISIONAL). Trainer-BN -298.4.
+      - O0: -305.2 against +-306.7, NO DIFFERENT (INCONCLUSIVE), inside the band by
+        1.5 points. Trainer-BN -164.6.
+      - Deployed by 20k window:
+        | Arm | 0-20k | 20-40k | 40-60k | 60-80k | 80k-end |
+        |---|---|---|---|---|---|
+        | OF | 505 | 664 | 835 | 947 | 814 |
+        | O0 | 518 | 744 | 848 | 922 | 1314 |
+        | C0 | 564 | 1015 | 1160 | 1290 | 1300 |
+      - OF tracks O0 to 80k; then O0 rises and OF does not.
+  (3) ENGAGEMENT: ENGAGED.
+      - Nodes holding an option: 117,781 / 598,791 = 19.7% (bar 0.5%).
+      - Simulations crossing one: 95,939 / 587,050 = 16.3% (bar 1%).
+      - Descriptive, the on/off probe over 1,024 roots: JS 0.0128; top move flips 6.2%
+        (63); signed first-move shift +0.049 over 214 roots.
+      - Options at expanded nodes: 90,546 of length 2 and 27,235 of length 3. Crossings:
+        98,204 and 68,620.
+      - Unroll jump share 19-20% per edge. Sampled birth-target share 42.9%
+        (DEPARTURE 3). Mean leaf depth 3.45 edges, max 29.
+  (4) STATE DEPENDENCE (descriptive). How often each predictor matches the move played,
+      by step:
+      | Predictor | Step 1 | Step 2 | Step 3 |
+      |---|---|---|---|
+      | The option's moves | 0.958 | 0.970 | 0.991 |
+      | First move repeated | 0.958 | 0.317 | 0.342 |
+      | Repeat the last move | 0.282 | 0.288 | 0.267 |
+      | Per-step persistence | 0.282 | 0.314 | 0.292 |
+      | Marginal | 0.186 | 0.185 | 0.181 |
+      - 73.7% of options are not one move repeated. (The paper reports about 5% on
+        Ms. Pac-Man at L = 3, with whole options played.)
+      - The heads predict the policy's own next moves. Play samples the sharpened
+        prior, so the move played is nearly the prior's argmax, which is the heads'
+        target.
+      - That is state dependence, about 65 points over persistence at steps 2-3.
+  (5) and (8): not built (offline probes on the kept snapshots).
+  (6) WHAT ELSE MOVED, OF / O0 / C0:
+      | Item | OF | O0 | C0 |
+      |---|---|---|---|
+      | Grad steps / env step | 3.17 | 3.22 | 2.72 |
+      | Gradient uses per record | 4,875 | 4,943 | 22,395 |
+      | Unroll span (frames) | 25.1 | 20 | ~112 |
+      | Decisions / s | 15 | 15 | 2.52 |
+      | beh_H_act | 0.309 | 0.327 | 0.099 |
+      | Refresh positions per call | 2,598 | 2,619 | 528 |
+      | Compute knobs | 256/8 | 256/8 | 64/1 |
+      | Replay stacks (GB) | 2.64 | 2.63 | 0.47 |
+      | Oldest record (k gradient steps) | ~96 | ~92 | ~78 |
+      | Wall clock (h) | 34.3 | 32.6 | 23.6 |
+      - Grad steps per env step: OF +17% and O0 +19% over C0, inside the 20% flag.
+      - Refresh: 12 trajectories a call, every second iteration.
+      - Off-policy horizon (TD_STEPS 5, decay 90k): 9.3% of OF's replay and 2.5% of
+        O0's train at horizon 4; none of C0's.
+      ERRATUM to READS (6): it says "a horizon of 10" and "the oldest sixth or so runs at
+      9". These arms' TD_STEPS is 5 (effzero-repro-refresh5x-communal, inherited), so the
+      shortening is 5 -> 4, and on less of the replay than registered.
+WHAT IT SAYS:
+  - The option head forms state-dependent options, and the birth search uses them: one
+    simulation in six crosses an option edge.
+  - With play and deployment taking only the first move, the targets barely move (JS
+    0.013, 6% top-move flips).
+  - The deployed score shows no gain: OF sits 89 below O0, inside the band, and 394
+    below C0, past it.
+  - The plain base itself trails C0 by 305, at the band's edge. So replacing the
+    vocabulary costs score here before any option is added.
+  - One seed: INCONCLUSIVE and PROVISIONAL throughout.
+NEXT, as registered:
+  - Read (3) ENGAGED calls for OH (the edge off, about 35 h) and a second seed of O0
+    and OF (about 66 h).
+  - OF against C0 reads WORSE, which keeps OF out of the base whatever seed 1 shows
+    (READS (1)).
+  - OW stays Kai's call after OF's read.
+  - OH was put to Kai before launch (offered 11-10), so: KAI'S CALL.
+SCORER NOTES (audit r6 LOWs, open, for reuse):
+  - A row whose env_steps is not an int drops out of the window silently.
+  - A trainer-BN conflict blocks the deployed read.
+  - A held arm with no supv2 log passes the STOP RULE.
+  - A C0 mismatch only prints "!!".
+  - Seed 0 is hard-coded, and a new RUNS key needs KIND / KNOBS entries (both fail
+    safe).
+  - Two cosmetic.
+
 ### Next experiment (pre-registered) -- Test O: OptionZero's option head in place of the token vocabulary (Kai, 2026-11-07)
 
 DECISION: Kai 2026-11-07, pausing Test Q: "I think the idea is incomplete and we
