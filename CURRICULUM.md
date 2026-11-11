@@ -789,6 +789,124 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered) -- Test H: does knowing where a player got to help guess the move they made? (Kai, 2026-11-11)
+
+DECISION: Kai 2026-11-11, closing Test O: "Options don't look like they are paying
+off. I think we go with implementing whatever is next, which I think is the shared
+learning algorithm based on others gameplay (or before that did we have something
+planned for to mimic the algorithm for self learning?)". Both were planned. Kai's
+2026-11-07 order was: (1) the option head on own play, which is Test O, now closed;
+(2) the move guesser; (3) learning from other players' play. P5g also says to validate
+on the agent's own checkpoints, where the moves are known, before any outside play.
+Test H is step 2 in that P5g form. Kai's framing from 2026-11-07: "tokens chosen are
+less so about moves chosen, and more so about ideal future state. Watching a master
+play gives you an idea of what the ideal future state ... looks like but not how to
+get there." The guesser is the "how" half: given the state now and where the player
+got to, which first move did they make?
+QUESTION: a network trained only on the agent's own play guesses the move made at a
+position. Does it guess better when it also sees what came after: a single later
+position, or Kai's "summation ... over some period of time" of the next stretch? And
+does that gain carry over to a different player whose moves are known?
+WHY: other players' play reaches us as frames and score. Recorded actions may be
+missing, or recorded in a different action space. Learning from it needs a guess at
+the moves (P4: BCO, an inverse model trained on own play). E1's one-step inverse
+model scored below trivial, but it had 1,970 samples of narrow late play over 18
+tokens. Test H uses the 9 plain moves, about 50x the data, and play from across a
+run. A guesser that sees the state alone learns the player's habits, which do not
+transfer. A guesser that sees what happened next learns the game's response to a
+move, which should transfer. Read (4) tests this.
+METHOD:
+  DATA, own play: O0's kept snapshots (Y:\SwitchPlayer-testo-run, plain 9 moves at 4
+    frames; one every 5 iterations). The 16 snapshots at iterations 10, 20, ..., 160
+    each play 10 whole games. Each game uses the run's own acting rule at that
+    snapshot's env-step progress (prior sampling, staged temperature) and the
+    training reset (noop starts). There is no search, as in training play. Each
+    game gets its own seed. Recorded per base step: the agent's observation, the
+    move played, the reward, and the emulator state (for the truth only).
+  SPLIT: by game, fixed before any training. Within each snapshot, games 0-7 train
+    and games 8-9 are held out, giving 32 held-out games. The training targets are
+    the moves played. No emulator branch or outcome class reaches training: the
+    emulator only scores (Kai 2026-10-30).
+  SECOND PLAYER: OF's kept snapshots (Y:\SwitchPlayer-testof-run), the same 9 plain
+    moves and first-move-only play, at the same 16 iterations, 2 games each. OF is
+    held out entirely. It is a stand-in "other player" with known moves (P5g).
+  TRUTH (scoring only): at every held-out decision t, the emulator state is restored
+    once per move m of the 9. Move m is played for one base step, then the moves
+    actually recorded at t+1 .. t+W-1, with W = 16 base steps (64 frames, the token
+    cap). Two moves are equivalent at t when every raw frame of the window is
+    identical (E0's rule; the stricter end-state equality is printed). The truth
+    class is the set of moves equivalent to the move played. Decisions whose window
+    runs past the game's end are not scored. A decision is CONTESTED when its truth
+    class is not all 9 moves. Only contested decisions are scored, because the move
+    cannot be known otherwise (P5b).
+  GUESSERS: one architecture, a small convolutional encoder on the agent's 84x84
+    observation, with heads over the 9 moves. Same budget and the same training
+    games for every arm:
+    - S: the observation at t only. This is behavioural cloning of own play.
+    - F_k: the observations at t and at t+k, for k = 1, 2, 4, 8, 16 base steps.
+    - SIGMA (Kai's summation): the observation at t plus a weighted sum of the
+      encoded observations at t+1 .. t+16. The weights over the 16 offsets are
+      learned (softmax, uniform at the start), so the guesser itself chooses how
+      much early or late arrival counts.
+    S and SIGMA are trained with 3 seeds each; each F_k with 1. Hyperparameters are
+    fixed in the build on the training games only, by a split of the training games;
+    the held-out games are not touched until the scoring step.
+READS (all on contested held-out decisions):
+  (1) PRIMARY: top-1 class accuracy, meaning the guesser's top move lies in the truth
+      class. SIGMA minus S, each the mean over its 3 seeds. 95% interval from 2,000
+      bootstrap resamples of the 32 held-out games, applied to the seed-averaged
+      per-decision correctness.
+  (2) HOW FAR AHEAD: F_k minus S for each k, with the same interval. Also SIGMA's
+      learned weights over the offsets. This is Kai's "say x moves in the future".
+  (3) CEILINGS (P5b's "measure first"): the share of decisions that are contested;
+      mean classes per decision; and per k, the share of contested decisions whose
+      moves already differ in raw frames by t+k. That share is the most any F_k
+      can see.
+  (4) ANOTHER PLAYER: the same models scored on OF's play, with truth computed the
+      same way. SIGMA minus S on OF, and each arm's drop from O0's held-out games to
+      OF's. A future-conditioned gain that survives the change of player is what
+      step 3 needs.
+  (5) REFERENCES: the majority move; repeat the previous move (it uses the true
+      previous move, so it is a reference only); and the probability the acting
+      policy itself gave the played move's class. For own play that policy is the
+      true source of the move given the state, so it is S's ceiling, not
+      SIGMA's.
+  (6) BREAKDOWNS: by snapshot (early against late play, E1's narrow-play trap); by
+      the played move; and at junctions against corridors, with E1's heading rule.
+  (7) SECONDARY METRIC: the mean log of the probability on the truth class, for
+      every arm.
+VERDICT on (1):
+  - VOID: any held-out game's replay does not reproduce its recorded frames; fewer
+    than 5,000 contested held-out decisions; or S fails to beat the majority move
+    on held-out accuracy (training failed).
+  - HELPS: the interval's lower bound is above 0. The gain is MATERIAL if it is at
+    least +0.05.
+  - NO HELP: the interval contains 0, or lies below it.
+NEXT:
+  - HELPS: step 3 is registered separately. First, the guesser on human Ms. Pac-Man
+    from Atari-HEAD, which records the players' actions, so it is scored with
+    labels. Its frame rate and action timing are checked before that registration.
+    Then a training run in which moves guessed from other players' play enter
+    learning. How they enter is Kai's call; P4 offers blending them into search
+    priors, scaled by the student's measured deficit.
+  - NO HELP: Kai's call. The future-state "how" has no support on this game at this
+    data volume. The value-only master (Test G's line) does not need moves.
+  - Read (4) failing while (1) HELPS also goes to Kai: the guesser would then have
+    learned the player's habits rather than the game.
+CAVEATS: O0 is one seed and one player across its own training. Temperature play is
+  broader than deployed play. OF shares O0's recipe, so it is closer to O0 than a
+  human is. The truth window fixes the later moves to the ones recorded, so it
+  answers "did this move matter in this game", not "in every game". One move per
+  base step at 4 frames: inputs held within a step are not separated. Guessing a
+  whole sequence (P5b's CTC) is out of scope, since play uses the first move only.
+COST: data from 16 + 16 snapshots, about 200k decisions, CPU under the lock, 1-2 h.
+  Truth branches about 9 x 64 frames per held-out decision, about 1-2 h, CPU. The
+  guessers train on the GPU, which is free while no run is live: 3 + 3 + 5 models,
+  about 2-3 h in total. Kai's Switch sessions pause it. Scoring takes minutes. Built
+  in Y:\SwitchPlayer-curriculum: benchmarks/probes/probe_move_guesser.py (data and
+  truth), the guesser trainer, and tests. Audit loop as ever, then run from a new
+  frozen tree, Y:\SwitchPlayer-testh-run. Kept trees are read only.
+
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
 (Pre-registration: "Next experiment (pre-registered) -- Test O", below; its RUN NOTES at
@@ -890,6 +1008,11 @@ NEXT, as registered:
     (READS (1)).
   - OW stays Kai's call after OF's read.
   - OH was put to Kai before launch (offered 11-10), so: KAI'S CALL.
+DECISION (Kai, 2026-11-11): "Options don't look like they are paying off. I think we
+  go with implementing whatever is next." TEST O CLOSED: OH, seed 1, OW and the offline
+  reads (5) and (8) are not run. The option code stays in the build tree, flag off.
+  Next in Kai's 2026-11-07 order is step 2, the move guesser (the future-state test),
+  then learning from other players' play.
 SCORER NOTES (audit r6 LOWs, open, for reuse):
   - A row whose env_steps is not an int drops out of the window silently.
   - A trainer-BN conflict blocks the deployed read.
