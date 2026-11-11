@@ -809,7 +809,8 @@ position. Does it guess better when it also sees what came after: a single later
 position, or Kai's "summation ... over some period of time" of the next stretch?
 For other players, what matters is whether the guesser learned the game's response
 to a move rather than the player's habits, so the primary read takes the habits out
-(read 1).
+of the first move (read 1), and the verdict also needs the one-step guesser, whose
+input no later move touches.
 WHY: other players' play reaches us as frames and score. Recorded actions may be
 missing, or recorded in a different action space. Learning from it needs a guess at
 the moves (P4: BCO, an inverse model trained on own play). E1's inverse model, over
@@ -823,138 +824,182 @@ METHOD:
   DATA, own play: O0's kept snapshots (Y:\SwitchPlayer-testo-run, plain 9 moves at 4
     frames; one every 5 iterations). The 16 snapshots at iterations 10, 20, ..., 160
     each play 10 whole games of 3 lives, about 99k decisions in all (O0 averages
-    about 620 base steps a game). CPU, a fixed thread count, so every forward pass
-    can be repeated exactly.
+    about 620 base steps a game). CPU, a fixed thread count, batch-1 forward passes
+    in one process type throughout (data and truth), so every forward pass repeats
+    exactly.
     - Acting rule: training play's own (Run.play_episode, not greedy): the prior,
       read with the snapshot's acting BN states, tempered by the acting temperature.
-      No search. Each decision draws one uniform u, and the move is the tempered
-      prior's inverse CDF at u (the distribution np.random.choice draws from). u is
-      recorded.
+      No search. The move is the tempered prior's inverse CDF at a uniform u
+      (searchsorted, side right, on the normalised cumulative sum: what legacy
+      np.random.choice does with one double). A test seeds np.random as
+      play_episode would and requires the probe's moves and stacks to equal
+      play_episode's over a few hundred steps on a real snapshot.
+    - Uniforms: u comes from a counter-based stream keyed by (run, snapshot, game,
+      decision index), independent of play. The life-change NOOP step is not a
+      decision and takes no index.
     - Temperature: it follows env-step progress, and snapshots hold training steps
-      only. SCHEDULE_ENV_TARGET is 100,000, both runs' --stop-env-steps
-      (supervisor.log; the snapshot spec does not hold it). SCHEDULE_ENV_STEPS is
-      row N's env_steps in the run's jsonl for snapshot N. Stages: T 0.5 at 10-80,
-      0.25 at 90-120, 0.125 at 130-160 (O0 row 90 is at 52,838; OF row 120 at
-      74,869, 131 steps short of 75k, so it plays at 0.25). The build prints each
-      snapshot's T beside the beh_T_values of the rows whose play used those
-      weights (row N+1 on; OF 159 its own row).
+      only. Pinned from the runs, not the snapshot spec: TEMPERATURE_TOTAL_STEPS
+      300,000 (the logs' "planned run 300000 steps"), SCHEDULE_ENV_TARGET 100,000
+      (--stop-env-steps, supervisor.log), SCHEDULE_ENV_STEPS row N's env_steps in the
+      run's jsonl for snapshot N; PRIOR_ACT_STAGED_TEMP and PRIOR_ACT_TEMP_SCALE from
+      the arm. Stages: T 0.5 at 10-80, 0.25 at 90-120, 0.125 at 130-160 (O0 row 90
+      is at 52,838; OF row 120 at 74,869, 131 steps short of 75k, so 0.25). GATE:
+      the probe refuses a snapshot whose T is not among the beh_T_values of the row
+      that played those weights, row N+5 (rows come every 5 iterations; O0's 160:
+      row 162; OF's 159 played in no row, so its env steps, 100,204, alone).
     - Reset: the training reset (noop starts). Each (run, snapshot, game) has its
-      own seed, which draws its noop count and its uniforms.
+      own seed, which draws its noop count and keys its uniforms.
     - Recorded per base step: the pooled observation frame (uint8), the move, u, the
       reward, the life index, a digest of every raw frame, and the emulator state
-      (for the truth only). EpisodicLifeEnv's extra NOOP step at a life change and
-      the re-tiled stack are recorded as they happen; neither is a decision.
+      (for the truth only). Play runs through the training wrapper stack; the life-
+      change NOOP step and the re-tiled stack are recorded as they happen.
   SPLIT: by game, fixed before any training. Within each snapshot, games 0-5 are FIT,
-    games 6-7 VALIDATION (early stopping and the one hyperparameter choice, both by
-    move NLL), games 8-9 HELD OUT: 32 games, about 20k decisions, untouched until
-    scoring. Training targets are the moves played. No branch, class or emulator
-    state reaches training: the emulator only scores (Kai 2026-10-30).
-  LIFE ENDS: a future offset past a life's last base step repeats that life's last
-    pooled observation, in training and in scoring alike. Every decision is a
-    sample, and no input or truth window crosses a life change. A game's end is a
-    life's end.
+    games 6-7 VALIDATION (early stopping and the learning rate, both by move NLL),
+    games 8-9 HELD OUT: 32 games, about 20k decisions, untouched until scoring.
+    Training targets are the moves played. No branch, class or emulator state
+    reaches training: the emulator only scores (Kai 2026-10-30).
+  LIFE ENDS: a future offset past a life's last base step takes that life's last
+    observation stack, unchanged (the 4-frame stack after the final step), in
+    training, in scoring and in the class keys alike. Every decision is a sample,
+    and no input or truth window crosses a life change. A game's end is a life's
+    end.
   SECOND PLAYER: OF's kept snapshots (Y:\SwitchPlayer-testof-run) at 10, 20, ...,
     150 and 159 (OF stopped at 159 and has no 160; 159 plays at T 0.125, as O0's 160
     does), 2 games each, about 20k decisions, from its own jsonl rows. OF is held
     out entirely: a stand-in "other player" with known moves (P5g).
-  TRUTH (scoring only), at every held-out decision t of O0 and OF, on raw ALE, with
-    lives read from ale.lives() (Test G's pin, probe_gap_check.py):
-    - The emulator state at t is restored once per move m of the 9, and m plays for
-      one base step. Moves that leave identical emulator states share everything
-      after (exact, as in E0).
-    - Each distinct state then continues for 15 base steps under the snapshot's own
-      acting rule, with the recorded uniforms u at t+1 .. t+15 (common random
+  TRUTH (scoring only), at every held-out decision t of O0 and OF. It runs before
+    any guesser trains.
+    - Branches step the same wrapper stack as the recorded line: the state at t is
+      restored into it (EpisodicLifeEnv's life count resynced, as Test G pinned),
+      then env.step. Pooling, the life-loss check after a whole step, the game end
+      and MaxAndSkip's buffer then behave as in the recorded play. A hook on the
+      emulator's act captures the raw frames for the raw-frame classes.
+    - Move m plays for one base step from the state at t, once per move of the 9.
+      Moves that leave identical (emulator state, pooled frame) pairs share
+      everything after (exact, as in E0's merge).
+    - Each distinct pair then continues for 15 base steps under the snapshot's own
+      acting rule, with the uniforms at decision indices t+1 .. t+15 (common random
       numbers): what this player would have done after that first move. W = 16
       base steps, 64 frames, the token cap.
     - The played move's continuation must reproduce the recorded line at every
       scored decision: the same moves, raw-frame digests and pooled observations,
       byte for byte.
     - A branch that loses a life stops there, and its future follows LIFE ENDS.
-    - Two moves are equivalent at t (primary) when their pooled observations at
-      t+1 .. t+16 are identical: what the guessers can see. Raw-frame classes
-      (every raw frame identical) and the stricter end-state equality are printed
-      beside.
+    - Two moves are equivalent at t (primary) when their observations at t+1 ..
+      t+16 are identical: what the guessers can see. Raw-frame classes (every raw
+      frame identical) and the stricter end-state equality are printed beside.
     - The truth class is the set of moves equivalent to the move played. A decision
       is CONTESTED when its truth class is not all 9 moves; only contested
       decisions are scored, since the move cannot be known otherwise (P5b).
     - These are not E0's classes (E0: a NOOP tail, a 92-frame window, raw frames),
       so classes per decision are not comparable with E0's 2.09.
+    - Tests before the run: branches at a real life loss and at a real game over,
+      and a smoke over whole games of both players that also counts the distinct
+      post-move pairs per decision (the cost below assumes 2-3).
   COUNTERFACTUAL ITEMS (scoring only): each contested held-out decision gives one
     item per class, weighted by the class's size / 9: the input is obs_t plus that
     class's future (the played class's is the recorded line). Each item is a
     coherent future of the same player after a given first move, and the weighting
-    makes the move behind it uniform over the 9, so habits cannot pick the item.
-    Futures are stored per game, compressed, and streamed.
+    makes the first move behind it uniform over the 9, so habits cannot pick the
+    item. The later offsets still carry this player's reaction to that move (see
+    the verdict's F_1 condition and the CAVEATS). Futures are stored per game,
+    compressed, on Y:, and streamed.
   GUESSERS: one network for every arm: a pair encoder (a small convolutional net
-    over obs_t and one other observation, stacked by channel: 24 channels of 84x84,
-    no BatchNorm), a learned softmax-weighted sum over the pairs it is given, and a
-    head of 9 move logits. The arms differ only in the pairs:
+    over obs_t and one other observation stack, stacked by channel: 24 channels of
+    84x84, no BatchNorm), a learned softmax-weighted sum over the pairs it is given,
+    and a head of 9 move logits. The arms differ only in the pairs:
     - S: the pair (obs_t, obs_t). The state only, at the same capacity.
     - F_k, k = 1, 2, 4, 8, 16: (obs_t, obs_{t+k}).
     - SIGMA (Kai's summation): (obs_t, obs_{t+j}) for every j = 1 .. 16, with the 16
       weights zero at the start (uniform). The guesser itself chooses how much early
       or late arrival counts.
     - Seeds: S, F_1 and SIGMA 5 each; F_2 .. F_16 1 each (seed 0).
-    - Training, from scratch: one optimiser, batch size, learning rate and step cap
-      for every arm, chosen once by a small grid on S's validation move NLL (FIT
-      and VALIDATION only), the batch capped to what SIGMA fits on the GPU. Pairs
-      are built on the GPU from frame indices. VALIDATION move NLL is evaluated at
-      fixed steps, step 0 included; each arm keeps its best point; a best point at
-      the step cap is flagged. Frames stay uint8; no worker processes (Windows
-      spawn copies the data); a free-commit gate before every stage (probe,
-      trainer, scorer).
-    - TRAINING FAILED: a future arm's seed whose best validation move NLL is not
-      below S's, same seed. The fix is fixed now: one re-grid of learning rate and
-      step cap on that arm's own validation NLL (FIT and VALIDATION only), and one
-      rerun. Held-out results play no part in it.
+    - Training, from scratch, one optimiser and batch size for every arm (the batch
+      capped to what SIGMA fits on the GPU; pairs built on the GPU from frame
+      indices). Learning rate: per arm type, the best of 3e-4, 1e-3 and 3e-3 by
+      seed 0's best validation move NLL; the other seeds reuse it. Step cap: one
+      generous cap for every arm, fixed by the smoke at no less than 3x the step of
+      S's best validation point. VALIDATION move NLL is evaluated at fixed steps,
+      step 0 included, on validation decisions whose input does not occur byte for
+      byte in FIT; each model keeps its best point.
+    - AT THE CAP: a model whose best point falls in the last 10% of the cap gets one
+      extension to twice the cap. Still in the last 10% after it: flagged, and its
+      arm can read at most PARTLY (it goes to Kai, never NO HELP).
+    - TRAINING FAILED, per seed: a future arm's seed whose best validation move NLL
+      is not below S's, same seed. Fixed now: one rerun at a third of the learning
+      rate and twice the cap. Still failing: the arm is VOID (Kai's call).
+      Held-out results play no part in either rule.
+    - A model killed before it finishes (Kai's Switch sessions kill GPU pythons)
+      reruns from scratch and does not count as a rerun above. Each finished model
+      writes a completion stamp; only stamped models are scored.
+    - Frames stay uint8; no worker processes (Windows spawn copies the data); a
+      free-commit gate before every stage (probe, trainer, scorer); every temporary
+      and output directory on Y:.
 READS (O0's held-out contested decisions unless stated, leaving out any decision
-  with an item that overlaps FIT (read 7); 95% intervals from a two-level bootstrap:
-  2,000 resamples of game clusters, games that share any byte-identical item being
-  one cluster (the effective count printed), and of the 5 seed indices):
-  (1) PRIMARY, habit-free: on the counterfactual items, R = 1 - err_SIGMA / err_S,
-      the share of S's errors that SIGMA removes. R is the mean over the 5 seeds of
-      each seed's R (SIGMA seed i against S seed i). Printed beside it: each seed's
-      R; R on branch items only (the played class left out); R on raw-frame
-      classes; and R with the overlapping decisions kept.
-  (1b) The same for F_1, the one-step inverse model.
+  with an item that overlaps FIT (read 7). 95% intervals: 2,000 resamples of game
+  clusters (games that share any byte-identical item are one cluster; the effective
+  count is printed) give each statistic's seed-mean; the seed spread enters as t(4)
+  x the between-seed SD / sqrt(5), added in quadrature to the bootstrap's
+  half-width):
+  (1) PRIMARY, habit-free first move: on the counterfactual items, R = 1 - err_SIGMA
+      / err_S, the share of S's errors that SIGMA removes. R is the mean over the 5
+      seeds of each seed's R (SIGMA seed i against S seed i). In the verdict: R
+      overall, on branch items only (the played class left out), and at junctions
+      (3 or more truth classes among the 9 moves). Printed beside: each seed's R; R
+      at corridors (the rest); R on raw-frame classes; R with items holding a lost
+      life left out; R with the overlapping decisions kept; R with every decision
+      whose obs_t occurs in FIT left out; and the future-blind oracle's error (1 -
+      the largest class's size / 9, per decision) beside err_S.
+  (1b) The same for F_1, the one-step inverse model. Its input, obs_{t+1}, depends
+      only on the state and the move, never on a later move.
   (2) OWN PLAY, descriptive: the played moves only, as they happened. SIGMA minus S
       class accuracy, overall and by temperature stage (10-80, 90-120, 130-160); R
       only where err_S is at least 0.05. Here S's headroom is mostly the acting
       temperature's sampling noise, and the information is in SIGMA's input nearly
       by construction.
   (3) HOW FAR AHEAD: F_k minus S on (1)'s items for each k (descriptive, one seed
-      for k >= 2); SIGMA minus F_1 with its interval (Kai's summation against a
+      for k >= 2); R_SIGMA minus R_F1 with its interval (Kai's summation against a
       single next position); SIGMA's learned weights over the offsets; and SIGMA
       cut to offsets j <= k, weights renormalised, for each k (no retraining).
   (4) CEILINGS (P5b's "measure first"): the share of decisions that are contested;
       mean classes per decision, pooled and raw; per k, the share of contested
-      decisions whose branches already differ in pooled observations by t+k; the
-      share of branch items with a lost life.
-  (5) ANOTHER PLAYER: OF's held-out play, (1)'s R and (2)'s difference for SIGMA
-      against S. (5) FAILS if SIGMA minus S class accuracy on OF's counterfactual
-      items has a lower bound at or below 0. Also printed: how often O0's acting
-      argmax at the same iteration (160 for OF's 159) agrees with OF's on OF's
-      held-out states (how alike the two players are).
+      decisions whose branches already differ by t+k; the share of branch items with
+      a lost life; distinct post-move pairs per decision. A perfect guesser reaches
+      R = 1, since the classes are defined on what it sees. No power estimate is
+      made for the 0.5 bar.
+  (5) ANOTHER PLAYER: OF's held-out play, with the same overlap exclusion (against
+      O0's FIT) and cluster rule: (1)'s R and (2)'s difference for SIGMA against S.
+      (5) FAILS if SIGMA minus S class accuracy on OF's counterfactual items has a
+      lower bound at or below 0. Also printed: how often O0's acting argmax at the
+      same iteration (160 for OF's 159) agrees with OF's on OF's held-out states
+      (how alike the two players are).
   (6) REFERENCES: the majority move; a random move; repeat the previous move (it
       uses the true previous move, so a reference only); and the acting policy
       itself, per snapshot, with its acting temperature and BN states: its argmax's
       top-1 class accuracy on own play (S's practical ceiling there, which S does
       not reach knowing nothing of the snapshot) and its mean log probability on
       the truth class (the reference for read 8).
-  (7) BREAKDOWNS: by temperature stage; by the played move; at junctions (3 or more
-      pooled truth classes among the 9 moves) against the rest. OVERLAP: an item
-      overlaps when its obs_t and its 16 future observations equal, byte for byte,
-      a FIT decision's obs_t and recorded future; the share of decisions with an
-      overlapping item is printed.
-  (8) SECONDARY METRIC: the mean log probability on the truth class, every arm, on
-      (1)'s items and on (2)'s.
+  (7) BREAKDOWNS: by temperature stage; by the played move; junctions against
+      corridors for every arm. OVERLAP: an item overlaps when its obs_t and its 16
+      future observations equal, byte for byte, a FIT decision's obs_t and recorded
+      future; the share of decisions with an overlapping item is printed.
+      Near-duplicates (one pellet apart) are not caught.
+  (8) SECONDARY METRIC: the mean log probability on the truth class, every arm,
+      on (1)'s items and on (2)'s.
 VERDICT on (1):
-  - VOID: any reproduction failure, O0's or OF's; fewer than 5,000 contested
-    held-out O0 decisions after the overlap exclusion; S's own-play class accuracy
-    on contested decisions not above the majority move's; or SIGMA or F_1 TRAINING
-    FAILED after its one rerun (then Kai's call).
-  - GUESSES THE GAME: R's lower bound is at least 0.5.
-  - PARTLY: the lower bound is above 0 but below 0.5.
+  - TRUTH FAILURE: a reproduction failure is a bug in the truth stage, found before
+    any guesser trains. It is fixed (the change re-audited) and the truth rerun. If
+    it cannot be fixed, the run is VOID (Kai's call). A failure on OF's games alone
+    that cannot be fixed VOIDs (5) only.
+  - VOID (Kai's call): fewer than 5,000 contested held-out O0 decisions after the
+    overlap exclusion; S's own-play class accuracy on contested decisions not above
+    the majority move's after one rerun of S; or SIGMA VOID by TRAINING FAILED.
+  - GUESSES THE GAME: all four hold: (i) R's lower bound is at least 0.5; (ii) R on
+    branch items only has a lower bound above 0; (iii) R at junctions has a lower
+    bound above 0; (iv) F_1's R has a lower bound above 0.
+  - PARTLY: (i) holds and another fails (named), or R's lower bound is above 0 but
+    below 0.5, or a SIGMA model stayed at its cap. An F_1 VOID by TRAINING FAILED
+    leaves (iv) unread: at most PARTLY.
   - NO HELP: the interval contains 0.
   - WORSE THAN HABITS: the upper bound is below 0. Read with (3)'s cut-offset
     profile: SIGMA would be misled by what comes later in the stretch.
@@ -974,22 +1019,29 @@ NEXT:
     work on O0's play but not on another player's.
 CAVEATS: O0 is one seed and one player across its own training. Temperature play is
   broader than deployed play. The counterfactual futures continue with O0's own
-  policy, so they show this player's response after another first move; another
-  player responds differently, which (5) and step 3 test. OF shares O0's recipe,
-  so it is closer to O0 than a human is. The truth answers "did this move matter in
-  this game, with this player's continuation", not "in every game". One move per
-  base step at 4 frames: inputs held within a step are not separated. Guessing a
-  whole sequence (P5b's CTC) is out of scope, since play uses the first move only.
-  The recorded-continuation items of r1 are dropped: they splice a first move onto
-  later moves chosen after another one, which no real player produces.
+  policy, so offsets past the first show this player's reaction to the move; O0 is
+  persistent (it repeats its move often), so SIGMA can partly read "where it kept
+  going". Condition (iv) holds the verdict to a guesser free of that, and (5) and
+  step 3 test other players. OF shares O0's recipe, so it is closer to O0 than a
+  human is. The truth answers "did this move matter in this game, with this
+  player's continuation", not "in every game". SIGMA is one design of the
+  summation: its pair encoder has no offset code and its head sees only the
+  weighted sum, so a NO HELP may belong to the summation as built rather than to
+  the future; F_k cover single offsets. One move per base step at 4 frames: inputs
+  held within a step are not separated. Guessing a whole sequence (P5b's CTC) is
+  out of scope, since play uses the first move only. The recorded-continuation items
+  of r1 are dropped: they splice a first move onto later moves chosen after another
+  one, which no real player produces.
 COST: about 119k decisions from 16 + 16 snapshots, CPU under the lock, about 1 h.
   Truth: 9 one-step branches per held-out decision, then about 15 forward passes
-  (about 6 ms each) and 60 frames for each distinct state, and the played line's
-  check; roughly 0.3 s a decision, about 40k decisions, 3-4 h CPU. Counterfactual
-  futures about 15-30 GB uncompressed, compressed per game on Y:. The guessers
-  train on the GPU, which is free while no run is live: 19 models (S, F_1 and SIGMA
-  5 each, F_2 .. F_16 1 each), about 4-6 h. Kai's Switch sessions pause it. Scoring
-  takes minutes. Built in Y:\SwitchPlayer-curriculum:
+  (about 6 ms each) and 60 frames for each distinct post-move pair, and the played
+  line's check; roughly 0.3 s a decision at 2-3 pairs (the smoke measures it), about
+  40k decisions, 3-4 h CPU, longer if pairs run higher. Counterfactual futures about
+  15-30 GB uncompressed, compressed per game on Y:. The guessers train on the GPU,
+  which is free while no run is live: the learning-rate grid on seed 0 (about 20
+  models, most of them small), then the other seeds, 19 models in the read (S, F_1
+  and SIGMA 5 each, F_2 .. F_16 1 each), about 5-8 h in all. Kai's Switch sessions
+  pause it. Scoring takes minutes. Built in Y:\SwitchPlayer-curriculum:
   benchmarks/probes/probe_move_guesser.py (data and truth), the guesser trainer, and
   tests. Audit loop as ever, then run from a new frozen tree,
   Y:\SwitchPlayer-testh-run. Kept trees are read only.
@@ -1018,6 +1070,24 @@ AUDIT r2 2026-11-11: 2 HIGH (the TRAINING FAILED clause on held-out counterfactu
   observations checked and used as the primary classes, training details, storage
   and GPU cost), all taken in. r2's suggestion to score h alone has no counterpart
   in the new design.
+AUDIT r3 2026-11-11: no HIGH; the design held (common random numbers make the first
+  move uniform; the classes are on what the guessers see; the byte check removes any
+  branch cue; LIFE ENDS says when, not which move; S is a fair control). 5 MEDIUM
+  (the 0.5 bar could pass on reversals alone with no skill at junctions: junction R
+  and branch-only R joined the verdict; SIGMA's later offsets carry O0's own
+  reaction: F_1's R joined the verdict and the CAVEATS say it; a cap set on S could
+  stop SIGMA early and read NO HELP: per-arm learning rate, a generous cap, one
+  extension, at most PARTLY at the cap; raw ALE against the wrappers would fail at
+  deaths and game ends and VOID everything: branches step the wrapper stack, and a
+  truth failure is fixed before training; the acting rule was re-implemented
+  unchecked and TEMPERATURE_TOTAL_STEPS unnamed, so every snapshot would have played
+  at T 0.5: pinned at 300,000, a refusing T gate, an equivalence test against
+  play_episode), 13 LOW (rows every 5 iterations, LIFE ENDS on stacks, the merge key,
+  batch-1 forwards, a counter-based uniform stream, overlap on obs_t and in
+  validation, verdict wiring, the seed interval, SIGMA's design limit, the
+  future-blind oracle and lost-life reads, the cost's unmeasured pairs and Y: for
+  temporaries, a kill/rerun rule with completion stamps, OF's exclusion), all taken
+  in.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
