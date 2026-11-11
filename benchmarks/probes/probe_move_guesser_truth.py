@@ -31,9 +31,15 @@ usage (from the run tree, under the lock, CPU):
   python benchmarks/probes/probe_move_guesser_truth.py [--data DIR] [--out DIR]
       [--games NAME,NAME] [--max-decisions N]
 The optional --games / --max-decisions make a SMOKE run (written under
-"truth-smoke"). A game already written with this source's stamp is skipped."""
+"truth-smoke"). A game already written with this source's stamp is skipped.
+CPU, stage A's THREADS threads and batch-1 forwards, so the CRN continuations
+repeat stage A's forwards byte for byte; the env settings happen only when it
+runs as a script."""
 import os
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+if __name__ == "__main__":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # "" deletes the var on Windows
+    os.environ["PROBE_ENV"] = "MsPacmanNoFrameskip-v4"
+    os.environ["PROBE_THREADS"] = "2"
 import argparse
 import hashlib
 import json
@@ -401,7 +407,11 @@ def written(out, name):
 def stage_truth(data, out, only=None, max_decisions=None):
     out.mkdir(parents=True, exist_ok=True)
     mg.commit_gate()
-    torch.set_num_threads(int(os.environ.get("PROBE_THREADS", "2")))
+    mg.pin_process()
+    div = json.loads((data / "diversity.json").read_text()) \
+        if (data / "diversity.json").exists() else None
+    if only is None and not (div and div.get("passed") and div.get("source") == mg.SOURCE):
+        raise SystemExit("stage A's diversity check has not passed for this data")
     games = held_games()
     if only is not None:
         games = [g for g in games if g[3] in only]
@@ -419,15 +429,17 @@ def stage_truth(data, out, only=None, max_decisions=None):
         with mg.player(path, env_steps) as (run, d):
             t = float(muzero.prior_acting_temperature(
                 run.searcher.network_manager.training_steps))
-            mg.temperature_gate(p, it, table, t, float(muzero.PRIOR_ACT_TEMP_SCALE))
+            mg.temperature_gate(p, it, table, t)
+            mg.check_threads()
             env, tap, noop, skip = mg.make_env()
             env.reset(seed=0)
             try:
                 for g, name in todo:
                     mg.commit_gate()
                     meta, arr, states = load_game(data, name)
-                    if meta.get("source") != mg.SOURCE:
-                        raise SystemExit(f"{name}: written by another stage-A source")
+                    if meta.get("source") != mg.SOURCE or meta.get("threads") != mg.THREADS:
+                        raise SystemExit(f"{name}: written by another stage-A source "
+                                         f"or thread count")
                     if abs(meta["temperature"] - t) > 1e-12:
                         raise SystemExit(f"{name}: recorded T {meta['temperature']} "
                                          f"against {t}")

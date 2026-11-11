@@ -36,9 +36,16 @@ usage (from the run tree, under the lock, CPU):
       [--player O0|OF] [--iterations 10,20] [--games N] [--life-cap N]
 The optional flags make a SMOKE run, which writes under a "smoke" directory and
 never into the real output. Games already written with this source's stamp are
-skipped, so a stopped stage resumes."""
+skipped, so a stopped stage resumes. CPU only, THREADS threads, batch-1
+forwards: stage B replays these forwards byte for byte. Imported as a module
+(the tests, stage B, the trainer) it changes nothing process-wide: the env
+settings happen only when it runs as a script, and probe_exhaustive_eval is
+imported only inside player()."""
 import os
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+if __name__ == "__main__":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # "" deletes the var on Windows
+    os.environ["PROBE_ENV"] = "MsPacmanNoFrameskip-v4"
+    os.environ["PROBE_THREADS"] = "2"
 import argparse
 import contextlib
 import ctypes
@@ -72,6 +79,8 @@ STAGES = ((50_000, 1.0), (75_000, 0.5))     # env steps below: stage factor
 LATE_FACTOR = 0.25
 DIVERSITY_BAR = 0.9
 FREE_COMMIT_GB = 8.0
+THREADS = 2                                 # torch CPU threads, data and truth alike
+ARM_SCALE = 0.5                             # PRIOR_ACT_TEMP_SCALE of both runs
 DIGEST = 16                                 # bytes per raw-frame digest
 RUNS = {
     "O0": {"tree": os.environ.get("TESTH_O0_TREE") or r"Y:\SwitchPlayer-testo-run",
@@ -88,7 +97,9 @@ KIND_START, KIND_OPEN, KIND_MOVE = 0, 1, 2
 # What the data depend on: this probe and the code it plays through.
 SOURCES = (pathlib.Path(__file__).resolve(), HERE / "probe_exhaustive_eval.py",
            ROOT / "experiments" / "ablation.py", ROOT / "muzero.py",
-           ROOT / "atari_wrappers.py", ROOT / "EpisodicLifeEnv.py")
+           ROOT / "atari_wrappers.py", ROOT / "EpisodicLifeEnv.py",
+           ROOT / "networks.py", ROOT / "residual_block.py",
+           ROOT / "scalar_categorical.py")
 
 
 def source_hash(paths=SOURCES):
@@ -149,8 +160,18 @@ def tempered(policy, t):
 
 def sample(policy, u):
     """Legacy np.random.choice(len(p), p=policy) at its one uniform u: p is
-    converted to float64, cdf = cumsum / cdf[-1], searchsorted side right."""
-    p = np.asarray(policy, dtype=np.float64)
+    converted to float64, cdf = cumsum / cdf[-1], searchsorted side right; the
+    same refusals (non-finite, negative, a sum off 1 by more than the input
+    dtype's sqrt(eps))."""
+    src = np.asarray(policy)
+    p = src.astype(np.float64)
+    atol = np.sqrt(np.finfo(np.float64).eps)
+    if np.issubdtype(src.dtype, np.floating):
+        atol = max(atol, float(np.sqrt(np.finfo(src.dtype).eps)))
+    if not np.all(np.isfinite(p)) or np.any(p < 0):
+        raise ValueError("probabilities are not non-negative and finite")
+    if abs(p.sum() - 1.0) > atol:
+        raise ValueError("probabilities do not sum to 1")
     cdf = p.cumsum()
     cdf /= cdf[-1]
     return int(cdf.searchsorted(u, side="right"))
@@ -242,6 +263,10 @@ def play_game(env, tap, skip, choose, opening, cap=LIFE_CAP, keep_states=False,
     while True:
         tap.take()
         obs, _ = env.reset()
+        if life > 0 and env.was_real_done:
+            # the life-change NOOP ended the game and the wrapper reset it:
+            # never seen in Ms. Pac-Man (Test G's assertion), refused here
+            raise RuntimeError("the life-change NOOP ended the game")
         frame = frame_of(obs)
         stack = muzero.initial_frame_stack(frame)
         _event(ev, KIND_START, -1, np.nan, -1, life, 0.0, 0, frame, tap.take(),
@@ -367,7 +392,7 @@ def rows(player):
     return out
 
 
-def temperature_gate(player, iteration, table, t_code, scale):
+def temperature_gate(player, iteration, table, t_code, scale=ARM_SCALE):
     """(env_steps, the playing row or None, message). SystemExit when T
     differs from the recomputation, or is not among the playing row's
     beh_T_values. The playing row is the next row after N (rows come every 5
@@ -421,6 +446,12 @@ def player(path, env_steps):
             if not spec.get("BN_RECAL_ACTING"):
                 raise SystemExit(f"{path.name}: not a BN_RECAL_ACTING run")
             pe.apply_acting_states(run, d)
+            if float(spec["PRIOR_ACT_TEMP_SCALE"]) != ARM_SCALE or \
+                    not spec["PRIOR_ACT_STAGED_TEMP"]:
+                raise SystemExit(f"{path.name}: acting temperature "
+                                 f"{spec.get('PRIOR_ACT_STAGED_TEMP')} x "
+                                 f"{spec.get('PRIOR_ACT_TEMP_SCALE')}, not staged x "
+                                 f"{ARM_SCALE}")
             muzero.PRIOR_ACT_STAGED_TEMP = bool(spec["PRIOR_ACT_STAGED_TEMP"])
             muzero.PRIOR_ACT_TEMP_SCALE = float(spec["PRIOR_ACT_TEMP_SCALE"])
             muzero.SCHEDULE_ENV_TARGET = ENV_TARGET
@@ -486,12 +517,31 @@ def game_name(player, iteration, game):
     return f"{player}-it{iteration:03d}-g{game}"
 
 
-def written(out, name):
+def written(out, name, cap=None):
+    """The game's meta if it is written by this source (and, given `cap`, at
+    that life cap and this opening), else None."""
     meta = out / f"{name}.json"
     if not meta.exists() or not (out / f"{name}.npz").exists():
         return None
     m = json.loads(meta.read_text())
-    return m if m.get("source") == SOURCE else None
+    if m.get("source") != SOURCE or m.get("threads") != THREADS:
+        return None
+    if cap is not None and (m.get("life_cap") != cap or m.get("opening") != OPENING):
+        return None
+    return m
+
+
+def pin_process():
+    """CPU, THREADS threads: refuses a process whose nets would run elsewhere."""
+    if ablation.DEVICE.type != "cpu":
+        raise SystemExit(f"the probe runs on the CPU, not {ablation.DEVICE}")
+    os.environ["PROBE_THREADS"] = str(THREADS)  # probe_exhaustive_eval's import reads it
+    torch.set_num_threads(THREADS)
+
+
+def check_threads():
+    if torch.get_num_threads() != THREADS:
+        raise SystemExit(f"torch threads {torch.get_num_threads()}, not {THREADS}")
 
 
 def write_game(out, name, arr, states, meta):
@@ -533,7 +583,7 @@ def split_of(player, game):
 def stage_data(out, players, iterations=None, games=None, cap=LIFE_CAP):
     out.mkdir(parents=True, exist_ok=True)
     commit_gate()
-    torch.set_num_threads(int(os.environ.get("PROBE_THREADS", "2")))
+    pin_process()
     for p in players:
         spec = RUNS[p]
         table = rows(p)
@@ -541,20 +591,20 @@ def stage_data(out, players, iterations=None, games=None, cap=LIFE_CAP):
         n_games = spec["games"] if games is None else games
         for it in its:
             names = [game_name(p, it, g) for g in range(n_games)]
-            if all(written(out, n) for n in names):
+            if all(written(out, n, cap) for n in names):
                 continue
             path = snapshot_path(p, it)
             env_steps = int(table[it]["env_steps"])
             with player(path, env_steps) as (run, d):
                 steps_at = run.searcher.network_manager.training_steps
                 t = float(muzero.prior_acting_temperature(steps_at))
-                env_steps, play_row, msg = temperature_gate(
-                    p, it, table, t, float(muzero.PRIOR_ACT_TEMP_SCALE))
+                env_steps, play_row, msg = temperature_gate(p, it, table, t)
                 print(f"{p} @{it}: {msg}", flush=True)
+                check_threads()
                 env, tap, noop, skip = make_env()
                 try:
                     for g, name in enumerate(names):
-                        if written(out, name):
+                        if written(out, name, cap):
                             continue
                         commit_gate()
                         key = game_key(spec["run"], it, g)
@@ -577,6 +627,8 @@ def stage_data(out, players, iterations=None, games=None, cap=LIFE_CAP):
                                 "lives": int(arr["life"].max()) + 1,
                                 "return": float(arr["reward"].sum()),
                                 "life_cap": cap, "opening": OPENING,
+                                "env_seed": key % (2 ** 31), "threads": THREADS,
+                                "device": str(ablation.DEVICE),
                                 "source": SOURCE, "secs": round(time.time() - t0, 1)}
                         write_game(out, name, arr, states if held else None, meta)
                         print(f"  {name}: {n_dec} decisions, return "
@@ -618,12 +670,13 @@ def diversity(out, players, iterations=None, games=None):
            "distinct_share": share(keys),
            "by_phase": {str(k): {"games": len(v), "distinct_share": share(v)}
                         for k, v in sorted(phase.items())}}
+    low = [k for k, v in rep["by_phase"].items()
+           if v["distinct_share"] < DIVERSITY_BAR]
+    rep["passed"] = not (rep["distinct_share"] < DIVERSITY_BAR or low)
     print("diversity:", json.dumps(rep), flush=True)
     (out / "diversity.json").write_text(json.dumps({**rep, "source": SOURCE},
                                                    indent=1))
-    low = [k for k, v in rep["by_phase"].items()
-           if v["distinct_share"] < DIVERSITY_BAR]
-    if rep["distinct_share"] < DIVERSITY_BAR or low:
+    if not rep["passed"]:
         raise SystemExit(f"STOP (Kai's call): first-decision stacks distinct in "
                          f"{rep['distinct_share']:.3f} of games; phases below "
                          f"{DIVERSITY_BAR}: {low}")

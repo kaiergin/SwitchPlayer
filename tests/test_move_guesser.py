@@ -53,6 +53,37 @@ def test_sample_matches_legacy_choice_at_the_same_uniform():
         assert mg.sample(p, u) == a
 
 
+def test_sample_refuses_what_legacy_choice_refuses():
+    p = np.full(mg.MOVES, 1 / 9, np.float32)
+    for bad in (np.where(np.arange(9) == 0, np.nan, p), np.where(np.arange(9) == 0, -0.1, p),
+                p * 1.01):
+        with pytest.raises(ValueError):
+            mg.sample(bad.astype(np.float32), 0.5)
+        with pytest.raises(ValueError):
+            np.random.choice(mg.MOVES, p=bad.astype(np.float32))
+
+
+def test_importing_the_probe_changes_nothing_process_wide():
+    import subprocess
+    code = ("import os, sys; sys.path[:0] = [{p!r}, {e!r}, {r!r}]; "
+            "keys = ('CUDA_VISIBLE_DEVICES', 'PROBE_ENV', 'PROBE_THREADS', "
+            "'PROBE_ACTING_STATES'); "
+            "before = [os.environ.get(k) for k in keys]; "
+            "import torch; threads = torch.get_num_threads(); "
+            "import ablation; envs = (ablation.ENV_NAME, ablation.ACTIONS, ablation.EPISODE_CAP); "
+            "import probe_move_guesser; "
+            "assert 'probe_exhaustive_eval' not in sys.modules; "
+            "assert torch.get_num_threads() == threads; "
+            "assert [os.environ.get(k) for k in keys] == before; "
+            "assert (ablation.ENV_NAME, ablation.ACTIONS, ablation.EPISODE_CAP) == envs; "
+            "print('ok')").format(p=str(PROBES), e=str(ROOT / "experiments"), r=str(ROOT))
+    env = {k: v for k, v in os.environ.items() if k not in ("PROBE_ENV", "PROBE_THREADS")}
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env=env, timeout=300)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip().endswith("ok")
+
+
 def test_tempered_is_play_episodes_float32_rule():
     p = np.array([0.5, 0.25, 0.25, 0, 0, 0, 0, 0, 0], np.float32)
     q = mg.tempered(p, 0.5)
@@ -235,6 +266,16 @@ def test_loop_life_lost_in_opening_cap_and_game_end():
     assert states == []
 
 
+def test_loop_a_capped_life_inside_the_opening_ends_the_game():
+    env = FakeEnv(deaths=[500, 900, 1300])
+    arr, _ = mg.play_game(env, FakeTap(), None, fake_choose, opening=80, cap=50)
+    kinds = arr["kind"]
+    assert int((kinds == mg.KIND_OPEN).sum()) == 50      # the cap counts opening steps
+    assert int((kinds == mg.KIND_MOVE).sum()) == 0
+    assert int(arr["end"][-1]) == 2 and env.was_real_done
+    assert env.resets == [("real", 0)]
+
+
 def test_stacks_from_frames_rule():
     f = [np.full((3, 84, 84), i, np.uint8) for i in range(6)]
     arr = {"kind": np.array([0, 1, 2, 2, 0, 2], np.int8),
@@ -309,7 +350,7 @@ def _random_choose(seed):
     return choose
 
 
-def test_real_handoff_and_restored_state_reproduces_the_step():
+def test_real_handoff_and_restored_state_reproduces_the_step(tmp_path):
     env, tap, noop, skip = mg.make_env()
     try:
         env.reset(seed=777)
@@ -322,13 +363,34 @@ def test_real_handoff_and_restored_state_reproduces_the_step():
         assert seen and set(seen) == set(rebuilt)
         assert all(np.array_equal(seen[d], rebuilt[d]) for d in seen)
         assert [s[0] for s in states] == sorted(seen)
-        # restore a held decision with its buffer and replay its recorded move
+        # raw-frame coverage: the real reset's noops, 4 per life-change NOOP,
+        # 4 per base step (the tap sits under NoopReset, below MaxAndSkip)
+        starts = np.flatnonzero(arr["kind"] == mg.KIND_START)
+        assert int(arr["ndigests"][starts[0]]) == 5
+        assert all(int(arr["ndigests"][i]) == 4 for i in starts[1:])
+        steps = np.flatnonzero(arr["kind"] != mg.KIND_START)
+        assert all(int(arr["ndigests"][i]) == 4 for i in steps[:-1])
+        # the states file round trip
+        mg.write_game(tmp_path, "g", arr, states, {"x": 1})
+        with np.load(tmp_path / "g-states.npz") as z:
+            blob, offs = z["blob"].tobytes(), z["offsets"]
+            back = [(int(d), blob[offs[i]:offs[i + 1]], z["buffer"][i], int(z["lives"][i]))
+                    for i, d in enumerate(z["decision"])]
+        assert [b[0] for b in back] == [s[0] for s in states]
+        assert all(b[1] == s[1] and np.array_equal(b[2], s[2]) and b[3] == s[3]
+                   for b, s in zip(back, states))
+        # each buffer is the pair the previous step pooled: its max is the
+        # previous event's frame (a life's start: its reset frame)
         ale = env.unwrapped.ale
         idx = {int(d): i for i, d in enumerate(arr["decision"]) if d >= 0}
-        for d, blob, buf, lives in states[:: max(1, len(states) // 15)]:
+        for d, blob, buf, lives in back:
+            assert np.array_equal(mg.frame_of(buf.max(axis=0)), arr["frames"][idx[d] - 1])
+        # restore a held decision with its buffer and replay its recorded move
+        for d, blob, buf, lives in back[:: max(1, len(back) // 15)]:
             ale.restoreState(ale_py.ALEState(blob))
             skip._buffer[:] = buf
             env.lives = ale.lives()
+            assert env.lives == lives
             env.was_real_done = False
             i = idx[d]
             tap.take()
@@ -349,16 +411,17 @@ def _play_episode_game(run, noops, seed):
     """Run.play_game's loop of play_episode(greedy=False) on the run's own env,
     np.random seeded: the decisions' (stack, move) in order."""
     ne = _noop_env(run.env)
-    out = []
+    out, lives = [], 0
     np.random.seed(seed)
     with mg.fixed_noops(ne, noops):
         run.env.was_real_done = True
         while True:
             traj, _, _, term = run.play_episode(greedy=False, cap=mg.LIFE_CAP)
+            lives += 1
             out += [(s, int(a)) for s, a, _ in traj[:-1]]
             if not term or run.env.was_real_done:
                 break
-    return out
+    return out, lives
 
 
 def _probe_game(run, noops, seed, t):
@@ -397,8 +460,9 @@ def test_probe_loop_equals_play_episode(player, iteration, t_expect):
         assert t == t_expect
         mg.temperature_gate(player, iteration, table, t, 0.5)
         run.env.reset(seed=777)
-        ref = _play_episode_game(run, 11, 4242)
+        ref, lives = _play_episode_game(run, 11, 4242)
         got = _probe_game(run, 11, 4242, t)
+    assert lives >= 2                           # across a life change
     assert len(ref) == len(got) > 50
     for (s1, a1), (s2, a2) in zip(ref, got):
         assert a1 == a2
@@ -419,8 +483,13 @@ def test_stage_smoke_one_game(tmp_path):
         assert z["frames"].shape[1:] == (3, 84, 84)
         assert int((z["kind"] == mg.KIND_OPEN).sum()) == mg.OPENING
         assert int((z["kind"] == mg.KIND_MOVE).sum()) == meta["decisions"] > 0
-        dec = z["prior"][z["kind"] == mg.KIND_MOVE]
+        mv = z["kind"] == mg.KIND_MOVE
+        dec = z["prior"][mv]
         assert np.allclose(dec.sum(1), 1, atol=1e-5)
+        # every recorded move is the acting rule at its recorded uniform
+        for p, u, t, m in zip(dec, z["u"][mv], z["temp"][mv], z["move"][mv]):
+            assert mg.sample(mg.tempered(p, float(t)), float(u)) == int(m)
+    assert meta["threads"] == mg.THREADS and meta["device"] == "cpu"
     assert rep["games"] == 1 and rep["distinct_share"] == 1.0
     # resume: a second call writes nothing new
     mtime = (out / f"{name}.npz").stat().st_mtime

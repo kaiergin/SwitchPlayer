@@ -37,7 +37,11 @@ usage (from the run tree, under the lock, GPU):
   python benchmarks/probes/train_move_guesser.py [--data DIR] [--out DIR]
       [--smoke-cap N] [--smoke-games N]"""
 import os
-_CVD = os.environ.get("CUDA_VISIBLE_DEVICES")
+# probe_move_guesser defaults CUDA_VISIBLE_DEVICES to -1 for the CPU stages, and
+# the modules it imports query CUDA once and cache the answer, so the GPU
+# stage names its device before any import (the lock's cpu mode, as in the
+# tests, keeps its -1).
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 import argparse
 import hashlib
 import json
@@ -51,11 +55,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import numpy as np
-import probe_move_guesser as mg     # sets CUDA_VISIBLE_DEVICES=-1 if unset ...
-if _CVD is None:                    # ... which the GPU stage must undo
-    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-else:
-    os.environ["CUDA_VISIBLE_DEVICES"] = _CVD
+import probe_move_guesser as mg
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,6 +70,8 @@ EDGE = {3e-4: 1e-4, 3e-3: 1e-2}
 PROVISIONAL_CAP = 40_000
 EVAL_EVERY = 500
 BATCH = 256
+EVAL_PAIRS = 4096                           # pairs per evaluation chunk
+GPU_HEADROOM = 0.85                         # of the memory other processes leave
 CAP_FACTOR = 3
 LATE = 0.9                                  # "the last 10% of its cap"
 SOURCES = (pathlib.Path(__file__).resolve(),)
@@ -210,7 +212,11 @@ class Guesser(nn.Module):
         if p != len(self.offsets):
             raise ValueError(f"{p} rows for {len(self.offsets)} offsets")
         pairs = torch.cat([o0.unsqueeze(1).expand(-1, p, -1, -1, -1), rows], dim=2)
-        z = self.enc(pairs.flatten(0, 1).float() / 255.0).view(b, p, -1)
+        # half precision on the GPU (autocast runs the convolutions in it
+        # anyway): a float32 copy of SIGMA's 16 pairs would double the input
+        x = pairs.flatten(0, 1)
+        x = x.to(torch.float16 if x.is_cuda else torch.float32) / 255.0
+        z = self.enc(x).view(b, p, -1)
         logits_w = self.w
         if keep is not None:
             mask = torch.tensor([o in keep for o in self.offsets], device=self.w.device)
@@ -248,7 +254,10 @@ class Trainer:
         self.majority_acc = float((corpus.move[self.val] == self.majority).mean()) \
             if len(self.val) else float("nan")
 
-    def logits(self, model, idx, keep=None, chunk=512):
+    def logits(self, model, idx, keep=None, chunk=None):
+        """Logits on decisions `idx`, in chunks of about EVAL_PAIRS pairs
+        (SIGMA's 16 pairs a decision would otherwise overflow the GPU)."""
+        chunk = chunk or max(1, EVAL_PAIRS // len(model.offsets))
         out = []
         model.eval()
         with torch.no_grad(), torch.autocast(self.device.type, dtype=torch.float16,
@@ -492,21 +501,34 @@ def _sigma_step(trainer, b):
 
 
 def fit_batch(trainer, start=BATCH):
-    """The largest batch, from `start` halving, at which SIGMA trains a step
-    (the registration: every arm then uses it)."""
+    """The largest batch, from `start` halving, at which a SIGMA training step
+    and an evaluation chunk fit the GPU (the registration: every arm then uses
+    it). On Windows the driver spills into shared system memory instead of
+    raising out-of-memory, which runs many times slower and is charged to host
+    commit, so the peak this process reserves must stay within GPU_HEADROOM
+    of what other processes leave free."""
+    if trainer.device.type != "cuda":
+        return start
+    torch.cuda.empty_cache()
+    free, total = torch.cuda.mem_get_info()
+    others = total - free - torch.cuda.memory_reserved()
+    budget = GPU_HEADROOM * (total - others)
     b = start
     while b >= 8:
         ok = True
+        torch.cuda.reset_peak_memory_stats()
         try:
             _sigma_step(trainer, b)
+            trainer.logits(Guesser(ARMS["SIGMA"]).to(trainer.device), trainer.fit[:64])
+            torch.cuda.synchronize()
+            ok = torch.cuda.max_memory_reserved() <= budget
         except torch.cuda.OutOfMemoryError:
             ok = False
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         if ok:
             return b
         b //= 2
-    raise SystemExit("SIGMA does not fit a batch of 8")
+    raise SystemExit("SIGMA does not fit a batch of 8 within the GPU's free memory")
 
 
 def main(argv):
