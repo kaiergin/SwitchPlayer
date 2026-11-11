@@ -1400,6 +1400,18 @@ RUN NOTES:
   - Read (4)'s item-weighted per-k share is computed for the CRN futures only.
   STAGE A DONE 15:56 (462 s): 192 games; opening diversity 0.995 overall, 0.976
   at the lowest noop phase (passed). Stage B started 15:56.
+  STAGE B DONE 17:53 (7,034 s): all 64 held-out games, 0 truth failures (every
+  played branch reproduced the record). O0: 13,594 decisions, 9,912 contested
+  (73%), 1.95 future states per decision; OF: 18,630 decisions, 14,932 contested
+  (80%), 2.04. FLOORS PASSED (floors.json): after the exclusion O0 9,878
+  contested over 27.1 effective games, OF 14,916 over 27.6 (floors 5,000 and
+  16); OF_VOID not written.
+  The full Test H suite at d25dcc27 (with b2e91382's new tests): 72 pass. Run
+  tree fast-forwarded 4466a49e -> d25dcc27 (stage A and B files unchanged;
+  stage C and D files carry the b2e91382 fixes). STAGES C-D LAUNCHED 17:56 from
+  d25dcc27 (run_testh_cd.sh: C on the GPU, then D1, then D2, stops on a
+  failure). Stage C: FIT 44,471 decisions, validation 14,158 (14,065 after the
+  FIT-overlap exclusion), batch 256 (pinned in batch.json).
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
