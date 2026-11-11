@@ -61,11 +61,12 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import numpy as np
 import probe_move_guesser as mg
+import testh_windows as tw
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-K_MAX = 16
+K_MAX = tw.K_MAX
 ARMS = {"S": (0,), "F1": (1,), "F2": (2,), "F4": (4,), "F8": (8,), "F16": (16,),
         "SIGMA": tuple(range(1, K_MAX + 1))}
 SEEDED = ("S", "F1", "SIGMA")               # 5 seeds each
@@ -80,17 +81,17 @@ TRAIN_COMMIT_GB = 14.0                      # its frames, CUDA context and GPU r
 GPU_HEADROOM = 0.85                         # of the memory other processes leave
 CAP_FACTOR = 3
 LATE = 0.9                                  # "the last 10% of its cap"
-SOURCES = (pathlib.Path(__file__).resolve(),)
+SOURCES = (pathlib.Path(__file__).resolve(), HERE / "testh_windows.py")
 SOURCE = mg.source_hash(SOURCES)
 
 
 # --------------------------------------------------------------------------
 # indices: every decision's 17 stacks as frame indices (LIFE ENDS)
 # --------------------------------------------------------------------------
-# the windows: one copy, in stage A's module (the truth's floors and the
-# scorer read the same rule)
-event_stacks = mg.event_stacks
-decision_windows = mg.decision_windows
+# the windows: one copy, testh_windows (the truth's floors and the scorer read
+# the same rule; outside stage A's fingerprint)
+event_stacks = tw.event_stacks
+decision_windows = tw.decision_windows
 
 
 class Corpus:
@@ -552,7 +553,10 @@ def before_gpu(data, truth):
     div = data / "diversity.json"
     if not div.exists() or not json.loads(div.read_text()).get("passed"):
         raise SystemExit("stage A's diversity check has not passed")
+    of_void = tr.of_void(truth)
     for p, it, g, name in tr.held_games():
+        if p == "OF" and of_void:
+            continue                        # (5) VOID by the recorded decision
         info = tr.written(truth, name, None)
         if info is None:
             raise SystemExit(f"{name}: no whole, failure-free truth from this source")
@@ -560,8 +564,9 @@ def before_gpu(data, truth):
     if not floors.exists():
         raise SystemExit("no floors.json: run stage B's floors step")
     f = json.loads(floors.read_text())
-    if f.get("source") != tr.SOURCE or not f["O0"]["passed"]:
-        raise SystemExit(f"floors not passed for O0: {f.get('O0')}")
+    if (f.get("source") != tr.SOURCE or f.get("windows_source") != tw.SOURCE
+            or not f["O0"]["passed"]):
+        raise SystemExit(f"floors not passed for O0 (or from other code): {f.get('O0')}")
 
 
 def main(argv):

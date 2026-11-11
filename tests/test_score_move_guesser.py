@@ -98,6 +98,64 @@ def test_R_per_seed_and_pairing():
     assert r["lo"] <= 0.75 <= r["hi"]
 
 
+def test_R_pairs_seeds_and_takes_ratios_of_sums():
+    """Seeds and games that differ: per-seed R is 1 - (sum of SIGMA i's weighted
+    errors / its weights) / (S i's), seed i against seed i, then the mean."""
+    rows = []
+    for d in range(60):
+        rows += _decision_items(sc.SET_CRN, T_CLASSES, 0, d)
+    # SIGMA seed s errs at decisions d % 6 < s (class-0 answer there); S seed s
+    # errs everywhere except d % 5 < s (right answer there)
+    fns = {}
+    for s in range(5):
+        fns[f"SIGMA-s{s}"] = (lambda s: lambda r: onehot(0) if r["decision"] % 6 < s
+                              else onehot(r["members"].argmax()))(s)
+        fns[f"S-s{s}"] = (lambda s: lambda r: onehot(r["members"].argmax())
+                          if r["decision"] % 5 < s else onehot(0))(s)
+    # games of unequal size
+    cuts = [0, 30, 90, 180]
+    games = [_game(rows[a:b], fns, f"g{i}") for i, (a, b) in enumerate(zip(cuts, cuts[1:]))]
+    t = sc.Table(games)
+    m = t.set == sc.SET_CRN
+    r = sc.R(t, m, sc.keys("SIGMA", fns), sc.keys("S", fns), sc.draws(t.n_games, boot=50))
+    want = []
+    for s in range(5):
+        ea = sum(2 / 3 for d in range(60) if d % 6 < s) / 60
+        eb = sum(2 / 3 for d in range(60) if not d % 5 < s) / 60
+        want.append(1 - ea / eb)
+    assert r["per_seed"] == pytest.approx(want)       # distinct per seed: pairing pinned
+    assert len(set(round(x, 9) for x in want)) == 5
+    assert r["R"] == pytest.approx(np.mean(want))
+
+
+def _jk(J_lo=0.3, K_lo=0.6, commit_ok=True, unread=False):
+    return {"J_lo": J_lo, "K_lo": K_lo, "commit_ok": commit_ok, "unread": unread,
+            "commits": [100] * 5, "commit_need": 100}
+
+
+def _out(i=0.5, ii=0.01, iv=0.5, jk=None):
+    jk = jk or {}
+    return {"i": {"lo": i}, "ii": {"lo": ii}, "iv": {"lo": iv},
+            "iii_crn": {"3": jk.get("c3", _jk()), "4": jk.get("c4", _jk())},
+            "iii_noop": {"3": jk.get("n3", _jk()), "4": jk.get("n4", _jk())}}
+
+
+def test_holds_at_the_bars():
+    h, unread, failed = sc.holds(_out())
+    assert all(h.values()) and not unread and not failed
+    assert sc.holds(_out(i=0.4999))[0]["i"] is False
+    assert sc.holds(_out(ii=0.0))[0]["ii"] is False              # strictly above 0
+    assert sc.holds(_out(iv=0.4999))[0]["iv"] is False
+    assert sc.holds(_out(jk={"c4": _jk(J_lo=0.25)}))[0]["iii"] is True   # at least 0.25
+    assert sc.holds(_out(jk={"n3": _jk(J_lo=0.2499)}))[0]["iii"] is False
+    h, _, failed = sc.holds(_out(jk={"c3": _jk(K_lo=0.5)}))      # strictly above 0.5
+    assert h["iii"] is False and any("K3" in f for f in failed)
+    h, _, failed = sc.holds(_out(jk={"n4": _jk(commit_ok=False)}))
+    assert h["iii"] is False and any("commitments" in f for f in failed)
+    h, unread, _ = sc.holds(_out(jk={"c4": _jk(unread=True)}))
+    assert h["iii"] is False and unread == ["iii_crn J4/K4"]
+
+
 def test_junction_identification_and_commitment():
     rows = []
     for d in range(4):
@@ -165,12 +223,25 @@ def test_floors_and_commitment_rule():
     assert r4["commit_ok"] and r4["K"] == pytest.approx(1.0)
     assert r4["unread"] is True                       # 10 games: effective games < 16
     assert res["3"]["unread"] is True                 # 110 < 300
+    # one commitment fewer than half the tier fails the test
+    def fn54(r):
+        if r["decision"] < 54:
+            return onehot(r["members"].argmax())
+        return onehot(0)
+    games = [_game(rows[i * 44:(i + 1) * 44], {f"SIGMA-s{s}": fn54 for s in range(5)},
+                   f"g{i}") for i in range(10)]
+    t = sc.Table(games)
+    res = sc.JK(t, sc.SET_CRN, [f"SIGMA-s{s}" for s in range(5)], sc.draws(t.n_games, boot=50),
+                np.ones(len(t.set), bool))
+    assert res["4"]["commits"] == [54] * 5 and res["4"]["commit_ok"] is False
 
 
 def _cond(lo, hi, holds=None, unread=()):
     h = {"i": lo >= 0.5, "ii": True, "iii": True, "iv": True}
     h.update(holds or {})
-    return {"i": {"lo": lo, "hi": hi}, "holds": h, "unread": list(unread)}
+    failed = [k for k, v in h.items() if not v]
+    return {"i": {"lo": lo, "hi": hi}, "holds": h, "unread": list(unread),
+            "failed": failed}
 
 
 PLAN = {"void": [], "flags": []}
@@ -184,13 +255,15 @@ def test_ladder_every_rung():
                      [], 9000, 30)[0] == "VOID"
     assert sc.ladder(_cond(0.6, 0.9), {"void": ["F1-s2: training failed"], "flags": []},
                      [], 9000, 30)[0] == "GUESSES THE GAME"
-    assert sc.ladder(_cond(0.6, 0.9), {"void": [], "flags": ["S-s1"]}, [], 9000, 30)[0] == "CAPPED"
+    v, why = sc.ladder(_cond(0.6, 0.9), {"void": [], "flags": ["S-s1"]}, [], 9000, 30)
+    assert v == "CAPPED" and "interval state beside it: GUESSES THE GAME" in why
     v = sc.ladder(_cond(0.6, 0.9), {"void": [], "flags": ["SIGMA-s1"]}, [], 9000, 30)[0]
     assert v.startswith("GUESSES THE GAME") and "flagged" in v
-    assert sc.ladder(_cond(0.3, 0.9), {"void": [], "flags": ["SIGMA-s1"]}, [], 9000, 30)[0] == "CAPPED"
+    v, why = sc.ladder(_cond(0.3, 0.9), {"void": [], "flags": ["SIGMA-s1"]}, [], 9000, 30)
+    assert v == "CAPPED" and "interval state beside it: PARTLY" in why
     assert sc.ladder(_cond(0.6, 0.9), PLAN, [], 9000, 30)[0] == "GUESSES THE GAME"
     v, why = sc.ladder(_cond(0.6, 0.9, {"iii": False}, ["iii_crn J4/K4"]), PLAN, [], 9000, 30)
-    assert v == "PARTLY" and "iii" in why and "iii_crn J4/K4" in why
+    assert v == "PARTLY" and "iii" in why and "UNREAD iii_crn J4/K4" in why
     assert sc.ladder(_cond(0.2, 0.9), PLAN, [], 9000, 30)[0] == "PARTLY"
     assert sc.ladder(_cond(0.0, 0.9), PLAN, [], 9000, 30)[0] == "NO HELP"
     assert sc.ladder(_cond(-0.2, 0.1), PLAN, [], 9000, 30)[0] == "NO HELP"
@@ -199,8 +272,11 @@ def test_ladder_every_rung():
 
 def test_next_step_precedence():
     assert sc.next_step("GUESSES THE GAME", "PASSES").startswith("step 3")
+    assert "F_1 is offered" in sc.next_step("GUESSES THE GAME", "PASSES", f1_meets=True)
+    assert "F_1 is offered" not in sc.next_step("GUESSES THE GAME", "PASSES")
     assert sc.next_step("GUESSES THE GAME", "FAILS").startswith("Kai's call")
     assert sc.next_step("GUESSES THE GAME", "VOID").startswith("Kai's call")
+    assert sc.next_step("GUESSES THE GAME", None).startswith("Kai's call")
     assert sc.next_step("PARTLY", "PASSES").startswith("Kai's call")
 
 
@@ -286,6 +362,13 @@ def test_game_items_against_record_and_truth():
     assert int(frames[w[1][-1]][0, 0, 0]) >= 200
     assert all((w[k] == w[5]).all() for k in range(5, 17))
     assert (w[0] == win[0][0]).all()
+    # every block item reads exactly its own block (fill value 200 + b)
+    for b, (a, kind, c, _) in enumerate(blocks):
+        s = lgm.SET_CRN if kind == 0 else lgm.SET_NOOP
+        m = (items["set"] == s) & (items["decision"] == a) & (items["cls"] == c)
+        assert m.sum() == 1
+        w = items["window"][m][0]
+        assert int(frames[w[1][-1]][0, 0, 0]) == 200 + b
 
 
 def test_pixel_search_exact():

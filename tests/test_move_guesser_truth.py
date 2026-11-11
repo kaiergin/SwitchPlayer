@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT / "experiments"))
 sys.path.insert(0, str(PROBES))
 import probe_move_guesser as mg  # noqa: E402
 import probe_move_guesser_truth as tr  # noqa: E402
+import testh_windows as tw  # noqa: E402
 
 HAVE_SNAPSHOTS = all(
     (pathlib.Path(s["tree"]) / "benchmarks" / "results" / s["run"]).exists()
@@ -260,6 +261,82 @@ def test_branches_at_the_real_game_over(game_over_game):
     # the death is long: decisions on the last life whose windows end before
     # the game over keep their classes apart (life ends are not merged away)
     assert any(len(set(by_d[d]["classes"]["crn"])) > 1 for d in final[:-tr.W])
+
+
+def _stage_a_file(path, name, frames_fill):
+    """A stage-A game file: a start, then moves (one life, ended)."""
+    n = len(frames_fill)
+    kinds = [mg.KIND_START] + [mg.KIND_MOVE] * (n - 1)
+    ends = [0] * n
+    ends[-1] = 1
+    arr = {"kind": np.array(kinds, np.int8), "end": np.array(ends, np.int8),
+           "move": np.zeros(n, np.int8),
+           "decision": np.array([-1] + list(range(n - 1)), np.int32),
+           "frames": np.stack([np.full((3, 84, 84), v, np.uint8) for v in frames_fill])}
+    np.savez(path / f"{name}.npz", **arr)
+    return n - 1
+
+
+def _truth_file(path, name, n, contested):
+    np.savez(path / f"{name}-truth.npz", decision=np.arange(n),
+             contested=np.array(contested, bool))
+
+
+def test_floors_fit_and_cross_game_exclusions(tmp_path):
+    data, out = tmp_path / "data", tmp_path / "truth"
+    data.mkdir(), out.mkdir()
+    # FIT game frames 1..9; held A frames 5,20,21,...; held B frames 40,20,41...
+    # A's decision 0 obs_t = tile(5) is not in FIT (FIT tiles 1); make A's first
+    # stack equal FIT's by giving A the same start frame as FIT
+    _stage_a_file(data, "FIT", [1] + list(range(2, 30)))
+    na = _stage_a_file(data, "A", [1] + list(range(100, 128)))     # shares FIT's start
+    nb = _stage_a_file(data, "B", [7] + list(range(150, 178)))
+    nc = _stage_a_file(data, "C", [7] + list(range(200, 228)))     # shares B's start
+    for name, n in (("A", na), ("B", nb), ("C", nc)):
+        _truth_file(out, name, n, [True] * n)
+    rep = tr.floors(data, out, held=[("O0", "A"), ("O0", "B"), ("OF", "C")], fit=["FIT"])
+    # A: decision 0's obs_t (tile of frame 1) occurs in FIT -> out; B and C:
+    # decision 0's obs_t (tile of 7) recurs across held-out games -> out of both
+    assert rep["O0"]["per_game"] == [na - 1, nb - 1]
+    assert rep["OF"]["per_game"] == [nc - 1]
+    assert rep["windows_source"] == tw.SOURCE
+    assert json.loads((out / "floors.json").read_text())["O0"]["contested"] == na + nb - 2
+
+
+def test_before_gpu_gate(tmp_path, monkeypatch):
+    import train_move_guesser as tg
+    data, truth = tmp_path / "data", tmp_path / "truth"
+    data.mkdir(), truth.mkdir()
+    with pytest.raises(SystemExit, match="diversity"):
+        tg.before_gpu(data, truth)
+    (data / "diversity.json").write_text(json.dumps({"passed": True}))
+    monkeypatch.setattr(tr, "held_games", lambda: [("O0", 10, 8, "O0-g"), ("OF", 10, 0, "OF-g")])
+    with pytest.raises(SystemExit, match="O0-g"):
+        tg.before_gpu(data, truth)
+    for n in ("O0-g", "OF-g"):
+        (truth / f"{n}-truth.npz").write_bytes(b"x")
+        (truth / f"{n}-truth.json").write_text(json.dumps(
+            {"source": tr.SOURCE, "failures": [], "max_decisions": None}))
+    with pytest.raises(SystemExit, match="floors"):
+        tg.before_gpu(data, truth)
+    fl = {"source": tr.SOURCE, "windows_source": tw.SOURCE,
+          "O0": {"passed": False}}
+    (truth / "floors.json").write_text(json.dumps(fl))
+    with pytest.raises(SystemExit, match="floors not passed"):
+        tg.before_gpu(data, truth)
+    fl["O0"]["passed"] = True
+    (truth / "floors.json").write_text(json.dumps(fl))
+    tg.before_gpu(data, truth)                                  # passes
+    # OF's truth failed: blocked, unless OF_VOID.json records the decision
+    (truth / "OF-g-truth.json").write_text(json.dumps(
+        {"source": tr.SOURCE, "failures": ["decision 3: x"], "max_decisions": None}))
+    with pytest.raises(SystemExit, match="OF-g"):
+        tg.before_gpu(data, truth)
+    (truth / "OF_VOID.json").write_text(json.dumps({"reason": "cannot be fixed: ..."}))
+    tg.before_gpu(data, truth)
+    (truth / "OF_VOID.json").write_text(json.dumps({}))
+    with pytest.raises(SystemExit, match="reason"):
+        tr.of_void(truth)
 
 
 def test_written_refuses_failed_or_partial_truth(tmp_path):

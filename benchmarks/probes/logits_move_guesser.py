@@ -31,7 +31,8 @@ usage (from the run tree, under the lock, GPU):
   python benchmarks/probes/logits_move_guesser.py [--data DIR] [--truth DIR]
       [--train DIR] [--out DIR] [--players O0,OF] [--games NAME,NAME]"""
 import os
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")   # before any import (see train_move_guesser)
+if __name__ == "__main__":
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")   # before any import (see train_move_guesser)
 import argparse
 import hashlib
 import json
@@ -46,9 +47,10 @@ import numpy as np
 import torch
 import probe_move_guesser as mg
 import train_move_guesser as tg
+import testh_windows as tw
 
 W = 16
-SOURCES = (pathlib.Path(__file__).resolve(),)
+SOURCES = (pathlib.Path(__file__).resolve(), HERE / "testh_windows.py")
 SOURCE = mg.source_hash(SOURCES)
 SET_OWN, SET_CRN, SET_NOOP = 0, 1, 2
 CUTS = tuple(range(1, tg.K_MAX + 1))
@@ -137,12 +139,21 @@ def game_items(arr, truth, frame_offset=0):
 # --------------------------------------------------------------------------
 # models
 # --------------------------------------------------------------------------
-def load_models(train, device):
+def load_models(train, device, smoke=False):
+    """plan.json's read models; each must carry a completion stamp from this
+    trainer and this stage-A data (a smoke's plan from older code is let
+    through, flagged in logits.json)."""
     plan = json.loads((train / "plan.json").read_text())
+    if plan.get("source") != tg.SOURCE and not smoke:
+        raise SystemExit("plan.json is from other trainer code")
     models = {}
     for key, m in plan["models"].items():
         arm = key.split("-s")[0]
         mdir = train / "models" / m["dir"]
+        stamp = json.loads((mdir / "stamp.json").read_text())
+        if not smoke and (stamp.get("source") != tg.SOURCE
+                          or stamp.get("data_source") != mg.SOURCE):
+            raise SystemExit(f"{key}: model from other trainer code or data")
         state, step = tg.best_state(mdir, m["cap"])
         if step != m["best_step"]:
             raise SystemExit(f"{key}: best step {step} against plan's {m['best_step']}")
@@ -216,7 +227,7 @@ def model_logits(nets, frames_t, windows, sets, device, chunk_pairs=tg.EVAL_PAIR
 # --------------------------------------------------------------------------
 # hashes and near-duplicates
 # --------------------------------------------------------------------------
-stack_hash = mg.stack_digest                # the exclusion's key, one definition
+stack_hash = tw.stack_digest                # the exclusion's key, one definition
 D1_COMMIT_GB = 14.0
 
 
@@ -272,11 +283,15 @@ def load_stage_a(data, name):
     return meta, arr
 
 
-def load_truth(truth, name):
+def load_truth(truth, name, smoke=False):
+    """A game's truth: this source, failure-free, and whole (no max_decisions)
+    unless this is a smoke."""
     import probe_move_guesser_truth as tr
     info = json.loads((truth / f"{name}-truth.json").read_text())
     if info.get("source") != tr.SOURCE or info["failures"]:
         raise SystemExit(f"{name}: truth from another source, or with failures")
+    if info.get("max_decisions") is not None and not smoke:
+        raise SystemExit(f"{name}: a smoke's partial truth")
     with np.load(truth / f"{name}-truth.npz") as z:
         return info, {k: z[k] for k in z.files}
 
@@ -288,7 +303,7 @@ def fit_hashes(data, iterations=None):
     stacks, items, frames = set(), set(), []
     for name in fit_names(iterations):
         _, arr = load_stage_a(data, name)
-        _, hs = mg.window_hashes(arr)
+        _, hs = tw.window_hashes(arr)
         for row in hs:
             stacks.update(row)
             items.add(b"".join(row))
@@ -297,13 +312,19 @@ def fit_hashes(data, iterations=None):
 
 
 def stage_logits(data, truth, train, out, players=("O0", "OF"), only=None,
-                 iterations=None):
+                 iterations=None, smoke=False):
+    import probe_move_guesser_truth as tr
     out.mkdir(parents=True, exist_ok=True)
+    # a run killed inside its write loop must not leave new per-game files
+    # under the old summary: the summary goes first, comes back last
+    (out / "logits.json").unlink(missing_ok=True)
     commit = mg.free_commit_gb() if sys.platform == "win32" else float("inf")
     if commit < D1_COMMIT_GB:
         raise SystemExit(f"free commit {commit:.1f} GB < {D1_COMMIT_GB} GB")
+    if tr.of_void(truth):
+        players = tuple(p for p in players if p != "OF")   # (5) VOID, recorded
     device = torch.device("cuda")
-    plan, nets = load_models(train, device)
+    plan, nets = load_models(train, device, smoke)
     fit_stacks, fit_items, fit_frames = fit_hashes(data, iterations)
     weights = {k: torch.softmax(v.w.detach().float(), 0).cpu().numpy().tolist()
                for k, v in nets.items() if k.startswith("SIGMA")}
@@ -313,13 +334,13 @@ def stage_logits(data, truth, train, out, players=("O0", "OF"), only=None,
     per_game, held_frames, spans = {}, [], {}
     for p, name in games:
         meta, arr = load_stage_a(data, name)
-        info, tru = load_truth(truth, name)
+        info, tru = load_truth(truth, name, smoke)
         frames, items = game_items(arr, tru)
         lg = model_logits(nets, torch.from_numpy(frames).to(device), items["window"],
                           items["set"], device)
         h0 = [stack_hash(frames, w[0]) for w in items["window"]]
         whole = [b"".join(stack_hash(frames, r) for r in w) for w in items["window"]]
-        newest = np.array([int(w[0][-1]) for w in items["window"]])
+        newest = np.array([int(w[0][-1]) for w in items["window"]], np.int64)
         lo = sum(len(f) for f in held_frames)
         held_frames.append(arr["frames"])
         spans[name] = (lo, lo + len(arr["frames"]))
@@ -362,8 +383,11 @@ def stage_logits(data, truth, train, out, players=("O0", "OF"), only=None,
         os.replace(tmp, out / f"{name}-logits.npz")
     summary = {"games": list(per_game), "sigma_weights": weights, "plan_cap": plan["cap"],
                "source": SOURCE, "train_source": plan["source"],
+               "of_void": tr.of_void(truth), "smoke": bool(smoke),
                "secs": round(time.time() - t0)}
-    (out / "logits.json").write_text(json.dumps(summary, indent=1))
+    tmp = out / "logits.json.tmp"
+    tmp.write_text(json.dumps(summary, indent=1))
+    os.replace(tmp, out / "logits.json")
     return summary
 
 
@@ -415,7 +439,7 @@ def main(argv):
     players = tuple(a.players.split(",")) if a.players else ("O0", "OF")
     only = set(a.games.split(",")) if a.games else None
     its = set(int(x) for x in a.iterations.split(",")) if a.iterations else None
-    stage_logits(data, truth, train, out, players, only, its)
+    stage_logits(data, truth, train, out, players, only, its, smoke)
     print("DONE", flush=True)
 
 

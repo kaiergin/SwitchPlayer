@@ -54,6 +54,7 @@ import ale_py
 import numpy as np
 import torch
 import probe_move_guesser as mg
+import testh_windows as tw
 import muzero
 
 W = 16                                      # base steps in the window, t .. t+15
@@ -425,6 +426,8 @@ def stage_truth(data, out, only=None, max_decisions=None):
     if only is None and not (div and div.get("passed") and div.get("source") == mg.SOURCE):
         raise SystemExit("stage A's diversity check has not passed for this data")
     games = held_games()
+    if of_void(out):
+        games = [g for g in games if g[0] != "OF"]     # (5) VOID, recorded
     if only is not None:
         games = [g for g in games if g[3] in only]
     by_snapshot = {}
@@ -503,8 +506,11 @@ def floors(data, out, held=None, fit=None):
     occurring byte for byte in a FIT window or in another held-out game) and
     the effective game count (1 / sum p^2, p a game's share of them: each
     contested decision's CRN items weigh 1 in all). floors.json; O0 must reach
-    5,000 decisions and 16 effective games, or GPU work is refused (stage C)."""
-    held = held if held is not None else [(p, n) for p, _, _, n in held_games()]
+    5,000 decisions and 16 effective games, or GPU work is refused (stage C).
+    With OF_VOID.json recorded, OF's games are left out ((5) VOID)."""
+    if held is None:
+        held = [(p, n) for p, _, _, n in held_games()
+                if not (p == "OF" and of_void(out))]
     if fit is None:
         spec = mg.RUNS["O0"]
         fit = [mg.game_name("O0", it, g) for it in spec["iterations"]
@@ -513,18 +519,19 @@ def floors(data, out, held=None, fit=None):
     for name in fit:
         with np.load(data / f"{name}.npz") as z:
             arr = {k: z[k] for k in ("kind", "end", "move", "decision", "frames")}
-        _, hs = mg.window_hashes(arr)
+        _, hs = tw.window_hashes(arr)
         for row in hs:
             fit_stacks.update(row)
     h0, owners = {}, {}
     for p, name in held:
         with np.load(data / f"{name}.npz") as z:
             arr = {k: z[k] for k in ("kind", "end", "move", "decision", "frames")}
-        d, hs = mg.window_hashes(arr)
+        d, hs = tw.window_hashes(arr)
         h0[name] = {int(x): row[0] for x, row in zip(d, hs)}
         for h in set(h0[name].values()):
             owners.setdefault(h, set()).add(name)
-    rep = {"source": SOURCE}
+    rep = {"source": SOURCE, "windows_source": tw.SOURCE,
+           "of_void": of_void(out)}
     for player in sorted({p for p, _ in held}):
         counts = []
         for p, name in held:
@@ -552,13 +559,42 @@ def floors(data, out, held=None, fit=None):
     return rep
 
 
+def of_void(truth):
+    """The recorded decision that OF's truth cannot be fixed (the
+    registration: a failure on OF's games alone that cannot be fixed VOIDs (5)
+    only): truth/OF_VOID.json, written by the operator with its reason and
+    noted in CURRICULUM. Every stage then reads O0 alone and (5) is VOID."""
+    f = pathlib.Path(truth) / "OF_VOID.json"
+    if not f.exists():
+        return False
+    reason = json.loads(f.read_text()).get("reason")
+    if not reason:
+        raise SystemExit("OF_VOID.json without a reason")
+    return True
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data")
     ap.add_argument("--out")
     ap.add_argument("--games")
     ap.add_argument("--max-decisions", type=int)
+    ap.add_argument("--floors-only", action="store_true",
+                    help="recompute floors.json from the written truth (O0 alone "
+                         "under OF_VOID.json)")
     a = ap.parse_args(argv)
+    if a.floors_only:
+        base = mg.ROOT / "benchmarks" / "probes" / "testh"
+        data = pathlib.Path(a.data) if a.data else base / "data"
+        out = pathlib.Path(a.out) if a.out else base / "truth"
+        for p, _, _, name in held_games():
+            if p == "OF" and of_void(out):
+                continue
+            if written(out, name, None) is None:
+                raise SystemExit(f"{name}: no whole, failure-free truth")
+        floors(data, out)
+        print("DONE", flush=True)
+        return
     smoke = bool(a.games or a.max_decisions)
     base = mg.ROOT / "benchmarks" / "probes" / "testh"
     data = pathlib.Path(a.data) if a.data else base / "data"

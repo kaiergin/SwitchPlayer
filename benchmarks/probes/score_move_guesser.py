@@ -31,6 +31,11 @@ BAR_K = 0.5
 STAGES = (("10-80", 10, 80), ("90-120", 90, 120), ("130-160", 130, 160))
 ARMS = ("S", "F1", "F2", "F4", "F8", "F16", "SIGMA")
 SEEDS = (0, 1, 2, 3, 4)
+TRUTH_KEYS = ("decision", "played", "contested", "n_states", "class_crn", "class_crn_raw",
+              "class_noop", "class_noop_raw", "crn_steps", "noop_steps", "crn_end",
+              "noop_end")
+SCORE_COMMIT_GB = 10.0
+N_HELD = {"O0": 32, "OF": 32}
 
 
 # --------------------------------------------------------------------------
@@ -218,8 +223,10 @@ def JK(table, set_code, sigma_keys, C, decision_mask):
 # --------------------------------------------------------------------------
 # the four conditions and the ladder
 # --------------------------------------------------------------------------
-def conditions(table, plan_models, C, dmask):
-    S, G = keys("S", plan_models), keys("SIGMA", plan_models)
+def conditions(table, plan_models, C, dmask, arm="SIGMA"):
+    """(i)-(iv) for `arm` (SIGMA for the verdict; F1 for (1b) and NEXT's
+    offer) against S, on the counterfactual and reaction-free items."""
+    S, G = keys("S", plan_models), keys(arm, plan_models)
     crn = (table.set == SET_CRN) & dmask
     noop = (table.set == SET_NOOP) & dmask
     out = {"i": R(table, crn, G, S, C),
@@ -227,9 +234,20 @@ def conditions(table, plan_models, C, dmask):
            "iii_crn": JK(table, SET_CRN, G, C, dmask),
            "iii_noop": JK(table, SET_NOOP, G, C, dmask),
            "iv": R(table, noop, G, S, C)}
+    out["holds"], out["unread"], out["failed"] = holds(out)
+    return out
+
+
+def holds(out):
+    """The registered bars on computed reads: (i) R's lower bound at least
+    0.5; (ii) branch-only R's above 0; (iii) on both item sets and both tiers
+    J's lower bound at least 0.25, K's above 0.5 and the commitment test
+    passed (a tier under its truth floor is UNREAD); (iv) reaction-free R's at
+    least 0.5. Returns (holds per condition, the UNREAD tiers, every failed
+    part named)."""
     c = {"i": out["i"]["lo"] >= BAR_R, "ii": out["ii"]["lo"] > 0,
          "iv": out["iv"]["lo"] >= BAR_RF}
-    iii, unread = True, []
+    iii, unread, failed = True, [], []
     for s in ("iii_crn", "iii_noop"):
         for tier in ("3", "4"):
             r = out[s][tier]
@@ -237,11 +255,20 @@ def conditions(table, plan_models, C, dmask):
                 unread.append(f"{s} J{tier}/K{tier}")
                 iii = False
                 continue
-            ok = (r["J_lo"] >= BAR_J and r["K_lo"] > BAR_K and r["commit_ok"])
-            iii = iii and ok
+            for name, ok in ((f"{s} J{tier} lower bound {r['J_lo']:.3f} < {BAR_J}",
+                              r["J_lo"] >= BAR_J),
+                             (f"{s} K{tier} lower bound {r['K_lo']:.3f} <= {BAR_K}",
+                              r["K_lo"] > BAR_K),
+                             (f"{s} K{tier} commitments {r['commits']} under "
+                              f"{r['commit_need']}", r["commit_ok"])):
+                if not ok:
+                    failed.append(name)
+                    iii = False
     c["iii"] = iii
-    out["holds"], out["unread"] = c, unread
-    return out
+    for k, bar in (("i", f">= {BAR_R}"), ("ii", "> 0"), ("iv", f">= {BAR_RF}")):
+        if not c[k]:
+            failed.append(f"({k}) lower bound {out[k]['lo']:.3f}, needs {bar}")
+    return c, unread, failed
 
 
 def ladder(cond, plan, truth_failures, contested_o0, eff_games):
@@ -258,20 +285,28 @@ def ladder(cond, plan, truth_failures, contested_o0, eff_games):
         return "VOID", why
     s_capped = [f for f in plan["flags"] if f.startswith("S-")]
     g_capped = [f for f in plan["flags"] if f.startswith("SIGMA-")]
+    state, detail = interval_state(cond)
     if s_capped:
-        return "CAPPED", s_capped
-    r = cond["i"]
-    h = cond["holds"]
-    if all(h[k] for k in ("i", "ii", "iii", "iv")):
+        # the registration: the interval state is printed beside it
+        return "CAPPED", s_capped + [f"interval state beside it: {state}"] + detail
+    if state == "GUESSES THE GAME":
         return ("GUESSES THE GAME" + (" (SIGMA CAPPED, flagged)" if g_capped else ""),
                 g_capped)
     if g_capped:
-        return "CAPPED", g_capped
+        return "CAPPED", g_capped + [f"interval state beside it: {state}"] + detail
+    return state, detail
+
+
+def interval_state(cond):
+    """The ladder below CAPPED: GUESSES THE GAME, PARTLY (each failed or
+    UNREAD part named), NO HELP or WORSE THAN HABITS."""
+    r, h = cond["i"], cond["holds"]
+    if all(h[k] for k in ("i", "ii", "iii", "iv")):
+        return "GUESSES THE GAME", []
     if h["i"]:
-        failed = [k for k in ("ii", "iii", "iv") if not h[k]] + cond["unread"]
-        return "PARTLY", failed
+        return "PARTLY", cond["failed"] + [f"UNREAD {u}" for u in cond["unread"]]
     if r["lo"] > 0:
-        return "PARTLY", ["R's lower bound below 0.5"]
+        return "PARTLY", [f"R's lower bound {r['lo']:.3f} above 0 but below {BAR_R}"]
     if r["hi"] < 0:
         return "WORSE THAN HABITS", []
     return "NO HELP", []
@@ -288,7 +323,9 @@ def load_player(logits_dir, truth_dir, data_dir, names):
         meta = json.loads((data_dir / f"{name}.json").read_text())
         g["name"], g["iteration"] = name, meta["iteration"]
         with np.load(truth_dir / f"{name}-truth.npz") as z:
-            g["truth"] = {k: z[k] for k in z.files}
+            # only what the reads use: the future blocks (most of the file)
+            # stay on disk
+            g["truth"] = {k: z[k] for k in TRUTH_KEYS}
         with np.load(data_dir / f"{name}.npz") as z:
             g["extra"] = {k: z[k] for k in ("kind", "move", "decision", "prior", "temp", "end")}
         games.append(g)
@@ -355,13 +392,17 @@ def oracle_error(table, mask):
     return float(np.mean(errs)) if errs else float("nan")
 
 
-def log_prob(table, key, mask):
+def log_prob(table, key, mask, weights=None):
+    """Read (8): the mean log probability on the truth class, weighted (class
+    size / 9 on the items by default; 1 per decision for read (2)'s)."""
+    if not mask.any():
+        return float("nan")
     lg = table.logits[key][mask].astype(np.float64)
     lg = lg - lg.max(1, keepdims=True)
     p = np.exp(lg)
     p /= p.sum(1, keepdims=True)
     pc = (p * table.members[mask]).sum(1)
-    w = table.weight[mask]
+    w = table.weight[mask] if weights is None else weights[mask]
     return float((w * np.log(np.maximum(pc, 1e-300))).sum() / w.sum())
 
 
@@ -390,10 +431,22 @@ def own_play(table, plan_models, dmask, C):
 
 
 def references(table, plan, dmask):
-    """Read (6) on O0's contested held-out decisions (own items)."""
+    """Read (6) on O0's contested held-out decisions (own items), pooled and
+    per snapshot."""
+    out = _references(table, plan, dmask)
+    out["per_snapshot"] = {
+        int(it): _references(table, plan, dmask & np.isin(
+            table.game, np.flatnonzero(table.iteration == it)))
+        for it in sorted(set(table.iteration.tolist()))}
+    return out
+
+
+def _references(table, plan, dmask):
     own = (table.set == SET_OWN) & dmask & np.isin(
         table.dkey, table.dkey[table.set == SET_CRN])
     idx = np.flatnonzero(own)
+    if not len(idx):
+        return {}
     maj = plan["majority"]
     out = {"majority": float(table.members[idx, maj].mean()),
            "random": float(table.weight[idx].mean())}
@@ -420,7 +473,10 @@ def ceilings(table, dmask):
     """Read (4), from the truth arrays."""
     out = {}
     contested, total, pooled, raw, noop_raw, states = 0, 0, [], [], [], []
+    all_pooled, all_states = [], []
     per_k = {k: [0, 0] for k in range(1, 17)}
+    per_k_noop = {k: [0, 0] for k in range(1, 17)}
+    per_k_junction = {k: [0, 0] for k in range(1, 17)}
     per_k_items = {k: [0.0, 0.0] for k in range(1, 17)}
     differ = 0
     lost_crn, lost_noop, n_crn, n_noop = 0, 0, 0, 0
@@ -431,6 +487,8 @@ def ceilings(table, dmask):
                 continue
             total += 1
             cls = tru["class_crn"][a]
+            all_pooled.append(len(set(cls.tolist())))
+            all_states.append(int(tru["n_states"][a]))
             if not tru["contested"][a]:
                 continue
             contested += 1
@@ -439,11 +497,21 @@ def ceilings(table, dmask):
             noop_raw.append(len(set(tru["class_noop_raw"][a].tolist())))
             states.append(int(tru["n_states"][a]))
             final = _partition([cls[m] for m in range(MOVES)])
-            differ += final != _partition([tru["class_noop"][a][m] for m in range(MOVES)])
+            final_noop = _partition([tru["class_noop"][a][m] for m in range(MOVES)])
+            differ += final != final_noop
+            junction = len(set(final)) >= 3
             for k in range(1, 17):
                 part = _partition([tru["crn_steps"][a, m, :k].tobytes() for m in range(MOVES)])
                 per_k[k][0] += part == final
                 per_k[k][1] += 1
+                if junction:
+                    # the junction ceiling: classes already pairwise distinct by t+k
+                    per_k_junction[k][0] += part == final
+                    per_k_junction[k][1] += 1
+                part_n = _partition([tru["noop_steps"][a, m, :k].tobytes()
+                                     for m in range(MOVES)])
+                per_k_noop[k][0] += part_n == final_noop
+                per_k_noop[k][1] += 1
                 # item-weighted: a class already separated from every other by t+k
                 part = np.array(part)
                 for c in set(final):
@@ -469,7 +537,14 @@ def ceilings(table, dmask):
     out["classes_raw"] = float(np.mean(raw)) if raw else float("nan")
     out["noop_classes_raw"] = float(np.mean(noop_raw)) if noop_raw else float("nan")
     out["states_per_decision"] = float(np.mean(states)) if states else float("nan")
+    out["classes_pooled_all_decisions"] = (float(np.mean(all_pooled)) if all_pooled
+                                           else float("nan"))
+    out["states_per_decision_all"] = (float(np.mean(all_states)) if all_states
+                                      else float("nan"))
     out["partition_final_by_k"] = {k: v[0] / v[1] for k, v in per_k.items() if v[1]}
+    out["partition_final_by_k_noop"] = {k: v[0] / v[1] for k, v in per_k_noop.items() if v[1]}
+    out["junction_ceiling_by_k"] = {k: v[0] / v[1] for k, v in per_k_junction.items()
+                                    if v[1]}
     out["partition_final_by_k_items"] = {k: v[0] / v[1] for k, v in per_k_items.items() if v[1]}
     out["crn_noop_partitions_differ"] = differ / contested if contested else float("nan")
     out["branch_items_lost_life"] = lost_crn / n_crn if n_crn else float("nan")
@@ -510,17 +585,55 @@ def perfect_fk(table, dmask):
 # --------------------------------------------------------------------------
 # the run
 # --------------------------------------------------------------------------
+def free_commit_gb():
+    if sys.platform != "win32":
+        return math.inf
+    import ctypes
+
+    class MS(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    m = MS()
+    m.dwLength = ctypes.sizeof(MS)
+    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+    return m.ullAvailPageFile / 2 ** 30
+
+
 def score(data, truth, train, logits, boot=BOOT):
+    free = free_commit_gb()
+    if free < SCORE_COMMIT_GB:
+        raise SystemExit(f"free commit {free:.1f} GB < {SCORE_COMMIT_GB} GB")
     plan = json.loads((train / "plan.json").read_text())
     summ = json.loads((logits / "logits.json").read_text())
     pm = plan["models"]
+    of_void = bool(summ.get("of_void"))
+    smoke = bool(summ.get("smoke") or plan.get("smoke"))
+    problems = []
+    if summ.get("train_source") != plan.get("source"):
+        problems.append("logits.json is from another plan")
     truth_failures = []
     for f in sorted(truth.glob("*-truth.json")):
+        if of_void and f.name.startswith("OF-"):
+            continue                        # (5) VOID by the recorded decision
         info = json.loads(f.read_text())
         truth_failures += info["failures"]
     names = {p: [n for n in summ["games"] if n.startswith(p + "-")] for p in ("O0", "OF")}
+    for p, n in N_HELD.items():
+        if p == "OF" and of_void:
+            continue
+        if len(names[p]) != n and not smoke:
+            problems.append(f"{p}: {len(names[p])} held-out games scored, not {n}")
+    if problems:
+        raise SystemExit("; ".join(problems))
     rep = {"plan": {k: plan[k] for k in ("cap", "rates_chosen", "flags", "void", "batch",
-                                         "majority", "majority_acc")}}
+                                         "majority", "majority_acc")},
+           "smoke": smoke, "of_void": of_void}
     tables, conds = {}, {}
     for p in ("O0", "OF"):
         if not names[p]:
@@ -535,12 +648,22 @@ def score(data, truth, train, logits, boot=BOOT):
         contested = len(np.unique(t.dkey[crn]))
         cond = conditions(t, pm, C, dm)
         S, G, F1 = keys("S", pm), keys("SIGMA", pm), keys("F1", pm)
+        f1 = conditions(t, pm, C, dm, arm="F1") if len(F1) == len(S) else None
+        f1_void = [v for v in plan["void"] if v.startswith("F1-")]
+        f1_flags = [f for f in plan["flags"] if f.startswith("F1-")]
         extra = {
             "contested_decisions": contested, "effective_games": eff,
             "excluded_share": float(1 - dm[t.set == SET_OWN].mean()),
             "whole_item_in_fit_share": float(t.whole_in_fit[t.set == SET_OWN].mean()),
             "F1": R(t, crn, F1, S, C),
             "F1_noop": R(t, (t.set == SET_NOOP) & dm, F1, S, C),
+            # (1b): F_1's own (i)-(iv); VOID or flagged models leave it unread
+            "F1_conditions": None if f1 is None else {
+                "holds": f1["holds"], "unread": f1["unread"], "failed": f1["failed"],
+                "i": f1["i"], "ii": f1["ii"], "iv": f1["iv"],
+                "iii_crn": f1["iii_crn"], "iii_noop": f1["iii_noop"],
+                "void": f1_void, "flags": f1_flags,
+                "meets_all": (not f1_void and all(f1["holds"].values()))},
             "junction_items": R(t, crn & _junction(t, crn), G, S, C),
             "junction_turn_items": R(t, crn & _junction(t, crn) & ~t.members[:, 0], G, S, C),
             "corridor_items": R(t, crn & ~_junction(t, crn), G, S, C),
@@ -563,8 +686,10 @@ def score(data, truth, train, logits, boot=BOOT):
             for a in ARMS if f"{a}-s0" in pm and a != "S"}
         extra["cut_profile"] = cut_profile(t, crn, (t.set == SET_NOOP) & dm, G, S)
         extra["sigma_weights"] = summ["sigma_weights"]
+        own_contested = (t.set == SET_OWN) & dm & np.isin(t.dkey, t.dkey[t.set == SET_CRN])
+        ones = np.ones(len(t.set))
         extra["log_prob"] = {k: {"crn": log_prob(t, k, crn),
-                                 "own": log_prob(t, k, (t.set == SET_OWN) & dm)}
+                                 "own": log_prob(t, k, own_contested, ones)}
                              for k in pm}
         extra["own_play"] = own_play(t, pm, dm, C)
         extra["ceilings"] = ceilings(t, dm)
@@ -601,7 +726,10 @@ def score(data, truth, train, logits, boot=BOOT):
     verdict, why = ladder(o0["cond"], plan, truth_failures,
                           o0["extra"]["contested_decisions"], o0["extra"]["effective_games"])
     rep["verdict"], rep["why"] = verdict, why
-    if "OF" in conds:
+    if of_void:
+        rep["five"] = "VOID"
+        rep["five_why"] = "OF's truth could not be fixed (OF_VOID.json)"
+    elif "OF" in conds:
         of = conds["OF"]
         floors_ok = (of["extra"]["contested_decisions"] >= FLOOR_DECISIONS
                      and of["extra"]["effective_games"] >= FLOOR_GAMES
@@ -610,9 +738,13 @@ def score(data, truth, train, logits, boot=BOOT):
             rep["five"] = "VOID"
         else:
             rep["five"] = "PASSES" if all(of["cond"]["holds"].values()) else "FAILS"
+            rep["five_failed"] = of["cond"]["failed"]
         rep["paired_drop"] = paired_drop(tables["O0"], tables["OF"], pm)
-    rep["next"] = next_step(verdict, rep.get("five"))
+    f1 = o0["extra"].get("F1_conditions")
+    rep["next"] = next_step(verdict, rep.get("five"),
+                            f1_meets=bool(f1 and f1["meets_all"]))
     rep["players"] = {p: {"holds": c["cond"]["holds"], "unread": c["cond"]["unread"],
+                          "failed": c["cond"]["failed"],
                           "i": c["cond"]["i"], "ii": c["cond"]["ii"],
                           "iii_crn": c["cond"]["iii_crn"], "iii_noop": c["cond"]["iii_noop"],
                           "iv": c["cond"]["iv"], **c["extra"]} for p, c in conds.items()}
@@ -695,13 +827,16 @@ def cut_profile(t, crn, noop, G, S):
     return out
 
 
-def next_step(verdict, five):
+def next_step(verdict, five, f1_meets=False):
     if verdict.startswith("GUESSES THE GAME"):
-        if five in ("FAILS", "VOID"):
-            return ("Kai's call: (5) " + five + " while (1) reads GUESSES THE GAME "
-                    "(the last rule overrides the first)")
-        return ("step 3, registered separately: the guesser (SIGMA, F_1 alongside) on "
-                "Atari-HEAD's human Ms. Pac-Man, then a training run with guessed moves")
+        if five in ("FAILS", "VOID", None):
+            return ("Kai's call: (5) " + (five or "unread") + " while (1) reads "
+                    "GUESSES THE GAME (the last rule overrides the first)")
+        out = ("step 3, registered separately: the guesser (SIGMA, F_1 alongside) on "
+               "Atari-HEAD's human Ms. Pac-Man, then a training run with guessed moves")
+        if f1_meets:
+            out += "; F_1 meets (i)-(iv) as well, so the simpler F_1 is offered to Kai too"
+        return out
     if verdict in ("TRUTH FAILURE",):
         return "fix the data or truth stage and rerun it, before any training read"
     return "Kai's call, with reads (3) and (4)"
