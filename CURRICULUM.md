@@ -1386,6 +1386,20 @@ RUN NOTES:
   test-h, 4466a49e; the run_testh_ab.sh script, under the lock, CPU; log
   testh_run.log in the session scratchpad). Stage C waits for the LOW fixes'
   re-audit and for stage B's floors.
+  The 7 LOWs fixed in b2e91382 (stages C and D only; stage A and B's files
+  byte-identical to 4466a49e); its re-audit: nothing above LOW, every fix
+  correct, the new tests traced to pass. Its 5 LOWs stay as OPERATOR NOTES:
+  - If OF_VOID.json is ever written after stage D1 ran, rerun D1 before D2 (D2
+    takes OF_VOID from logits.json).
+  - R's undefined_draws counts every non-finite draw; interval() now drops only
+    NaN ones (an infinite draw, which needs S at zero error, counts against).
+  - Untested descriptive paths: the perfect-F_k key past a branch's end, the
+    NOOP junction ceiling's values, read (2)'s interval values, interval()'s
+    NaN/inf rule, NEXT's F_1 flag text; the (iv) mask test would not catch
+    "NOOP branch items only".
+  - Read (4)'s item-weighted per-k share is computed for the CRN futures only.
+  STAGE A DONE 15:56 (462 s): 192 games; opening diversity 0.995 overall, 0.976
+  at the lowest noop phase (passed). Stage B started 15:56.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
