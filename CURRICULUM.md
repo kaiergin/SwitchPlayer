@@ -857,10 +857,16 @@ METHOD:
       80 uniformly random moves of the 9, at 4 frames each, before the policy takes
       over. Noop starts alone give only 4 distinct states once the jingle ends
       (noop count mod 4: every snapshot's exact eval, O0 and OF), and moves do
-      nothing until about frame 266. Test G measured 80 random moves at 119
-      distinct states in 120. The opening's moves are not the player's: they are
-      neither samples nor scored. Each (run, snapshot, game) has its own seed, which
-      draws its noop count and opening and keys its uniforms.
+      nothing until about frame 266. The 119 distinct states in 120 after 80 random
+      moves was measured for Test O's read (8) on raw ALE, so the data stage checks
+      it here: it prints how many first-decision stacks are byte-distinct over all
+      192 games and within each noop phase, and stops (Kai's call) if fewer than
+      90% are. The opening's moves are not the player's: they take no decision
+      index and are neither samples nor scored, but their frames are recorded,
+      since the first stacks include them. A life lost during the opening is played
+      on, the life index advancing (Test G's rule); the 80 steps count toward life
+      1's 3,000 cap. Each (run, snapshot, game) has its own seed, which draws its
+      noop count and opening and keys its uniforms.
     - Recorded per base step: the pooled 84x84x3 observation frame (uint8, about 21
       KB; about 2.5 GB for all 119k steps), the move, u, the reward, the life index,
       and a digest of every raw frame. For held-out games also the emulator state
@@ -913,7 +919,10 @@ METHOD:
       so classes per decision are not comparable with E0's 2.09.
     - Tests before the run: branches at a real life loss and at a real game over;
       the play_episode equivalence test on O0 at T 0.5 and at T 0.125 and on an OF
-      snapshot (head 0 of its option net), each across a life change; and a smoke
+      snapshot (head 0 of its option net), each across a life change, with the
+      opening off (play_episode has none); a hand-off test that the stack at the
+      first decision after the opening is the one play_episode's pushes would build
+      from the same frames (each step pushed once); and a smoke
       over whole games of both players that also counts the distinct post-move
       states per decision (the cost below assumes 2-3) and the game clusters (READS).
   COUNTERFACTUAL ITEMS (scoring only): each contested held-out decision gives one
@@ -957,7 +966,9 @@ METHOD:
       edge of the grid gets one more value beyond it (1e-4 or 1e-2), once. Step cap:
       one cap for every arm, fixed by a smoke of S and of SIGMA on FIT and
       VALIDATION at each of the three rates under a provisional cap of 40,000
-      steps: 3x the latest best step among them. VALIDATION move NLL is evaluated
+      steps: 3x the latest best step among them. These six smoke models are also
+      S's and SIGMA's seed-0 grid models. An arm whose best point lands past the cap
+      is handled by AT THE CAP below. VALIDATION move NLL is evaluated
       every 500 steps, step 0 included, on one
       common set: validation decisions none of whose observations (obs_t or the 16
       after it) occur byte for byte in FIT. Each model keeps its best point.
@@ -986,29 +997,41 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
   as built (not renormalised within a subset). A seed's R = 1 - error_SIGMA /
   error_S on the same items (SIGMA seed i against S seed i); R is the mean of the 5
   seeds' R.
-  INTERVALS (95%): game clusters are built after the exclusion, from the scored
-  decisions, two held-out games joining when they still share a byte-identical
-  obs_t or counterfactual item. Floor: an effective cluster count (1 / sum of p^2,
-  p a cluster's share of the item weight) of at least 16, or the read is VOID
-  (Kai's call). The count is computed after the truth stage, before any GPU work,
-  and the smoke reports it early. 2,000 cluster resamples give the seed-mean's percentiles q2.5 and
-  q97.5. The seed term is t(4) x the between-seed SD / sqrt(5). Lower bound = point
-  - sqrt((point - q2.5)^2 + seed term^2); upper bound likewise with q97.5 - point.
+  INTERVALS (95%): after the exclusion no scored decision shares its obs_t with
+  another held-out game, so the clusters are the held-out games. The opening is the
+  real guard against shared games, and the data stage checks it (DATA). Floor: an
+  effective cluster count (1 / sum of p^2, p a game's share of the item weight) of
+  at least 16, or the read is VOID (Kai's call), computed after the truth stage,
+  before any GPU work. 2,000 game resamples give the seed-mean's percentiles q2.5
+  and q97.5. The seed term is t(4) x the between-seed SD / sqrt(5). Lower bound =
+  point - sqrt((point - q2.5)^2 + seed term^2); upper bound likewise with q97.5 -
+  point. A difference between arms (R_SIGMA - R_F1, or (5)'s SIGMA - S) is taken
+  per seed, seed i against seed i, and its seed term uses the SD of the 5
+  per-seed differences.
+  JUNCTION IDENTIFICATION: at a decision with 3 or more classes, the decision is
+  IDENTIFIED when the arm's top move lies in the item's class for every one of its
+  items. J is the share of such decisions identified, each weighted 1. Any guesser
+  whose answer takes at most two values per decision (S, a guesser that knows
+  only "kept the heading or changed it", one that knows only "reversed or not")
+  scores J = 0 by construction; a perfect guesser scores 1. No heading semantics
+  enter it.
   (1) PRIMARY, habit-free first move: on the counterfactual items, R, the share of
-      S's errors that SIGMA removes. In the verdict: R overall, on branch items only
-      (the played class left out), on junction TURN items (decisions with 3 or more
-      truth classes among the 9 moves; items whose class does not contain NOOP, so
-      the heading changed), and on the reaction-free items. A guesser that knows only
-      "kept the heading or changed it" scores 0 on junction turns. Printed beside:
-      each seed's R; R at all junction items; R
+      S's errors that SIGMA removes. In the verdict: R overall, R on branch items
+      only (the played class left out), SIGMA's J on the counterfactual items and
+      on the reaction-free items (junctions by each set's own classes), and R on the
+      reaction-free items. Printed beside: each seed's R and J; R at junction
+      items, and on junction items whose class does not contain NOOP; R
       at corridors (the rest); R on raw-frame classes; R with items holding a lost
-      life left out; R with the overlapping decisions kept; R with every decision
-      whose obs_t occurs in FIT left out; and the future-blind oracle's error (1 -
+      life left out; R with every exclusion undone; and the future-blind oracle's
+      error (1 -
       the largest class's size / 9, per decision) beside err_S.
   (1b) The same for F_1, the one-step inverse model. Its input, obs_{t+1}, depends
       only on the state and the move, never on a later move. Also every arm's R on
-      the reaction-free items. F_1's input is the same on both sets, so its two R
-      should nearly match; a gap points to a class bug.
+      the reaction-free items. F_1's input is the same on both sets, but the two
+      partitions can differ legitimately (moves with the same next observation and
+      different emulator states can merge under one continuation and split under
+      the other), so the share of decisions whose two partitions differ is printed
+      beside F_1's two R.
   (2) OWN PLAY, descriptive: the played moves only, as they happened, each decision
       weighted 1. SIGMA minus S
       class accuracy, overall and by temperature stage (10-80, 90-120, 130-160); R
@@ -1024,13 +1047,17 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
       mean classes per decision, pooled and raw; per k, the share of contested
       decisions whose branches already differ by t+k; the share of branch items with
       a lost life; distinct post-move states per decision; the same shares for the
-      reaction-free futures. The reaction-free raw-frame classes are nearly E0's
-      construction (a NOOP tail, 64 frames against 92), so their mean per decision
-      is printed beside E0's 2.09 as a check on the truth stage. A perfect guesser reaches
+      reaction-free futures. Descriptive: the reaction-free raw-frame classes are
+      close to E0's construction (a NOOP tail, 64 frames against 92), so their mean
+      over all held-out decisions is printed beside E0's 2.09 (all of T2's
+      decisions) and E1's 2.33 (live decisions). Different players and windows, so
+      no rule attaches. A perfect guesser reaches
       R = 1, since the classes are defined on what it sees. No power estimate is
       made for the 0.5 bar.
-  (5) ANOTHER PLAYER: OF's held-out play, with the same overlap exclusion (against
-      O0's FIT) and cluster rule: (1)'s R and (2)'s difference for SIGMA against S.
+  (5) ANOTHER PLAYER: OF's held-out play, with the same exclusions (an obs_t that
+      recurs in O0's FIT or in any other held-out game, O0's or OF's) and the same
+      cluster floor, which VOIDs (5) alone: (1)'s R and (2)'s difference for SIGMA
+      against S.
       (5) FAILS if SIGMA minus S class accuracy on OF's counterfactual items has a
       lower bound at or below 0. Also printed: how often O0's acting argmax at the
       same iteration (160 for OF's 159) agrees with OF's on OF's held-out states
@@ -1060,10 +1087,12 @@ VERDICT on (1), the first state that applies, in this order:
     rerun) still flagged at its cap. S is every R's denominator, so a capped S
     inflates them all. The interval state below is printed beside it.
   - GUESSES THE GAME: all four hold: (i) R's lower bound is at least 0.5; (ii) R on
-    branch items only has a lower bound above 0; (iii) R on junction turn items has
-    a lower bound of at least 0.25; (iv) R on the reaction-free items has a lower
-    bound of at least 0.5, the same bar as (i): these futures show the game's
-    response alone, the thing step 3 needs.
+    branch items only has a lower bound above 0; (iii) SIGMA's J has a lower bound
+    of at least 0.25 on the counterfactual items and on the reaction-free items
+    alike: at junctions it tells the turns apart, not only "turned or not", on
+    futures this player shaped and on futures nobody shaped; (iv) R on the
+    reaction-free items has a lower bound of at least 0.5, the same bar as (i):
+    these futures show the game's response alone, the thing step 3 needs.
   - PARTLY: (i) holds and another fails (named), or R's lower bound is above 0 but
     below 0.5.
   - NO HELP: the interval contains 0.
@@ -1082,8 +1111,9 @@ NEXT (the (5) rule, last, overrides the first):
   - CAPPED, PARTLY, NO HELP or WORSE THAN HABITS: Kai's call, with reads (3) and (4) showing
     where it falls short. The value-only master (Test G's line) does not need
     moves.
-  - (5) FAILS while (1) reads GUESSES THE GAME: Kai's call. The guesser would then
-    work on O0's play but not on another player's.
+  - (5) FAILS, or is VOID, while (1) reads GUESSES THE GAME: Kai's call. A FAIL
+    means the guesser works on O0's play but not on another player's; a VOID
+    leaves transfer unread.
 CAVEATS: O0 is one seed and one player across its own training. Temperature play is
   broader than deployed play. The counterfactual futures continue with O0's own
   policy, so offsets past the first show this player's reaction to the move. Play
@@ -1108,7 +1138,8 @@ COST: about 119k decisions from 16 + 16 snapshots, CPU under the lock, about 1 h
   about 40k decisions, 3-4 h CPU, longer if states run higher; the reaction-free
   continuations add emulator frames only. Counterfactual and reaction-free futures
   about 30-60 GB uncompressed, compressed per game on Y:. Emulator states with
-  buffers for the held-out games only. The guessers train on the GPU,
+  MaxAndSkip's buffer (two raw frames, about 200 KB a step, about 8 GB
+  uncompressed) for the held-out games only, compressed. The guessers train on the GPU,
   which is free while no run is live: the learning-rate grid on seed 0 (about 20
   models, most of them small), then the other seeds, 19 models in the read (S, F_1
   and SIGMA 5 each, F_2 .. F_16 1 each), roughly 6-10 h in all, SIGMA's 16 pairs
@@ -1186,6 +1217,20 @@ AUDIT r5 2026-11-11: 1 HIGH (noop starts give only 4 states after the jingle, so
   guesser, optimiser, evaluation spacing and grid edge pinned; the cap smoke
   includes SIGMA; CAPPED's scope; NEXT's precedence; read (2) weighted per
   decision; training time; E0 and F_1 cross-checks), all taken in.
+AUDIT r6 2026-11-11: 1 HIGH (junction-turn R did not stop a guesser that knows only
+  "reversed or not", which reaches 0.33-1 there, and the sentence saying such a
+  guesser scores 0 was false: (iii) is now J, the share of junctions whose every
+  item the guesser names correctly, 0 by construction for any two-valued guesser),
+  1 MEDIUM (junction skill was never required on futures nobody shaped: J is
+  required on the reaction-free items too), 9 LOW (two side reads made identical to
+  the primary by r5's exclusion: one "every exclusion undone" read instead;
+  clusters are games after the exclusion, and the opening's diversity is now
+  checked with a stop rule, its 119-of-120 figure being Test O's, not Test G's;
+  the opening's lives, cap, indices, frames and a hand-off test; the E0 comparison
+  descriptive; F_1's two partitions can differ legitimately; differences' seed
+  terms; (5)'s exclusions, floor and VOID; the buffer's storage; the cap smoke's
+  models are the grid's), all taken in. The r6 auditor ran one trivial python -c
+  print outside the lock, touching nothing.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
