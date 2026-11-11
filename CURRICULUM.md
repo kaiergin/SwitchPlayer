@@ -863,7 +863,7 @@ METHOD:
       moves was measured for Test O's read (8) on raw ALE, so the data stage checks
       it here: it prints how many first-decision stacks are byte-distinct over all
       192 games and within each noop phase, and stops (Kai's call) if fewer than
-      90% are. The opening's moves are not the player's: they take no decision
+      90% are, overall or in any phase. The opening's moves are not the player's: they take no decision
       index and are neither samples nor scored, but their frames are recorded,
       since the first stacks include them. A life lost during the opening takes the
       training life change (the wrapper's reset: its NOOP step and the re-tiled
@@ -974,7 +974,8 @@ METHOD:
       VALIDATION at each of the three rates under a provisional cap of 40,000
       steps: 3x the latest best step among them, counted after any extension those
       models get. These six smoke models are also S's and SIGMA's seed-0 grid
-      models. If an edge rate (1e-4 or 1e-2) wins for S or SIGMA, its smoke model
+      models; the chosen ones continue to the final cap before they enter the read,
+      so every seed has the same budget. If an edge rate (1e-4 or 1e-2) wins for S or SIGMA, its smoke model
       joins and the cap is recomputed. An arm whose best point lands past the cap is
       handled by AT THE CAP below. VALIDATION move NLL is evaluated
       every 500 steps, step 0 included, on one
@@ -986,8 +987,9 @@ METHOD:
     - TRAINING FAILED, per seed: a future arm's seed whose best validation move NLL
       is not below S's, same seed. Fixed now: one rerun at a third of the learning
       rate and twice the cap. Still failing: the arm is VOID (Kai's call).
-    - S's SANITY CHECK: S's validation move accuracy must beat the majority move
-      (FIT's most frequent move). Failing: the same one rerun; still failing, VOID.
+    - S's SANITY CHECK, per seed: each S seed's validation move accuracy must beat
+      the majority move (FIT's most frequent move). A failing seed gets the same one
+      rerun; any S seed still failing VOIDs the run.
     - Held-out results play no part in any of these rules.
     - A model killed before it finishes (Kai's Switch sessions kill GPU pythons)
       reruns from scratch and does not count as a rerun above. Each finished model
@@ -1023,23 +1025,35 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
   or more classes. A guesser whose answer takes at most two values per decision (S,
   "kept the heading or changed it", "reversed or not") scores J3 = 0 by
   construction; one with at most three values ("kept, reversed or turned") scores
-  J4 = 0. A perfect guesser scores 1 on both. No heading semantics enter. Floors:
-  at least 300 junctions for J3 and 100 for J4 in a set, with their effective game
-  count (by decision weight) printed; below a floor that condition is UNREAD. The
-  smoke counts both early. Printed beside them, the ceiling: per k, the share of
-  junctions whose classes are already pairwise distinct by t+k.
+  J4 = 0. A perfect guesser scores 1 on both. No heading semantics enter.
+  COMMITTED: a junction is committed when the arm's answers on its items fall in
+  pairwise distinct classes; K3 and K4 are the identified shares among committed
+  junctions (3 or more, 4 or more classes). A guesser that tells "turned" apart
+  but flips a coin on which turn scores about 0.5 there; one that knows the turns
+  scores near 1.
+  Floors, per set: at least 300 junctions for J3, 100 for J4, and 100 committed
+  junctions for each of K3 and K4, each with an effective game count (by decision
+  weight) of at least 16; below a floor that quantity is UNREAD. The smoke counts
+  them early. Intervals as for R: the same game resamples and seed term (no ratio).
+  Printed beside them, the ceiling: per k, the share of junctions whose classes
+  are already pairwise distinct by t+k.
   (1) PRIMARY, habit-free first move: on the counterfactual items, R, the share of
       S's errors that SIGMA removes. In the verdict: R overall, R on branch items
-      only (the played class left out), SIGMA's J3 and J4 on the counterfactual
-      items and on the reaction-free items, and R on the reaction-free items.
-      Printed beside: each seed's R, J3 and J4; R at junction items, and on
+      only (the played class left out), SIGMA's J3, J4, K3 and K4 on the
+      counterfactual items and on the reaction-free items, and R on the
+      reaction-free items. Printed beside: each seed's R, J and K; R at seed 0's
+      final-step model instead of its best point (descriptive: selection is by
+      own-play move NLL, which also rewards within-class habits); R at junction items, and on
       junction items whose class does not contain NOOP; R at corridors (the rest);
       R on raw-frame classes; R with items holding a lost life left out; R with
       every exclusion undone; the future-blind oracle's error (1 - the largest
       class's size / 9, per decision) beside err_S, and 1 - err_SIGMA / err_oracle
       beside R (R partly rewards S's fit to the player's habits, since a habit
-      that sits in a small class raises err_S); and the intraclass correlation of
-      per-game R within snapshots (near-duplicate games would raise it).
+      that sits in a small class raises err_S); and NEAR-DUPLICATES measured
+      directly: for each held-out decision, the fewest differing pixels between
+      the newest frame of its obs_t and any newest frame in the same snapshot's FIT
+      games or its other held-out game; the share under 50 differing pixels (of
+      7,056) and R without those decisions.
   (1b) The same for F_1, the one-step inverse model. Its input, obs_{t+1}, depends
       only on the state and the move, never on a later move. Also every arm's R on
       the reaction-free items. F_1's input is the same on both sets, but the two
@@ -1057,7 +1071,12 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
       for k >= 2); R_SIGMA minus R_F1 with its interval (Kai's summation against a
       single next position); SIGMA's learned weights over the offsets; and SIGMA
       cut to offsets j <= k, weights renormalised, for each k (no retraining), on
-      the counterfactual items and on the reaction-free items.
+      the counterfactual items and on the reaction-free items. The cut profile
+      feeds the head sums it never trained on, so it is descriptive; the trained
+      F_k carry any reading of "misled by later frames". E0 found the classes
+      nearly fixed after one step (2.08 of 2.09 at 4 frames), so R_SIGMA - R_F1
+      mostly measures how learnable the move is from a longer stretch, not new
+      information.
   (4) CEILINGS (P5b's "measure first"): the share of decisions that are contested;
       mean classes per decision, pooled and raw; per k, the share of contested
       decisions whose branches already differ by t+k; the share of branch items with
@@ -1067,12 +1086,14 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
       over the contested held-out decisions (the only ones with reaction-free
       futures) is printed beside E1's 2.33 (live decisions) and E0's 2.09 (all of
       T2's decisions, the start jingle's dead ones included; Test H's opening
-      removes those). Different players and windows, so no rule attaches. A perfect guesser reaches
+      removes those; E1's live set also holds 127 one-class decisions). Different
+      players, windows and populations, so no rule attaches. A perfect guesser reaches
       R = 1, since the classes are defined on what it sees. No power estimate is
       made for the 0.5 bar.
   (5) ANOTHER PLAYER: OF's held-out play, with the same exclusions (an obs_t that
-      recurs in O0's FIT or in any other held-out game, O0's or OF's). The same
-      floors apply to OF and, missed, VOID (5) alone. On OF's items, the four
+      recurs in O0's FIT or in any other held-out game, O0's or OF's). Every floor
+      (decisions, effective games, and the J and K floors) applies to OF and, missed,
+      VOIDs (5) alone; transfer is then unread, not failed. On OF's items, the four
       GUESSES THE GAME conditions (i)-(iv) are computed exactly as on O0's. (5)
       PASSES when all four hold on OF; it FAILS otherwise. Also printed: (2)'s
       difference on OF; the paired drop R(O0) - R(OF), seed i against seed i, with
@@ -1089,8 +1110,7 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
       corridors for every arm. OVERLAP: the share of decisions left out because
       their obs_t recurs, and the share with a whole item (obs_t and its 16 future
       observations) equal byte for byte to a FIT decision's. Near-duplicates (one
-      pellet apart) are not caught; the intraclass correlation in (1) is the
-      check.
+      pellet apart) are not excluded; (1)'s NEAR-DUPLICATES read measures them.
   (8) SECONDARY METRIC: the mean log probability on the truth class, every arm,
       on (1)'s items and on (2)'s.
 VERDICT on (1), the first state that applies, in this order:
@@ -1101,26 +1121,36 @@ VERDICT on (1), the first state that applies, in this order:
   - VOID (Kai's call): fewer than 5,000 contested held-out O0 decisions after the
     exclusion; an effective cluster count below 16; S failing its sanity check
     after its rerun; or SIGMA VOID by TRAINING FAILED.
-  - CAPPED (Kai's call): an S or SIGMA model in the read (one of the 5 seeds, or its
-    rerun) still flagged at its cap. S is every R's denominator, and an S short of
-    its best drifts toward the most common move, which moves err_S and every R
-    with it. The interval state below is printed beside it.
+  - CAPPED (Kai's call): an S model in the read (one of the 5 seeds, or its rerun)
+    still flagged at its cap. S is every R's denominator, and an S short of its
+    best drifts toward the most common move, which moves err_S and every R with it.
+    A SIGMA model flagged at its cap, still improving, mostly understates SIGMA: it
+    may read GUESSES THE GAME, flagged; any lower state with a capped SIGMA is
+    CAPPED. The interval state below is printed beside it.
   - GUESSES THE GAME: all four hold: (i) R's lower bound is at least 0.5; (ii) R on
     branch items only has a lower bound above 0; (iii) on the counterfactual items
-    and on the reaction-free items alike, SIGMA's J3 has a lower bound of at least
-    0.25 and its J4 a lower bound above 0: at junctions it tells the turns apart,
-    not only "kept, reversed or turned", on futures this player shaped and on
-    futures nobody shaped; (iv) R on the reaction-free items has a lower bound of
+    and on the reaction-free items alike, SIGMA's J3 and J4 have lower bounds of at
+    least 0.25, and its K3 and K4 lower bounds above 0.5: at junctions it names
+    every outcome often, and when it commits to distinct answers it is right more
+    often than a coin between turns, on futures this player shaped and on futures
+    nobody shaped; (iv) R on the reaction-free items has a lower bound of
     at least 0.5, the same bar as (i): these futures show the game's response
     alone, the thing step 3 needs.
   - PARTLY: (i) holds and another fails or is UNREAD (named), or R's lower bound is
     above 0 but below 0.5.
   - NO HELP: the interval contains 0.
-  - WORSE THAN HABITS: the upper bound is below 0. Read with (3)'s cut-offset
-    profile: SIGMA would be misled by what comes later in the stretch.
+  - WORSE THAN HABITS: the upper bound is below 0. Read with the trained F_k on
+    the same items (the cut profile is descriptive): SIGMA would be misled by what
+    comes later in the stretch.
+  A failure of (iv) alone is read beside SIGMA cut to j <= 1 .. 4 and F_1 on the
+  reaction-free items: a 15-step NOOP hold is rare in own play (repeating the last
+  move 0.28, Test O read 4), so (iv) can fail on distribution shift, not only on
+  reliance on habits.
   F_1 ((1b)) is printed with its own flags and plays no part in the verdict.
 NEXT (the (5) rule, last, overrides the first):
-  - GUESSES THE GAME: step 3 is registered separately. First the guesser on human
+  - GUESSES THE GAME: step 3 is registered separately. It carries SIGMA, with F_1
+    alongside as the reaction-free comparison (if F_1 meets (i)-(iv) as well, the
+    simpler F_1 is offered to Kai too). First the guesser on human
     Ms. Pac-Man from Atari-HEAD, which records the players' actions. Before that
     registration: whether its recorded actions replay in ALE, recovering the states
     and so the classes; if not, exact-move accuracy, which charges a guess among
@@ -1264,6 +1294,18 @@ AUDIT r7 2026-11-11: no HIGH; J, its reachability and subset size, the played it
   against the future-blind oracle printed; the E0 comparison's population; the cap
   after extensions and edge rates; near-duplicates checked by the intraclass
   correlation of per-game R; the item-overlap exclusion folded into obs_t's), all
+  taken in.
+AUDIT r8 2026-11-11: no HIGH; verdict and NEXT complete over (5)'s three states,
+  the J floors reachable (E1's census: about 5% of live decisions at 4 classes),
+  the pins, counts and period checked and held. 1 MEDIUM (J4 above 0 was nearly no
+  bar, and a guesser that flips a coin between turns could reach J3: J4 now at
+  0.25, and K3 / K4, the identified share among committed junctions, must exceed
+  0.5), 8 LOW (near-duplicates measured directly instead of an intraclass
+  correlation the shared player raises anyway; a J or K floor missed on OF VOIDs
+  (5); the seed-0 smoke models continue to the final cap; a capped SIGMA may read
+  GUESSES, flagged; S's check per seed; one-step information stated and step 3's
+  arm named; (iv) failures and WORSE THAN HABITS read beside trained arms; J's
+  interval, the 90% rule's scope, a final-step R and E1's population stated), all
   taken in.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
