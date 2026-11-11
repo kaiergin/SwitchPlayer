@@ -1028,13 +1028,20 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
   J4 = 0. A perfect guesser scores 1 on both. No heading semantics enter.
   COMMITTED: a junction is committed when the arm's answers on its items fall in
   pairwise distinct classes; K3 and K4 are the identified shares among committed
-  junctions (3 or more, 4 or more classes). A guesser that tells "turned" apart
-  but flips a coin on which turn scores about 0.5 there; one that knows the turns
-  scores near 1.
-  Floors, per set: at least 300 junctions for J3, 100 for J4, and 100 committed
-  junctions for each of K3 and K4, each with an effective game count (by decision
-  weight) of at least 16; below a floor that quantity is UNREAD. The smoke counts
-  them early. Intervals as for R: the same game resamples and seed term (no ratio).
+  junctions (3 or more, 4 or more classes). At 4 or more classes a guesser that
+  tells "turned" apart but flips a coin on which turn scores about 0.5 on K4 and
+  at most about 0.25 on J4; one that knows the turns scores near 1. So J4 and K4
+  carry the coin test. A 3-class junction (a corner, a T entered from an arm) has
+  one turn class, so K3 and J3 do not.
+  Floors, per set, from the truth alone: at least 300 junctions for J3 and K3 and
+  100 for J4 and K4, each with an effective game count (by decision weight) of at
+  least 16; below a floor that quantity is UNREAD. The smoke counts junctions.
+  The committed set depends on the guesser, so it decides no floor: each seed's K
+  is computed on its own committed junctions, and if any seed commits at fewer
+  than 100 junctions in a tier, that K does not pass (on O0 it is named in
+  PARTLY; on OF, (5) FAILS). A guesser that knows the turns commits at nearly
+  every junction. Intervals as for R: the same game resamples and seed term (no
+  ratio).
   Printed beside them, the ceiling: per k, the share of junctions whose classes
   are already pairwise distinct by t+k.
   (1) PRIMARY, habit-free first move: on the counterfactual items, R, the share of
@@ -1050,10 +1057,11 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
       class's size / 9, per decision) beside err_S, and 1 - err_SIGMA / err_oracle
       beside R (R partly rewards S's fit to the player's habits, since a habit
       that sits in a small class raises err_S); and NEAR-DUPLICATES measured
-      directly: for each held-out decision, the fewest differing pixels between
-      the newest frame of its obs_t and any newest frame in the same snapshot's FIT
-      games or its other held-out game; the share under 50 differing pixels (of
-      7,056) and R without those decisions.
+      directly: for each held-out decision of O0 and of OF, the fewest differing
+      pixels between the newest frame of its obs_t and every newest frame in FIT
+      (all 96 games) and in the other held-out games, computed on the GPU in
+      chunks; the share under 50 differing pixels (of 7,056) and R without those
+      decisions.
   (1b) The same for F_1, the one-step inverse model. Its input, obs_{t+1}, depends
       only on the state and the move, never on a later move. Also every arm's R on
       the reaction-free items. F_1's input is the same on both sets, but the two
@@ -1073,10 +1081,11 @@ READS (O0's held-out contested decisions unless stated, leaving out any decision
       cut to offsets j <= k, weights renormalised, for each k (no retraining), on
       the counterfactual items and on the reaction-free items. The cut profile
       feeds the head sums it never trained on, so it is descriptive; the trained
-      F_k carry any reading of "misled by later frames". E0 found the classes
-      nearly fixed after one step (2.08 of 2.09 at 4 frames), so R_SIGMA - R_F1
-      mostly measures how learnable the move is from a longer stretch, not new
-      information.
+      F_k carry any reading of "misled by later frames". R_SIGMA - R_F1 is read
+      beside (4)'s share of contested decisions that already differ by t+1 and the
+      junction ceiling at k = 1: where nearly all differ by t+1, a SIGMA gain over
+      F_1 is learnability from a longer stretch; where many differ only later (an
+      early press taking effect at the next junction), it can be new information.
   (4) CEILINGS (P5b's "measure first"): the share of decisions that are contested;
       mean classes per decision, pooled and raw; per k, the share of contested
       decisions whose branches already differ by t+k; the share of branch items with
@@ -1195,7 +1204,9 @@ COST: about 104k decisions from 16 + 16 snapshots, CPU under the lock, about 1 h
   which is free while no run is live: the learning-rate grid on seed 0 (about 20
   models, most of them small), then the other seeds, 19 models in the read (S, F_1
   and SIGMA 5 each, F_2 .. F_16 1 each), roughly 6-10 h in all, SIGMA's 16 pairs
-  per sample dominating; the smoke measures it before the full run. Kai's Switch sessions
+  per sample dominating; the smoke measures it before the full run. The
+  near-duplicate search (about 34k held-out frames against about 70k others) takes
+  minutes on the GPU. Kai's Switch sessions
   pause it. Scoring takes minutes. Built in Y:\SwitchPlayer-curriculum:
   benchmarks/probes/probe_move_guesser.py (data and truth), the guesser trainer, and
   tests. Audit loop as ever, then run from a new frozen tree,
@@ -1307,6 +1318,15 @@ AUDIT r8 2026-11-11: no HIGH; verdict and NEXT complete over (5)'s three states,
   arm named; (iv) failures and WORSE THAN HABITS read beside trained arms; J's
   interval, the 90% rule's scope, a final-step R and E1's population stated), all
   taken in.
+AUDIT r9 2026-11-11: no HIGH; the verdict ladder, NEXT, the pins and counts held, and
+  (iii) can neither be met without knowing the turns nor is it UNREAD by
+  construction (about 700-850 four-class junctions per player per set expected).
+  2 MEDIUM (the committed-junction floor depended on the guesser, so a transfer
+  failure on OF would have read "unread": floors now come from the truth alone,
+  and too few commitments is a failure; read (3) misread E0, whose two figures
+  share one construction: the interpretation now rests on Test H's own per-k
+  shares), 2 LOW (only J4 and K4 carry the coin test, stated; near-duplicates
+  against all FIT frames on the GPU, for O0 and OF), all taken in.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
