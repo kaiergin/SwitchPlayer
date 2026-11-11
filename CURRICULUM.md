@@ -802,7 +802,8 @@ Test H is step 2 in that P5g form. Kai's framing from 2026-11-07: "tokens chosen
 less so about moves chosen, and more so about ideal future state. Watching a master
 play gives you an idea of what the ideal future state ... looks like but not how to
 get there." The guesser is the "how" half: given the state now and where the player
-got to, which first move did they make?
+got to, which first move did they make? Kai on this plan, 2026-11-11: "No I like
+where you're heading with H. Let's start on that and see where it goes".
 QUESTION: a network trained only on the agent's own play guesses the move made at a
 position. Does it guess better when it also sees what came after: a single later
 position, or Kai's "summation ... over some period of time" of the next stretch?
