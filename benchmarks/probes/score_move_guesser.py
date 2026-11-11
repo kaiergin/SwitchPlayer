@@ -94,6 +94,9 @@ def interval(point, boot_values, seed_values):
     """The registered interval: the bootstrap's percentiles of the seed-mean
     and t(4) x the between-seed SD / sqrt(5), in quadrature, each side."""
     bv = np.asarray(boot_values, float)
+    bv = bv[np.isfinite(bv)]               # a subset read's draws without its games
+    if not len(bv) or not np.isfinite(point):
+        return float("nan"), float("nan")
     q_lo, q_hi = np.percentile(bv, 2.5), np.percentile(bv, 97.5)
     sv = np.asarray(seed_values, float)
     seed = T4 * sv.std(ddof=1) / math.sqrt(len(sv)) if len(sv) > 1 else 0.0
@@ -104,15 +107,17 @@ def interval(point, boot_values, seed_values):
 
 def ratio_stat(num_a, den_a, num_b, den_b, C):
     """Per seed R = 1 - err_a / err_b and its draws: num/den (S, G) arrays
-    per seed; returns (per-seed R, mean, draws of the mean)."""
-    ea = num_a.sum(1) / den_a.sum(1)
-    eb = num_b.sum(1) / den_b.sum(1)
-    r = 1 - ea / eb
-    ea_b = (C @ num_a.T) / (C @ den_a.T)            # (B, S)
-    eb_b = (C @ num_b.T) / (C @ den_b.T)
+    per seed; returns (per-seed R, mean, draws of the mean). The seeds share
+    their items, so a draw without the subset's games is undefined for all of
+    them (NaN; interval() leaves it out); an empty subset gives NaN."""
     with np.errstate(divide="ignore", invalid="ignore"):
+        ea = num_a.sum(1) / den_a.sum(1)
+        eb = num_b.sum(1) / den_b.sum(1)
+        r = 1 - ea / eb
+        ea_b = (C @ num_a.T) / (C @ den_a.T)        # (B, S)
+        eb_b = (C @ num_b.T) / (C @ den_b.T)
         rb = 1 - ea_b / eb_b
-    return r, float(r.mean()), np.nanmean(rb, 1)
+    return r, float(r.mean()), rb.mean(1)
 
 
 def keys(arm, plan_models):
@@ -132,10 +137,12 @@ def R(table, mask, a_keys, b_keys, C, weights=None):
     na, da, nb, db = map(np.array, (na, da, nb, db))
     per, mean, boot = ratio_stat(na, da, nb, db, C)
     lo, hi = interval(mean, boot, per)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        err_a = float((na.sum(1) / da.sum(1)).mean())
+        err_b = float((nb.sum(1) / db.sum(1)).mean())
     return {"per_seed": per.tolist(), "R": mean, "lo": lo, "hi": hi,
-            "err_a": float((na.sum(1) / da.sum(1)).mean()),
-            "err_b": float((nb.sum(1) / db.sum(1)).mean()),
-            "items": int(mask.sum())}
+            "err_a": err_a, "err_b": err_b, "items": int(mask.sum()),
+            "undefined_draws": int((~np.isfinite(boot)).sum())}
 
 
 # --------------------------------------------------------------------------
