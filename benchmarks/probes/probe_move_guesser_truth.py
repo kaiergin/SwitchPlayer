@@ -60,6 +60,8 @@ W = 16                                      # base steps in the window, t .. t+1
 SOURCES = mg.SOURCES + (pathlib.Path(__file__).resolve(),)
 SOURCE = mg.source_hash(SOURCES)
 END_NONE, END_LIFE, END_CAP = 0, 1, 2
+FLOOR_DECISIONS = 5000                      # contested held-out O0 decisions
+FLOOR_GAMES = 16.0                          # effective games
 
 
 def _d(x):
@@ -117,6 +119,9 @@ def continuation(env, tap, skip, start, stack, frame, steps_in_life, act, first_
         steps += 1
         if ended:
             end = END_LIFE
+            break
+        if steps >= cap:
+            end = END_CAP                   # as stage A labels the capping step
             break
         stack = muzero.push_frame(stack, f)
     return frames, moves, rewards, digests, end, env.unwrapped.ale.cloneState().serialize()
@@ -396,12 +401,19 @@ def held_games():
     return names
 
 
-def written(out, name):
+def written(out, name, max_decisions=None):
+    """The game's truth info if written by this source, failure-free and at
+    this max_decisions (None = the whole game), else None: a rerun never
+    skips a game whose truth failed, and a smoke's partial truth never passes
+    for a whole game's."""
     meta = out / f"{name}-truth.json"
     if not meta.exists() or not (out / f"{name}-truth.npz").exists():
         return None
     m = json.loads(meta.read_text())
-    return m if m.get("source") == SOURCE else None
+    if (m.get("source") != SOURCE or m.get("failures")
+            or m.get("max_decisions") != max_decisions):
+        return None
+    return m
 
 
 def stage_truth(data, out, only=None, max_decisions=None):
@@ -420,7 +432,8 @@ def stage_truth(data, out, only=None, max_decisions=None):
         by_snapshot.setdefault((p, it), []).append((g, name))
     total_fail = []
     for (p, it), members in by_snapshot.items():
-        todo = [(g, name) for g, name in members if not written(out, name)]
+        todo = [(g, name) for g, name in members
+                if not written(out, name, max_decisions)]
         if not todo:
             continue
         table = mg.rows(p)
@@ -474,7 +487,69 @@ def stage_truth(data, out, only=None, max_decisions=None):
     if total_fail:
         print("TRUTH FAILURE:", *total_fail[:20], sep="\n  ", flush=True)
         raise SystemExit(2)
+    # every game in scope: written whole (or at this smoke's max_decisions),
+    # failure-free, by this source
+    missing = [n for _, _, _, n in games if written(out, n, max_decisions) is None]
+    if missing:
+        raise SystemExit(f"TRUTH FAILURE: no clean truth for {missing[:5]}")
+    if only is None and max_decisions is None:
+        floors(data, out)
     return games
+
+
+def floors(data, out, held=None, fit=None):
+    """The READS floors, from the truth alone, before any GPU work: per
+    player, the contested held-out decisions left after the exclusion (obs_t
+    occurring byte for byte in a FIT window or in another held-out game) and
+    the effective game count (1 / sum p^2, p a game's share of them: each
+    contested decision's CRN items weigh 1 in all). floors.json; O0 must reach
+    5,000 decisions and 16 effective games, or GPU work is refused (stage C)."""
+    held = held if held is not None else [(p, n) for p, _, _, n in held_games()]
+    if fit is None:
+        spec = mg.RUNS["O0"]
+        fit = [mg.game_name("O0", it, g) for it in spec["iterations"]
+               for g in mg.SPLIT["fit"]]
+    fit_stacks = set()
+    for name in fit:
+        with np.load(data / f"{name}.npz") as z:
+            arr = {k: z[k] for k in ("kind", "end", "move", "decision", "frames")}
+        _, hs = mg.window_hashes(arr)
+        for row in hs:
+            fit_stacks.update(row)
+    h0, owners = {}, {}
+    for p, name in held:
+        with np.load(data / f"{name}.npz") as z:
+            arr = {k: z[k] for k in ("kind", "end", "move", "decision", "frames")}
+        d, hs = mg.window_hashes(arr)
+        h0[name] = {int(x): row[0] for x, row in zip(d, hs)}
+        for h in set(h0[name].values()):
+            owners.setdefault(h, set()).add(name)
+    rep = {"source": SOURCE}
+    for player in sorted({p for p, _ in held}):
+        counts = []
+        for p, name in held:
+            if p != player:
+                continue
+            with np.load(out / f"{name}-truth.npz") as z:
+                dec, cont = z["decision"], z["contested"]
+            n = 0
+            for x, c in zip(dec, cont):
+                h = h0[name][int(x)]
+                if c and h not in fit_stacks and not (owners[h] - {name}):
+                    n += 1
+            counts.append(n)
+        counts = np.array(counts, float)
+        eff = float(counts.sum() ** 2 / (counts ** 2).sum()) if counts.sum() else 0.0
+        rep[player] = {"contested": int(counts.sum()), "effective_games": eff,
+                       "per_game": counts.astype(int).tolist(),
+                       "passed": bool(counts.sum() >= FLOOR_DECISIONS
+                                      and eff >= FLOOR_GAMES)}
+    tmp = out / "floors.json.tmp"
+    tmp.write_text(json.dumps(rep, indent=1))
+    os.replace(tmp, out / "floors.json")
+    print("floors:", json.dumps({k: v for k, v in rep.items() if k != "source"}),
+          flush=True)
+    return rep
 
 
 def main(argv):
@@ -488,6 +563,8 @@ def main(argv):
     base = mg.ROOT / "benchmarks" / "probes" / "testh"
     data = pathlib.Path(a.data) if a.data else base / "data"
     out = pathlib.Path(a.out) if a.out else base / ("truth-smoke" if smoke else "truth")
+    if smoke and out.resolve() == (base / "truth").resolve():
+        raise SystemExit("a smoke never writes into the real truth directory")
     only = set(a.games.split(",")) if a.games else None
     stage_truth(data, out, only, a.max_decisions)
     print("DONE", flush=True)

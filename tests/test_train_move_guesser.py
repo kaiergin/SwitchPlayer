@@ -180,9 +180,11 @@ class FakeTrainer:
         self.batch, self.majority, self.majority_acc = 256, 0, majority_acc
         self.calls = []
 
-    def train(self, arm, seed, lr, steps, mdir, resume=None):
+    def train(self, arm, seed, lr, steps, mdir, resume=None, save_all=False):
         self.calls.append((arm, seed, lr, steps, mdir.name, resume is not None))
         (mdir / "bests").mkdir(parents=True, exist_ok=True)
+        if save_all:
+            (mdir / "evals").mkdir(exist_ok=True)
         start = resume["steps"] if resume else 0
         hist = json.loads((mdir / "history.json").read_text()) if resume else []
         best = min((h["nll"] for h in hist), default=math.inf)
@@ -196,11 +198,14 @@ class FakeTrainer:
                 if nll < best:
                     best = nll
                     torch.save({}, mdir / "bests" / f"step{s:06d}.pt")
+                if save_all:
+                    torch.save({}, mdir / "evals" / f"step{s:06d}.pt")
             s += tg.EVAL_EVERY
+        torch.save({"step": steps}, mdir / "last.pt")
         (mdir / "history.json").write_text(json.dumps(hist))
         (mdir / "stamp.json").write_text(json.dumps(
             {"arm": arm, "seed": seed, "lr": lr, "steps": steps, "batch": 256,
-             "source": tg.SOURCE}))
+             "source": tg.SOURCE, "data_source": mg.SOURCE}))
 
 
 def vee(best_step, depth=1.0):
@@ -261,6 +266,38 @@ def test_plan_rules(tmp_path):
     # F16 fails twice: VOID
     assert any(v.startswith("F16-s0") for v in rec["void"])
     assert json.loads((tmp_path / "plan.json").read_text())["cap"] == cap
+    # seed 0 of S and SIGMA are the grid's models, continued in their own
+    # directories to the final cap, with the final step's state on disk
+    for arm, lr in (("S", 1e-3), ("SIGMA", 1e-2)):
+        m = rec["models"][f"{arm}-s0"]
+        assert m["dir"] == f"{arm}-s0-lr{lr:g}"
+        assert m["final_state"] == f"evals/step{m['cap']:06d}.pt"
+        assert (tmp_path / "models" / m["dir"] / m["final_state"]).exists()
+        stamp = json.loads((tmp_path / "models" / m["dir"] / "stamp.json").read_text())
+        assert stamp["steps"] >= cap
+    assert "final_state" not in rec["models"]["SIGMA-s1"]
+    # flags are those of the read's models as they stand
+    assert rec["flags"] == sorted(k for k, m in rec["models"].items() if m["flagged"])
+
+
+def test_plan_flags_a_model_still_late_after_its_extension(tmp_path):
+    curves = {(arm, lr): vee(1000, depth=0.5 if arm == "S" else 1.1)
+              for arm in tg.ARMS for lr in tg.RATES + tuple(tg.EDGE.values())}
+    curves[("S", 1e-3)] = vee(1500, depth=1.0)
+    curves[("SIGMA", 1e-3)] = vee(1500, depth=1.2)
+    curves[("F1", 1e-3)] = lambda s: 2.0 - 1.15 - s / 1e7      # still improving
+    t = FakeTrainer(curves)
+    old = tg.EVAL_EVERY
+    tg.EVAL_EVERY = 100
+    try:
+        rec = tg.Plan(t, tmp_path, provisional=4000, log=lambda s: None).run()
+    finally:
+        tg.EVAL_EVERY = old
+    cap = rec["cap"]
+    for s in tg.SEEDS:
+        m = rec["models"][f"F1-s{s}"]
+        assert m["cap"] == 2 * cap and m["flagged"]
+        assert f"F1-s{s}" in rec["flags"]
 
 
 def test_killed_model_is_cleared_and_retrained(tmp_path):
@@ -284,5 +321,50 @@ def test_killed_model_is_cleared_and_retrained(tmp_path):
         n = len(t.calls)
         plan.ensure("S", 0, 1e-3, 1500)
         assert len(t.calls) == n
+        # stamp, history and last.pt disagreeing (killed between writes): cleared
+        torch.save({"step": 999}, d / "last.pt")
+        plan.ensure("S", 0, 1e-3, 1500)
+        assert t.calls[-1][-1] is False and len(t.calls) == n + 1
+        # other stage-A data: cleared and retrained
+        st = json.loads((d / "stamp.json").read_text())
+        st["data_source"] = "older"
+        (d / "stamp.json").write_text(json.dumps(st))
+        plan.ensure("S", 0, 1e-3, 1500)
+        assert t.calls[-1][-1] is False and len(t.calls) == n + 2
+        # another batch: refused, never deleted
+        t.batch = 128
+        with pytest.raises(SystemExit, match="batch"):
+            plan.ensure("S", 0, 1e-3, 1500)
+        assert (d / "stamp.json").exists()
     finally:
         tg.EVAL_EVERY = old
+
+
+def test_resume_equals_an_uninterrupted_run(tmp_path):
+    torch.set_num_threads(2)
+    c = toy_corpus(n=200)
+    fit, val = np.arange(160), np.arange(160, 200)
+    t = tg.Trainer(c, fit, val, "cpu", batch=16)
+    old = tg.EVAL_EVERY
+    tg.EVAL_EVERY = 10
+    try:
+        t.train("F1", 0, 1e-3, 40, tmp_path / "a")
+        t.train("F1", 0, 1e-3, 20, tmp_path / "b")
+        stamp = json.loads((tmp_path / "b" / "stamp.json").read_text())
+        t.train("F1", 0, 1e-3, 40, tmp_path / "b", resume=stamp)
+    finally:
+        tg.EVAL_EVERY = old
+    a = torch.load(tmp_path / "a" / "last.pt", weights_only=False)
+    b = torch.load(tmp_path / "b" / "last.pt", weights_only=False)
+    for k in a["model"]:
+        assert torch.allclose(a["model"][k], b["model"][k], atol=1e-6), k
+    ha = json.loads((tmp_path / "a" / "history.json").read_text())
+    hb = json.loads((tmp_path / "b" / "history.json").read_text())
+    assert [h["step"] for h in ha] == [h["step"] for h in hb]
+    assert all(abs(x["nll"] - y["nll"]) < 1e-5 for x, y in zip(ha, hb))
+
+
+def test_windows_refuse_a_malformed_record():
+    arr = _game([0, 2, 2, 2], [0, 0, 0, 0])       # a life with no end flag
+    with pytest.raises(ValueError, match="without an end flag"):
+        tg.decision_windows(arr)

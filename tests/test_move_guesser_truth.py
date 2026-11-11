@@ -5,11 +5,14 @@ regression the first smoke found; life ends, caps, a full window, a malformed
 record refused); future and raw keys, the partition, the per-step digests
 padded past a life's end; and, on the real game with a stand-in policy (no
 snapshot), a game recorded by stage A's loop then put through the truth: no
-failures, the played move's class holds it, CRN continuations reproduce the
-record across a lost life, the NOOP continuation plays NOOPs, the classes match
-the one-step merge, the blocks pack as registered; and that the checks catch a
-corrupted frame, a corrupted digest and a wrong uniform key. Slow, needing the
-snapshots: stage A writes one OF game and stage B finds no failure on it."""
+failures, CRN continuations reproduce the record across a lost life, the NOOP
+continuation plays NOOPs, the classes match the one-step merge, the blocks pack
+as registered; branches at the real game over (the last life), one replayed on
+a fresh emulator to the same frames and the game's end; that the checks catch a
+corrupted frame, a corrupted digest and a policy shifted off the record; that
+written() refuses a failed or partial truth; the floors on a hand case. Slow,
+needing the snapshots: stage A writes one OF game, stage B finds no failure on
+it and its floors count it."""
 import hashlib
 import json
 import pathlib
@@ -205,6 +208,76 @@ def test_checks_catch_a_corrupted_record_and_a_wrong_key(game):
     assert any("continuation differs" in f for f in fail)
 
 
+@pytest.fixture(scope="module")
+def game_over_game():
+    """A stand-in game played to the real game over (no cap reached)."""
+    env, tap, noop, skip = mg.make_env()
+    key = mg.game_key("standin", 2, 0)
+    env.reset(seed=12)
+    with mg.fixed_noops(noop, 3):
+        arr, states = mg.play_game(env, tap, skip, standin_choose(key), opening=80,
+                                   cap=3000, keep_states=True)
+    st = {d: (blob, buf) for d, blob, buf, lives in states}
+    yield env, tap, skip, arr, st, key
+    env.close()
+
+
+def test_branches_at_the_real_game_over(game_over_game):
+    env, tap, skip, arr, st, key = game_over_game
+    assert int(arr["end"][-1]) == 1 and env.was_real_done      # the game ended
+    moves = np.flatnonzero(arr["kind"] == mg.KIND_MOVE)
+    last_life = int(arr["life"][-1])
+    final = [int(arr["decision"][i]) for i in moves if int(arr["life"][i]) == last_life]
+    sub = {d: st[d] for d in final[-250:]}
+    results, failures = tr.game_truth(env, tap, skip, arr, sub, standin_act(key))
+    assert [f for f in failures if "no saved state" not in f] == []
+    by_d = {r["decision"]: r for r in results}
+    # the played line reaches the game over in every window that holds it, and
+    # reproduces the record byte for byte there (failures == [] above): the
+    # step that ends the game breaks MaxAndSkip's loop early, so its frame
+    # reads the restored buffer. In Ms. Pac-Man the game ends some 30 base
+    # steps after the fatal touch, so inside these windows every move is
+    # already in the same death: other branches merge with the played one.
+    for d in final[-tr.W:]:
+        r = by_d[d]
+        g = r["groups"][r["played"]]
+        assert r["crn"][g]["end"] == tr.END_LIFE
+    # the final decision's step, replayed on a fresh emulator: the game over
+    # itself, the recorded frame and digests
+    d = final[-1]
+    i = int(np.flatnonzero((arr["kind"] == mg.KIND_MOVE) & (arr["decision"] == d))[0])
+    blob, buf = st[d]
+    env2, tap2, noop2, skip2 = mg.make_env()
+    try:
+        env2.reset(seed=0)
+        tr.restore(env2, skip2, blob, buf)
+        f, _, ended, dg = tr.step(env2, tap2, int(arr["move"][i]))
+        assert ended and env2.unwrapped.ale.game_over() and env2.was_real_done
+        assert np.array_equal(f, arr["frames"][i])
+        assert dg == [bytes(x) for x in arr["digests"][i][:int(arr["ndigests"][i])]]
+    finally:
+        env2.close()
+    # the death is long: decisions on the last life whose windows end before
+    # the game over keep their classes apart (life ends are not merged away)
+    assert any(len(set(by_d[d]["classes"]["crn"])) > 1 for d in final[:-tr.W])
+
+
+def test_written_refuses_failed_or_partial_truth(tmp_path):
+    (tmp_path / "g-truth.npz").write_bytes(b"x")
+    def put(**kw):
+        info = {"source": tr.SOURCE, "failures": [], "max_decisions": None, **kw}
+        (tmp_path / "g-truth.json").write_text(json.dumps(info))
+    put()
+    assert tr.written(tmp_path, "g") is not None
+    put(failures=["decision 3: ..."])
+    assert tr.written(tmp_path, "g") is None
+    put(max_decisions=150)
+    assert tr.written(tmp_path, "g") is None
+    assert tr.written(tmp_path, "g", 150) is not None
+    put(source="other")
+    assert tr.written(tmp_path, "g") is None
+
+
 # --------------------------------------------------------------------------
 # slow: a real snapshot
 # --------------------------------------------------------------------------
@@ -222,3 +295,8 @@ def test_stage_truth_on_one_of_game(tmp_path):
     with np.load(out / f"{name}-truth.npz") as z:
         assert z["class_crn"].shape == (40, mg.MOVES)
         assert int(z["contested"].sum()) == info["contested"]
+    # the floors on this one game, no FIT: every contested decision counts
+    rep = tr.floors(data, out, held=[("OF", name)], fit=[])
+    assert rep["OF"]["contested"] == info["contested"]
+    assert rep["OF"]["effective_games"] == pytest.approx(1.0)
+    assert rep["OF"]["passed"] is False

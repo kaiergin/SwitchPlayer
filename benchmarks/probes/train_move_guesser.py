@@ -33,15 +33,20 @@ A model trains in its own directory; only a completion stamp makes it count,
 so a model killed by a Switch session reruns from scratch (not counted as a
 rerun). plan.json lists, per arm and seed, the model and point the read uses.
 
+A real run refuses before any GPU work unless stage A's diversity check
+passed, the truth is whole and failure-free, and stage B's floors.json passed
+(before_gpu). The batch is pinned for the run in batch.json at its first fit;
+a relaunch reuses it, or refuses when it no longer fits (never re-decided).
+
 usage (from the run tree, under the lock, GPU):
-  python benchmarks/probes/train_move_guesser.py [--data DIR] [--out DIR]
-      [--smoke-cap N] [--smoke-games N]"""
+  python benchmarks/probes/train_move_guesser.py [--data DIR] [--truth DIR]
+      [--out DIR] [--smoke-cap N] [--smoke-iterations 80,160]"""
 import os
-# probe_move_guesser defaults CUDA_VISIBLE_DEVICES to -1 for the CPU stages, and
-# the modules it imports query CUDA once and cache the answer, so the GPU
-# stage names its device before any import (the lock's cpu mode, as in the
-# tests, keeps its -1).
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+if __name__ == "__main__":
+    # the modules imported below query CUDA once and cache the answer, so the
+    # GPU stage names its device before any import; imported as a module (the
+    # tests, stage D1) it changes nothing process-wide
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 import argparse
 import hashlib
 import json
@@ -71,6 +76,7 @@ PROVISIONAL_CAP = 40_000
 EVAL_EVERY = 500
 BATCH = 256
 EVAL_PAIRS = 4096                           # pairs per evaluation chunk
+TRAIN_COMMIT_GB = 14.0                      # its frames, CUDA context and GPU reservations
 GPU_HEADROOM = 0.85                         # of the memory other processes leave
 CAP_FACTOR = 3
 LATE = 0.9                                  # "the last 10% of its cap"
@@ -81,52 +87,10 @@ SOURCE = mg.source_hash(SOURCES)
 # --------------------------------------------------------------------------
 # indices: every decision's 17 stacks as frame indices (LIFE ENDS)
 # --------------------------------------------------------------------------
-def event_stacks(kind, frame_offset=0):
-    """Per event, the frame indices of the stack before it and after it, by
-    play_episode's rule (a life's start frame tiled, each step's frame pushed
-    before the next choice). Start events have no 'before'."""
-    before, after = [None] * len(kind), [None] * len(kind)
-    stack = frame = None
-    for i, k in enumerate(kind):
-        if int(k) == mg.KIND_START:
-            frame = frame_offset + i
-            stack = [frame] * 4
-            after[i] = list(stack)
-            continue
-        stack = stack[1:] + [frame]
-        before[i] = list(stack)
-        frame = frame_offset + i
-        after[i] = stack[1:] + [frame]
-    return before, after
-
-
-def decision_windows(arr, frame_offset=0):
-    """(decision ids, event ids, moves, windows): windows[n] is (K_MAX + 1, 4)
-    frame indices, row 0 obs_t, row k obs_{t+k}; past the life's last base step
-    a row repeats the life's last stack."""
-    kind, end = arr["kind"], arr["end"]
-    before, after = event_stacks(kind, frame_offset)
-    dec, ev, mv, win = [], [], [], []
-    n = len(kind)
-    for i in range(n):
-        if int(kind[i]) != mg.KIND_MOVE:
-            continue
-        rows = [before[i]]
-        last = None
-        for k in range(1, K_MAX + 1):
-            j = i + k - 1
-            if last is None and j < n and int(kind[j]) != mg.KIND_START:
-                rows.append(after[j])
-                if int(end[j]) != 0:
-                    last = after[j]
-            else:
-                rows.append(last if last is not None else rows[-1])
-        dec.append(int(arr["decision"][i]))
-        ev.append(i)
-        mv.append(int(arr["move"][i]))
-        win.append(rows)
-    return (np.array(dec, np.int32), np.array(ev, np.int32), np.array(mv, np.int64),
-            np.array(win, np.int64).reshape(-1, K_MAX + 1, 4))
+# the windows: one copy, in stage A's module (the truth's floors and the
+# scorer read the same rule)
+event_stacks = mg.event_stacks
+decision_windows = mg.decision_windows
 
 
 class Corpus:
@@ -215,7 +179,8 @@ class Guesser(nn.Module):
         # half precision on the GPU (autocast runs the convolutions in it
         # anyway): a float32 copy of SIGMA's 16 pairs would double the input
         x = pairs.flatten(0, 1)
-        x = x.to(torch.float16 if x.is_cuda else torch.float32) / 255.0
+        half = x.is_cuda and torch.is_autocast_enabled("cuda")
+        x = x.to(torch.float16 if half else torch.float32) / 255.0
         z = self.enc(x).view(b, p, -1)
         logits_w = self.w
         if keep is not None:
@@ -275,9 +240,12 @@ class Trainer:
         acc = float((lg.argmax(1) == y).float().mean())
         return nll, acc
 
-    def train(self, arm, seed, lr, steps, mdir, resume=None):
+    def train(self, arm, seed, lr, steps, mdir, resume=None, save_all=False):
         """Train (or continue) to `steps`. mdir holds history.json, bests/,
-        last.pt and stamp.json. Returns the stamp."""
+        last.pt and stamp.json, each written whole (tmp, then replace; the
+        stamp last). save_all also keeps the state at every evaluation in
+        evals/ (read 1's final-step R for seed 0's S and SIGMA). Returns the
+        stamp."""
         torch.manual_seed(seed)
         model = Guesser(ARMS[arm]).to(self.device)
         opt = torch.optim.Adam(model.parameters(), lr=lr)
@@ -295,12 +263,16 @@ class Trainer:
             step, perm, pos = st["step"], st["perm"], st["pos"]
             history = json.loads((mdir / "history.json").read_text())
         (mdir / "bests").mkdir(parents=True, exist_ok=True)
+        if save_all:
+            (mdir / "evals").mkdir(exist_ok=True)
         best = min((h["nll"] for h in history), default=math.inf)
         if step == 0:
             nll, acc = self.evaluate(model)
             history.append({"step": 0, "nll": nll, "acc": acc})
             best = nll
             torch.save(model.state_dict(), mdir / "bests" / "step000000.pt")
+            if save_all:
+                torch.save(model.state_dict(), mdir / "evals" / "step000000.pt")
         while step < steps:
             model.train()
             if pos + self.batch > len(perm):
@@ -322,13 +294,19 @@ class Trainer:
                 if nll < best:
                     best = nll
                     torch.save(model.state_dict(), mdir / "bests" / f"step{step:06d}.pt")
+                if save_all:
+                    torch.save(model.state_dict(), mdir / "evals" / f"step{step:06d}.pt")
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
                     "scaler": scaler.state_dict(), "rng": rng, "step": step,
-                    "perm": perm, "pos": pos}, mdir / "last.pt")
-        (mdir / "history.json").write_text(json.dumps(history))
+                    "perm": perm, "pos": pos}, mdir / "last.pt.tmp")
+        (mdir / "history.json.tmp").write_text(json.dumps(history))
+        os.replace(mdir / "last.pt.tmp", mdir / "last.pt")
+        os.replace(mdir / "history.json.tmp", mdir / "history.json")
         stamp = {"arm": arm, "seed": seed, "lr": lr, "steps": step,
-                 "batch": self.batch, "source": SOURCE, "data_source": mg.SOURCE}
-        (mdir / "stamp.json").write_text(json.dumps(stamp))
+                 "batch": self.batch, "source": SOURCE, "data_source": mg.SOURCE,
+                 "save_all": bool(save_all)}
+        (mdir / "stamp.json.tmp").write_text(json.dumps(stamp))
+        os.replace(mdir / "stamp.json.tmp", mdir / "stamp.json")
         return stamp
 
 
@@ -363,16 +341,28 @@ class Plan:
     def mdir(self, arm, seed, lr, tag=""):
         return self.out / "models" / f"{arm}-s{seed}-lr{lr:g}{tag}"
 
+    def save_all(self, arm, seed, tag):
+        """Seed 0's S and SIGMA keep every evaluation's state (read 1's
+        final-step R)."""
+        return arm in ("S", "SIGMA") and seed == 0 and not tag
+
     def ensure(self, arm, seed, lr, steps, tag=""):
-        """The model trained to at least `steps`; a dir without a stamp (a
-        killed run) is cleared and retrained, one stamped short of `steps` is
-        continued from last.pt (bests past the stamp, from a killed extension,
-        are cleared first)."""
+        """The model trained to at least `steps`. A dir without a stamp (a
+        killed run), or whose stamp, history and last.pt disagree (killed
+        between their writes), is cleared and retrained; one written by other
+        trainer code or other stage-A data likewise. One stamped short of
+        `steps` is continued from last.pt (states past the stamp, from a
+        killed extension, cleared first). A stamp at another batch refuses:
+        the batch is pinned for the run (batch.json), never re-decided."""
         d = self.mdir(arm, seed, lr, tag)
         stamp = None
         if (d / "stamp.json").exists():
             stamp = json.loads((d / "stamp.json").read_text())
-            if stamp.get("source") != SOURCE or stamp.get("batch") != self.t.batch:
+            if stamp.get("batch") != self.t.batch:
+                raise SystemExit(f"{d.name}: trained at batch {stamp.get('batch')}, "
+                                 f"the run's is {self.t.batch}")
+            if (stamp.get("source") != SOURCE or stamp.get("data_source") != mg.SOURCE
+                    or not self._consistent(d, stamp)):
                 shutil.rmtree(d)
                 stamp = None
         elif d.exists():
@@ -380,13 +370,24 @@ class Plan:
         if stamp is not None and stamp["steps"] >= steps:
             return d
         if stamp is not None:
-            for f in (d / "bests").glob("step*.pt"):
-                if int(f.stem[4:]) > stamp["steps"]:
-                    f.unlink()
+            for sub in ("bests", "evals"):
+                for f in (d / sub).glob("step*.pt"):
+                    if int(f.stem[4:]) > stamp["steps"]:
+                        f.unlink()
         t0 = time.time()
-        self.t.train(arm, seed, lr, steps, d, resume=stamp)
+        self.t.train(arm, seed, lr, steps, d, resume=stamp,
+                     save_all=self.save_all(arm, seed, tag))
         self.log(f"  trained {d.name} to {steps} [{time.time() - t0:.0f}s]")
         return d
+
+    @staticmethod
+    def _consistent(d, stamp):
+        try:
+            hist = json.loads((d / "history.json").read_text())
+            last = torch.load(d / "last.pt", map_location="cpu", weights_only=False)
+        except (OSError, ValueError, RuntimeError):
+            return False
+        return hist and hist[-1]["step"] == stamp["steps"] == last["step"]
 
     def at_cap(self, arm, seed, lr, cap, tag=""):
         """AT THE CAP: trained to cap; a best in the last 10% gets one extension
@@ -418,12 +419,16 @@ class Plan:
     def use(self, arm, seed, lr, cap, tag=""):
         d, used, step, nll, acc, flag = self.at_cap(arm, seed, lr, cap, tag)
         key = f"{arm}-s{seed}"
-        self.record["models"][key] = {"dir": d.name, "lr": lr, "cap": used,
-                                      "best_step": step, "nll": nll, "acc": acc,
-                                      "flagged": flag, "rerun": bool(tag)}
-        if flag:
-            self.record["flags"].append(key)
-        return self.record["models"][key]
+        rec = {"dir": d.name, "lr": lr, "cap": used, "best_step": step, "nll": nll,
+               "acc": acc, "flagged": flag, "rerun": bool(tag)}
+        if self.save_all(arm, seed, tag):
+            # read (1)'s final-step model: the state at the model's used cap
+            final = d / "evals" / f"step{used:06d}.pt"
+            if not final.exists():
+                raise SystemExit(f"{key}: no state at its final step {used}")
+            rec["final_state"] = f"evals/step{used:06d}.pt"
+        self.record["models"][key] = rec
+        return rec
 
     def run(self):
         # 1-2: S and SIGMA under the provisional cap, then the cap
@@ -460,6 +465,10 @@ class Plan:
                     if m["nll"] >= s_nll:
                         self.record["void"].append(f"{arm}-s{seed}: training failed")
         self.record["rates_chosen"] = {a: float(r) for a, r in rates.items()}
+        # the flags of the read's models as they stand (a rerun replaces the
+        # model it reran, flag and all)
+        self.record["flags"] = sorted(k for k, m in self.record["models"].items()
+                                      if m["flagged"])
         (self.out / "plan.json").write_text(json.dumps(self.record, indent=1))
         return self.record
 
@@ -519,7 +528,9 @@ def fit_batch(trainer, start=BATCH):
         torch.cuda.reset_peak_memory_stats()
         try:
             _sigma_step(trainer, b)
-            trainer.logits(Guesser(ARMS["SIGMA"]).to(trainer.device), trainer.fit[:64])
+            # one whole evaluation chunk, as evaluate() runs it
+            trainer.logits(Guesser(ARMS["SIGMA"]).to(trainer.device),
+                           trainer.fit[:EVAL_PAIRS // len(ARMS["SIGMA"])])
             torch.cuda.synchronize()
             ok = torch.cuda.max_memory_reserved() <= budget
         except torch.cuda.OutOfMemoryError:
@@ -531,9 +542,32 @@ def fit_batch(trainer, start=BATCH):
     raise SystemExit("SIGMA does not fit a batch of 8 within the GPU's free memory")
 
 
+def before_gpu(data, truth):
+    """The registration's order: the truth stage complete before any guesser
+    trains, and the floors (decisions, effective games) read from it before
+    any GPU work. Refuses unless stage A's diversity check passed, every held
+    game's truth is present, from the current stage-B source, failure-free and
+    whole (no max_decisions), and stage B's floors.json passed for O0."""
+    import probe_move_guesser_truth as tr
+    div = data / "diversity.json"
+    if not div.exists() or not json.loads(div.read_text()).get("passed"):
+        raise SystemExit("stage A's diversity check has not passed")
+    for p, it, g, name in tr.held_games():
+        info = tr.written(truth, name, None)
+        if info is None:
+            raise SystemExit(f"{name}: no whole, failure-free truth from this source")
+    floors = truth / "floors.json"
+    if not floors.exists():
+        raise SystemExit("no floors.json: run stage B's floors step")
+    f = json.loads(floors.read_text())
+    if f.get("source") != tr.SOURCE or not f["O0"]["passed"]:
+        raise SystemExit(f"floors not passed for O0: {f.get('O0')}")
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--data")
+    ap.add_argument("--truth")
     ap.add_argument("--out")
     ap.add_argument("--smoke-cap", type=int)
     ap.add_argument("--smoke-iterations")
@@ -541,9 +575,14 @@ def main(argv):
     smoke = bool(a.smoke_cap or a.smoke_iterations)
     base = mg.ROOT / "benchmarks" / "probes" / "testh"
     data = pathlib.Path(a.data) if a.data else base / "data"
+    truth = pathlib.Path(a.truth) if a.truth else base / "truth"
     out = pathlib.Path(a.out) if a.out else base / ("train-smoke" if smoke else "train")
+    if not smoke:
+        before_gpu(data, truth)
     out.mkdir(parents=True, exist_ok=True)
-    mg.commit_gate()
+    commit = mg.free_commit_gb() if sys.platform == "win32" else math.inf
+    if commit < TRAIN_COMMIT_GB:
+        raise SystemExit(f"free commit {commit:.1f} GB < {TRAIN_COMMIT_GB} GB")
     if not torch.cuda.is_available():
         raise SystemExit("stage C trains on the GPU; none is visible")
     its = (tuple(int(x) for x in a.smoke_iterations.split(","))
@@ -557,7 +596,16 @@ def main(argv):
     print(f"FIT {len(fit)} decisions, VALIDATION {len(val_all)} ({len(val)} after "
           f"the FIT-overlap exclusion), frames {corpus.frames.shape}", flush=True)
     trainer = Trainer(corpus, fit, val, "cuda")
-    trainer.batch = fit_batch(trainer)
+    pinned = out / "batch.json"
+    if pinned.exists():
+        b = json.loads(pinned.read_text())["batch"]
+        if fit_batch(trainer, start=b) != b:
+            raise SystemExit(f"the run's batch {b} no longer fits the GPU's free "
+                             f"memory: free the GPU (close what holds it) and relaunch")
+        trainer.batch = b
+    else:
+        trainer.batch = fit_batch(trainer)
+        pinned.write_text(json.dumps({"batch": trainer.batch}))
     print(f"batch {trainer.batch}", flush=True)
     plan = Plan(trainer, out, provisional=a.smoke_cap or PROVISIONAL_CAP,
                 log=lambda s: print(s, flush=True))
