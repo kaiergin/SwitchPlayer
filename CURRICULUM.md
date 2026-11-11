@@ -1327,6 +1327,29 @@ AUDIT r9 2026-11-11: no HIGH; the verdict ladder, NEXT, the pins and counts held
   share one construction: the interpretation now rests on Test H's own per-k
   shares), 2 LOW (only J4 and K4 carry the coin test, stated; near-duplicates
   against all FIT frames on the GPU, for O0 and OF), all taken in.
+AUDIT r10 2026-11-11: nothing above LOW. REGISTRATION AUDIT LOOP CLOSED. The verdict
+  ladder, NEXT over (5)'s three states, K's floors and coin arithmetic, the
+  reachability of GUESSES THE GAME and every cited figure were checked and held.
+  Its 7 LOWs are BUILD NOTES, binding on the build and checked by its audits:
+  - Read (4)'s per-k share is "the partition from obs_{t+1 .. t+k} already equals
+    the final partition" (also item-weighted), with each perfect F_k's ceiling
+    beside it; read (3) uses this definition.
+  - K: the commitment test uses the full sample. A seed passes it with at least
+    100 commitments in the tier, or at least half the tier's junctions where that
+    is fewer (near the floor, so a tier of 110 junctions needs 55). A bootstrap
+    draw in which a seed has no commitments in a tier counts against the bound.
+  - The paired drop R(O0) - R(OF): O0's and OF's held-out games resampled
+    independently in each draw; the seed term from the 5 per-seed drops.
+  - TRUTH FAILURE: the data and truth stages rerun as needed, still before any
+    training.
+  - Citations: repeat-the-last-move 0.28 and the 0.958 / 0.970 / 0.991 heads were
+    measured on OF; "K3 and J3 do not carry the coin test" means a coin between
+    turns at 3-class junctions (K3 above 0.5 still rules out a coin between
+    reversing and turning).
+  - The step cap comes from the smoke models at the chosen learning rates only.
+  - The near-duplicate search compares about 34k held-out frames with about
+    86-100k others; still minutes on the GPU.
+  The r10 auditor's one stray find was stopped at once and changed nothing.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
