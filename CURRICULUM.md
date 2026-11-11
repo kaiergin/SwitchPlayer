@@ -1350,6 +1350,42 @@ AUDIT r10 2026-11-11: nothing above LOW. REGISTRATION AUDIT LOOP CLOSED. The ver
   - The near-duplicate search compares about 34k held-out frames with about
     86-100k others; still minutes on the GPU.
   The r10 auditor's one stray find was stopped at once and changed nothing.
+BUILD AND CODE AUDIT, 2026-11-11 (branch curriculum-p2):
+  - Stage A (benchmarks/probes/probe_move_guesser.py), B
+    (probe_move_guesser_truth.py), C (train_move_guesser.py), D1
+    (logits_move_guesser.py), D2 (score_move_guesser.py), the shared windows
+    (testh_windows.py); tests/test_move_guesser*.py, test_train_move_guesser.py,
+    test_score_move_guesser.py (66 pass).
+  - Code audit rounds: stage A r1 (nothing above LOW); A-C at 761f7ac7 (5 MEDIUM,
+    12 LOW: a rerun hiding a truth failure, a relaunch able to delete models, no
+    final-step states, no gate before GPU work, no game-over branch test); A-D at
+    d3fc8f8f (4 MEDIUM, 11 LOW: the scorer loading the future blocks, an OF-only
+    truth failure blocking the run, F_1's conditions missing, weak scorer tests);
+    A-D at 4466a49e: NOTHING ABOVE LOW, CODE AUDIT LOOP CLOSED. Its 7 LOWs (the
+    before-GPU gate's OF_VOID and diversity-source checks, F_1's flags in NEXT's
+    offer, the perfect-F_k key past a life's end, interval() dropping only
+    undefined draws, read (2)'s and the NOOP junction ceiling's missing pieces,
+    paired_drop's bootstrap count) touch stages C and D only; they are fixed and
+    re-audited before stage C starts, and the run tree moves to that commit only
+    if stages A and B's files are unchanged.
+  - Smokes: stage A against Run.play_episode move for move and stack for stack
+    (O0 @10, @160, OF @80); stage B's played branches reproducing the record
+    byte for byte (120 OF decisions, then 8 games x 150; 0 failures, 2.3 states a
+    decision); the trainer on 20 O0 games (SIGMA 62 ms a step at batch 256, about
+    4 GB of GPU; on that tiny set every guesser stayed near chance, move NLL about
+    2.08 against 2.20, and the TRAINING FAILED reruns fired); an end-to-end chain
+    (data, truth, D1, D2) reading VOID, as a smoke should, twice, identically.
+    The smokes found and fixed: a dict key used twice in stage B, the trainer not
+    seeing the GPU, SIGMA's evaluation spilling past 12 GB into shared memory
+    without an OOM, NaN bounds for subset reads.
+  - Ms. Pac-Man fact from the game-over test: a life ends in the counters about
+    30 base steps after the fatal touch, so inside a 16-step window every move of
+    a dying life merges into one class; no non-played branch reaches a life end.
+RUN NOTES:
+  STAGES A AND B LAUNCHED 2026-11-11 15:48 from Y:\SwitchPlayer-testh-run (branch
+  test-h, 4466a49e; the run_testh_ab.sh script, under the lock, CPU; log
+  testh_run.log in the session scratchpad). Stage C waits for the LOW fixes'
+  re-audit and for stage B's floors.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
