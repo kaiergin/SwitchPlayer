@@ -33,7 +33,7 @@ ARMS = ("S", "F1", "F2", "F4", "F8", "F16", "SIGMA")
 SEEDS = (0, 1, 2, 3, 4)
 TRUTH_KEYS = ("decision", "played", "contested", "n_states", "class_crn", "class_crn_raw",
               "class_noop", "class_noop_raw", "crn_steps", "noop_steps", "crn_end",
-              "noop_end")
+              "noop_end", "crn_len", "noop_len")
 SCORE_COMMIT_GB = 10.0
 N_HELD = {"O0": 32, "OF": 32}
 
@@ -99,7 +99,8 @@ def interval(point, boot_values, seed_values):
     """The registered interval: the bootstrap's percentiles of the seed-mean
     and t(4) x the between-seed SD / sqrt(5), in quadrature, each side."""
     bv = np.asarray(boot_values, float)
-    bv = bv[np.isfinite(bv)]               # a subset read's draws without its games
+    bv = bv[~np.isnan(bv)]                 # only a subset read's draws without its games
+                                           # (an infinite draw stays and counts)
     if not len(bv) or not np.isfinite(point):
         return float("nan"), float("nan")
     q_lo, q_hi = np.percentile(bv, 2.5), np.percentile(bv, 97.5)
@@ -424,10 +425,31 @@ def own_play(table, plan_models, dmask, C):
         a_g = np.mean([acc(k, m) for k in G])
         rec = {"decisions": int(m.sum()), "acc_S": a_s, "acc_SIGMA": a_g,
                "diff": a_g - a_s}
+        if m.any():
+            rec["diff_interval"] = diff_acc(table, m, G, S, C)
         if 1 - a_s >= 0.05 and m.any():
             rec["R"] = R(table, m, G, S, C, weights=w1)
         out[label] = rec
     return out
+
+
+def diff_acc(table, mask, a_keys, b_keys, C):
+    """Class accuracy of arm a minus arm b on the masked items, each weighted
+    1, per seed (seed i against seed i), with the registered interval (the
+    game bootstrap of the seed-mean, the seed term from the per-seed
+    differences)."""
+    w = np.ones(len(table.set))
+    per, boots = [], []
+    for ka, kb in zip(a_keys, b_keys):
+        na, da = game_sums(table, mask, table.correct(ka).astype(float), w)
+        nb, db = game_sums(table, mask, table.correct(kb).astype(float), w)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            per.append(na.sum() / da.sum() - nb.sum() / db.sum())
+            boots.append((C @ na) / (C @ da) - (C @ nb) / (C @ db))
+    per = np.array(per)
+    point = float(per.mean())
+    lo, hi = interval(point, np.mean(boots, 0), per)
+    return {"diff": point, "lo": lo, "hi": hi, "per_seed": per.tolist()}
 
 
 def references(table, plan, dmask):
@@ -477,6 +499,7 @@ def ceilings(table, dmask):
     per_k = {k: [0, 0] for k in range(1, 17)}
     per_k_noop = {k: [0, 0] for k in range(1, 17)}
     per_k_junction = {k: [0, 0] for k in range(1, 17)}
+    per_k_junction_noop = {k: [0, 0] for k in range(1, 17)}
     per_k_items = {k: [0.0, 0.0] for k in range(1, 17)}
     differ = 0
     lost_crn, lost_noop, n_crn, n_noop = 0, 0, 0, 0
@@ -512,6 +535,10 @@ def ceilings(table, dmask):
                                      for m in range(MOVES)])
                 per_k_noop[k][0] += part_n == final_noop
                 per_k_noop[k][1] += 1
+                if len(set(final_noop)) >= 3:
+                    # the junction ceiling on the reaction-free set's own junctions
+                    per_k_junction_noop[k][0] += part_n == final_noop
+                    per_k_junction_noop[k][1] += 1
                 # item-weighted: a class already separated from every other by t+k
                 part = np.array(part)
                 for c in set(final):
@@ -545,6 +572,8 @@ def ceilings(table, dmask):
     out["partition_final_by_k_noop"] = {k: v[0] / v[1] for k, v in per_k_noop.items() if v[1]}
     out["junction_ceiling_by_k"] = {k: v[0] / v[1] for k, v in per_k_junction.items()
                                     if v[1]}
+    out["junction_ceiling_by_k_noop"] = {k: v[0] / v[1]
+                                         for k, v in per_k_junction_noop.items() if v[1]}
     out["partition_final_by_k_items"] = {k: v[0] / v[1] for k, v in per_k_items.items() if v[1]}
     out["crn_noop_partitions_differ"] = differ / contested if contested else float("nan")
     out["branch_items_lost_life"] = lost_crn / n_crn if n_crn else float("nan")
@@ -574,7 +603,14 @@ def perfect_fk(table, dmask):
                 groups = {}
                 for c in set(cls.tolist()):
                     m = int(np.flatnonzero(cls == c)[0])
-                    key = tru["crn_steps"][a, m, max(0, k - 4):k].tobytes()
+                    n = int(tru["crn_len"][a, m])
+                    if k <= n:
+                        # obs_{t+k}: obs_t's frames and the first k of the branch's
+                        key = tru["crn_steps"][a, m, max(0, k - 4):k].tobytes()
+                    else:
+                        # past the branch's end LIFE ENDS repeats its last stack
+                        key = (tru["crn_steps"][a, m, max(0, n - 4):n].tobytes()
+                               + bytes([n, int(tru["crn_end"][a, m])]))
                     groups.setdefault(key, []).append((cls == c).sum() / MOVES)
                 acc_num += sum(max(v) for v in groups.values())
                 acc_den += 1.0
@@ -657,7 +693,8 @@ def score(data, truth, train, logits, boot=BOOT):
             "whole_item_in_fit_share": float(t.whole_in_fit[t.set == SET_OWN].mean()),
             "F1": R(t, crn, F1, S, C),
             "F1_noop": R(t, (t.set == SET_NOOP) & dm, F1, S, C),
-            # (1b): F_1's own (i)-(iv); VOID or flagged models leave it unread
+            # (1b): F_1's own (i)-(iv); a VOID F_1 cannot be offered, and a
+            # model flagged at its cap is named in the offer
             "F1_conditions": None if f1 is None else {
                 "holds": f1["holds"], "unread": f1["unread"], "failed": f1["failed"],
                 "i": f1["i"], "ii": f1["ii"], "iv": f1["iv"],
@@ -739,10 +776,11 @@ def score(data, truth, train, logits, boot=BOOT):
         else:
             rep["five"] = "PASSES" if all(of["cond"]["holds"].values()) else "FAILS"
             rep["five_failed"] = of["cond"]["failed"]
-        rep["paired_drop"] = paired_drop(tables["O0"], tables["OF"], pm)
+        rep["paired_drop"] = paired_drop(tables["O0"], tables["OF"], pm, boot)
     f1 = o0["extra"].get("F1_conditions")
     rep["next"] = next_step(verdict, rep.get("five"),
-                            f1_meets=bool(f1 and f1["meets_all"]))
+                            f1_meets=bool(f1 and f1["meets_all"]),
+                            f1_flags=(f1 or {}).get("flags", []))
     rep["players"] = {p: {"holds": c["cond"]["holds"], "unread": c["cond"]["unread"],
                           "failed": c["cond"]["failed"],
                           "i": c["cond"]["i"], "ii": c["cond"]["ii"],
@@ -796,16 +834,16 @@ def _boot_R(t, mask, a_keys, b_keys, C):
     return ratio_stat(*map(np.array, (na, da, nb, db)), C)[2]
 
 
-def paired_drop(t0, t1, pm):
+def paired_drop(t0, t1, pm, boot=BOOT):
     """R(O0) - R(OF) per seed, O0's and OF's games resampled independently."""
     S, G = keys("S", pm), keys("SIGMA", pm)
     m0 = (t0.set == SET_CRN) & decision_mask(t0)
     m1 = (t1.set == SET_CRN) & decision_mask(t1)
-    r0 = R(t0, m0, G, S, draws(t0.n_games))
-    r1 = R(t1, m1, G, S, draws(t1.n_games))
+    r0 = R(t0, m0, G, S, draws(t0.n_games, boot))
+    r1 = R(t1, m1, G, S, draws(t1.n_games, boot))
     per = np.array(r0["per_seed"]) - np.array(r1["per_seed"])
-    b = _boot_R(t0, m0, G, S, draws(t0.n_games, seed=SEED)) - \
-        _boot_R(t1, m1, G, S, draws(t1.n_games, seed=SEED + 1))
+    b = _boot_R(t0, m0, G, S, draws(t0.n_games, boot, seed=SEED)) - \
+        _boot_R(t1, m1, G, S, draws(t1.n_games, boot, seed=SEED + 1))
     point = float(per.mean())
     lo, hi = interval(point, b, per)
     return {"drop": point, "lo": lo, "hi": hi, "per_seed": per.tolist()}
@@ -827,7 +865,7 @@ def cut_profile(t, crn, noop, G, S):
     return out
 
 
-def next_step(verdict, five, f1_meets=False):
+def next_step(verdict, five, f1_meets=False, f1_flags=()):
     if verdict.startswith("GUESSES THE GAME"):
         if five in ("FAILS", "VOID", None):
             return ("Kai's call: (5) " + (five or "unread") + " while (1) reads "
@@ -836,6 +874,8 @@ def next_step(verdict, five, f1_meets=False):
                "Atari-HEAD's human Ms. Pac-Man, then a training run with guessed moves")
         if f1_meets:
             out += "; F_1 meets (i)-(iv) as well, so the simpler F_1 is offered to Kai too"
+            if f1_flags:
+                out += f" (F_1 models flagged at their cap: {', '.join(f1_flags)})"
         return out
     if verdict in ("TRUTH FAILURE",):
         return "fix the data or truth stage and rerun it, before any training read"

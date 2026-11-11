@@ -9,6 +9,7 @@ order, the raw-class split, the READS exclusion. D1 on the CPU: block windows
 (pushes, LIFE ENDS), a game's items against its record and truth, the exact
 pixel search against brute force (and its own-game exclusion), the packing,
 SIGMA's cut at 16 equal to its forward, and model_logits equal to the nets."""
+import json
 import math
 import pathlib
 import sys
@@ -126,6 +127,29 @@ def test_R_pairs_seeds_and_takes_ratios_of_sums():
     assert r["per_seed"] == pytest.approx(want)       # distinct per seed: pairing pinned
     assert len(set(round(x, 9) for x in want)) == 5
     assert r["R"] == pytest.approx(np.mean(want))
+
+
+def test_conditions_read_the_registered_item_sets():
+    """(i) every CRN item, (ii) CRN branch items only, (iv) the NOOP items: S
+    answers move 3 everywhere; SIGMA is right on the played CRN item and every
+    NOOP item, and answers move 0 on the CRN branch items."""
+    rows = []
+    for d in range(30):
+        rows += _decision_items(sc.SET_CRN, T_CLASSES, 0, d)
+        rows += _decision_items(sc.SET_NOOP, T_CLASSES, 0, d)
+
+    def sigma(r):
+        if r["set"] == sc.SET_CRN and not r["played"]:
+            return onehot(0)
+        return onehot(r["members"].argmax())
+    fns = {f"S-s{s}": (lambda r: onehot(3)) for s in range(5)}
+    fns.update({f"SIGMA-s{s}": sigma for s in range(5)})
+    games = [_game(rows[i * 60:(i + 1) * 60], fns, f"g{i}") for i in range(3)]
+    t = sc.Table(games)
+    out = sc.conditions(t, fns, sc.draws(t.n_games, boot=50), np.ones(len(t.set), bool))
+    assert out["i"]["R"] == pytest.approx(0.0)        # 2/3 against 2/3
+    assert out["ii"]["R"] == pytest.approx(-1.0)      # 1 against 1/2
+    assert out["iv"]["R"] == pytest.approx(1.0)       # 0 against 2/3
 
 
 def _jk(J_lo=0.3, K_lo=0.6, commit_ok=True, unread=False):
@@ -294,6 +318,143 @@ def test_raw_split_and_exclusion():
     t.h0_in_other = np.array([False, False, True])
     assert not sc.decision_mask(t).any()
     assert sc.decision_mask(t, undo=True).all()
+
+
+# --------------------------------------------------------------------------
+# score() end to end on a synthetic run directory
+# --------------------------------------------------------------------------
+FOUR = [[0], [1, 2], [3, 4, 5], [6, 7, 8]]
+CLS_IDS = np.array([0, 1, 1, 2, 2, 2, 3, 3, 3], np.int8)
+KEYS = [f"{a}-s{s}" for a in ("S", "SIGMA", "F1") for s in range(5)]
+
+
+def _write_game(dirs, name, player, n=30):
+    data, truth, logits = dirs
+    it = 160 if player == "O0" else 159
+    # stage A: a start, then n decisions, the last ending the life
+    kinds = [0] + [2] * n
+    ends = [0] * (n + 1)
+    ends[-1] = 1
+    prior = np.full((n + 1, 9), 1 / 9, np.float32)
+    prior[0] = np.nan
+    np.savez(data / f"{name}.npz", kind=np.array(kinds, np.int8),
+             move=np.zeros(n + 1, np.int8), decision=np.array([-1] + list(range(n)), np.int32),
+             prior=prior, temp=np.full(n + 1, 0.25), end=np.array(ends, np.int8))
+    (data / f"{name}.json").write_text(json.dumps({"iteration": it}))
+    # stage B: four classes everywhere, separated from the first step
+    steps = np.zeros((n, 9, 16, 16), np.uint8)
+    steps[:, :, :, 0] = CLS_IDS[None, :, None] + 1
+    np.savez(truth / f"{name}-truth.npz", decision=np.arange(n), played=np.zeros(n, np.int8),
+             contested=np.ones(n, bool), n_states=np.full(n, 4, np.int8),
+             class_crn=np.tile(CLS_IDS, (n, 1)), class_crn_raw=np.tile(CLS_IDS, (n, 1)),
+             class_noop=np.tile(CLS_IDS, (n, 1)), class_noop_raw=np.tile(CLS_IDS, (n, 1)),
+             crn_steps=steps, noop_steps=steps, crn_end=np.zeros((n, 9), np.int8),
+             noop_end=np.zeros((n, 9), np.int8), crn_len=np.full((n, 9), 16, np.int8),
+             noop_len=np.full((n, 9), 16, np.int8))
+    (truth / f"{name}-truth.json").write_text(json.dumps({"failures": []}))
+    # D1: own, CRN and NOOP items; SIGMA and F1 right everywhere, S answers 3
+    rows = []
+    for d in range(n):
+        rows += _decision_items(sc.SET_OWN, [FOUR[0]], 0, d)
+        rows += _decision_items(sc.SET_CRN, FOUR, 0, d)
+        rows += _decision_items(sc.SET_NOOP, FOUR, 0, d)
+    m = len(rows)
+    rec = {k: np.array([r[k] for r in rows]) for k in
+           ("set", "decision", "cls", "members", "weight", "played", "end", "a")}
+    rec.update(h0_in_fit=np.zeros(m, bool), h0_in_other=np.zeros(m, bool),
+               whole_in_fit=np.zeros(m, bool), near_dup=np.full(m, 999))
+    right = np.stack([onehot(r["members"].argmax()) for r in rows]).astype(np.float32)
+    for k in KEYS:
+        lg = np.tile(onehot(3), (m, 1)).astype(np.float32) if k.startswith("S-") else right
+        rec["logits/" + k] = lg
+        if k.startswith("SIGMA"):
+            rec["logits/" + k + "/cut"] = np.stack([lg] * 16)
+    if player == "OF":
+        rec["o0_argmax"] = np.where(rec["set"] == sc.SET_OWN, 0, -1).astype(np.int8)
+    np.savez(logits / f"{name}-logits.npz", **rec)
+
+
+def _run(tmp_path, monkeypatch, of_void=False, of_failure=False):
+    dirs = [tmp_path / x for x in ("data", "truth", "logits")]
+    for d in dirs:
+        d.mkdir()
+    train = tmp_path / "train"
+    train.mkdir()
+    names = ["O0-it160-g8", "O0-it160-g9", "OF-it159-g0", "OF-it159-g1"]
+    for n in names:
+        _write_game(dirs, n, n[:2])
+    if of_failure:
+        (dirs[1] / "OF-it159-g0-truth.json").write_text(json.dumps({"failures": ["d 3"]}))
+    plan = {"models": {k: {"dir": k} for k in KEYS}, "cap": 1000, "rates_chosen": {},
+            "flags": [], "void": [], "batch": 256, "majority": 0, "majority_acc": 0.3,
+            "source": "plan-x", "smoke": False}
+    (train / "plan.json").write_text(json.dumps(plan))
+    games = [n for n in names if not (of_void and n.startswith("OF"))]
+    (dirs[2] / "logits.json").write_text(json.dumps(
+        {"games": games, "sigma_weights": {}, "of_void": of_void, "smoke": False,
+         "train_source": "plan-x"}))
+    for k, v in (("FLOOR_DECISIONS", 10), ("FLOOR_GAMES", 1.5), ("FLOOR_J3", 10),
+                 ("FLOOR_J4", 10), ("COMMIT_MIN", 5), ("SCORE_COMMIT_GB", 0.0),
+                 ("N_HELD", {"O0": 2, "OF": 2})):
+        monkeypatch.setattr(sc, k, v)
+    return sc.score(dirs[0], dirs[1], train, dirs[2], boot=100)
+
+
+def test_score_end_to_end_guesses_and_five_passes(tmp_path, monkeypatch):
+    rep = _run(tmp_path, monkeypatch)
+    assert rep["verdict"] == "GUESSES THE GAME", rep["why"]
+    assert rep["five"] == "PASSES"
+    assert rep["next"].startswith("step 3") and "F_1 is offered" in rep["next"]
+    o0 = rep["players"]["O0"]
+    assert o0["i"]["R"] == pytest.approx(1.0) and o0["ii"]["R"] == pytest.approx(1.0)
+    assert o0["iii_crn"]["4"]["J"] == pytest.approx(1.0)
+    assert o0["F1_conditions"]["meets_all"]
+    assert o0["references"]["majority"] == pytest.approx(1.0)
+    assert o0["ceilings"]["partition_final_by_k"][1] == pytest.approx(1.0)
+
+
+def test_score_end_to_end_of_void_and_truth_failure(tmp_path, monkeypatch):
+    rep = _run(tmp_path, monkeypatch, of_void=True, of_failure=True)
+    assert rep["verdict"] == "GUESSES THE GAME"           # OF's failure ignored
+    assert rep["five"] == "VOID" and rep["next"].startswith("Kai's call")
+    assert "OF" not in rep["players"]
+
+
+def test_score_end_to_end_of_truth_failure_without_void(tmp_path, monkeypatch):
+    rep = _run(tmp_path, monkeypatch, of_failure=True)
+    assert rep["verdict"] == "TRUTH FAILURE"
+
+
+def test_score_refuses_an_incomplete_or_foreign_run(tmp_path, monkeypatch):
+    _run(tmp_path, monkeypatch)
+    summ = json.loads((tmp_path / "logits" / "logits.json").read_text())
+    summ["games"] = summ["games"][1:]
+    (tmp_path / "logits" / "logits.json").write_text(json.dumps(summ))
+    with pytest.raises(SystemExit, match="held-out games scored"):
+        sc.score(tmp_path / "data", tmp_path / "truth", tmp_path / "train",
+                 tmp_path / "logits", boot=50)
+    summ["train_source"] = "other"
+    (tmp_path / "logits" / "logits.json").write_text(json.dumps(summ))
+    with pytest.raises(SystemExit, match="another plan"):
+        sc.score(tmp_path / "data", tmp_path / "truth", tmp_path / "train",
+                 tmp_path / "logits", boot=50)
+
+
+def test_d1_exclusion_key_is_the_floors_key():
+    import testh_windows as tw
+    arr = _arr()
+    truth = {"decision": np.arange(5), "played": np.zeros(5, np.int8),
+             "contested": np.zeros(5, bool), "class_crn": np.zeros((5, 9), np.int8),
+             "class_noop": np.zeros((5, 9), np.int8),
+             "crn_len": np.full((5, 9), 16, np.int8), "crn_end": np.zeros((5, 9), np.int8),
+             "blk_dec": np.zeros(0, int), "blk_kind": np.zeros(0, int),
+             "blk_class": np.zeros(0, int), "blk_len": np.zeros(0, int),
+             "blk_end": np.zeros(0, int), "blk_frames": np.zeros((0, 16, 3, 84, 84), np.uint8)}
+    frames, items = lgm.game_items(arr, truth)
+    d, hs = tw.window_hashes(arr)
+    by = {int(x): row for x, row in zip(d, hs)}
+    for w, dec in zip(items["window"], items["decision"]):
+        assert lgm.stack_hash(frames, w[0]) == by[int(dec)][0]
 
 
 # --------------------------------------------------------------------------

@@ -551,8 +551,11 @@ def before_gpu(data, truth):
     whole (no max_decisions), and stage B's floors.json passed for O0."""
     import probe_move_guesser_truth as tr
     div = data / "diversity.json"
-    if not div.exists() or not json.loads(div.read_text()).get("passed"):
+    if not div.exists():
         raise SystemExit("stage A's diversity check has not passed")
+    dv = json.loads(div.read_text())
+    if not dv.get("passed") or dv.get("source") != mg.SOURCE:
+        raise SystemExit("stage A's diversity check has not passed (for this stage A)")
     of_void = tr.of_void(truth)
     for p, it, g, name in tr.held_games():
         if p == "OF" and of_void:
@@ -567,6 +570,9 @@ def before_gpu(data, truth):
     if (f.get("source") != tr.SOURCE or f.get("windows_source") != tw.SOURCE
             or not f["O0"]["passed"]):
         raise SystemExit(f"floors not passed for O0 (or from other code): {f.get('O0')}")
+    if bool(f.get("of_void")) != of_void:
+        raise SystemExit("floors.json was computed under another OF_VOID state: "
+                         "rerun stage B with --floors-only")
 
 
 def main(argv):

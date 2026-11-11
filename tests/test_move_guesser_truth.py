@@ -309,7 +309,10 @@ def test_before_gpu_gate(tmp_path, monkeypatch):
     data.mkdir(), truth.mkdir()
     with pytest.raises(SystemExit, match="diversity"):
         tg.before_gpu(data, truth)
-    (data / "diversity.json").write_text(json.dumps({"passed": True}))
+    (data / "diversity.json").write_text(json.dumps({"passed": True, "source": "older"}))
+    with pytest.raises(SystemExit, match="for this stage A"):
+        tg.before_gpu(data, truth)
+    (data / "diversity.json").write_text(json.dumps({"passed": True, "source": mg.SOURCE}))
     monkeypatch.setattr(tr, "held_games", lambda: [("O0", 10, 8, "O0-g"), ("OF", 10, 0, "OF-g")])
     with pytest.raises(SystemExit, match="O0-g"):
         tg.before_gpu(data, truth)
@@ -319,7 +322,7 @@ def test_before_gpu_gate(tmp_path, monkeypatch):
             {"source": tr.SOURCE, "failures": [], "max_decisions": None}))
     with pytest.raises(SystemExit, match="floors"):
         tg.before_gpu(data, truth)
-    fl = {"source": tr.SOURCE, "windows_source": tw.SOURCE,
+    fl = {"source": tr.SOURCE, "windows_source": tw.SOURCE, "of_void": False,
           "O0": {"passed": False}}
     (truth / "floors.json").write_text(json.dumps(fl))
     with pytest.raises(SystemExit, match="floors not passed"):
@@ -333,6 +336,11 @@ def test_before_gpu_gate(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="OF-g"):
         tg.before_gpu(data, truth)
     (truth / "OF_VOID.json").write_text(json.dumps({"reason": "cannot be fixed: ..."}))
+    # floors computed before the decision no longer match it
+    with pytest.raises(SystemExit, match="OF_VOID state"):
+        tg.before_gpu(data, truth)
+    fl["of_void"] = True
+    (truth / "floors.json").write_text(json.dumps(fl))
     tg.before_gpu(data, truth)
     (truth / "OF_VOID.json").write_text(json.dumps({}))
     with pytest.raises(SystemExit, match="reason"):
