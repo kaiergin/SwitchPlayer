@@ -238,23 +238,30 @@ def packed(frames):
     return (f[:, 0] << 16 | f[:, 1] << 8 | f[:, 2]).reshape(len(frames), -1)
 
 
-def min_pixel_diff(queries, refs, device, q_chunk=32, r_chunk=2048, exclude=None):
+def min_pixel_diff(queries, refs, device, q_chunk=8, r_chunk=1024, exclude=None):
     """For each query frame, the fewest differing pixels against any ref frame
-    (exact). exclude[i]: (lo, hi) of refs to skip for query i (its own game)."""
+    (exact). exclude[i]: (lo, hi) of refs to skip for query i (its own game).
+    The count is summed as int32: a reduction copies its input to the
+    accumulation dtype first, so a bool sum's default int64 made a full int64
+    copy of the (qc, rc, 7056) comparison, which at 32 x 2048 (3.7 GB) spilled
+    into Windows shared GPU memory on the real run (stage D1 ran 3 h+
+    PCIe-bound); at 8 x 1024 the comparison is 58 MB and its int32 copy
+    231 MB. A pixel count fits int32 (at most 7056, the exclusion's 10**9)."""
     q = torch.from_numpy(packed(queries)).to(device)
     best = torch.full((len(queries),), 10 ** 9, dtype=torch.int64, device=device)
     for r0 in range(0, len(refs), r_chunk):
         r = torch.from_numpy(packed(refs[r0:r0 + r_chunk])).to(device)
         for q0 in range(0, len(q), q_chunk):
             qq = q[q0:q0 + q_chunk]
-            diff = (qq[:, None, :] != r[None, :, :]).sum(-1)          # (qc, rc)
+            diff = (qq[:, None, :] != r[None, :, :]).sum(-1, dtype=torch.int32)  # (qc, rc)
             if exclude is not None:
                 for i in range(len(qq)):
                     lo, hi = exclude[q0 + i]
                     a, b = max(lo - r0, 0), min(hi - r0, len(r))
                     if a < b:
                         diff[i, a:b] = 10 ** 9
-            best[q0:q0 + q_chunk] = torch.minimum(best[q0:q0 + q_chunk], diff.min(1).values)
+            best[q0:q0 + q_chunk] = torch.minimum(best[q0:q0 + q_chunk],
+                                                  diff.min(1).values.long())
     return best.cpu().numpy()
 
 
@@ -357,7 +364,11 @@ def stage_logits(data, truth, train, out, players=("O0", "OF"), only=None,
     held_all = np.concatenate(held_frames)
     for name, g in per_game.items():
         g["h0_in_other"] = np.array([len(owners[h] - {name}) > 0 for h in g["h0"]])
-    # near-duplicates: newest frames of the held-out decisions (own items)
+    # near-duplicates: newest frames of the held-out decisions (own items).
+    # The guessers are done with: their weights and the logits pass's cached
+    # blocks leave the card first, so the search runs in dedicated memory
+    del nets
+    torch.cuda.empty_cache()
     for name, g in per_game.items():
         own = g["items"]["set"] == SET_OWN
         q = held_all[g["newest"][own]]

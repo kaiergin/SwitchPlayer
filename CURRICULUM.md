@@ -1412,6 +1412,28 @@ RUN NOTES:
   d25dcc27 (run_testh_cd.sh: C on the GPU, then D1, then D2, stops on a
   failure). Stage C: FIT 44,471 decisions, validation 14,158 (14,065 after the
   FIT-overlap exclusion), batch 256 (pinned in batch.json).
+  STAGE C: grid under the provisional cap (best validation NLL, seed 0; chance
+  ln 9 = 2.197): S 1e-4 2.0208 @3000 (edge step), 3e-4 2.0290, 1e-3 2.0793,
+  3e-3 2.1284; SIGMA 1e-4 2.0216 @3000 (edge step), 3e-4 2.0280, 1e-3 2.0422,
+  3e-3 2.1289. Every arm learns a little from the screen, then overfits from
+  ~step 3000 (40k steps: NLL 6-13). Rates S 1e-4, SIGMA 1e-4, cap 9000.
+  Paused 23:13-09:17 at Kai's request (the SIGMA-s3 rerun redone). STAGE C
+  DONE 11-12 09:37: no flags; void = SIGMA-s0, -s1, -s3 and F1-s1, -s2
+  TRAINING FAILED (at lr/3 and twice the cap still not below their S seed).
+  Seeds (best NLL within the cap): S 2.0208 2.0191 2.0173 2.0160 2.0230;
+  SIGMA 2.0216 2.0269 2.0197 2.0166 2.0226 (s2 passes on its rerun, s4 by
+  0.0004); F1 2.0190 2.0206 2.0225 2.0126 2.0148; F2-F16 seed 0 2.009-2.017.
+  D1 STOPPED 11-12 12:57 after its logits (64 games, 429 s) and 3 h 13 min in
+  the near-duplicate pixel search: a bool sum's int64 accumulation copies the
+  (32, 2048, 7056) comparison into a 3.7 GB int64 tensor, which Windows put in
+  shared GPU memory (nvidia-smi dmon: ~40 GB/s over PCIe, card memory 1-8%).
+  FIX (commit below): 8 x 1024 chunks, an int32 count, the guessers and the
+  logits pass's cache freed before the search; exact as before. Audit r1:
+  nothing above LOW (3 LOWs fixed: docstring, a far-side planted match, an
+  all-excluded query); r2: nothing above LOW. 73 tests pass. OPERATOR NOTES
+  (r2's LOWs): the new test catches over-exclusion at a span's edge only by
+  chance (no near-match planted just outside a span); the int32 count's memory
+  benefit is untested and its .long() redundant. D1 rerun from the fix.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 

@@ -551,6 +551,35 @@ def test_pixel_search_exact():
     assert (lgm.packed(a)[0] != lgm.packed(a)[1]).sum() == 1
 
 
+def test_pixel_search_int32_count_and_boundary_exclusion():
+    """The int32 count (the D1 memory fix) agrees with a brute-force int64
+    search at the defaults and at small chunks, with each query's excluded
+    span crossing a ref-chunk boundary."""
+    rng = np.random.default_rng(2)
+    q = rng.integers(0, 4, (11, 3, 84, 84)).astype(np.uint8)
+    r = rng.integers(0, 4, (29, 3, 84, 84)).astype(np.uint8)
+    r[7] = q[0]                                          # inside the excluded span
+    r[20] = q[0]
+    r[20, 0, :3, :3] ^= 1                                # 9 pixels apart, outside it
+    r[10] = q[1]                                         # past the boundary at 8, excluded
+    pq, pr = lgm.packed(q), lgm.packed(r)
+    full = np.array([[(pq[i] != pr[j]).sum() for j in range(len(r))]
+                     for i in range(len(q))], np.int64)
+    spans = [(5 + i % 3, 13 + i % 3) for i in range(len(q))]
+    spans[10] = (0, len(r))                              # every ref excluded: the sentinel
+    masked = full.copy()
+    for i, (lo, hi) in enumerate(spans):
+        masked[i, lo:hi] = 10 ** 9
+    for kw in ({}, {"q_chunk": 3, "r_chunk": 8}, {"q_chunk": 32, "r_chunk": 2048}):
+        got = lgm.min_pixel_diff(q, r, torch.device("cpu"), **kw)
+        assert got.dtype == np.int64 and np.array_equal(got, full.min(1))
+        ex = lgm.min_pixel_diff(q, r, torch.device("cpu"), exclude=spans, **kw)
+        assert np.array_equal(ex, masked.min(1))
+    assert full[0].min() == 0 and masked[0].min() == 9
+    assert full[1].min() == 0 and masked[1].min() > 0     # the far-side match is masked
+    assert masked[10].min() == 10 ** 9
+
+
 def test_cut_and_model_logits_on_the_cpu():
     torch.manual_seed(0)
     frames = torch.randint(0, 255, (40, 3, 84, 84), dtype=torch.uint8)
