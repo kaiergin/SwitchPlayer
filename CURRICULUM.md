@@ -789,7 +789,50 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
-### Next experiment (pre-registered) -- Test H: does knowing where a player got to help guess the move they made? (Kai, 2026-11-11)
+### RESULT -- Test H: the move guesser on own play (O0, OF as second player), 2026-11-12
+
+VERDICT: VOID -- SIGMA TRAINING FAILED (seeds 0, 1 and 3: at the chosen rate,
+and again at a third of it with twice the cap, SIGMA's best validation NLL was
+not below its S seed's). (5) FAILS. NEXT: Kai's call, with reads (3) and (4).
+Run: Y:\SwitchPlayer-testh-run (test-h): stages A-B from 4466a49e, C from
+d25dcc27, D1-D2 from 4e88d087 (D1's memory fix only; score.json in
+benchmarks/probes/testh). Truth clean (0 failures in 64 games), floors passed.
+
+What the guessers did (contested decisions, class error weighted |c|/9; SIGMA
+against S, mean of 5 seeds, registered intervals):
+- O0: R = -0.001 [-0.009, 0.006] (err SIGMA 0.3876, S 0.3871); branch-only (ii)
+  0.001 [-0.010, 0.012]; reaction-free (iv) 0.006 [-0.002, 0.015]. Junctions:
+  J3/J4 ~0, K3/K4 ~0, commitments 0-2 of the 100 needed.
+- OF: R = 0.011 [-0.004, 0.025]. Paired drop O0 -> OF -0.012 [-0.030, 0.006].
+- F_1 (screen + next frame), the F_k arms, junction/corridor and turn subsets,
+  near-duplicates out, exclusions undone, raw classes: all within +-0.03 of 0.
+- Validation NLL (every arm, every seed): 2.009-2.027 against chance 2.197;
+  each arm overfits from ~step 3000.
+
+Read (3), the references (O0 own play, class accuracy on contested decisions):
+  majority move 0.572, random move 0.613, S 0.712, SIGMA 0.713, repeat the
+  previous move 0.761, the snapshot's own acting argmax 0.879 (0.79 at it 10
+  rising to 0.94 by it 130-160). OF: S 0.643, SIGMA 0.650.
+Read (4), the ceilings: 73% of O0's decisions are contested, 2.31 classes per
+  contested decision; the next frame alone fixes the partition in 96% of
+  decisions (99% weighted by items), two frames in 100%. A perfect reader of
+  frame k would name the class 99.1% (k=1), 100% (k=2, 4), 98.7% (k=8), 97.1%
+  (k=16) of the time. The future-blind oracle (always the largest class) errs
+  0.311; S and SIGMA err 0.387 (R against that oracle -0.24).
+
+READING. The answer is in the frames: one or two frames after the move
+almost always settle which outcome happened. No guesser learned to read
+them. Every arm, with or without futures, ends at the same screen-only
+prior, below "repeat the previous move" and below the future-blind
+largest-class oracle. So VOID is the right call, and the result is about
+learnability, not about futures. A from-scratch conv pair encoder on 84x84
+frames with ~44k own-play decisions memorises screens (overfits by ~3000
+steps = ~17 epochs) before it learns the few-pixel displacement a move
+causes. This repeats E1 (11-02: an IDM on own play below trivial).
+OPERATIONS. Stage C 5.5 GPU h (paused 23:13-09:17 at Kai's request). D1's
+first run was stopped after 3 h 13 min in the near-duplicate search: a bool
+sum's int64 accumulation made a 3.7 GB copy that Windows put in shared GPU
+memory. The fix (4e88d087, audited twice, exact) ran D1 in 18 min.
 
 DECISION: Kai 2026-11-11, closing Test O: "Options don't look like they are paying
 off. I think we go with implementing whatever is next, which I think is the shared
@@ -1434,6 +1477,9 @@ RUN NOTES:
   (r2's LOWs): the new test catches over-exclusion at a span's edge only by
   chance (no near-match planted just outside a span); the int32 count's memory
   benefit is untested and its .long() redundant. D1 rerun from the fix.
+  RERUN 11-12 13:00 from 4e88d087: stage C re-checked its stamps (16 s, same
+  plan), D1 18 min, D2 21 s. STAGES C-D DONE 13:19. VERDICT VOID -- see
+  "RESULT -- Test H" above the registration.
 
 ### RESULT -- Test O, seed 0: the option head (OF) against the plain arm (O0) and the token arm (C0), 2026-11-11
 
