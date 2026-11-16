@@ -789,6 +789,103 @@ concurrently, sequential, --snapshot-weights. Pre-registered reads:
 - stop rule: both seeds ≤ −17 at iter 30, or value/control more than doubling
   after T1 (a self-echo blow-up).
 
+### Next experiment (pre-registered, DRAFT pending Kai) -- E2o: does merging equivalent moves at the root make search cheaper, given perfect groups? (Kai, 2026-11-16)
+
+DECISION: after Test H, Kai: "The only reason I could see this as useful is if we can
+determine that certain moves are equivalent in the search tree to cut down search
+cost". Approved 2026-11-16 ("Sure"): an upper-bound test first, offline, then whole
+games only if it pays.
+QUESTION: if search knew exactly which of the 9 moves lead to the same next state,
+and searched one child per group at the root, how many unmerged simulations would a
+merged 8-simulation search be worth?
+WHY: this is E2 (designed after E0, never run: "children are grouped by predicted
+outcome and one per class is expanded"), with the emulator's exact groups in place
+of a learned model. The prize is measured: on Test H's O0 held-out decisions the 9
+moves reach 1.95 distinct next states on average (2.31 on the 73% that are
+contested; OF 2.04), and moves in one group share the emulator state, MaxAndSkip's
+buffer and the step's raw frames, so they share every future: merging them at the
+root loses nothing in the real game. Every learned grouping so far failed (E1's
+forward model and IDM, E3a's latents, Test H's guesser). An oracle bounds what any of
+them could buy: if the bound is small, none is worth building.
+WHAT IT CANNOT SHOW: merges below the root (the tree's nodes there are imagined
+latents, and the oracle knows only real states; a grouping read from the screen
+would act at the root too); training targets under root noise (no noise here, see
+SEARCH); whether the merged search's answer is BETTER (step 2's scores do that).
+The emulator supplies groups here as a test only, never for learning (Kai
+2026-10-30).
+METHOD (step 1, offline):
+  DATA: Test H's O0 held-out games (Y:\SwitchPlayer-testh-run, benchmarks/probes/
+    testh): 16 snapshots x games 8-9 = 32 games, 13,560 decisions, 9,878 contested.
+    Stage A's stacks are the search inputs. Stage B's class_crn is the grouping: it is
+    built from the 16-step futures of the one-step groups, so it can only merge them,
+    and the probe requires its class count to equal n_states (the one-step group
+    count) at every decision, which makes the two the same partition. A mismatch
+    stops the probe. No new play.
+  NETS: each snapshot's learner nets in eval mode, the nets its birth search ran
+    (BN_RECAL_ACTING's acting BN states are NOT applied: they serve the prior only).
+  SEARCH: the birth search's engine, muzero_vtree.VectorizedPUCT, at the arm's
+    C_PUCT, DISCOUNT, MAX_DEPTH and value-prefix settings; no root noise and
+    tie_break "first", so each (decision, arm) is one deterministic answer.
+  ARMS, at every decision:
+    - UNMERGED at 8, 12, 16, 24, 32, 48, 64, 100 and 200 simulations;
+    - MERGED at 8, 16 and 32;
+    - references UNMERGED-400 and MERGED-400.
+  MERGE (root only): one root child per group, the member with the highest root
+    prior (ties: the lowest move index), carrying the group's summed prior. The other
+    members are never selected (score -inf at the root) and do not seed the value
+    range. Below the root, all 9 moves as usual.
+  WHAT EACH ARM PLAYS: the class of its most-visited root move (the act_search
+    choice; ties: the lowest move index). Its TARGET: root visits summed per class.
+READS (contested decisions unless stated; intervals: 2,000 by-game bootstrap draws,
+  the 32 games resampled):
+  (1) PRIMARY, play agreement: A(arm) = the share of decisions whose played class is
+    UNMERGED-400's. N_eff(8) = the unmerged budget whose A equals MERGED-8's, by
+    interpolation in log simulations between grid points (">200" past the grid; 8
+    when MERGED-8 is no better than UNMERGED-8). The saving is N_eff(8) / 8. Also
+    N_eff(16) and N_eff(32).
+  (2) Target distance: total variation between each arm's class distribution and
+    UNMERGED-400's; N_eff the same way.
+  (3) The merged search's own answer: MERGED-400 against UNMERGED-400 (play
+    agreement and total variation). Low agreement means the two searches settle on
+    different moves, and offline cannot say which is better.
+  (4) All decisions: the share where all 9 moves form one group (no search needed to
+    play there; O0 27%).
+  (5) Descriptive: the unmerged search's visits on non-representative members, by
+    budget; root value error against each reference; by snapshot (iterations
+    10-160); 2-group decisions against 3 or more (corridor against junction).
+VERDICT on (1):
+  - PROMISING: N_eff(8) >= 16 with its interval's lower end >= 10. Step 2 is
+    pre-registered in full and run.
+  - LITTLE: N_eff(8) < 10. Perfect groups do not make the search meaningfully
+    cheaper, so the line ends (E2, a learned grouping and Test H's guesser). Kai's
+    call on what follows.
+  - Otherwise: Kai's call.
+  - FLAG, beside any verdict: (3)'s play agreement below 0.9.
+STEP 2 (outline; registered in full only after a PROMISING read): whole games from
+  O0's late snapshots, acting each step by the prior's argmax, UNMERGED-8 or MERGED-8,
+  the groups computed each step from the emulator's 9 one-step branches (Test H's
+  rule), with paired noop starts and openings across arms. Unclipped whole-game
+  scores; games per arm sized from step 1's timing. This is the real-time question:
+  on Pong, 8-simulation search at deployment scored below the same snapshot's prior
+  argmax (10-15 read (D), paired per game: Gumbel-8 -5.67, PUCT-8 -5.23), and part
+  of the reason may be simulations spent on duplicate moves.
+COST AND OPERATIONS: GPU, one process, under the lock. A smoke times 64 decisions at
+  every arm and projects the whole. Above 6 GPU hours, a fixed subsample (every k-th
+  contested decision of every game, k from the smoke) is set before any read. Batch
+  per budget sized to fit dedicated GPU memory (the engine allocates 1 + 9 x (sims +
+  1) nodes per tree; D1's lesson: a spill into shared memory makes it PCIe-bound).
+  Its own frozen worktree.
+TESTS before the run:
+  - all-singleton groups: MERGED equals UNMERGED exactly (visits, values);
+  - non-representative members get 0 visits; the representative carries the summed
+    prior; a one-group decision puts every visit on one child;
+  - the class view sums visits per class correctly;
+  - the partition check (class_crn's count equals n_states) passes on the real data
+    and stops on a planted mismatch;
+  - UNMERGED at 50 simulations equals the birth search's engine call on the same nets
+    with root noise off.
+Code audit loop until nothing above LOW, then the run.
+
 ### RESULT -- Test H: the move guesser on own play (O0, OF as second player), 2026-11-12
 
 VERDICT: VOID -- SIGMA TRAINING FAILED (seeds 0, 1 and 3: at the chosen rate,
@@ -833,6 +930,8 @@ OPERATIONS. Stage C 5.5 GPU h (paused 23:13-09:17 at Kai's request). D1's
 first run was stopped after 3 h 13 min in the near-duplicate search: a bool
 sum's int64 accumulation made a 3.7 GB copy that Windows put in shared GPU
 memory. The fix (4e88d087, audited twice, exact) ran D1 in 18 min.
+
+### Next experiment (pre-registered) -- Test H: does knowing where a player got to help guess the move they made? (Kai, 2026-11-11)
 
 DECISION: Kai 2026-11-11, closing Test O: "Options don't look like they are paying
 off. I think we go with implementing whatever is next, which I think is the shared
